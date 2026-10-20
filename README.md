@@ -34,3 +34,24 @@ Secondo screenshot dell'autore su Chrome Android: casella **Pivot giornalieri UT
 ## FASE 2B — Leggibilità grafico mobile, 20/10/2026
 Dopo la prova visuale del pulsante pivot, la revisione 2B è stata **sviluppata su GitHub, ancora NON installata né verificata sul Samsung**. Oggetto: disattivazione delle etichette dei price line sull'asse prezzi (i numeri venivano traslati per evitare collisioni), massimo due supporti e due resistenze strutturali visualizzati sul grafico, solo P + il pivot più vicino sopra e sotto l'ultima chiusura quando l'interruttore è attivo. La sezione espandibile «Tutti i livelli e i prezzi esatti» conserva comunque i **tre supporti, le tre resistenze** e gli **sette pivot** eventualmente calcolabili, con valori precisi e conteggio swing; nessun livello è scartato dai dati originali. In evidenza le vicinanze numeriche entro lo 0,5% tra fonti diverse, espressamente descrittive (non segnali di tenuta). Interruttori EMA e S/R rimangono disponibili. File modificati `grafico_4h.py` e `test_decision_desk.py`; **2 test di regressione aggiunti (suite attesa 115)**. Validazione sintattica JavaScript dell'HTML `PASS` nell'ambiente di sviluppo; **test Python/Chrome sul Samsung ancora da eseguire** con `kdd-aggiorna --check`, poi `--apply` solo dopo PASS. Il riavvio controllato del server locale sarà necessario. 
 Prossima fase dopo la prova visuale: dati OHLCV realmente chiusi per 15m/1H/1D, senza interpolazioni e con confronto strutturale multitimeframe; non inventare feed o indicatori.
+
+## FASE 2C — Etichette numeriche e legenda EMA sul grafico, 20/10/2026
+**Sviluppata su GitHub ma NON installata né verificata visivamente sul Samsung.**
+Commits di codice `f0b8778d65200c5ecec0d0d22963fb710bd7bd0c` e regressione
+`2708a9cb13948dcb8deaa6648c60cf9feb13691a`.
+La nuova rappresentazione inserisce una piccola legenda EMA20 (oro) / EMA50
+(azzurro) dentro l'angolo alto sinistro del grafico prezzi, con visibilità
+sincronizzata agli interruttori. Le linee EMA rimangono senza targhe sul
+lato destro. I S/R visibili, sempre al massimo due per lato, tornano a mostrare
+sull'asse dei prezzi solo il valore numerico, senza il testo `Str S1/R1`.
+I pivot restano con etichette sull'asse disabilitate per evitare nuove
+collisioni e con valori esatti nella tabella espandibile; le formule, le
+candele, gli orari, i toggle e il contenuto dei dati restano invariati.
+Regressione preesistente aggiornata per controllare la legenda e la
+separazione dei nomi dal prezzo. **Verifica statica dei sorgenti e parsing
+JavaScript con V8: PASS**; test Python nell'ambiente Termux e collaudo
+visuale su Chrome Android: **DA ESEGUIRE**, tramite procedura controllata
+`kdd-aggiorna --check`, eventuale `--apply` solo con preflight positivo,
+poi riavvio consapevole del server. La sovrapposizione effettiva dei valori
+numerici sul display mobile resta da verificare: se il motore sposta etichette
+molto ravvicinate, il dato esatto resta in tabella. Nessun ordine su Kraken.
