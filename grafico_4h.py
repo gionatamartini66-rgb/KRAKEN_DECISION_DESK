@@ -250,13 +250,16 @@ footer{font-size:.83rem;color:#b3c1d8;line-height:1.5;margin:14px 0 26px}
 <p class="method">Le linee sul grafico mostrano soltanto i due S/R più vicini per lato
 e, se selezionati, P più un pivot sopra e uno sotto l'ultima chiusura.
 Nella tabella trovi tutti i livelli calcolati, anche quelli nascosti.
-Sull'asse destro i supporti e le resistenze visibili hanno soltanto
-il prezzo numerico, senza sigle. I pivot mantengono per ora le etichette
-sull'asse disattivate per ridurre le collisioni; i loro prezzi esatti sono
-sempre consultabili nella tabella.</p>
+Sull'asse destro, i S/R mostrano il prezzo a cinque decimali quando
+c'è spazio. Le etichette che si sovrapporrebbero al prezzo corrente
+o ad altri livelli vengono nascoste, lasciando le linee visibili.
+Il motore grafico può spostare altre etichette: per prezzi esatti
+e gli eventuali livelli senza targhetta consulta la tabella.
+I pivot mantengono le etichette sull'asse disattivate.</p>
 <div id="levels-list"></div>
 </details>
 <div class="stats" id="candle-stats" aria-live="polite">Seleziona una candela per i valori OHLCV.</div>
+<p id="axis-note" class="muted" aria-live="polite">Prezzi S/R a cinque decimali; etichette troppo vicine nascoste senza rimuovere le linee.</p>
 <div id="price-shell">
 <div id="plot-ema-legend" role="note" aria-label="Legenda delle medie mobili">
 <span data-ema="20"><i class="ema-swatch ema20" aria-hidden="true"></i>EMA20</span>
@@ -305,7 +308,7 @@ try {
   const layout={background:{type:'solid',color:'#101a2c'},textColor:'#dbe5f3',
                 attributionLogo:true,fontFamily:'system-ui, sans-serif'};
   const common={width:document.getElementById('price-plot').clientWidth,
-    rightPriceScale:{borderColor:'#50617b'},timeScale:{borderColor:'#50617b',
+    rightPriceScale:{borderColor:'#50617b',alignLabels:true},timeScale:{borderColor:'#50617b',
     timeVisible:true,secondsVisible:false},layout:layout,grid:grid,
     localization:{locale:'it-IT'}};
   const chart=LightweightCharts.createChart(document.getElementById('price-plot'),
@@ -313,6 +316,7 @@ try {
   const candleSeries=chart.addSeries(LightweightCharts.CandlestickSeries,{
     upColor:'#23bb91',downColor:'#ee6b77',borderVisible:false,
     wickUpColor:'#23bb91',wickDownColor:'#ee6b77',priceLineVisible:false,
+    priceFormat:{type:'price',precision:5,minMove:0.00001},
     lastValueVisible:true});
   candleSeries.setData(rows.map(v=>({
     time:v.time,open:v.open,high:v.high,low:v.low,close:v.close})));
@@ -321,6 +325,7 @@ try {
   function addEma(points,color,selector,legendSelector){
     const series=chart.addSeries(LightweightCharts.LineSeries,{
       color:color,lineWidth:2,priceLineVisible:false,lastValueVisible:false,
+      priceFormat:{type:'price',precision:5,minMove:0.00001},
       crosshairMarkerVisible:false,title:''});
     series.setData(points);
     const control=document.querySelector(selector);
@@ -343,23 +348,67 @@ try {
     document.querySelector('[data-ema="50"]').hidden=true;
   }
 
-  // Le etichette sulle medie sono nella legenda, non sull'asse prezzi.
-  // Per i livelli strutturali il price line mostra solo il numero:
-  // title vuoto, evitando le scritte "Str S1", "Str R1" nell'asse.
+  // Il numero mostrato su una linea S/R è a cinque decimali; la
+  // tabella sottostante conserva il valore di calcolo a otto decimali.
+  // Se i prezzi sono vicini, non spostiamo etichette fingendo una
+  // corrispondenza verticale: ne mostriamo soltanto quelle distinguibili.
+  const PRICE_LABEL_GAP_PX=30;
+  const lastClose=rows[rows.length-1].close;
+  const axisNote=document.getElementById('axis-note');
+  let activeStructural=[];
+  let labelUpdatePending=false;
+  function refreshAxisLabels(){
+    if(!activeStructural.length){
+      axisNote.textContent='Livelli S/R nascosti: i prezzi esatti restano nella tabella.';
+      return;
+    }
+    const occupied=[];
+    const lastY=candleSeries.priceToCoordinate(lastClose);
+    if(Number.isFinite(lastY))occupied.push(lastY);
+    const ranked=activeStructural.map(e=>({
+      ...e,y:candleSeries.priceToCoordinate(e.price)
+    })).sort((a,b)=>Math.abs(a.price-lastClose)-Math.abs(b.price-lastClose));
+    let hidden=0;
+    for(const item of ranked){
+      const visible=Number.isFinite(item.y) &&
+        item.y>=0 && item.y<=document.getElementById('price-plot').clientHeight &&
+        occupied.every(y=>Math.abs(y-item.y)>=PRICE_LABEL_GAP_PX);
+      // Solo l'etichetta viene omessa; la linea resta a prezzo reale.
+      item.line.applyOptions({axisLabelVisible:visible});
+      if(visible)occupied.push(item.y);
+      else hidden++;
+    }
+    axisNote.textContent='S/R sull\'asse: prezzi a 5 decimali.'+
+      (hidden?' '+hidden+' etichett'+(hidden===1?'a omessa':'e omesse')+
+       ' per vicinanza o fuori scala; le linee restano visibili.':' Tutte le etichette distinguibili.')+
+      ' Prezzi completi nella tabella.';
+  }
+  function scheduleAxisLabels(){
+    if(labelUpdatePending)return;
+    labelUpdatePending=true;
+    requestAnimationFrame(()=>{
+      labelUpdatePending=false;
+      refreshAxisLabels();
+    });
+  }
   function addLevel(price,color,group,showPrice){
     const line=candleSeries.createPriceLine({
       price:price,color:color,lineWidth:1,lineStyle:2,
       axisLabelVisible:showPrice,title:''});
-    group.push(line);
+    group.push({line:line,price:price});
   }
-  function levelToggle(selector,entries,showPrice){
+  function levelToggle(selector,entries,showPrice,updateStructure=false){
     const input=document.querySelector(selector);
     let active=[];
     function display(){
-      for(const line of active)candleSeries.removePriceLine(line);
+      for(const item of active)candleSeries.removePriceLine(item.line);
       active=[];
       if(input.checked)entries.forEach(e=>
         addLevel(e.price,e.color,active,showPrice));
+      if(updateStructure){
+        activeStructural=active;
+        scheduleAxisLabels();
+      }
     }
     input.addEventListener('change',display);
     display();
@@ -369,8 +418,7 @@ try {
     price:e.price,color:'#32c7aa'}));
   tech.structure.resistances.slice(0,2).forEach((e,i)=>structural.push({
     price:e.price,color:'#f3a078'}));
-  levelToggle('#show-structure',structural,true);
-  const lastClose=rows[rows.length-1].close;
+  levelToggle('#show-structure',structural,true,true);
   const pivotEntries=[];
   const pivotNames=['P','S1','S2','S3','R1','R2','R3'];
   if(tech.pivots){
@@ -486,6 +534,10 @@ try {
     color:v.close>=v.open?'rgba(35,187,145,0.75)':'rgba(238,107,119,0.75)'})));
   chart.timeScale().fitContent();
   volumeChart.timeScale().fitContent();
+  // Ricalcola l'affollamento dopo zoom e scorrimento: l'autoscale
+  // può modificare le distanze in pixel senza alterare i prezzi.
+  chart.timeScale().subscribeVisibleLogicalRangeChange(scheduleAxisLabels);
+  scheduleAxisLabels();
   let syncing=false;
   function sync(source,dest){
     source.timeScale().subscribeVisibleLogicalRangeChange(r=>{
@@ -515,6 +567,7 @@ try {
   const observer=new ResizeObserver(()=>{
     chart.applyOptions({width:document.getElementById('price-plot').clientWidth});
     volumeChart.applyOptions({width:document.getElementById('volume-plot').clientWidth});
+    scheduleAxisLabels();
   });
   observer.observe(document.getElementById('price-plot'));
   msg.textContent='Grafico generato: '+rows.length+' candele 4H reali + volumi. Scorri e ingrandisci.';
