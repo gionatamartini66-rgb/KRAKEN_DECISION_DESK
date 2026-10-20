@@ -55,3 +55,37 @@ visuale su Chrome Android: **DA ESEGUIRE**, tramite procedura controllata
 poi riavvio consapevole del server. La sovrapposizione effettiva dei valori
 numerici sul display mobile resta da verificare: se il motore sposta etichette
 molto ravvicinate, il dato esatto resta in tabella. Nessun ordine su Kraken.
+
+## Verifica Android fase 2C — 20/10/2026, ore 22:18 Italia
+L'autore ha eseguito `kdd-aggiorna --check` e poi `kdd-aggiorna --apply` per
+il commit `66ed493c0c6bc425d4da14240be563b37c6d2cca`:
+**115/115 test PASS prima e dopo l'applicazione**, con backup locale
+`20261020T194800-66ed493c0c`. Il server KDD era già avviato su
+`127.0.0.1:8765` (un secondo avvio ha prodotto il normale errore
+`Address already in use`), quindi è stato riavviato il processo esistente.
+Screenshot di Chrome Android conferma: legenda EMA interna, S/R numerici,
+candele e volumi visibili. Dopo "Aggiorna dati ora", la candela 4H con
+apertura 20/10 ore 16:00 UTC risulta disponibile, chiusura 0,9061 EUR:
+refresh grafico verificato. Persistono tag S/R affollati e arrotondati
+a due decimali: **fase 2C completata, limite visivo documentato**.
+
+## FASE 2D — Prezzi S/R più precisi e riduzione collisioni, 20/10/2026
+**Codice sviluppato nel repository; NON ancora installato o collaudato in
+Chrome Android.** Gli indicatori e i dati OHLCV non cambiano.
+La formattazione grafica dei prezzi (candele ed EMA) passa a **5 decimali**
+soltanto come rappresentazione, indipendente dal tick negoziabile di Kraken.
+Le targhette S/R sono rese quando c'è spazio sufficiente in pixel; quelle
+vicine al prezzo di chiusura o ad altre targhette vengono nascoste, ma
+**le linee restano alla loro quota reale** e la tabella continua a mostrare
+i prezzi calcolati fino a otto decimali. Regola conservativa
+`PRICE_LABEL_GAP_PX=30`; recalcolo su zoom, pan e ridimensionamento,
+e controllo esplicito del prezzo corrente. I pivot conservano l'asse
+senza etichette.
+Verifica sintattica del JS `PASS`; simulazione isolata V8 di tre diverse
+scale grafiche `PASS` per collisioni fra S/R e close. La suite Python
+è stata aggiornata con un nuovo test di rendering, esecuzione Termux
+**PENDENTE** (attesi almeno 116 test). Confronto visivo e possibili
+aggiustamenti del margine pixel restano necessari dopo l'installazione
+controllata. Il prossimo incremento funzionale sarà il multitimeframe
+15m/1H/4H/1D, subordinato alla verifica dei dati chiusi disponibili e
+delle fonti; nessun segnale BUY/SELL automatico.
