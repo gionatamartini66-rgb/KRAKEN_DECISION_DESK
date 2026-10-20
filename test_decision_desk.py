@@ -611,7 +611,13 @@ class DeskTests(unittest.TestCase):
         self.assertIn("lastValueVisible:false",page)
         # I livelli S/R espongono solo prezzi numerici, senza nomi nell'asse.
         self.assertIn("axisLabelVisible:showPrice,title:''",page)
-        self.assertIn("levelToggle('#show-structure',structural,true)",page)
+        self.assertIn("levelToggle('#show-structure',structural,true,true)",page)
+        self.assertIn("priceFormat:{type:'price',precision:5,minMove:0.00001}",page)
+        self.assertIn("candleSeries.priceToCoordinate(lastClose)",page)
+        self.assertIn("PRICE_LABEL_GAP_PX=30",page)
+        self.assertIn("axisLabelVisible:visible",page)
+        self.assertIn("subscribeVisibleLogicalRangeChange(scheduleAxisLabels)",page)
+        self.assertIn('id="axis-note"',page)
         self.assertIn("levelToggle('#show-pivots',pivotEntries,false)",page)
         self.assertNotIn("title:'Str S",page)
         self.assertNotIn("title:'Str R",page)
@@ -621,6 +627,35 @@ class DeskTests(unittest.TestCase):
         self.assertIn("pivotNames.map(",page)
         self.assertIn("0.005",page)
         self.assertIn("Nessuna conferma di tenuta o breakout",page)
+        self.assertNotIn("readonly.json",page)
+
+    def test_graph_precise_axis_labels_preserve_exact_source_and_no_stale_descriptions(self):
+        import grafico_4h as g
+        import datetime as dt
+        import json, tempfile, pathlib
+        from unittest import mock
+        start=1_800_000_000
+        candles=[{'apertura_ts_utc':start+i*14400,
+                  'open':.905,'high':.910,'low':.89,'close':.9061,
+                  'volume_base':100+i} for i in range(60)]
+        sample={'creato_utc':'2026-10-20T16:30:00+00:00',
+                'grafici_4h':{'SUI':{'stato':'OK','coppia':'SUI/EUR',
+                    'serie_ohlcv_chiuse':candles}}}
+        with tempfile.TemporaryDirectory() as folder:
+            f=pathlib.Path(folder)/'dossier.json'
+            f.write_text(json.dumps(sample))
+            with mock.patch.object(g.dt,'datetime',wraps=dt.datetime) as cls:
+                cls.now.return_value=dt.datetime.fromtimestamp(
+                    start+70*14400,dt.timezone.utc)
+                page=g.page_from_dossier(f)
+        self.assertIn("precision:5,minMove:0.00001",page)
+        self.assertIn("show-structure",page)
+        self.assertIn("priceToCoordinate",page)
+        self.assertIn("requestAnimationFrame",page)
+        self.assertIn("Tutti i livelli e i prezzi esatti",page)
+        self.assertIn('"close":0.9061',page)
+        self.assertNotIn("title:'Str S",page)
+        self.assertNotIn("title:'Str R",page)
         self.assertNotIn("readonly.json",page)
 
     def test_graph_full_pivots_stay_in_payload_when_plot_filters_lines(self):
