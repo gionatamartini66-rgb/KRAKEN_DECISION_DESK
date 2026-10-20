@@ -259,7 +259,7 @@ Pivot P/S1–S3/R1–R3: formule classiche sul giorno UTC precedente, solo se
 sono presenti tutte e sei le candele 4H necessarie. Il grafico limita il
 numero delle linee per leggibilità, mentre la tabella conserva i valori
 completi. Le vicinanze fra indicatori non costituiscono conferme indipendenti:
-sono una descrizione geometrica e non un segnale BUY/SELL.
+sono una descrizione geometrica; nessun segnale BUY/SELL.
 Pattern e altri timeframe NON sono ancora implementati.</p>
 </section>
 <footer><a href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer">
