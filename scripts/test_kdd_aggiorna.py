@@ -93,6 +93,38 @@ class UpdateTests(unittest.TestCase):
             kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=False)
         self.assertIn('già identico', stream.getvalue())
 
+    def test_preflight_sees_private_fixtures_only_in_local_temp(self):
+        """Regression: suite locale necessita piano GPT e portafoglio reali;
+        sono disponibili nei test ma NON aggiunti al mirror GitHub."""
+        sensitive = {
+            'portafoglio.json': '{"dummy":"private-portfolio"}',
+            'piano_gpt.json': '{"dummy":"private-plan"}',
+            'migrazione_attesa.json': '{"dummy":"private-migration"}',
+        }
+        for name, body in sensitive.items():
+            (self.live / name).write_text(body)
+            self.assertFalse((self.root / name).exists())
+        seen = []
+
+        def observe(stage):
+            for name, body in sensitive.items():
+                self.assertEqual((stage / name).read_text(), body)
+                seen.append(name)
+
+        with patch.object(kdd, 'isolated_test', side_effect=observe), \
+             contextlib.redirect_stdout(io.StringIO()):
+            kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=True)
+        self.assertEqual(set(seen), set(sensitive))
+        for name, body in sensitive.items():
+            self.assertEqual((self.live / name).read_text(), body)
+            self.assertFalse((self.root / name).exists())
+
+    def test_private_fixture_symlink_is_refused(self):
+        (self.live / 'portafoglio.json').symlink_to(self.live / 'config.json')
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(kdd.SafetyError, 'fixture locale symlink'):
+                kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=True)
+
 
 if __name__ == '__main__':
     unittest.main()
