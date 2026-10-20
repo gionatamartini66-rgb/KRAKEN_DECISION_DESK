@@ -10,6 +10,7 @@ import datetime as dt
 import html
 import json
 import math
+import statistics
 from pathlib import Path
 
 TOKEN = "SUI"
@@ -57,9 +58,118 @@ def data_from_dossier(path: Path):
     }
 
 
+def ema_points(candles, period):
+    """EMA sull'ultimo campione di candele chiuse; SMA iniziale di 'period' chiusure.
+
+    I primi period-1 punti sono assenti, mai riempiti artificialmente.
+    """
+    if not isinstance(period, int) or period < 2 or len(candles) < period:
+        return []
+    alpha = 2.0 / (period + 1)
+    values = [row["close"] for row in candles]
+    ema = sum(values[:period]) / period
+    points = [{"time": candles[period - 1]["time"], "value": round(ema, 8)}]
+    for i in range(period, len(candles)):
+        ema += alpha * (values[i] - ema)
+        points.append({"time": candles[i]["time"], "value": round(ema, 8)})
+    return points
+
+
+def daily_pivots(candles):
+    """Pivot CLASSICI del giorno UTC precedente, esclusivamente da 6 barre 4H chiuse.
+
+    Il riferimento è il giorno UTC nel quale cade la chiusura più recente:
+    non si usano candele in formazione né dati del giorno corrente.
+    """
+    if not candles:
+        return None
+    last_close = dt.datetime.fromtimestamp(
+        candles[-1]["time"] + 14400, dt.timezone.utc)
+    prev_day = last_close.date() - dt.timedelta(days=1)
+    start = int(dt.datetime.combine(prev_day, dt.time.min,
+                                     dt.timezone.utc).timestamp())
+    day = [row for row in candles if start <= row["time"] < start + 86400]
+    if len(day) != 6 or [row["time"] for row in day] != [
+            start + 14400 * i for i in range(6)]:
+        return None
+    high = max(row["high"] for row in day)
+    low = min(row["low"] for row in day)
+    close = day[-1]["close"]
+    p = (high + low + close) / 3.0
+    spread = high - low
+    return {"reference_day_utc": prev_day.isoformat(),
+            "P": round(p, 8),
+            "R1": round(2 * p - low, 8),
+            "S1": round(2 * p - high, 8),
+            "R2": round(p + spread, 8),
+            "S2": round(p - spread, 8),
+            "R3": round(high + 2 * (p - low), 8),
+            "S3": round(low - 2 * (high - p), 8)}
+
+
+def structural_levels(candles, tolerance=0.009):
+    """Livelli *descrittivi* da swing 4H confermati: almeno due test.
+
+    Richiede due candele chiuse prima e dopo ciascuno swing (raggio 2).
+    Raggruppa prezzi simili entro una tolleranza relativa dello 0,9%.
+    Nessun livello quando mancano due estremi indipendenti. Non è un ordine.
+    """
+    if len(candles) < 7:
+        return {"supports": [], "resistances": []}
+    last = candles[-1]["close"]
+    def pivots(side):
+        col = "low" if side == "low" else "high"
+        result = []
+        for i in range(2, len(candles) - 2):
+            here = candles[i][col]
+            nearby = [candles[j][col] for j in range(i - 2, i + 3) if j != i]
+            if ((here < min(nearby)) if side == "low" else
+                    (here > max(nearby))):
+                result.append((i, here))
+        return result
+    def group(items, support):
+        clusters = []
+        for index, price in sorted(items, key=lambda entry: entry[1]):
+            found = next((
+                cl for cl in clusters
+                if abs(price - statistics.median(x[1] for x in cl)) /
+                   statistics.median(x[1] for x in cl) <= tolerance
+            ), None)
+            if found is None:
+                clusters.append([(index, price)])
+            else:
+                found.append((index, price))
+        candidates = []
+        for cl in clusters:
+            if len(cl) < 2:
+                continue
+            level = statistics.median(x[1] for x in cl)
+            if (support and level >= last) or (not support and level <= last):
+                continue
+            candidates.append((level, len(cl), max(x[0] for x in cl)))
+        # Prossimità al prezzo corrente, a parità tocchi/recenza.
+        candidates.sort(key=lambda z: (abs(z[0] - last), -z[1], -z[2]))
+        return [{"price": round(p, 8), "touches": n,
+                 "last_swing_time": candles[i]["time"]}
+                for p, n, i in candidates[:3]]
+    return {"supports": group(pivots("low"), True),
+            "resistances": group(pivots("high"), False)}
+
+
+def technical_from_candles(candles):
+    return {
+        "ema20": ema_points(candles, 20),
+        "ema50": ema_points(candles, 50),
+        "pivots": daily_pivots(candles),
+        "structure": structural_levels(candles),
+    }
+
+
 def page_from_dossier(path: Path):
     x = data_from_dossier(path)
     candle_json = json.dumps(x["candles"], separators=(",",":"), allow_nan=False)
+    technical_json = json.dumps(technical_from_candles(x["candles"]),
+                                separators=(",",":"), allow_nan=False)
     pair = html.escape(x["pair"], quote=True)
     observed = html.escape(x["observed_utc"], quote=True)
     closed = html.escape(x["closed_at_utc"], quote=True)
@@ -79,6 +189,11 @@ header{display:flex;justify-content:space-between;align-items:center;gap:12px;fl
 .panel{background:#151f32;border:1px solid #34415d;border-radius:12px;padding:12px;margin-top:12px}
 #price-plot{width:100%;height:420px}#volume-plot{width:100%;height:150px}
 .buttons{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+.legend{display:flex;gap:10px;flex-wrap:wrap;margin:6px 0 12px}
+.legend label{display:flex;gap:6px;align-items:center;padding:8px;border:1px solid #536481;
+ background:#1a2941;border-radius:8px;font-size:.92rem}
+.legend input{width:17px;height:17px;accent-color:#8aceff}
+#tech-summary{font-size:.9rem;line-height:1.45}
 button{font:inherit;min-height:40px;padding:8px 14px;border-radius:8px;
  background:#253c5e;border:1px solid #5e8cbb;color:white}
 button:focus-visible,a:focus-visible{outline:3px solid #a2e2ff}
@@ -101,6 +216,13 @@ footer{font-size:.83rem;color:#b3c1d8;line-height:1.5;margin:14px 0 26px}
 <button type="button" data-range="100">Ultime 100</button>
 <button type="button" data-range="all">Tutte</button>
 </div>
+<div class="legend" aria-label="Livelli e indicatori">
+<label><input type="checkbox" id="show-ema20" checked> EMA20 (oro)</label>
+<label><input type="checkbox" id="show-ema50" checked> EMA50 (azzurro)</label>
+<label><input type="checkbox" id="show-structure" checked> S/R strutturali</label>
+<label><input type="checkbox" id="show-pivots"> Pivot giornalieri UTC</label>
+</div>
+<div id="tech-summary" class="muted" aria-live="polite">Elaborazione livelli tecnici…</div>
 <div class="stats" id="candle-stats" aria-live="polite">Seleziona una candela per i valori OHLCV.</div>
 <div id="price-plot" aria-label="Grafico candlestick SUI/EUR 4H"></div>
 <h2 style="font-size:1rem">Volumi scambiati (SUI)</h2>
@@ -108,9 +230,14 @@ footer{font-size:.83rem;color:#b3c1d8;line-height:1.5;margin:14px 0 26px}
 <p class="muted">Dati raccolti: __OBSERVED__. Ultima candela chiusa: __CLOSED__.
 Il grafico usa 200 candele 4H al massimo. L'ultimo prezzo non è live:
 per aggiornare torna al cruscotto e premi «Aggiorna dati ora».</p>
-<p class="muted"><b>FASE 1 / PROTOTIPO.</b> Solo candele e volumi.
-EMA, pivot, supporti, resistenze, pattern e altri timeframe NON sono ancora
-implementati nel grafico; non attribuirgli segnali BUY/SELL.</p>
+<p class="muted"><b>FASE 2 / INDICATORI ESPLORATIVI 4H.</b>
+EMA20/50 calcolate esclusivamente sulle candele CHIUSE presenti (massimo 200,
+seme SMA iniziale). Supporti e resistenze: estremi locali confermati con
+almeno due swing vicini; se mancano non viene inventata una linea.
+Pivot P/S1–S3/R1–R3: formule classiche sul giorno UTC precedente, solo se
+sono presenti tutte e sei le candele 4H necessarie. Si possono nascondere
+per evitare sovrapposizioni. Pattern e altri timeframe NON sono ancora
+implementati; nessun segnale BUY/SELL.</p>
 </section>
 <footer><a href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer">
 __NOTICE__</a> · Libreria gratuita Lightweight Charts 5.2.1, servita localmente.
@@ -122,13 +249,15 @@ Dati Kraken Spot pubblici, non grafico ufficiale TradingView.</footer>
 (function(){
 "use strict";
 const rows = __BARS__;
+const tech = __TECHNICAL__;
 const msg=document.getElementById('graph-status');
 const stats=document.getElementById('candle-stats');
 try {
   if (!window.LightweightCharts ||
       !LightweightCharts.createChart ||
       !LightweightCharts.CandlestickSeries ||
-      !LightweightCharts.HistogramSeries) {
+      !LightweightCharts.HistogramSeries ||
+      !LightweightCharts.LineSeries) {
      throw new Error('Libreria grafica non caricata completamente');
   }
   const grid={vertLines:{color:'#27354c'},horzLines:{color:'#27354c'}};
@@ -146,6 +275,67 @@ try {
     lastValueVisible:true});
   candleSeries.setData(rows.map(v=>({
     time:v.time,open:v.open,high:v.high,low:v.low,close:v.close})));
+  // EMA calcolate in Python sul medesimo campione chiuso delle candele.
+  // Non introdurre qui dati nuovi o stime che non siano tracciabili.
+  function addEma(points,color,label,selector){
+    const series=chart.addSeries(LightweightCharts.LineSeries,{
+      color:color,lineWidth:2,priceLineVisible:false,lastValueVisible:false,
+      crosshairMarkerVisible:false,title:label});
+    series.setData(points);
+    document.querySelector(selector).addEventListener('change',evt=>{
+      series.applyOptions({visible:evt.target.checked});
+    });
+    return series;
+  }
+  addEma(tech.ema20,'#ffc85a','EMA 20','#show-ema20');
+  if(tech.ema50.length)
+    addEma(tech.ema50,'#58c5ff','EMA 50','#show-ema50');
+  else {
+    const e=document.querySelector('#show-ema50');
+    e.checked=false;e.disabled=true;e.parentElement.title='Meno di 50 barre chiuse';
+  }
+
+  function addLevel(price,title,color,group) {
+    const line=candleSeries.createPriceLine({
+      price:price,color:color,lineWidth:1,lineStyle:2,
+      axisLabelVisible:true,title:title});
+    group.push(line);
+  }
+  function levelToggle(selector,entries){
+    const input=document.querySelector(selector);
+    let active=[];
+    function display(){
+      for(const line of active)candleSeries.removePriceLine(line);
+      active=[];
+      if(input.checked)entries.forEach(e=>addLevel(e.price,e.title,e.color,active));
+    }
+    input.addEventListener('change',display);
+    display();
+  }
+  const structural=[];
+  tech.structure.supports.forEach((e,i)=>structural.push({
+    price:e.price,title:'Str S'+(i+1),color:'#32c7aa'}));
+  tech.structure.resistances.forEach((e,i)=>structural.push({
+    price:e.price,title:'Str R'+(i+1),color:'#f3a078'}));
+  levelToggle('#show-structure',structural);
+  const pivotEntries=[];
+  if(tech.pivots)for(const name of ['P','S1','S2','S3','R1','R2','R3']){
+    pivotEntries.push({price:tech.pivots[name],title:'Pivot '+name,
+      color:name==='P'?'#e4d778':name.startsWith('S')?'#8bceaf':'#bd9fff'});
+  }
+  levelToggle('#show-pivots',pivotEntries);
+  const eur = new Intl.NumberFormat('it-IT',{maximumFractionDigits:6});
+  const supports=tech.structure.supports.length;
+  const resistances=tech.structure.resistances.length;
+  document.querySelector('#tech-summary').textContent=
+    'Ultima EMA20: '+eur.format(tech.ema20[tech.ema20.length-1].value)+
+    (tech.ema50.length?' · EMA50: '+eur.format(tech.ema50[tech.ema50.length-1].value):
+      ' · EMA50: storico insufficiente')+
+    ' · S/R confermati: '+supports+' supporti, '+resistances+' resistenze'+
+    ' (almeno due swing per livello).'+
+    (tech.pivots?' Pivot del '+tech.pivots.reference_day_utc+
+       ' UTC: P '+eur.format(tech.pivots.P)+'.':
+       ' Pivot giornalieri: dati completi giorno precedente insufficienti.');
   const volumeChart=LightweightCharts.createChart(
     document.getElementById('volume-plot'),{...common,height:150});
   const volumeSeries=volumeChart.addSeries(LightweightCharts.HistogramSeries,{
@@ -197,5 +387,6 @@ try {
 </body>
 </html>"""
     return (template.replace("__BARS__", candle_json)
+            .replace("__TECHNICAL__", technical_json)
             .replace("__OBSERVED__", observed).replace("__CLOSED__", closed)
             .replace("__NOTICE__", html.escape(notice)))
