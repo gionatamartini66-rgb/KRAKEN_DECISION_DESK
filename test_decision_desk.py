@@ -504,6 +504,84 @@ class DeskTests(unittest.TestCase):
         self.assertNotIn("readonly.json",page)
         self.assertIn("TradingView",page)
 
+    def test_graph_real_ema_seed_no_lookahead(self):
+        import grafico_4h as g
+        candles=[{"time":i*14400,"close":float(i+1)} for i in range(80)]
+        e20=g.ema_points(candles,20)
+        e50=g.ema_points(candles,50)
+        self.assertEqual(len(e20),61)
+        self.assertEqual(len(e50),31)
+        self.assertEqual(e20[0],{"time":19*14400,"value":10.5})
+        self.assertEqual(e50[0],{"time":49*14400,"value":25.5})
+        self.assertAlmostEqual(e20[1]["value"],10.5+2/(20+1)*(21-10.5),places=7)
+        self.assertEqual(g.ema_points(candles[:25],50),[])
+        self.assertEqual(len(g.ema_points(candles[:25],20)),6)
+
+    def test_graph_daily_pivots_complete_previous_utc_day_only(self):
+        import grafico_4h as g
+        start=int(dt.datetime(2026,10,19,tzinfo=dt.timezone.utc).timestamp())
+        prior=[dict(time=start+i*14400,open=10,close=10+i*.1,
+                    low=8+i*.1,high=12+i*.1,volume=1) for i in range(6)]
+        current=[dict(time=start+86400+i*14400,open=100,close=100,
+                      low=1,high=1000,volume=1) for i in range(2)]
+        levels=g.daily_pivots(prior+current)
+        self.assertEqual(levels["reference_day_utc"],"2026-10-19")
+        hi=12.5; lo=8; close=10.5
+        pivot=(hi+lo+close)/3
+        self.assertAlmostEqual(levels["P"],pivot)
+        self.assertAlmostEqual(levels["R1"],2*pivot-lo)
+        self.assertAlmostEqual(levels["S1"],2*pivot-hi)
+        self.assertAlmostEqual(levels["R2"],pivot+(hi-lo))
+        self.assertAlmostEqual(levels["S2"],pivot-(hi-lo))
+        self.assertAlmostEqual(levels["R3"],hi+2*(pivot-lo))
+        self.assertAlmostEqual(levels["S3"],lo-2*(hi-pivot))
+        self.assertIsNone(g.daily_pivots(prior[:-1]+current))
+        self.assertIsNone(g.daily_pivots(current))
+
+    def test_graph_structural_levels_need_confirmed_twice(self):
+        import grafico_4h as g
+        candles=[dict(time=i*14400,open=10.5,close=10.5,
+                      high=10.9,low=10.1,volume=1) for i in range(33)]
+        for i in (7,17):
+            candles[i]["low"]=9.2
+        for i in (10,20):
+            candles[i]["high"]=11.8
+        levels=g.structural_levels(candles)
+        self.assertEqual(len(levels["supports"]),1)
+        self.assertEqual(len(levels["resistances"]),1)
+        self.assertAlmostEqual(levels["supports"][0]["price"],9.2)
+        self.assertAlmostEqual(levels["resistances"][0]["price"],11.8)
+        self.assertEqual(levels["supports"][0]["touches"],2)
+        self.assertEqual(g.structural_levels(candles[:7]),
+                         {"supports":[],"resistances":[]})
+
+    def test_graph_indicator_controls_and_no_unjustified_claims(self):
+        import grafico_4h as g
+        from unittest import mock
+        start=1_800_000_000
+        sample={"creato_utc":"2026-10-20T12:00:00+00:00",
+            "grafici_4h":{"SUI":{"stato":"OK","coppia":"SUI/EUR",
+                "serie_ohlcv_chiuse":[
+                    {"apertura_ts_utc":start+i*14400,"open":10.0,
+                     "high":10.5,"low":9.5,"close":10.0,
+                     "volume_base":1.0} for i in range(60)]}}}
+        with tempfile.TemporaryDirectory() as folder:
+            fp=pathlib.Path(folder)/"dossier.json"
+            fp.write_text(json.dumps(sample))
+            with mock.patch.object(g.dt,"datetime",wraps=dt.datetime) as time_cls:
+                time_cls.now.return_value=dt.datetime.fromtimestamp(
+                    start+14400*65,dt.timezone.utc)
+                page=g.page_from_dossier(fp)
+        self.assertIn("EMA20",page)
+        self.assertIn("EMA50",page)
+        self.assertIn('id="show-structure"',page)
+        self.assertIn('id="show-pivots"',page)
+        self.assertIn("createPriceLine",page)
+        self.assertIn('"ema20"',page)
+        self.assertIn('"ema50"',page)
+        self.assertNotIn("readonly.json",page)
+        self.assertIn("nessun segnale BUY/SELL",page)
+
     def test_grafico_4h_refuses_partial_and_gapped(self):
         import grafico_4h as g
         from unittest import mock
