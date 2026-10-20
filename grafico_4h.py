@@ -193,7 +193,18 @@ header{display:flex;justify-content:space-between;align-items:center;gap:12px;fl
 .legend label{display:flex;gap:6px;align-items:center;padding:8px;border:1px solid #536481;
  background:#1a2941;border-radius:8px;font-size:.92rem}
 .legend input{width:17px;height:17px;accent-color:#8aceff}
-#tech-summary{font-size:.9rem;line-height:1.45}
+#tech-summary{font-size:.9rem;line-height:1.45;margin-bottom:6px}
+#nearby-summary{font-size:.9rem;line-height:1.5;padding:8px 10px;
+ background:#1a2941;border-left:3px solid #8aceff;border-radius:5px;margin:8px 0 12px}
+.level-details{margin:8px 0 14px;padding:10px;border:1px solid #41506c;border-radius:8px}
+.level-details summary{cursor:pointer;color:#c7e8ff;font-weight:600}
+.level-details section{margin:12px 0 8px}
+.level-details h3{font-size:.95rem;margin:8px 0}
+.level-details table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums;font-size:.9rem}
+.level-details td,.level-details th{padding:7px 5px;border-bottom:1px solid #3a4b64;text-align:left}
+.level-details td:nth-child(2){font-weight:600;text-align:right;white-space:nowrap}
+.level-details td:last-child,.level-details th:last-child{font-size:.82rem;color:#b7c9dd;padding-left:8px}
+.level-details .method{margin:9px 0;font-size:.85rem}
 button{font:inherit;min-height:40px;padding:8px 14px;border-radius:8px;
  background:#253c5e;border:1px solid #5e8cbb;color:white}
 button:focus-visible,a:focus-visible{outline:3px solid #a2e2ff}
@@ -219,10 +230,20 @@ footer{font-size:.83rem;color:#b3c1d8;line-height:1.5;margin:14px 0 26px}
 <div class="legend" aria-label="Livelli e indicatori">
 <label><input type="checkbox" id="show-ema20" checked> EMA20 (oro)</label>
 <label><input type="checkbox" id="show-ema50" checked> EMA50 (azzurro)</label>
-<label><input type="checkbox" id="show-structure" checked> S/R strutturali</label>
-<label><input type="checkbox" id="show-pivots"> Pivot giornalieri UTC</label>
+<label><input type="checkbox" id="show-structure" checked> S/R principali</label>
+<label><input type="checkbox" id="show-pivots"> Pivot (3 linee)</label>
 </div>
 <div id="tech-summary" class="muted" aria-live="polite">Elaborazione livelli tecnici…</div>
+<div id="nearby-summary" aria-live="polite">Ricerca di eventuali vicinanze fra livelli…</div>
+<details class="level-details">
+<summary>Tutti i livelli e i prezzi esatti (apri)</summary>
+<p class="method">Le linee sul grafico mostrano soltanto i due S/R più vicini per lato
+e, se selezionati, P più un pivot sopra e uno sotto l'ultima chiusura.
+Nella tabella trovi tutti i livelli calcolati, anche quelli nascosti.
+Le etichette sull'asse prezzi sono disattivate perché si sovrapponevano,
+spostando visivamente i numeri rispetto alle linee.</p>
+<div id="levels-list"></div>
+</details>
 <div class="stats" id="candle-stats" aria-live="polite">Seleziona una candela per i valori OHLCV.</div>
 <div id="price-plot" aria-label="Grafico candlestick SUI/EUR 4H"></div>
 <h2 style="font-size:1rem">Volumi scambiati (SUI)</h2>
@@ -235,9 +256,11 @@ EMA20/50 calcolate esclusivamente sulle candele CHIUSE presenti (massimo 200,
 seme SMA iniziale). Supporti e resistenze: estremi locali confermati con
 almeno due swing vicini; se mancano non viene inventata una linea.
 Pivot P/S1–S3/R1–R3: formule classiche sul giorno UTC precedente, solo se
-sono presenti tutte e sei le candele 4H necessarie. Si possono nascondere
-per evitare sovrapposizioni. Pattern e altri timeframe NON sono ancora
-implementati; nessun segnale BUY/SELL.</p>
+sono presenti tutte e sei le candele 4H necessarie. Il grafico limita il
+numero delle linee per leggibilità, mentre la tabella conserva i valori
+completi. Le vicinanze fra indicatori non costituiscono conferme indipendenti:
+sono una descrizione geometrica e non un segnale BUY/SELL.
+Pattern e altri timeframe NON sono ancora implementati.</p>
 </section>
 <footer><a href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer">
 __NOTICE__</a> · Libreria gratuita Lightweight Charts 5.2.1, servita localmente.
@@ -298,7 +321,7 @@ try {
   function addLevel(price,title,color,group) {
     const line=candleSeries.createPriceLine({
       price:price,color:color,lineWidth:1,lineStyle:2,
-      axisLabelVisible:true,title:title});
+      axisLabelVisible:false,title:title});
     group.push(line);
   }
   function levelToggle(selector,entries){
@@ -313,15 +336,25 @@ try {
     display();
   }
   const structural=[];
-  tech.structure.supports.forEach((e,i)=>structural.push({
+  tech.structure.supports.slice(0,2).forEach((e,i)=>structural.push({
     price:e.price,title:'Str S'+(i+1),color:'#32c7aa'}));
-  tech.structure.resistances.forEach((e,i)=>structural.push({
+  tech.structure.resistances.slice(0,2).forEach((e,i)=>structural.push({
     price:e.price,title:'Str R'+(i+1),color:'#f3a078'}));
   levelToggle('#show-structure',structural);
+  const lastClose=rows[rows.length-1].close;
   const pivotEntries=[];
-  if(tech.pivots)for(const name of ['P','S1','S2','S3','R1','R2','R3']){
-    pivotEntries.push({price:tech.pivots[name],title:'Pivot '+name,
-      color:name==='P'?'#e4d778':name.startsWith('S')?'#8bceaf':'#bd9fff'});
+  const pivotNames=['P','S1','S2','S3','R1','R2','R3'];
+  if(tech.pivots){
+    // Una sola linea P e le due coordinate pivot più vicine, sopra e sotto.
+    const byDistance=pivotNames.filter(n=>n!=='P')
+      .sort((a,b)=>Math.abs(tech.pivots[a]-lastClose)-
+                    Math.abs(tech.pivots[b]-lastClose));
+    const above=byDistance.find(n=>tech.pivots[n]>lastClose);
+    const below=byDistance.find(n=>tech.pivots[n]<lastClose);
+    for(const name of ['P',above,below].filter((n,i,all)=>n && all.indexOf(n)===i)){
+      pivotEntries.push({price:tech.pivots[name],title:'Pivot '+name,
+        color:name==='P'?'#e4d778':name.startsWith('S')?'#8bceaf':'#bd9fff'});
+    }
   }
   levelToggle('#show-pivots',pivotEntries);
   const eur = new Intl.NumberFormat('it-IT',{maximumFractionDigits:6});
@@ -336,6 +369,85 @@ try {
     (tech.pivots?' Pivot del '+tech.pivots.reference_day_utc+
        ' UTC: P '+eur.format(tech.pivots.P)+'.':
        ' Pivot giornalieri: dati completi giorno precedente insufficienti.');
+
+  const exact=new Intl.NumberFormat('it-IT',{maximumFractionDigits:8});
+  const categories=[
+    {name:'Medie esponenziali (chiusure 4H)',family:'EMA',items:[
+      {label:'EMA20',price:tech.ema20[tech.ema20.length-1].value,note:'20 chiusure'},
+      ...(tech.ema50.length ? [{label:'EMA50',
+        price:tech.ema50[tech.ema50.length-1].value,note:'50 chiusure'}] : [])]},
+    {name:'Supporti strutturali',family:'S/R',items:
+      tech.structure.supports.map((v,i)=>({label:'S'+(i+1),
+        price:v.price,note:v.touches+' swing 4H'}))},
+    {name:'Resistenze strutturali',family:'S/R',items:
+      tech.structure.resistances.map((v,i)=>({label:'R'+(i+1),
+        price:v.price,note:v.touches+' swing 4H'}))},
+    {name:'Pivot classici UTC',family:'Pivot',items:
+      tech.pivots?pivotNames.map(n=>({label:n,price:tech.pivots[n],
+        note:tech.pivots.reference_day_utc})) : []},
+  ];
+  const panel=document.getElementById('levels-list');
+  for(const section of categories){
+    const block=document.createElement('section');
+    const title=document.createElement('h3');
+    title.textContent=section.name;
+    block.appendChild(title);
+    if(!section.items.length){
+      const empty=document.createElement('p');
+      empty.textContent='Nessun livello disponibile con i dati chiusi.';
+      block.appendChild(empty);
+    }else{
+      const table=document.createElement('table');
+      const header=document.createElement('tr');
+      ['Livello','Prezzo EUR','Origine'].forEach(name=>{
+        const th=document.createElement('th');
+        th.textContent=name;header.appendChild(th);
+      });
+      table.appendChild(header);
+      for(const item of section.items){
+        const tr=document.createElement('tr');
+        [item.label,exact.format(item.price),item.note].forEach(value=>{
+          const td=document.createElement('td');
+          td.textContent=value;tr.appendChild(td);
+        });
+        table.appendChild(tr);
+      }
+      block.appendChild(table);
+    }
+    panel.appendChild(block);
+  }
+  // Confluenza = vicinanza numerica, NON maggior probabilità di rimbalzo.
+  // Il gruppo deve stare per intero entro 0,5% del valore mediano.
+  const near=categories.flatMap(cat=>cat.items.map(item=>({
+    ...item,family:cat.family
+  }))).sort((a,b)=>a.price-b.price);
+  const groups=[];
+  let group=[];
+  for(const item of near){
+    if(group.length===0 || (item.price-group[0].price)/
+        (0.5*(item.price+group[0].price))<=0.005){
+      group.push(item);
+    }else{
+      groups.push(group);group=[item];
+    }
+  }
+  if(group.length)groups.push(group);
+  const confluences=groups.filter(items=>items.length>=2 &&
+    new Set(items.map(x=>x.family)).size>=2);
+  confluences.sort((a,b)=>Math.abs(a[0].price-lastClose)-
+                         Math.abs(b[0].price-lastClose));
+  const strip=document.getElementById('nearby-summary');
+  if(confluences.length){
+    const shown=confluences.slice(0,2).map(items=>
+      exact.format(Math.min(...items.map(x=>x.price)))+'–'+
+      exact.format(Math.max(...items.map(x=>x.price)))+' € ('+
+      items.map(x=>x.label+' '+x.family).join(', ')+')');
+    strip.textContent='Vicinanze entro 0,5% (solo descrittive): '+
+      shown.join(' · ')+'. Nessuna conferma di tenuta o breakout.';
+  }else{
+    strip.textContent='Nessuna vicinanza multi-fonte entro 0,5% '+
+      'fra i livelli osservati. Non equivale a mancanza di opportunità.';
+  }
   const volumeChart=LightweightCharts.createChart(
     document.getElementById('volume-plot'),{...common,height:150});
   const volumeSeries=volumeChart.addSeries(LightweightCharts.HistogramSeries,{
