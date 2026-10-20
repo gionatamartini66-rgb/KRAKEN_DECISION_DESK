@@ -4,6 +4,7 @@
 !/.gitignore
 !/README.md
 !/IMPORTAZIONE_SICURA.md
+!/AGGIORNAMENTI_TERMUX.md
 !/scripts/
 !/scripts/importa_codice_termux.sh
 !/scripts/kdd_aggiorna.py
