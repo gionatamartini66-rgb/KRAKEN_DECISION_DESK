@@ -41,3 +41,29 @@ I backup sono conservati solo sul Samsung in `~/.local/share/kdd-deploy-backups/
 ## Obiettivo successivo
 
 Dopo il primo controllo `kdd-aggiorna --check` positivo sul Samsung, creare un cambiamento benigno con commit e verificare il percorso completo `--apply` con test reali prima di utilizzarlo per le EMA20/50 e i livelli tecnici del grafico.
+
+## Diagnosi e correzione del primo collaudo (20 ottobre 2026)
+
+Il primo `kdd-aggiorna --check` dopo la canary `c833d569` ha confermato che il
+clone si aggiorna correttamente e rileva il solo `grafico_4h.py`; lo staging
+ha però prodotto `FAILED (failures=3, errors=3)`. **Nessun sorgente live è stato
+modificato:** stop precauzionale corretto.
+
+**Causa nel deploy iniziale:** il suite di test originale include verifiche
+dell'effettivo stato patrimoniale/migrazione e di un piano GPT presente sul
+Samsung; lo staging copiava `migrazione_attesa.json` e la fotografia T0, ma
+**ometteva** `portafoglio.json` e `piano_gpt.json`. In assenza dei file
+originali locali le prove producevano errori di fixture, anziché segnalare una
+regressione delle tre righe di commento.
+
+Correzione: lo staging temporaneo privato (directory 0700 sullo stesso Samsung)
+copia anche questi due file **solo localmente**, prima di eseguire i 109 test.
+Lo script rifiuta link simbolici per tali fixture e stampa soltanto i nomi dei
+test falliti, senza diff HTML che potrebbero esporre dati. Sono state aggiunte
+due regressioni dedicate all'assenza dei file privati nel clone GitHub e al
+rifiuto dei symlink (suite di updater ora 6 test, una volta eseguita sul Samsung).
+
+**Fatto osservato:** diagnosi ricavata dai sorgenti, correzione pubblicata su
+GitHub. **Ancora da confermare:** l'esecuzione corretta sul Samsung di
+`kdd-aggiorna --check` e `kdd-aggiorna --apply`. Nessuna installazione nel
+runtime ancora dichiarata.
