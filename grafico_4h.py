@@ -187,7 +187,17 @@ def page_from_dossier(path: Path):
 a{color:#8aceff}h1{font-size:1.25rem;margin:8px 0}small,.muted{color:#b3c1d8}
 header{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
 .panel{background:#151f32;border:1px solid #34415d;border-radius:12px;padding:12px;margin-top:12px}
+#price-shell{position:relative}
 #price-plot{width:100%;height:420px}#volume-plot{width:100%;height:150px}
+#plot-ema-legend{position:absolute;z-index:2;top:9px;left:10px;pointer-events:none;
+  display:flex;gap:11px;flex-wrap:wrap;padding:5px 8px;
+  border-radius:6px;background:rgba(16,26,44,.86);
+  color:#eaf0fa;font-size:.78rem;font-weight:600}
+#plot-ema-legend span{display:inline-flex;align-items:center;gap:5px}
+#plot-ema-legend [hidden]{display:none}
+.ema-swatch{display:inline-block;width:18px;border-top:2px solid}
+.ema-swatch.ema20{border-color:#ffc85a}
+.ema-swatch.ema50{border-color:#58c5ff}
 .buttons{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
 .legend{display:flex;gap:10px;flex-wrap:wrap;margin:6px 0 12px}
 .legend label{display:flex;gap:6px;align-items:center;padding:8px;border:1px solid #536481;
@@ -240,12 +250,20 @@ footer{font-size:.83rem;color:#b3c1d8;line-height:1.5;margin:14px 0 26px}
 <p class="method">Le linee sul grafico mostrano soltanto i due S/R più vicini per lato
 e, se selezionati, P più un pivot sopra e uno sotto l'ultima chiusura.
 Nella tabella trovi tutti i livelli calcolati, anche quelli nascosti.
-Le etichette sull'asse prezzi sono disattivate perché si sovrapponevano,
-spostando visivamente i numeri rispetto alle linee.</p>
+Sull'asse destro i supporti e le resistenze visibili hanno soltanto
+il prezzo numerico, senza sigle. I pivot mantengono per ora le etichette
+sull'asse disattivate per ridurre le collisioni; i loro prezzi esatti sono
+sempre consultabili nella tabella.</p>
 <div id="levels-list"></div>
 </details>
 <div class="stats" id="candle-stats" aria-live="polite">Seleziona una candela per i valori OHLCV.</div>
+<div id="price-shell">
+<div id="plot-ema-legend" role="note" aria-label="Legenda delle medie mobili">
+<span data-ema="20"><i class="ema-swatch ema20" aria-hidden="true"></i>EMA20</span>
+<span data-ema="50"><i class="ema-swatch ema50" aria-hidden="true"></i>EMA50</span>
+</div>
 <div id="price-plot" aria-label="Grafico candlestick SUI/EUR 4H"></div>
+</div>
 <h2 style="font-size:1rem">Volumi scambiati (SUI)</h2>
 <div id="volume-plot" aria-label="Istogramma dei volumi SUI/EUR 4H"></div>
 <p class="muted">Dati raccolti: __OBSERVED__. Ultima candela chiusa: __CLOSED__.
@@ -300,47 +318,58 @@ try {
     time:v.time,open:v.open,high:v.high,low:v.low,close:v.close})));
   // EMA calcolate in Python sul medesimo campione chiuso delle candele.
   // Non introdurre qui dati nuovi o stime che non siano tracciabili.
-  function addEma(points,color,label,selector){
+  function addEma(points,color,selector,legendSelector){
     const series=chart.addSeries(LightweightCharts.LineSeries,{
       color:color,lineWidth:2,priceLineVisible:false,lastValueVisible:false,
-      crosshairMarkerVisible:false,title:label});
+      crosshairMarkerVisible:false,title:''});
     series.setData(points);
-    document.querySelector(selector).addEventListener('change',evt=>{
-      series.applyOptions({visible:evt.target.checked});
-    });
+    const control=document.querySelector(selector);
+    const indicator=document.querySelector(legendSelector);
+    function sync(){
+      const visible=control.checked&&!control.disabled;
+      series.applyOptions({visible:visible});
+      indicator.hidden=!visible;
+    }
+    control.addEventListener('change',sync);
+    sync();
     return series;
   }
-  addEma(tech.ema20,'#ffc85a','EMA 20','#show-ema20');
+  addEma(tech.ema20,'#ffc85a','#show-ema20','[data-ema="20"]');
   if(tech.ema50.length)
-    addEma(tech.ema50,'#58c5ff','EMA 50','#show-ema50');
+    addEma(tech.ema50,'#58c5ff','#show-ema50','[data-ema="50"]');
   else {
     const e=document.querySelector('#show-ema50');
     e.checked=false;e.disabled=true;e.parentElement.title='Meno di 50 barre chiuse';
+    document.querySelector('[data-ema="50"]').hidden=true;
   }
 
-  function addLevel(price,title,color,group) {
+  // Le etichette sulle medie sono nella legenda, non sull'asse prezzi.
+  // Per i livelli strutturali il price line mostra solo il numero:
+  // title vuoto, evitando le scritte "Str S1", "Str R1" nell'asse.
+  function addLevel(price,color,group,showPrice){
     const line=candleSeries.createPriceLine({
       price:price,color:color,lineWidth:1,lineStyle:2,
-      axisLabelVisible:false,title:title});
+      axisLabelVisible:showPrice,title:''});
     group.push(line);
   }
-  function levelToggle(selector,entries){
+  function levelToggle(selector,entries,showPrice){
     const input=document.querySelector(selector);
     let active=[];
     function display(){
       for(const line of active)candleSeries.removePriceLine(line);
       active=[];
-      if(input.checked)entries.forEach(e=>addLevel(e.price,e.title,e.color,active));
+      if(input.checked)entries.forEach(e=>
+        addLevel(e.price,e.color,active,showPrice));
     }
     input.addEventListener('change',display);
     display();
   }
   const structural=[];
   tech.structure.supports.slice(0,2).forEach((e,i)=>structural.push({
-    price:e.price,title:'Str S'+(i+1),color:'#32c7aa'}));
+    price:e.price,color:'#32c7aa'}));
   tech.structure.resistances.slice(0,2).forEach((e,i)=>structural.push({
-    price:e.price,title:'Str R'+(i+1),color:'#f3a078'}));
-  levelToggle('#show-structure',structural);
+    price:e.price,color:'#f3a078'}));
+  levelToggle('#show-structure',structural,true);
   const lastClose=rows[rows.length-1].close;
   const pivotEntries=[];
   const pivotNames=['P','S1','S2','S3','R1','R2','R3'];
@@ -352,11 +381,11 @@ try {
     const above=byDistance.find(n=>tech.pivots[n]>lastClose);
     const below=byDistance.find(n=>tech.pivots[n]<lastClose);
     for(const name of ['P',above,below].filter((n,i,all)=>n && all.indexOf(n)===i)){
-      pivotEntries.push({price:tech.pivots[name],title:'Pivot '+name,
+      pivotEntries.push({price:tech.pivots[name],
         color:name==='P'?'#e4d778':name.startsWith('S')?'#8bceaf':'#bd9fff'});
     }
   }
-  levelToggle('#show-pivots',pivotEntries);
+  levelToggle('#show-pivots',pivotEntries,false);
   const eur = new Intl.NumberFormat('it-IT',{maximumFractionDigits:6});
   const supports=tech.structure.supports.length;
   const resistances=tech.structure.resistances.length;
