@@ -6,6 +6,10 @@
 !/IMPORTAZIONE_SICURA.md
 !/scripts/
 !/scripts/importa_codice_termux.sh
+!/scripts/kdd_aggiorna.py
+!/scripts/test_kdd_aggiorna.py
+!/scripts/kdd_aggiorna.sh
+!/scripts/installa_comando_kdd.sh
 !/analisi_v02.py
 !/binance_reference.py
 !/costi_spot.py
