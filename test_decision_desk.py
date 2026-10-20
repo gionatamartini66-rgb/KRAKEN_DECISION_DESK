@@ -582,6 +582,49 @@ class DeskTests(unittest.TestCase):
         self.assertNotIn("readonly.json",page)
         self.assertIn("nessun segnale BUY/SELL",page)
 
+    def test_graph_level_decluttering_preserves_exact_level_data(self):
+        import grafico_4h as g
+        from unittest import mock
+        start=1_800_000_000
+        fake={"creato_utc":"2026-10-20T12:00:00+00:00",
+              "grafici_4h":{"SUI":{"stato":"OK","coppia":"SUI/EUR",
+              "serie_ohlcv_chiuse":[{
+                  "apertura_ts_utc":start+i*14400,
+                  "open":10.0, "high":11.0, "low":9.0,
+                  "close":10.0, "volume_base":123.0} for i in range(60)]}}}
+        with tempfile.TemporaryDirectory() as folder:
+            file=pathlib.Path(folder)/"dossier.json"
+            file.write_text(json.dumps(fake))
+            with mock.patch.object(g.dt,"datetime",wraps=dt.datetime) as cls:
+                cls.now.return_value=dt.datetime.fromtimestamp(
+                    start+14400*70,dt.timezone.utc)
+                page=g.page_from_dossier(file)
+        self.assertIn("Tutti i livelli e i prezzi esatti",page)
+        self.assertIn('id="nearby-summary"',page)
+        self.assertIn('id="levels-list"',page)
+        self.assertIn("axisLabelVisible:false",page)
+        self.assertNotIn("axisLabelVisible:true",page)
+        self.assertIn("tech.structure.supports.slice(0,2)",page)
+        self.assertIn("tech.structure.resistances.slice(0,2)",page)
+        self.assertIn("pivotNames.map(",page)
+        self.assertIn("0.005",page)
+        self.assertIn("Nessuna conferma di tenuta o breakout",page)
+        self.assertNotIn("readonly.json",page)
+
+    def test_graph_full_pivots_stay_in_payload_when_plot_filters_lines(self):
+        import grafico_4h as g
+        start=int(dt.datetime(2026,10,19,tzinfo=dt.timezone.utc).timestamp())
+        candles=[
+            dict(time=start+i*14400,open=10.0,high=11.0,
+                 low=9.0,close=10.0,volume=1.0) for i in range(6)
+        ]
+        candles.append(dict(time=start+6*14400,open=10.0,
+                            high=12.0,low=8.0,close=11.0,volume=1.0))
+        pivots=g.daily_pivots(candles)
+        self.assertEqual(set(pivots),
+                         {"reference_day_utc","P","R1","S1","R2","S2","R3","S3"})
+        self.assertEqual(g.technical_from_candles(candles)["pivots"],pivots)
+
     def test_grafico_4h_refuses_partial_and_gapped(self):
         import grafico_4h as g
         from unittest import mock
