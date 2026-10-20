@@ -1,0 +1,33 @@
+# KDD - esclusione preventiva: il repository contiene SOLO codice approvato.
+# Regola deliberata: negare ogni file, consentire esplicitamente unicamente i nomi sotto.
+*
+!/.gitignore
+!/README.md
+!/IMPORTAZIONE_SICURA.md
+!/scripts/
+!/scripts/importa_codice_termux.sh
+!/analisi_v02.py
+!/binance_reference.py
+!/costi_spot.py
+!/decision_desk.py
+!/dossier_trade.py
+!/flusso_spot.py
+!/grafico_4h.py
+!/kdd_saldi.py
+!/kraken_readonly.py
+!/mercati_spot.py
+!/piano_gpt.py
+!/ricerca_setup.py
+!/serve.py
+!/studio_delta.py
+!/test_decision_desk.py
+!/verifica_piani.py
+!/vendor/
+vendor/*
+!/vendor/lightweight-charts-5.2.1.js
+!/vendor/LIGHTWEIGHT_CHARTS_LICENSE.txt
+!/vendor/LIGHTWEIGHT_CHARTS_NOTICE.txt
+
+# MAI includere: .env, chiavi, credenziali, wallet, file JSON del portafoglio,
+# T0, estratti di conto, dossier e rilevazioni, piani, backup e log.
+# Evitare git add -f. Un .gitignore NON protegge da file gia' tracciati.
