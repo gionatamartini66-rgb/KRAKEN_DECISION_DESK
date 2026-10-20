@@ -3,6 +3,9 @@ Niente ordini, chiavi o indicatori fittizi. Dati dal dossier Kraken esistente.
 """
 from __future__ import annotations
 
+# CANARY DEPLOY 2026-10-20: sola verifica aggiornamento GitHub → Termux.
+# Nessun cambiamento al grafico, ai dati di mercato o al comportamento di KDD.
+
 import datetime as dt
 import html
 import json
