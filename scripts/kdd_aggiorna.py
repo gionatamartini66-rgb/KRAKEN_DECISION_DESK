@@ -145,7 +145,13 @@ def isolated_test(staging: Path) -> None:
     if proc.stdout.strip():
         print(proc.stdout[-1700:])
     if proc.stderr.strip():
-        print(proc.stderr[-1700:])
+        # Evita di riversare in chat migliaia di caratteri HTML e possibili
+        # valori locali contenuti negli assertion errors.
+        diagnostic = [
+            line for line in proc.stderr.splitlines()
+            if line.startswith(('FAIL: ', 'ERROR: ', 'Ran ', 'FAILED ', 'OK'))
+        ]
+        print('\n'.join(diagnostic) if diagnostic else proc.stderr[-400:])
     if proc.returncode:
         raise SafetyError('test KDD falliti: codice originale NON modificato')
     print('Test KDD: OK')
@@ -195,10 +201,19 @@ def apply(root: Path, live: Path, *, commit_sha: str, dry_run: bool) -> None:
             shutil.copy2(src, staging / src.name)
         for name in PY_FILES:
             shutil.copy2(root / name, staging / name)
-        # Il test usa dati reali solo per asserzioni locali, senza trasmissione.
-        for name in ('config.json', 'migrazione_attesa.json'):
+        # Alcuni test legacy verificano LO STATO LOCALE effettivo (piano GPT,
+        # portafoglio e migrazione). Il clone GitHub non contiene questi file.
+        # Sono copiati esclusivamente NEL TEMPORANEO LOCALE (0700), mai nello
+        # staging Git o sulla rete; la cartella viene eliminata a fine prova.
+        # Senza queste fixture i test danno falsi negativi e non certificano
+        # davvero le regressioni. Non includere readonly.json/chiavi o altri
+        # segreti: i test non ne hanno bisogno.
+        for name in ('config.json', 'migrazione_attesa.json',
+                     'portafoglio.json', 'piano_gpt.json'):
             original = live / name
-            if original.exists():
+            if original.is_symlink():
+                raise SafetyError(f'fixture locale symlink: {name}')
+            if original.is_file():
                 shutil.copy2(original, staging / name)
         t0_path = 'storico_portafoglio/T0_2026-10-19_2301_KRAKEN_PRO.json'
         if (live / t0_path).exists():
