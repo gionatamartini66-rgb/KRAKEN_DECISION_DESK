@@ -773,7 +773,13 @@ class DeskTests(unittest.TestCase):
                 result=g.daily_pivots(bars,interval_seconds=sec)
                 self.assertIsNotNone(result)
                 self.assertEqual(result['reference_day_utc'],'2026-10-19')
-                self.assertIsNone(g.daily_pivots(bars[1:],interval_seconds=sec))
+                if sec < 86400:
+                    self.assertIsNone(g.daily_pivots(bars[1:],interval_seconds=sec))
+                else:
+                    # A daily candle is a whole day by itself: the remaining
+                    # bar represents the next day, not an incomplete day.
+                    after=g.daily_pivots(bars[1:],interval_seconds=sec)
+                    self.assertNotEqual(after['reference_day_utc'],'2026-10-19')
 
     def test_graph_full_pivots_stay_in_payload_when_plot_filters_lines(self):
         import grafico_4h as g
