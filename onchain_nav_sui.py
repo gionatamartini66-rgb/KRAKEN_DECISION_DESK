@@ -1,4 +1,4 @@
-"""Bounded read-only Sui Mainnet pilot; manual use, stdlib-only, no state persistence."""
+"""Bounded manual read-only Sui on-chain pilot, stdlib-only; no persistence."""
 import argparse
 from datetime import datetime, timezone
 import json
@@ -16,13 +16,16 @@ MAINNET_PREFIX = '35834a8a'
 STAKING = '0x3::sui_system::request_add_stake'
 UNSTAKING = '0x3::sui_system::request_withdraw_stake'
 MAX_CALLS = 9
+MAX_PAGES_PER_TRANSACTION = 4
 MAX_BYTES = 1_000_000
-LOOKUP = '''query($digest: String!) { transaction(digest: $digest) {
+# Pagination explicitly requested. Query syntax is provisional until validated live.
+LOOKUP = '''query($digest: String!, $after: String) { transaction(digest: $digest) {
  digest effects { status timestamp checkpoint { sequenceNumber }
- objectChanges { nodes { address idCreated idDeleted
+ objectChanges(first: 50, after: $after) { pageInfo { hasNextPage endCursor }
+ nodes { address idCreated idDeleted
  inputState { asMoveObject { contents { type { repr } json } } }
- outputState { asMoveObject { contents { type { repr } json } } } } }
- } } }'''
+ outputState { asMoveObject { contents { type { repr } json } } } } } }
+ } }'''
 FILTER = '''query($function: String!) { transactions(last: 3, filter:{function:$function}) {
  pageInfo { hasPreviousPage startCursor } nodes { digest } } }'''
 IDENTITY = 'query { chainIdentifier serviceConfig { availableRange(type:"Query",field:"transactions",filters:["function"]) { first {sequenceNumber} last {sequenceNumber} } } }'
@@ -35,7 +38,13 @@ class SourceProblem(Exception):
 
 
 def now():
-    return datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
+    return datetime.now(timezone.utc).isoformat(timespec='microseconds').replace('+00:00', 'Z')
+
+
+def _dict(value, field):
+    if not isinstance(value, dict):
+        raise SourceProblem('RISPOSTA_INCOMPLETA', f'oggetto {field} assente o malformato')
+    return value
 
 
 def _base58_decode(s):
@@ -62,12 +71,11 @@ def mainnet(chain_identifier):
 
 
 def post_graphql(query, variables=None, *, transport=None):
-    """No retry. Reject GraphQL partial-success as failure, including HTTP 200."""
     payload = json.dumps({'query': query, 'variables': variables or {}}, separators=(',', ':')).encode()
     if len(payload) > 5000:
         raise SourceProblem('RICHIESTA_TROPPO_GRANDE', 'limite payload')
     req = urllib.request.Request(ENDPOINT, data=payload,
-             headers={'Content-Type': 'application/json', 'User-Agent': 'KDD-Onchain-G2/0.1 read-only'}, method='POST')
+             headers={'Content-Type': 'application/json', 'User-Agent': 'KDD-Onchain-G2R1/0.1 read-only'}, method='POST')
     try:
         response = (transport or urllib.request.urlopen)(req, timeout=12)
         with response as conn:
@@ -75,15 +83,16 @@ def post_graphql(query, variables=None, *, transport=None):
             if len(raw) > MAX_BYTES:
                 raise SourceProblem('RISPOSTA_TROPPO_GRANDE', 'limite risposta')
     except urllib.error.HTTPError as exc:
-        state = 'RATE_LIMIT' if exc.code == 429 else 'ERRORE_HTTP'
-        raise SourceProblem(state, f'HTTP {exc.code}') from exc
+        raise SourceProblem('RATE_LIMIT' if exc.code == 429 else 'ERRORE_HTTP', f'HTTP {exc.code}') from exc
     except (TimeoutError, urllib.error.URLError, OSError) as exc:
         raise SourceProblem('FONTE_NON_DISPONIBILE', type(exc).__name__) from exc
     try:
         doc = json.loads(raw)
     except (ValueError, UnicodeDecodeError) as exc:
         raise SourceProblem('RISPOSTA_INCOMPLETA', 'JSON invalido') from exc
-    if not isinstance(doc, dict) or doc.get('errors'):
+    if not isinstance(doc, dict):
+        raise SourceProblem('RISPOSTA_INCOMPLETA', 'GraphQL documento non oggetto')
+    if doc.get('errors'):
         raise SourceProblem('ERRORE_GRAPHQL', 'GraphQL errors presenti')
     if not isinstance(doc.get('data'), dict):
         raise SourceProblem('RISPOSTA_INCOMPLETA', 'campo data assente')
@@ -102,63 +111,134 @@ def _normalized_type(t):
         return None
 
 
-def parse_stake(tx, kind, acquired, coverage):
-    """Only record a verified changed StakedSui principal; no inferred net flow."""
-    if not isinstance(tx, dict) or not re.fullmatch(r'[1-9A-HJ-NP-Za-km-z]{32,64}', str(tx.get('digest', ''))):
+def _object_changes(tx):
+    fx = _dict(_dict(tx, 'transaction').get('effects'), 'effects')
+    conn = _dict(fx.get('objectChanges'), 'effects.objectChanges')
+    nodes = conn.get('nodes')
+    page = _dict(conn.get('pageInfo'), 'effects.objectChanges.pageInfo')
+    if not isinstance(nodes, list) or type(page.get('hasNextPage')) is not bool:
+        raise SourceProblem('RISPOSTA_INCOMPLETA', 'nodes o hasNextPage mancanti')
+    cursor = page.get('endCursor')
+    if page['hasNextPage'] and (not isinstance(cursor, str) or not cursor):
+        raise SourceProblem('RISPOSTA_INCOMPLETA', 'cursor di continuazione non valido')
+    return nodes, page['hasNextPage'], cursor
+
+
+def _transaction_identity(tx):
+    _dict(tx, 'transaction')
+    if not re.fullmatch(r'[1-9A-HJ-NP-Za-km-z]{32,64}', str(tx.get('digest', ''))):
         raise SourceProblem('EVENTO_NON_VERIFICABILE', 'digest invalido')
-    effects = tx.get('effects')
-    if not isinstance(effects, dict):
-        raise SourceProblem('EVENTO_NON_VERIFICABILE', 'effects assenti')
-    if effects.get('status') != 'SUCCESS':
-        return [], 'TRANSAZIONE_FALLITA' if effects.get('status') else 'EVENTO_NON_VERIFICABILE'
-    timestamp = effects.get('timestamp')
-    checkpoint = (effects.get('checkpoint') or {}).get('sequenceNumber')
+    fx = _dict(tx.get('effects'), 'effects')
+    status = fx.get('status')
+    if status not in ('SUCCESS', 'FAILURE'):
+        raise SourceProblem('EVENTO_NON_VERIFICABILE', 'status transazione assente o inatteso')
+    checkpoint = _dict(fx.get('checkpoint'), 'checkpoint').get('sequenceNumber')
     try:
-        stamp = utc(timestamp)
-        cp = uint(checkpoint, allow_zero=True)
-    except (ValueError, AttributeError) as exc:
-        raise SourceProblem('EVENTO_NON_VERIFICABILE', 'timestamp/checkpoint non validi') from exc
-    changes = (effects.get('objectChanges') or {}).get('nodes')
-    if not isinstance(changes, list):
-        raise SourceProblem('EVENTO_NON_VERIFICABILE', 'objectChanges assenti')
+        stamp, cp = utc(fx.get('timestamp')), uint(checkpoint, allow_zero=True)
+    except ValueError as exc:
+        raise SourceProblem('EVENTO_NON_VERIFICABILE', 'timestamp/checkpoint invalidi') from exc
+    return tx['digest'], status, stamp, cp
+
+
+def collect_pages(first_tx, fetch_page):
+    """Atomic collection. On incomplete pages emit no verified transaction."""
+    ident = _transaction_identity(first_tx)
+    tx = first_tx
+    collected = []
+    used = set()
+    for count in range(MAX_PAGES_PER_TRANSACTION):
+        if _transaction_identity(tx) != ident:
+            raise SourceProblem('EVENTO_NON_VERIFICABILE', 'metadati transazione differiscono fra pagine')
+        nodes, has_more, cursor = _object_changes(tx)
+        collected.extend(nodes)
+        if not has_more:
+            merged = {'digest':first_tx['digest'], 'effects':dict(first_tx['effects'])}
+            merged['effects']['objectChanges'] = {'nodes':collected, 'pageInfo':{'hasNextPage':False, 'endCursor':cursor}}
+            return merged
+        if count + 1 >= MAX_PAGES_PER_TRANSACTION:
+            raise SourceProblem('RISPOSTA_INCOMPLETA', 'limite pagine raggiunto')
+        if cursor in used:
+            raise SourceProblem('RISPOSTA_INCOMPLETA', 'cursore ripetuto')
+        used.add(cursor)
+        tx = _dict(fetch_page(first_tx['digest'], cursor), 'transaction')
+    raise SourceProblem('RISPOSTA_INCOMPLETA', 'paginazione interrotta')
+
+
+def _contents(change, side):
+    outer = change.get(side)
+    if outer is None:
+        return None
+    outer = _dict(outer, side)
+    obj = outer.get('asMoveObject')
+    if obj is None:
+        return None
+    return _dict(_dict(obj, 'asMoveObject').get('contents'), 'contents')
+
+
+def parse_stake(tx, kind, acquired, coverage):
+    """Only changed StakedSui objects are facts; filter != command attribution."""
+    if kind not in ('staking','unstaking'):
+        raise SourceProblem('EVENTO_NON_VERIFICABILE', 'famiglia filtro sconosciuta')
+    digest, status, stamp, cp = _transaction_identity(tx)
+    if status == 'FAILURE':
+        return [], 'TRANSAZIONE_FALLITA'
+    try:
+        acquired = utc(acquired)
+    except ValueError as exc:
+        raise SourceProblem('EVENTO_NON_VERIFICABILE', 'orario acquisizione invalido') from exc
+    if datetime.fromisoformat(stamp.replace('Z','+00:00')) > datetime.fromisoformat(acquired.replace('Z','+00:00')):
+        raise SourceProblem('EVENTO_NON_VERIFICABILE', 'evento successivo ad acquisizione')
+    changes, more, _ = _object_changes(tx)
+    if more:
+        raise SourceProblem('RISPOSTA_INCOMPLETA', 'objectChanges con pagine ulteriori')
     out = []
     seen = set()
     for change in changes:
         if not isinstance(change, dict):
-            continue
-        side = 'outputState' if kind == 'staking' else 'inputState'
-        state = ((change.get(side) or {}).get('asMoveObject') or {}).get('contents')
-        if not isinstance(state, dict) or _normalized_type((state.get('type') or {}).get('repr')) != STAKED:
-            continue
-        if kind == 'staking' and change.get('idCreated') is not True:
-            continue
-        if kind == 'unstaking' and change.get('idDeleted') is not True:
-            continue
+            raise SourceProblem('RISPOSTA_INCOMPLETA', 'objectChange malformato')
         obj = change.get('address')
-        if not isinstance(obj, str) or not re.fullmatch(r'0x[0-9a-fA-F]{1,64}', obj):
-            continue
-        if obj in seen:
-            continue
-        raw = (state.get('json') or {}).get('principal')
-        try:
-            amount = units(raw)
-        except ValueError:
-            continue
-        seen.add(obj)
-        out.append(Observation(
-            kind='FATTO_OSSERVATO', asset='SUI', chain='sui:mainnet', asset_id=COIN,
-            event='STAKING_PRINCIPALE' if kind == 'staking' else 'UNSTAKING_PRINCIPALE_CONSUMATO',
-            quantity=amount, unit='SUI', transaction=tx['digest'], block_reference=str(cp),
-            event_utc=stamp, acquired_utc=acquired, reference_period=stamp,
-            knowable_utc=stamp, source=ENDPOINT, coverage=coverage, verification='VERIFICATO',
-            limits=('Singola transazione, non flusso netto di rete.',
-                    'Principal di StakedSui, non saldo exchange o vendita.'),
-            compatible=('Delegazione di principal' if kind == 'staking' else 'Consumo di un oggetto StakedSui',),
-            prohibited=('BUY/SELL', 'Intenzione del proprietario', 'Pressione immediata di mercato'),
-            economic_relevance='Modifica individuale dei token impegnati nello staking.',
-            details={'staked_sui_object': obj, 'principal_mist': str(raw), 'operation': kind}
-        ))
-    return out, 'VERIFICATO' if out else 'EVENTO_NON_VERIFICABILE'
+        created = change.get('idCreated') is True
+        deleted = change.get('idDeleted') is True
+        if created and deleted:
+            raise SourceProblem('EVENTO_NON_VERIFICABILE', 'cambiamento contraddittorio')
+        for side, marked, event in (
+            ('outputState',created,'STAKED_SUI_OGGETTO_CREATO'),
+            ('inputState',deleted,'STAKED_SUI_OGGETTO_CONSUMATO')):
+            if not marked:
+                continue
+            state = _contents(change,side)
+            if state is None:
+                continue
+            typed = state.get('type')
+            if _normalized_type(_dict(typed, 'contents.type').get('repr')) != STAKED:
+                continue
+            if not isinstance(obj, str) or not re.fullmatch(r'0x[0-9a-fA-F]{1,64}',obj):
+                raise SourceProblem('EVENTO_NON_VERIFICABILE','id oggetto StakedSui non valido')
+            key = (obj.lower(),event)
+            if key in seen:
+                continue
+            raw = _dict(state.get('json'), 'contents.json').get('principal')
+            try:
+                amount = units(raw)
+            except ValueError as exc:
+                raise SourceProblem('EVENTO_NON_VERIFICABILE','principal non valido') from exc
+            seen.add(key)
+            out.append(Observation(
+                kind='FATTO_OSSERVATO', asset='SUI',chain='sui:mainnet',asset_id=COIN,
+                event=event,quantity=amount,unit='SUI',transaction=digest,
+                block_reference=str(cp),event_utc=stamp,acquired_utc=acquired,
+                reference_period=stamp,knowable_utc=None,source=ENDPOINT,
+                coverage=coverage,verification='VERIFICATO',
+                limits=('Singola transazione: nessun flusso netto di rete.',
+                        'Filtro per funzione non prova attribuzione al singolo comando PTB.',
+                        'StakedSui principal non e ordine exchange, vendita o ricompensa.'),
+                compatible=('Creazione o consumo oggetto StakedSui',),
+                prohibited=('BUY/SELL','Intenzione indirizzo','Pressione di mercato',
+                            'Attribuzione causale di comando Move non provata'),
+                economic_relevance='Cambiamento oggetto StakedSui, significato direzionale indeterminato.',
+                details={'staked_sui_object':obj.lower(),'principal_mist':str(raw),
+                         'filter_family':kind,'command_attribution':'NON_DIMOSTRATA'}))
+    return out, ('OGGETTO_VERIFICATO_ATTRIBUZIONE_NON_DIMOSTRATA' if out else 'EVENTO_NON_VERIFICABILE')
 
 
 def parse_circulation(data, acquired):
@@ -181,11 +261,11 @@ def parse_circulation(data, acquired):
         limits=('Stima per fine mese soggetta a revisioni.','Non aggiungere ai flussi blockchain.'),
         compatible=('Programma di circolazione della Foundation',),
         prohibited=('Offerta circolante in tempo reale', 'Vendite attese', 'Flussi exchange'),
-        economic_relevance='Contesto programmatico di offerta, privo di implicazione direzionale automatica.')
+        economic_relevance='Contesto programmatico, non direzione prezzo.')
 
 
 def read_circulation(transport=None):
-    req = urllib.request.Request(CIRCULATION, headers={'Accept':'application/json','User-Agent':'KDD-Onchain-G2/0.1 read-only'})
+    req = urllib.request.Request(CIRCULATION, headers={'Accept':'application/json','User-Agent':'KDD-Onchain-G2R1/0.1 read-only'})
     try:
         with (transport or urllib.request.urlopen)(req, timeout=12) as resp:
             raw = resp.read(MAX_BYTES+1)
@@ -203,50 +283,67 @@ def read_circulation(transport=None):
 
 
 def run(*, request=post_graphql, include_circulation=False, circulation=read_circulation):
-    """1 identity + 2 bounded filters + <=6 detail lookups; no background tasks."""
-    start = now()
-    report = {'acquired_utc':start, 'network':'sui:mainnet', 'statuses':{}, 'observations':[],
-              'coverage':None, 'requests_max':MAX_CALLS, 'requests_made':0}
+    """1 identity + 2 bounded filters + remaining details/pages; never aggregates."""
+    report={'request_started_utc':now(),'network':'sui:mainnet','statuses':{},
+            'observations':[],'coverage':None,'requests_max':MAX_CALLS,'requests_made':0}
     def ask(query, vars=None):
         if report['requests_made'] >= MAX_CALLS:
-            raise SourceProblem('LIMITE_RICHIESTE', 'budget esaurito')
+            raise SourceProblem('RISPOSTA_INCOMPLETA', 'budget richieste esaurito')
         report['requests_made'] += 1
-        return request(query, vars)
+        result = request(query,vars)
+        return _dict(result,'GraphQL.data'),now()
     try:
-        ident = ask(IDENTITY)
-        if not isinstance(ident, dict):
-            raise SourceProblem('RISPOSTA_INCOMPLETA', 'identita non presente')
+        ident,_ = ask(IDENTITY)
         if not mainnet(ident.get('chainIdentifier')):
             raise SourceProblem('IDENTITA_NON_VERIFICATA','chainIdentifier non mainnet')
-        rng = ((ident.get('serviceConfig') or {}).get('availableRange') or {})
-        if not isinstance(rng.get('first'), dict) or not isinstance(rng.get('last'), dict):
+        service = _dict(ident.get('serviceConfig'),'serviceConfig')
+        rng = service.get('availableRange')
+        if not isinstance(rng,dict) or not isinstance(rng.get('first'),dict) or not isinstance(rng.get('last'),dict):
             report['coverage']='NON_DETERMINABILE'
         else:
             report['coverage']={'first_checkpoint':rng['first'].get('sequenceNumber'),
-                                'last_checkpoint':rng['last'].get('sequenceNumber'),
-                                'scope':'Query.transactions filter=function; non copertura totale'}
+                  'last_checkpoint':rng['last'].get('sequenceNumber'),
+                  'scope':'Query.transactions filter=function; campione limitato'}
         report['statuses']['identity']='VERIFICATA'
-        for label, func in (('staking',STAKING), ('unstaking',UNSTAKING)):
+        global_seen=set()
+        for label,func in (('staking',STAKING),('unstaking',UNSTAKING)):
             try:
-                d = ask(FILTER, {'function':func})
-                txs = (d.get('transactions') or {}).get('nodes')
-                if not isinstance(txs, list):
-                    raise SourceProblem('RISPOSTA_INCOMPLETA','transactions.nodes assenti')
-                status = 'EVENTO_NON_TROVATO'
-                for tx in txs[:3]:
-                    if not isinstance(tx,dict) or not isinstance(tx.get('digest'),str):
-                        raise SourceProblem('RISPOSTA_INCOMPLETA','digest assente')
-                    data = ask(LOOKUP, {'digest':tx['digest']})
-                    if (data.get('transaction') or {}).get('digest') != tx['digest']:
-                        raise SourceProblem('EVENTO_NON_VERIFICABILE','mismatch digest lookup')
-                    obs, event_status = parse_stake(data['transaction'],label,start,str(report['coverage']))
-                    if obs:
-                        report['observations'].extend(o.to_decision_context() for o in obs)
-                        status='VERIFICATO'
-                    elif status != 'VERIFICATO':
+                d,_=ask(FILTER,{'function':func})
+                conn=_dict(d.get('transactions'),'transactions')
+                nodes=conn.get('nodes')
+                page=_dict(conn.get('pageInfo'),'transactions.pageInfo')
+                if not isinstance(nodes,list) or type(page.get('hasPreviousPage')) is not bool:
+                    raise SourceProblem('RISPOSTA_INCOMPLETA','filtro nodes/pageInfo malformato')
+                incomplete = page['hasPreviousPage'] or report['coverage']=='NON_DETERMINABILE'
+                report['statuses'][f'{label}_coverage']=('COPERTURA_INSUFFICIENTE' if incomplete else 'CAMPIONE_LIMITATO_NON_GENERALE')
+                status='NESSUN_EVENTO_NEL_CAMPIONE' if not nodes else 'EVENTO_NON_VERIFICABILE'
+                for node in nodes[:3]:
+                    node=_dict(node,'transactions.nodes entry')
+                    digest=node.get('digest')
+                    if not isinstance(digest,str):
+                        raise SourceProblem('RISPOSTA_INCOMPLETA','digest filtro malformato')
+                    first, acquired = ask(LOOKUP,{'digest':digest,'after':None})
+                    tx=_dict(first.get('transaction'),'transaction')
+                    if tx.get('digest') != digest:
+                        raise SourceProblem('EVENTO_NON_VERIFICABILE','digest mismatch')
+                    def next_page(digest_,cursor):
+                        nonlocal acquired
+                        response, acquired = ask(LOOKUP,{'digest':digest_, 'after':cursor})
+                        return _dict(response.get('transaction'),'transaction')
+                    full=collect_pages(tx,next_page)
+                    found,event_status=parse_stake(full,label,acquired,str(report['coverage']))
+                    if found:
+                        for o in found:
+                            key=(o.transaction,o.details['staked_sui_object'],o.event)
+                            if key in global_seen:
+                                report['statuses']['cross_filter_duplicate']='SCARTATO'
+                                continue
+                            global_seen.add(key)
+                            report['observations'].append(o.to_decision_context())
+                        status='OGGETTO_VERIFICATO_ATTRIBUZIONE_NON_DIMOSTRATA'
+                    elif status != 'OGGETTO_VERIFICATO_ATTRIBUZIONE_NON_DIMOSTRATA':
                         status=event_status
                 report['statuses'][label]=status
-                report['statuses'][f'{label}_pagination']='CAMPIONE_PARZIALE_NON_AGGREGABILE'
             except SourceProblem as exc:
                 report['statuses'][label]=exc.state
                 report['statuses'][f'{label}_detail']=str(exc)
@@ -261,15 +358,16 @@ def run(*, request=post_graphql, include_circulation=False, circulation=read_cir
             report['statuses']['circulation']='PROGRAMMA_ACQUISITO'
         except SourceProblem as exc:
             report['statuses']['circulation']=exc.state
+    report['acquired_utc']=now()
     report['decision_utility']='NON_DIMOSTRATA'
     report['market_pair_context']='SUI/EUR Kraken spot: ASSOCIAZIONE FUTURA, NESSUN DATO MERCATO ACQUISITO'
     return report
 
 
-if __name__ == '__main__':
-    p=argparse.ArgumentParser(description='KDD G2 Sui on-chain, solo consultazione manuale')
-    p.add_argument('--live',action='store_true',help='autorizza richieste pubbliche; default non esegue rete')
-    p.add_argument('--circulation',action='store_true',help='includi fonte programma circolazione')
+if __name__=='__main__':
+    p=argparse.ArgumentParser(description='KDD G2R1 Sui on-chain, consultazione manuale')
+    p.add_argument('--live',action='store_true',help='richieste pubbliche; default nessuna rete')
+    p.add_argument('--circulation',action='store_true',help='includi programma circolazione')
     args=p.parse_args()
     if not args.live:
         p.error('nessuna richiesta eseguita senza --live')
