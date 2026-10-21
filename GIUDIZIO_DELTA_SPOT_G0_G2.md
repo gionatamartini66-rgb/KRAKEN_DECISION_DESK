@@ -2,7 +2,7 @@
 
 **Data:** 21 ottobre 2026.  
 **Classe:** revisione G0 dei sorgenti e della cronologia sperimentale; **nessuna sperimentazione o modifica del runtime**.  
-**Stato:** **DECISIONE D'USO ATTUALE: LIMITARE**. La **validazione scientifica incrementale rimane INCOMPLETA** finché non si rileggono integralmente i congelamenti A/B e gli esiti prospettici sul Samsung.  
+**Stato:** **ESPERIMENTO STORICO A/B COMPLETATO E GIUDICATO NEL SUO PERIMETRO: LIMITARE**. I resoconti verificati da Termux il 21 ottobre riportano **4 casi, 12/12 orizzonti osservati, hash A/B coerenti, 0/4 cambi di decisione**. La conclusione non è generalizzabile a tutte le condizioni di mercato e non dimostra alcuna redditività.  
 **Autorità:** proposta tecnico-analitica. Eventuali ampliamenti e trade richiedono decisione dell'autore.
 
 ## 1. Oggetto misurato — verificato direttamente nel codice
@@ -22,15 +22,17 @@ Le regressioni `test_decision_desk.py` verificano formule, campioni tronchi, fin
 
 **Il delta spot non è** un CVD storico continuo, il book, un indice multi-exchange, un indicatore dei futures o una previsione della direzione futura.
 
-## 2. Due livelli di osservazione — cronologia da verificare sui congelamenti originali
+## 2. Evidenze sperimentali e provenienza della verifica locale
 
-**G2 contestuale, 19/10 ~17:17 Italia:** la cronologia di chat riferisce una prova su **INJ, QNT, AVA e PUMP** che ha mostrato alcune convergenze fra delta e variazione di prezzo, oltre alla divergenza QNT (buy delta positivo con prezzo in lieve ribasso). Questa è una **correlazione contestuale sulla finestra osservata**, non un test prospettico di redditività. Non sono ripubblicati qui gli snapshot e i numeri per rispettare il confine fra repository tecnico e dossier operativi privati.
+**G2 contestuale, 19/10:** prova riferita su INJ, QNT, AVA, PUMP: descrizione di coincidenze e divergenze prezzo/delta. Non costituisce prova prospettica di rendimento.
 
-**Esperimento prospettico A/B, 19/10 ~22:05 Italia:** la cronologia di chat riferisce fasi A senza delta / B con delta, congelate per **SUI, QNT, PUMP, ONDO**. Tutti e quattro i delta erano negativi e **nessuna delle quattro decisioni operative riferite cambiò** dopo aver mostrato il dato. Si tratta di evidenza preliminare di **nessun valore decisionale incrementale osservato in quel campione**, non di dimostrazione che il delta sia sempre inutile.
+**A/B prospettico, 19/10, verificato da output Termux il 21/10:** quattro candidati QNT, SUI, PUMP, ONDO; fasi congelate A senza delta / B con delta. L'utente ha eseguito localmente `studio_delta.py`: `ORIZZONTI_COMPLETI`, **1 esperimento**, **4 casi**, **12/12 chiusure osservate** a +1h/+4h/+24h, **0 nuove chiamate Kraken** in quel passaggio, **0 errori**.
 
-Il codice `studio_delta.py` implementa una coppia A/B immutabile con checksum della fase A e verifica le **variazioni di chiusura** a **+1h, +4h e +24h**, quando le candele sono disponibili. Le variazioni di prezzo **non** sono PnL, fill, segnali operativi o causalità; il modulo si aggiorna su richiesta, non in background.
+Nel successivo controllo locale, `studio_delta.paired()` ha validato gli abbinamenti e l'hash della fase A; il checksum dell'archivio esiti ha corrisposto alla fase B (**VERIFICA A/B: OK**). Tutti e quattro i token mostravano **delta della candela chiusa negativo** e **variazione di prezzo positiva a tutti e tre gli orizzonti successivi**. L'output delle fasi A/B ha mostrato esattamente **zero cambiamenti di azione su quattro**; le motivazioni B confermano perlopiù informazioni già disponibili su prezzo, forza relativa, volumi e book. Per SUI il delta della finestra mobile risultava di segno opposto a quello della candela chiusa: **le due finestre temporali non sono intercambiabili**.
 
-**Lacuna probatoria esplicita:** in questa ricognizione non sono stati accessibili direttamente i file originali `esperimenti_delta/*_fase_A.json`, `*_fase_B.json`, `*_esiti.json`, relativi hash e timestamp interni. Sono custoditi nel runtime privato Samsung e non nel repository GitHub, correttamente per politica di riservatezza. Non è quindi accertata qui la completezza degli orizzonti +1/+4/+24h né verificato direttamente il verbatim delle due fasi. **Non proclamare validazione scientifica definitiva o guadagno dimostrato.**
+**Interpretazione delimitata:** delta negativo in una candela e rialzo successivo non sono logicamente incompatibili; i casi mostrano però che **il segno del delta non va interpretato come previsione direzionale**, e che **nel campione osservato l'informazione non ha cambiato nessuna decisione**. Non è provata una relazione contrarian, né è possibile classificare le scelte prudenziali come errori ex post senza regole di ingresso, uscita, invalidazione, commissioni e rischio. **Quattro token non equivalgono a dodici esperimenti indipendenti.**
+
+**Provenienza e limiti:** i risultati sono stati letti sul dispositivo tramite comandi Python e **trascritti dall'output Termux in chat**. Gli snapshot A/B e gli esiti completi restano privati sul Samsung, non copiati in GitHub. La verifica locale degli hash e dei 12 orizzonti è documentata nell'output; questo documento non attesta un'acquisizione diretta integrale dei tre file da parte del revisore né una validazione esterna delle quotazioni storiche. Il valore predittivo generale resta **NON DIMOSTRATO**.
 
 ## 3. Giudizio per l'uso decisionale attuale
 
@@ -43,14 +45,16 @@ Regole di uso **da applicare nel ragionamento**, senza sostenere che il software
 4. **Sospendere l'inferenza** quando il campione non copre la candela, è scaduto, l'identità della coppia è ambigua o mancano dati confrontabili.
 5. **Cercare discordanza utile** col prezzo, col volume e col book; trattarla come quesito di approfondimento e non come segnale predittivo.
 
-**Zero cambiamenti A→B nel campione riferito** impedisce di sostenere che il delta abbia già migliorato le decisioni. Non assegniamo pesi o soglie decisionali nuove.
+**Zero cambiamenti A→B nel campione verificato tramite Termux** impedisce di sostenere che il delta abbia già migliorato le decisioni. Non assegniamo pesi o soglie decisionali nuove.
 
-## 4. Residuo verificabile e sequenza preservata
+## 4. Adjudication chiusa per il campione; lavoro successivo distinto
 
-Per trasformare il giudizio d'uso in **adjudication scientifica chiusa**, occorre la lettura locale source-bound delle coppie congelate A/B e degli eventuali file esiti: controllo checksum, riferimenti temporali, confronto ragioni **A vs B per candidato**, stato +1h/+4h/+24h, copertura, eventuali risultati mancanti. Questa verifica **non necessita nuovi indicatori, nuovi trade, API private o nuovi esperimenti**.
+**Decisione metodologica per l'esperimento disponibile: LIMITARE.** Con dati A/B e osservazioni prospettiche disponibili, il punto sperimentale storico è giudicato: il delta è una descrizione utile della microstruttura, ma il suo **valore decisionale incrementale non è dimostrato**. L'assenza di variazioni delle decisioni non permette di misurare miglioramenti di accuratezza, PnL o opportunità perse imputabili causalmente al delta.
 
-L'accesso al Samsung da Remote Desktop Commander era **esaurito per il mese** al momento della ricognizione. Non chiedere di mettere snapshot privati su GitHub, aggirare la quota o ripetere chiamate remote bloccate. Se non è possibile leggere gli originali, conservare l'esito **LIMITATO — VALIDAZIONE INCOMPLETA** senza inventare risultati.
+**NON** occorre ripetere lo stesso esperimento, introdurre filtri numerici arbitrari o richiedere altre chiamate API per dichiarare questo esito. La limitazione non impone eliminare la raccolta tecnica del dato; non promuoverlo a segnale operativo o fattore di ranking.
 
-La roadmap resta nell'ordine: **G0/G2 → adjudication delta (uso LIMITATO, conferma prospettica pendente) → una sola integrazione motivata → motore decisionale GPT**. Nessuna fase successiva è autorizzata automaticamente da questo giudizio.
+Un'eventuale valutazione futura su campione maggiore, con esiti operativi netti predefiniti, sarebbe **un altro esperimento**, autorizzabile separatamente in roadmap; non rientra in questa adjudication.
 
-**Nessun dato patrimoniale, segreto o snapshot operativo copiato nel repository.**
+La sequenza resta: **G0/G2 → giudizio delta (CHIUSO PER IL CAMPIONE: USO LIMITATO) → scelta umana di una sola integrazione motivata → consolidamento motore decisionale GPT**. La scelta del prossimo componente non è automaticamente autorizzata da questo rapporto.
+
+**Nessuna modifica al software runtime, nessun trade, nessun documento privato del Samsung pubblicato.**
