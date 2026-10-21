@@ -98,7 +98,7 @@ class SuiTests(unittest.TestCase):
         self.assertEqual((o,s),([],'EVENTO_NON_VERIFICABILE'))
 
     def test_identity_ambiguous(self):
-        t=tx(changes=[{'address':OBJ,'idCreated':True, 'outputState':{
+        t=tx(changes=[{'address':OBJ,'idCreated':True,'idDeleted':False, 'outputState':{
           'asMoveObject':{'contents':{'type':{'repr':'0x4::staking_pool::StakedSui'},'json':{'principal':'99'}}}}}])
         self.assertEqual(sui.parse_stake(t,'staking','2026-10-21T12:00:01Z','coverage')[0],[])
 
@@ -302,5 +302,110 @@ class RemediationTests(unittest.TestCase):
         self.assertEqual(report['statuses']['staking'],'RISPOSTA_INCOMPLETA')
         self.assertFalse(report['observations'])
 
+
+
+class R2IntegrityTests(unittest.TestCase):
+    def test_d1_string_flag(self):
+        bad=change()
+        bad['idDeleted']='true'
+        with self.assertRaises(sui.SourceProblem) as cm:
+            sui.parse_stake(tx(changes=[bad]),'staking','2026-10-21T12:00:01Z','sample')
+        self.assertEqual(cm.exception.state,'RISPOSTA_INCOMPLETA')
+
+    def test_d1_missing_flag(self):
+        bad=change()
+        del bad['idDeleted']
+        with self.assertRaises(sui.SourceProblem) as cm:
+            sui.parse_stake(tx(changes=[bad]),'staking','2026-10-21T12:00:01Z','sample')
+        self.assertEqual(cm.exception.state,'RISPOSTA_INCOMPLETA')
+
+    def test_d2_same_page_conflict(self):
+        a=change(principal='1000000000')
+        b=change(principal='2000000000')
+        with self.assertRaises(sui.SourceProblem) as cm:
+            sui.parse_stake(tx(changes=[a,b]),'staking','2026-10-21T12:00:01Z','sample')
+        self.assertEqual(cm.exception.state,'RISPOSTA_INCOERENTE')
+
+    def test_d2_cross_page_conflict(self):
+        first=tx(changes=[change(principal='1000000000')],more=True,cursor='p')
+        second=tx(changes=[change(principal='2000000000')])
+        merged=sui.collect_pages(first,lambda d,c:second)
+        with self.assertRaises(sui.SourceProblem) as cm:
+            sui.parse_stake(merged,'staking','2026-10-21T12:00:01Z','sample')
+        self.assertEqual(cm.exception.state,'RISPOSTA_INCOERENTE')
+
+
+    def test_d2_cross_filter_conflict(self):
+        calls=[0]
+        def req(q,vars=None):
+            if q==sui.IDENTITY:return identity()
+            if q==sui.FILTER:return filter_nodes()
+            calls[0]+=1
+            principal='1000000000' if calls[0]==1 else '2000000000'
+            return {'transaction':tx(changes=[change(principal=principal)])}
+        r=sui.run(request=req)
+        self.assertEqual(r['observations'],[])
+        self.assertEqual(r['statuses']['cross_filter_conflict'],'RISPOSTA_INCOERENTE')
+        self.assertEqual(r['statuses']['staking'],'RISPOSTA_INCOERENTE')
+        self.assertEqual(r['statuses']['unstaking'],'RISPOSTA_INCOERENTE')
+
+    def test_d2_cross_page_identical_duplicate(self):
+        first=tx(changes=[change()],more=True,cursor='p')
+        second=tx(changes=[change()])
+        merged=sui.collect_pages(first,lambda d,c:second)
+        found,_=sui.parse_stake(merged,'staking','2026-10-21T12:00:01Z','sample')
+        self.assertEqual(len(found),1)
+
+    def test_d2_distinct_events_preserved(self):
+        found,_=sui.parse_stake(tx(changes=[change(),change(deleted=True)]),
+            'staking','2026-10-21T12:00:01Z','sample')
+        self.assertEqual(len(found),2)
+
+    def test_d3_invalid_coverage_range(self):
+        bad=[
+            {'first':{},'last':{}},
+            {'first':{'sequenceNumber':True},'last':{'sequenceNumber':2}},
+            {'first':{'sequenceNumber':'10'},'last':{'sequenceNumber':'9'}},
+            {'first':{'sequenceNumber':-1},'last':{'sequenceNumber':2}},
+            {'first':{'sequenceNumber':'x'},'last':{'sequenceNumber':2}}
+        ]
+        for rng in bad:
+            with self.subTest(rng=rng):
+                def req(q,vars=None):
+                    if q==sui.IDENTITY:return {'chainIdentifier':'35834a8a','serviceConfig':{'availableRange':rng}}
+                    if q==sui.FILTER:return filter_nodes(nodes=[])
+                    raise AssertionError('unexpected')
+                r=sui.run(request=req)
+                self.assertEqual(r['coverage'],'NON_DETERMINABILE')
+                self.assertEqual(r['statuses']['staking_coverage'],'COPERTURA_INSUFFICIENTE')
+
+    def test_d3_single_fact_survives_unknown_coverage(self):
+        def req(q,vars=None):
+            if q==sui.IDENTITY:return {'chainIdentifier':'35834a8a','serviceConfig':{'availableRange':{'first':{},'last':{}}}}
+            if q==sui.FILTER:return filter_nodes()
+            return {'transaction':tx()}
+        r=sui.run(request=req)
+        self.assertEqual(r['coverage'],'NON_DETERMINABILE')
+        self.assertEqual(len(r['observations']),1)
+        self.assertEqual(r['observations'][0]['verification'],'VERIFICATO')
+
+
+    def test_d1_invalid_unrelated_change_rejects_entire_tx(self):
+        malformed={'address':'0x987','idCreated':'false','idDeleted':False,
+                   'inputState':None,'outputState':None}
+        with self.assertRaises(sui.SourceProblem) as cm:
+            sui.parse_stake(tx(changes=[change(),malformed]),'staking',
+                            '2026-10-21T12:00:01Z','bounded')
+        self.assertEqual(cm.exception.state,'RISPOSTA_INCOMPLETA')
+
+    def test_d3_valid_range_numeric_order(self):
+        def req(q,vars=None):
+            if q==sui.IDENTITY:return identity()
+            if q==sui.FILTER:return filter_nodes(nodes=[])
+            raise AssertionError('unexpected')
+        r=sui.run(request=req)
+        self.assertEqual(r['coverage']['first_checkpoint'],336000000)
+        self.assertEqual(r['coverage']['last_checkpoint'],336510900)
+        self.assertEqual(r['statuses']['staking_coverage'],'CAMPIONE_LIMITATO_NON_GENERALE')
 
 if __name__=='__main__':unittest.main(verbosity=2)
