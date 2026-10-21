@@ -15,11 +15,11 @@ L'autore in passato evitava gli short soprattutto perché gli riusciva più natu
 
 1. G0, verifica source-bound del delta spot — riportata come svolta.
 2. G2, prova delimitata su INJ, QNT, AVA e PUMP — riportata come svolta; contributo informativo osservato, **nessuna redditività dimostrata**.
-3. **Adjudication sul delta spot — APERTA, nodo prioritario:** conservare, limitare oppure scartare in base alle evidenze originali.
+3. **Delta spot — uso LIMITATO (giudizio G0 preliminare), validazione scientifica INCOMPLETA:** conservare come dato contestuale con copertura verificata; verificare i file A/B e gli esiti prospettici prima di chiudere il giudizio.
 4. Solo dopo, **una integrazione delimitata e motivata** dal giudizio.
 5. Consolidamento delle valutazioni GPT su candidati reali, condizioni operative, alternative spot e costi netti.
 
-**Fonti di governo della decisione:** [ROADMAP_KDD.md](ROADMAP_KDD.md) e [GOVERNO_KDD.md](GOVERNO_KDD.md). Sono documenti del **repository tecnico GitHub**; non sostituiscono il mandato operativo completo conservato sul Samsung né modificano il README privato di Termux. Le fasi G0/G2 sono stati comunicati nella cronologia di lavoro: le prove originarie devono essere rilette prima dell'adjudication.
+**Fonti di governo della decisione:** [ROADMAP_KDD.md](ROADMAP_KDD.md), [GOVERNO_KDD.md](GOVERNO_KDD.md) e [GIUDIZIO_DELTA_SPOT_G0_G2.md](GIUDIZIO_DELTA_SPOT_G0_G2.md). Sono documenti del **repository tecnico GitHub**; non sostituiscono il mandato operativo completo conservato sul Samsung né modificano il README privato di Termux. Le fasi G0/G2 sono riportate nella cronologia di lavoro: il codice del delta è stato riletto e la sua funzione tecnica verificata, ma le prove A/B originali e i risultati +1h/+4h/+24h non sono stati acquisiti dal Samsung. Il giudizio d'uso LIMITATO non è una prova di efficacia né una convalida scientifica definitiva.
 
 **Stato operativo dell'infrastruttura, 21/10:** multitimeframe SUI/EUR 15m/1H/4H/1D e confronto fra intervalli verificati visivamente sul Samsung; correzione del 4H live pubblicata e collaudata fino a **125 test** nel ciclo Termux riferito dall'autore. Le sezioni successive del README sono **cronologia dei singoli checkpoint**, perciò eventuali scritte storiche «non ancora installato» non descrivono lo stato attuale.
 
