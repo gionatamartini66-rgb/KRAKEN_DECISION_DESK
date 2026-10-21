@@ -678,10 +678,10 @@ class DeskTests(unittest.TestCase):
                 cls.now.return_value=dt.datetime.fromtimestamp(
                     start+70*14400,dt.timezone.utc)
                 page=g.page_from_dossier(path)
-        match=re.search(r'<script>\\s*([\\s\\S]*?)\\s*</script>',page)
+        match=re.search('<script>(.*?)</script>',page,re.S)
         self.assertIsNotNone(match)
         script=match.group(1)
-        self.assertIn('axisNote.textContent="S/R sull\\'asse: prezzi a 5 decimali."',script)
+        self.assertIn('axisNote.textContent="S/R sull' + chr(39) + 'asse: prezzi a 5 decimali."',script)
         self.assertNotIn("axisNote.textContent='S/R sull'asse",script)
         # Optional stronger syntax check where a JS parser is installed.
         node=shutil.which('node')
