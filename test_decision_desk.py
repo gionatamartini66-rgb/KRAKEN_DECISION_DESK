@@ -658,6 +658,38 @@ class DeskTests(unittest.TestCase):
         self.assertNotIn("title:'Str R",page)
         self.assertNotIn("readonly.json",page)
 
+    def test_chart_inline_javascript_survives_python_html_escaping(self):
+        """The Python HTML template must not break embedded JavaScript quotes."""
+        import grafico_4h as g
+        import datetime as dt
+        import json, pathlib, tempfile, re, shutil, subprocess
+        from unittest import mock
+        start=1_800_000_000
+        sample={'creato_utc':'2026-10-20T16:30:00+00:00',
+                'grafici_4h':{'SUI':{'stato':'OK','coppia':'SUI/EUR',
+                    'serie_ohlcv_chiuse':[
+                      {'apertura_ts_utc':start+i*14400,'open':.9,
+                       'high':.91,'low':.89,'close':.9,'volume_base':1}
+                      for i in range(60)]}}}
+        with tempfile.TemporaryDirectory() as folder:
+            path=pathlib.Path(folder)/'dossier.json'
+            path.write_text(json.dumps(sample))
+            with mock.patch.object(g.dt,'datetime',wraps=dt.datetime) as cls:
+                cls.now.return_value=dt.datetime.fromtimestamp(
+                    start+70*14400,dt.timezone.utc)
+                page=g.page_from_dossier(path)
+        match=re.search(r'<script>\\s*([\\s\\S]*?)\\s*</script>',page)
+        self.assertIsNotNone(match)
+        script=match.group(1)
+        self.assertIn('axisNote.textContent="S/R sull\\'asse: prezzi a 5 decimali."',script)
+        self.assertNotIn("axisNote.textContent='S/R sull'asse",script)
+        # Optional stronger syntax check where a JS parser is installed.
+        node=shutil.which('node')
+        if node:
+            outcome=subprocess.run([node,'--check'],input=script,
+                text=True,capture_output=True,timeout=10)
+            self.assertEqual(outcome.returncode,0,outcome.stderr)
+
     def test_graph_full_pivots_stay_in_payload_when_plot_filters_lines(self):
         import grafico_4h as g
         start=int(dt.datetime(2026,10,19,tzinfo=dt.timezone.utc).timestamp())
