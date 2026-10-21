@@ -1682,6 +1682,135 @@ class DeskTests(unittest.TestCase):
                 self.assertEqual(corrupted['esperimenti'],0)
                 self.assertEqual(corrupted['chiamate_kraken'],0)
 
+    def test_delta_offline_audit_is_readonly_with_three_closed_horizons(self):
+        import studio_delta as sd
+        import hashlib, json, tempfile, pathlib
+        from unittest.mock import patch
+        base=1_800_000_000
+        stamp=dt.datetime.fromtimestamp(base,dt.timezone.utc).isoformat()
+        with tempfile.TemporaryDirectory() as folder:
+            root=pathlib.Path(folder)
+            a={'fase':'A_SENZA_DELTA_CONGELATA','snapshot_kraken_utc':stamp,
+               'candidati':[{'token':'SUI','coppia':'SUI/EUR',
+                   'riferimento_chiusura_15m_utc':stamp,
+                   'prezzo_riferimento_quote':100.0,
+                   'scelta':'ATTESA','prezzo_privato_TEST':1234567}]}
+            aa=root/'mock_fase_A.json'
+            aa.write_text(json.dumps(a))
+            b={'fase':'B_CON_DELTA_CONGELATA','snapshot_kraken_utc':stamp,
+               'fase_A_nome':aa.name,
+               'fase_A_sha256':hashlib.sha256(aa.read_bytes()).hexdigest(),
+               'candidati':[{'token':'SUI','coppia':'SUI/EUR',
+                   'pair_key_kraken':'SUIEUR','finestra_a_utc':stamp,
+                   'delta_candela_stato':'COMPLETA','scelta':'ATTESA'}]}
+            bb=root/'mock_fase_B.json'
+            bb.write_text(json.dumps(b))
+            observations={}
+            for hours in (1,4,24):
+                end=100+hours
+                observations[str(hours)]={
+                    'stato':'CHIUSURA_OSSERVATA','orizzonte_ore':hours,
+                    'chiusura_finale_utc':dt.datetime.fromtimestamp(
+                        base+hours*3600,dt.timezone.utc).isoformat(),
+                    'prezzo_finale_quote':end,
+                    'variazione_prezzo_pct':float(hours)}
+            ep=root/'mock_esiti.json'
+            ep.write_text(json.dumps({'fase_B_nome':bb.name,
+                'fase_B_sha256':hashlib.sha256(bb.read_bytes()).hexdigest(),
+                'esiti':{'SUI':observations}}))
+            before={p.name:p.read_bytes() for p in root.iterdir()}
+            with patch.object(sd.desk,'kraken',
+                              side_effect=AssertionError('OFFLINE means no API')):
+                audit=sd.audit_offline(root)
+            after={p.name:p.read_bytes() for p in root.iterdir()}
+            self.assertEqual(before,after)
+            self.assertEqual(audit['stato'],'DOCUMENTAZIONE_AB_ED_ESITI_COMPLETI')
+            case=audit['esperimenti'][0]['candidati'][0]
+            self.assertEqual(case['confronto_testuale_A_B']['stato'],
+                             'CAMPO_TESTUALE_UGUALE')
+            self.assertEqual(set(case['orizzonti'].values()),{'OSSERVATO'})
+            # This output can be copied from Termux without private values.
+            public=json.dumps(audit)
+            self.assertNotIn('1234567',public)
+            self.assertNotIn('prezzo_finale_quote',public)
+            self.assertNotIn('fase_A_sha256',public)
+            self.assertEqual(audit['rete'],'NESSUNA_CHIAMATA')
+            self.assertEqual(audit['scritture'],'NESSUNA')
+
+    def test_delta_offline_audit_tampering_and_absent_results_fail_closed(self):
+        import studio_delta as sd
+        import hashlib, json, tempfile, pathlib
+        base=1_800_000_000
+        stamp=dt.datetime.fromtimestamp(base,dt.timezone.utc).isoformat()
+        with tempfile.TemporaryDirectory() as folder:
+            root=pathlib.Path(folder)
+            self.assertEqual(sd.audit_offline(root)['stato'],'NESSUNA_FASE_B')
+            aa=root/'x_fase_A.json'
+            aa.write_text(json.dumps({'fase':'A_SENZA_DELTA_CONGELATA',
+                'snapshot_kraken_utc':stamp,
+                'candidati':[{'token':'QNT','coppia':'QNT/USD',
+                'riferimento_chiusura_15m_utc':stamp,
+                'prezzo_riferimento_quote':100.0}]}))
+            bb=root/'x_fase_B.json'
+            bb.write_text(json.dumps({'fase':'B_CON_DELTA_CONGELATA',
+                'snapshot_kraken_utc':stamp,'fase_A_nome':aa.name,
+                'fase_A_sha256':hashlib.sha256(aa.read_bytes()).hexdigest(),
+                'candidati':[{'token':'QNT','coppia':'QNT/USD',
+                  'pair_key_kraken':'QNTUSD','finestra_a_utc':stamp,
+                  'delta_candela_stato':'COMPLETA'}]}))
+            audit=sd.audit_offline(root)
+            self.assertEqual(audit['stato'],'INCOMPLETO')
+            self.assertEqual(audit['esperimenti'][0]['esiti'],'FILE_ASSENTE')
+            self.assertEqual(audit['esperimenti'][0]['candidati'][0]
+                             ['confronto_testuale_A_B']['stato'],'NON_CONFRONTABILE')
+            self.assertEqual(set(audit['esperimenti'][0]['candidati'][0]
+                                 ['orizzonti'].values()),{'ASSENTE'})
+            aa.write_text('manomesso')
+            tampered=sd.audit_offline(root)
+            self.assertEqual(tampered['stato'],'INCOMPLETO')
+            self.assertEqual(tampered['esperimenti'][0]['fasi'],'NON_VERIFICABILI')
+            self.assertNotIn('manomesso',json.dumps(tampered))
+
+    def test_delta_offline_audit_rejects_wrong_outcome_hash_or_close(self):
+        import studio_delta as sd
+        import hashlib, json, tempfile, pathlib
+        base=1_800_000_000
+        stamp=dt.datetime.fromtimestamp(base,dt.timezone.utc).isoformat()
+        with tempfile.TemporaryDirectory() as folder:
+            root=pathlib.Path(folder)
+            a={'fase':'A_SENZA_DELTA_CONGELATA',
+               'snapshot_kraken_utc':stamp,
+               'candidati':[{'token':'PUMP','coppia':'PUMP/USD',
+                   'riferimento_chiusura_15m_utc':stamp,
+                   'prezzo_riferimento_quote':100,'scelta':'LONG'}]}
+            aa=root/'a_fase_A.json';aa.write_text(json.dumps(a))
+            b={'fase':'B_CON_DELTA_CONGELATA',
+               'snapshot_kraken_utc':stamp,'fase_A_nome':aa.name,
+               'fase_A_sha256':hashlib.sha256(aa.read_bytes()).hexdigest(),
+               'candidati':[{'token':'PUMP','coppia':'PUMP/USD',
+                   'pair_key_kraken':'PUMPUSD','finestra_a_utc':stamp,
+                   'delta_candela_stato':'COMPLETA','scelta':'ATTESA'}]}
+            bb=root/'a_fase_B.json';bb.write_text(json.dumps(b))
+            ep=root/'a_esiti.json'
+            row={'stato':'CHIUSURA_OSSERVATA','orizzonte_ore':1,
+                 'chiusura_finale_utc':dt.datetime.fromtimestamp(
+                      base+2*3600,dt.timezone.utc).isoformat(),
+                 'prezzo_finale_quote':103,'variazione_prezzo_pct':3}
+            ep.write_text(json.dumps({'fase_B_nome':bb.name,
+                'fase_B_sha256':'0'*64,'esiti':{'PUMP':{'1':row}}}))
+            wrong_hash=sd.audit_offline(root)['esperimenti'][0]
+            self.assertEqual(wrong_hash['esiti'],'METADATI_INCOERENTI')
+            ep.write_text(json.dumps({'fase_B_nome':bb.name,
+                'fase_B_sha256':hashlib.sha256(bb.read_bytes()).hexdigest(),
+                'esiti':{'PUMP':{'1':row}}}))
+            wrong_end=sd.audit_offline(root)['esperimenti'][0]
+            self.assertEqual(wrong_end['esiti'],'FILE_INTEGRO')
+            self.assertEqual(wrong_end['candidati'][0]['orizzonti']['1h'],
+                             'INCOERENTE')
+            self.assertEqual(wrong_end['candidati'][0]
+                             ['confronto_testuale_A_B']['stato'],
+                             'CAMPO_TESTUALE_DIVERSO')
+
     def test_spot_flow_full_4h_window_and_15m_signed_volume(self):
         import flusso_spot as f
         now=1_800_000_000
