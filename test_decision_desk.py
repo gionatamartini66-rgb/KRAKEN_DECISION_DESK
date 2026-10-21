@@ -772,14 +772,16 @@ class DeskTests(unittest.TestCase):
                                  high=13.0,low=11.0,close=12.0,volume=1))
                 result=g.daily_pivots(bars,interval_seconds=sec)
                 self.assertIsNotNone(result)
-                self.assertEqual(result['reference_day_utc'],'2026-10-19')
+                # With 1D, the last bar at midnight covers the full new day;
+                # with intraday data the last bar covers only part of that day.
+                expected_day='2026-10-20' if sec == 86400 else '2026-10-19'
+                self.assertEqual(result['reference_day_utc'],expected_day)
                 if sec < 86400:
                     self.assertIsNone(g.daily_pivots(bars[1:],interval_seconds=sec))
                 else:
-                    # A daily candle is a whole day by itself: the remaining
-                    # bar represents the next day, not an incomplete day.
-                    after=g.daily_pivots(bars[1:],interval_seconds=sec)
-                    self.assertNotEqual(after['reference_day_utc'],'2026-10-19')
+                    self.assertEqual(
+                        g.daily_pivots(bars[1:],interval_seconds=sec)['reference_day_utc'],
+                        '2026-10-20')
 
     def test_graph_full_pivots_stay_in_payload_when_plot_filters_lines(self):
         import grafico_4h as g
