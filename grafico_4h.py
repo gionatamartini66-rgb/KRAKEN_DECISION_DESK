@@ -400,6 +400,7 @@ footer{font-size:.83rem;color:#b3c1d8;line-height:1.5;margin:14px 0 26px}
 __TIMEFRAME_BUTTONS__
 </nav>
 <p class="muted">Seleziona l'intervallo reale delle candele. Zoom e scorrimento col dito.</p>
+<p><a href="/analisi/sui-mtf" style="font-weight:700">🔎 Confronta 15m · 1H · 4H · 1D</a></p>
 <div class="legend" aria-label="Livelli e indicatori">
 <label><input type="checkbox" id="show-ema20" checked> EMA20 (oro)</label>
 <label><input type="checkbox" id="show-ema50" checked> EMA50 (azzurro)</label>
