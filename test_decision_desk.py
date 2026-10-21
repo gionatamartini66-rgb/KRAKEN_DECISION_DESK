@@ -825,7 +825,7 @@ class DeskTests(unittest.TestCase):
     def test_graph_is_linked_from_live_mobile_dashboard_not_promised_full(self):
         html=serve.with_controls("<html><h2>1 · Decisioni e posizioni</h2></html>")
         self.assertIn('href=\'/grafico/sui-4h\'',html)
-        self.assertIn("Prova grafico reale SUI 4H",html)
+        self.assertIn("Grafico SUI/EUR · 15m / 1H / 4H / 1D",html)
         self.assertNotIn("EMA 20",html)
 
     def test_4h_closed_candles_without_last_in_progress(self):
