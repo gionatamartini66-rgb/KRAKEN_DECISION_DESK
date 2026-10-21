@@ -145,3 +145,42 @@ a `kdd-aggiorna --check` sul Samsung. Non dichiarare installato.**
 Dopo il precheck e l'applicazione autorizzata, serve un riavvio controllato
 del server `serve.py`, cambiato in questa fase, e una verifica browser
 di tutti i quattro pulsanti.
+
+## FASE 3B — Confronto SUI/EUR multitimeframe (21 ottobre 2026)
+
+**Implementazione su ramo `feature/sui-multiframe-desk-20261021`;
+non ancora verificata sul Samsung.** Le acquisizioni 15m, 1H e 1D
+provengono esclusivamente da `/0/public/OHLC` Kraken Spot, senza chiavi
+private né scraping. Il 4H proviene dal dossier locale già verificato.
+La pagina di confronto `/analisi/sui-mtf` è raggiungibile dal cruscotto
+e da ciascuno dei quattro grafici. Non contiene ordini o pulsanti trading.
+
+Per ciascun intervallo indica: data/ora della propria ultima candela chiusa,
+data/ora rilevazione, close, EMA20, EMA50, posizione relativa fra queste
+tre grandezze, volume dell'ultima barra rispetto alla media delle **venti
+barre precedenti del medesimo timeframe**, e S/R euristici più vicini,
+con collegamento al grafico originale. Mostra il riferimento originario
+dei dati e impedisce che una rilevazione venga considerata simultanea alle
+altre.
+
+Il controllo freschezza confronta la chiusura dell'ultima barra con
+il limite UTC completo del suo intervallo (margine tecnico 120 secondi).
+Una serie troppo vecchia, incompleta, incongruente o la risposta Kraken
+non disponibile producono uno stato separato per quell'intervallo e
+**bloccano qualunque conclusione complessiva**. Nessuna interpolazione,
+nessuna candela in formazione, nessun dato patrimoniale pubblicato.
+
+Soltanto con tutti i quattro intervalli verificabili, KDD descrive
+l'eventuale allineamento o disallineamento di `close > EMA20 > EMA50`
+o `close < EMA20 < EMA50`. L'etichetta è una classificazione geometrica,
+senza previsione dei rendimenti, senza segnale BUY/SELL e senza autorizzazione
+a operare. L'analisi GPT resta autonoma e deve considerare anche liquidità,
+spread, book, contesto macro e rischi di esecuzione.
+
+File toccati `grafico_4h.py`, `serve.py`, `test_decision_desk.py`;
++4 nuovi test di regressione (suite attesa almeno **124**), compresi
+dati assenti/scaduti, simulazione di indisponibilità Kraken, orientamenti
+opposti e rendering HTML mobile. Da eseguire `kdd-aggiorna --check` e
+`--apply` solo dopo esito PASS. Serve un riavvio controllato del processo
+`serve.py` e una verifica visiva della pagina mobile. Fino a quel momento
+lo stato dell'implementazione resta **DA COLLAUDARE SU ANDROID**.

@@ -783,6 +783,126 @@ class DeskTests(unittest.TestCase):
                         g.daily_pivots(bars[1:],interval_seconds=sec)['reference_day_utc'],
                         '2026-10-20')
 
+    def _mtf_fixture(self, now, direction="up"):
+        import grafico_4h as g
+        frames = {}
+        by_label = {"15m": 900, "1H": 3600, "4H": 14400, "1D": 86400}
+        for label, seconds in by_label.items():
+            expected_end = int((now.timestamp()-120)//seconds)*seconds
+            start = expected_end - seconds*65
+            bars = []
+            for k in range(65):
+                close = (0.75 + k*.003 if direction=="up" else 1.15-k*.003)
+                bars.append({"time":start+k*seconds,"open":close,
+                    "high":close+.012,"low":close-.012,"close":close,
+                    "volume":500.0 if k==64 else 250.0})
+            frames[label] = {"timeframe":label,"interval_seconds":seconds,
+                "observed_utc":now.isoformat(timespec="seconds"),
+                "source":"Kraken Spot test fixture",
+                "candles":bars}
+        return frames
+
+    def test_mtf_four_real_freshness_bullish_and_bearish(self):
+        import grafico_4h as g
+        import datetime as dt
+        now=dt.datetime(2026,10,21,7,42,tzinfo=dt.timezone.utc)
+        rising=g.compare_timeframes(self._mtf_fixture(now),now=now)
+        self.assertEqual(rising["stato"],"COMPLETO")
+        self.assertEqual(rising["quadro"],"ALLINEAMENTO_RIALZISTA_DESCRITTIVO")
+        self.assertEqual([x["timeframe"] for x in rising["timeframe"]],
+                         ["15m","1H","4H","1D"])
+        self.assertTrue(all(x["stato"]=="AGGIORNATO" for x in rising["timeframe"]))
+        self.assertTrue(all(x["volume_vs_media20"]==2 for x in rising["timeframe"]))
+        falling=g.compare_timeframes(self._mtf_fixture(now,"down"),now=now)
+        self.assertEqual(falling["quadro"],"ALLINEAMENTO_RIBASSISTA_DESCRITTIVO")
+        self.assertTrue(all(x["orientamento"]=="PREZZO_SOTTO_EMA20_SOTTO_EMA50"
+                            for x in falling["timeframe"]))
+
+    def test_mtf_stale_or_missing_frame_blocks_market_conclusion(self):
+        import grafico_4h as g
+        import datetime as dt
+        now=dt.datetime(2026,10,21,7,42,tzinfo=dt.timezone.utc)
+        data=self._mtf_fixture(now)
+        data["4H"]["candles"]=data["4H"]["candles"][:-1]
+        stale=g.compare_timeframes(data,now=now)
+        self.assertEqual(stale["stato"],"PARZIALE")
+        self.assertEqual(stale["quadro"],"CONFRONTO_INCOMPLETO")
+        self.assertEqual(stale["timeframe"][2]["stato"],"SCADUTO")
+        data["1H"]={"errore":"HTTP 503"}
+        incomplete=g.compare_timeframes(data,now=now)
+        self.assertEqual(incomplete["timeframe"][1]["stato"],"NON_DISPONIBILE")
+        self.assertEqual(incomplete["quadro"],"CONFRONTO_INCOMPLETO")
+        self.assertNotIn("ALLINEAMENTO_RIALZISTA",str(incomplete))
+
+    def test_mtf_transitions_and_invalid_temporal_data(self):
+        import grafico_4h as g
+        import datetime as dt
+        now=dt.datetime(2026,10,21,7,42,tzinfo=dt.timezone.utc)
+        data=self._mtf_fixture(now)
+        last=data["15m"]["candles"][-1]
+        last.update(open=0.90,high=0.91,low=0.86,close=0.88)
+        self.assertEqual(g.compare_timeframes(data,now=now)["quadro"],
+                         "CONFIGURAZIONE_MISTA")
+        data=self._mtf_fixture(now)
+        data["1D"]["observed_utc"]="2026-10-23T00:00:00+00:00"
+        invalid=g.compare_timeframes(data,now=now)
+        self.assertEqual(invalid["timeframe"][-1]["stato"],"NON_VALIDO")
+        self.assertEqual(invalid["stato"],"PARZIALE")
+        short=self._mtf_fixture(now)
+        short["15m"]["candles"]=short["15m"]["candles"][:30]
+        self.assertEqual(g.compare_timeframes(short,now=now)["timeframe"][0]["stato"],
+                         "STORICO_INSUFFICIENTE")
+
+    def test_mtf_read_only_sources_partial_failures_and_mobile_render(self):
+        import grafico_4h as g
+        import serve
+        import datetime as dt
+        import tempfile, pathlib
+        import json
+        now=dt.datetime(2026,10,21,7,42,tzinfo=dt.timezone.utc)
+        frames=self._mtf_fixture(now)
+        with tempfile.TemporaryDirectory() as folder:
+            path=pathlib.Path(folder)/"dossier.json"
+            frame=frames["4H"]
+            payload={"creato_utc":now.isoformat(),
+                     "grafici_4h":{"SUI":{"stato":"OK","coppia":"SUI/EUR",
+                       "serie_ohlcv_chiuse":[{
+                           "apertura_ts_utc":c["time"],"open":c["open"],
+                           "high":c["high"],"low":c["low"],"close":c["close"],
+                           "volume_base":c["volume"]} for c in frame["candles"]]}}}
+            path.write_text(json.dumps(payload))
+            called=[]
+            def fake(endpoint,**kwargs):
+                self.assertEqual(endpoint,"OHLC")
+                self.assertEqual(kwargs["pair"],"SUIEUR")
+                called.append(kwargs["interval"])
+                if kwargs["interval"]==60:
+                    raise OSError("mock offline")
+                seconds=kwargs["interval"]*60
+                frame_label={15:"15m",1440:"1D"}[kwargs["interval"]]
+                candles=frames[frame_label]["candles"]
+                records=[[c["time"],str(c["open"]),str(c["high"]),str(c["low"]),
+                    str(c["close"]),"1",str(c["volume"]),"1"] for c in candles]
+                last=records[-1][:]
+                last[0]+=seconds
+                return {"PAIR":records+[last],"last":last[0]}
+            summary=serve.load_sui_comparison(
+                public_kraken=fake,dossier_path=path,now=now)
+        self.assertEqual(called,[15,60,1440])
+        self.assertEqual(summary["stato"],"PARZIALE")
+        self.assertEqual(summary["timeframe"][1]["stato"],"NON_DISPONIBILE")
+        self.assertEqual(summary["timeframe"][2]["stato"],"AGGIORNATO")
+        html=serve.render_sui_comparison(summary)
+        self.assertIn('Confronto SUI/EUR',html)
+        self.assertIn('tf=15m',html)
+        self.assertIn('tf=1h',html)
+        self.assertIn('tf=4h',html)
+        self.assertIn('tf=1d',html)
+        self.assertIn('CONFRONTO',html.upper())
+        self.assertNotIn('readonly.json',html)
+        dashboard=serve.with_controls("<html><h2>1 · Decisioni e posizioni</h2></html>")
+        self.assertIn("href='/analisi/sui-mtf'",dashboard)
+
     def test_graph_full_pivots_stay_in_payload_when_plot_filters_lines(self):
         import grafico_4h as g
         start=int(dt.datetime(2026,10,19,tzinfo=dt.timezone.utc).timestamp())

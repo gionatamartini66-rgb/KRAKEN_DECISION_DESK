@@ -210,6 +210,106 @@ def technical_from_candles(candles, interval_seconds=14400):
     }
 
 
+def summarize_timeframe(data, now=None):
+    """Describe price/EMA and completed-volume observations, never a trade signal.
+
+    Freshness is assessed against the most recent fully closed time boundary,
+    allowing 120 seconds for the upstream OHLC close to become available.
+    Never replace a missing/stale frame with another timeframe.
+    """
+    now = now or dt.datetime.now(dt.timezone.utc)
+    if now.tzinfo is None:
+        raise ValueError("Orario UTC di confronto non valido")
+    frame = data.get("timeframe")
+    intervals = {"15m": 900, "1H": 3600, "4H": 14400, "1D": 86400}
+    if frame not in intervals:
+        raise ValueError("Timeframe sconosciuto")
+    seconds = intervals[frame]
+    if data.get("interval_seconds", seconds) != seconds:
+        raise ValueError("Durata candele incoerente")
+    records = data.get("candles", [])
+    if len(records) < 50:
+        return {"timeframe": frame, "stato": "STORICO_INSUFFICIENTE",
+                "motivo": "Servono almeno 50 candele chiuse per confrontare EMA20 ed EMA50"}
+    last = records[-1]
+    close_end = last["time"] + seconds
+    expected_end = int((now.timestamp() - 120) // seconds) * seconds
+    observed = dt.datetime.fromisoformat(data["observed_utc"].replace("Z", "+00:00"))
+    if observed.tzinfo is None or observed.timestamp() > now.timestamp() + 120:
+        raise ValueError("Data rilevazione non valida o futura")
+    fresh = close_end >= expected_end and close_end <= now.timestamp() + 2
+    indicator20 = ema_points(records, 20)[-1]["value"]
+    indicator50 = ema_points(records, 50)[-1]["value"]
+    price = last["close"]
+    prior = [r["volume"] for r in records[-21:-1]]
+    volume_avg = statistics.mean(prior)
+    volume_ratio = last["volume"] / volume_avg if volume_avg > 0 else None
+    if price > indicator20 > indicator50:
+        orientation = "PREZZO_SOPRA_EMA20_SOPRA_EMA50"
+    elif price < indicator20 < indicator50:
+        orientation = "PREZZO_SOTTO_EMA20_SOTTO_EMA50"
+    else:
+        orientation = "CONFIGURAZIONE_MISTA"
+    structure = structural_levels(records)
+    supports = structure.get("supports", [])
+    resistances = structure.get("resistances", [])
+    return {
+        "timeframe": frame,
+        "stato": "AGGIORNATO" if fresh else "SCADUTO",
+        "orientamento": orientation if fresh else "NON_VALUTABILE",
+        "chiusura_utc": dt.datetime.fromtimestamp(
+            close_end, dt.timezone.utc).isoformat(timespec="seconds"),
+        "rilevazione_utc": data["observed_utc"],
+        "candele": len(records),
+        "close": price,
+        "ema20": indicator20,
+        "ema50": indicator50,
+        "volume": last["volume"],
+        "volume_vs_media20": round(volume_ratio, 3) if volume_ratio is not None else None,
+        "supporto_vicino": supports[0]["price"] if supports else None,
+        "resistenza_vicina": resistances[0]["price"] if resistances else None,
+        "fonte": data.get("source", "Dossier Kraken KDD"),
+    }
+
+
+def compare_timeframes(frames, now=None):
+    """Compare four independently acquired frames without implying an order."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    labels = ("15m", "1H", "4H", "1D")
+    details = []
+    for name in labels:
+        entry = frames.get(name)
+        if isinstance(entry, dict) and "errore" in entry:
+            details.append({"timeframe": name, "stato": "NON_DISPONIBILE",
+                            "motivo": str(entry["errore"])[:160]})
+        elif entry is None:
+            details.append({"timeframe": name, "stato": "NON_DISPONIBILE",
+                            "motivo": "Nessun dato disponibile"})
+        else:
+            try:
+                details.append(summarize_timeframe(entry, now=now))
+            except (ValueError, TypeError, KeyError, IndexError, ZeroDivisionError):
+                details.append({"timeframe": name, "stato": "NON_VALIDO",
+                                "motivo": "Serie OHLC o timestamp non verificabili"})
+    complete = all(x["stato"] == "AGGIORNATO" for x in details)
+    if not complete:
+        picture = "CONFRONTO_INCOMPLETO"
+    else:
+        orientations = {x["orientamento"] for x in details}
+        if orientations == {"PREZZO_SOPRA_EMA20_SOPRA_EMA50"}:
+            picture = "ALLINEAMENTO_RIALZISTA_DESCRITTIVO"
+        elif orientations == {"PREZZO_SOTTO_EMA20_SOTTO_EMA50"}:
+            picture = "ALLINEAMENTO_RIBASSISTA_DESCRITTIVO"
+        else:
+            picture = "CONFIGURAZIONE_MISTA"
+    return {"coppia": "SUI/EUR", "rilevazione_confronto_utc": now.isoformat(
+                timespec="seconds"), "stato": "COMPLETO" if complete else "PARZIALE",
+            "quadro": picture, "timeframe": details,
+            "avvertenza": ("Ultime chiusure a orari differenti: confrontare la posizione "
+                          "rispetto alle medie, non considerare i close simultanei. "
+                          "Nessun segnale operativo, probabilita o istruzione di trading.")}
+
+
 def page_from_dossier(path: Path):
     return page_from_data(data_from_dossier(path))
 
@@ -300,6 +400,7 @@ footer{font-size:.83rem;color:#b3c1d8;line-height:1.5;margin:14px 0 26px}
 __TIMEFRAME_BUTTONS__
 </nav>
 <p class="muted">Seleziona l'intervallo reale delle candele. Zoom e scorrimento col dito.</p>
+<p><a href="/analisi/sui-mtf" style="font-weight:700">🔎 Confronta 15m · 1H · 4H · 1D</a></p>
 <div class="legend" aria-label="Livelli e indicatori">
 <label><input type="checkbox" id="show-ema20" checked> EMA20 (oro)</label>
 <label><input type="checkbox" id="show-ema50" checked> EMA50 (azzurro)</label>
