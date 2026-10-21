@@ -184,3 +184,31 @@ opposti e rendering HTML mobile. Da eseguire `kdd-aggiorna --check` e
 `--apply` solo dopo esito PASS. Serve un riavvio controllato del processo
 `serve.py` e una verifica visiva della pagina mobile. Fino a quel momento
 lo stato dell'implementazione resta **DA COLLAUDARE SU ANDROID**.
+
+## FASE 3B — Correzione freschezza 4H nel confronto (21 ottobre 2026)
+
+**Difetto osservato sul Samsung:** nel nuovo pannello MTF i dati pubblici 15m,
+1H e 1D erano aggiornati, ma 4H risultava `SCADUTO` alle 08:04 UTC
+perché il confronto attingeva al dossier locale fermo alla chiusura delle
+04:00 UTC anziché interrogare Kraken per quella vista. La regola di
+freschezza ha reagito correttamente e ha impedito conclusioni generali;
+la causa era una dipendenza di acquisizione, non la formula degli indicatori.
+
+**Correzione proposta nel codice:** `load_sui_comparison` consulta
+`/0/public/OHLC` con `pair=SUIEUR` per **tutti e quattro** gli
+intervalli (15, 60, 240 e 1440 minuti). Il confronto non consulta più
+`dossier_multifonte.json` e non richiede `Aggiorna dati ora`.
+Il **grafico 4H separato** mantiene invece deliberatamente il suo dossier:
+questa distinzione è dichiarata nella pagina, che mostra sempre la fonte
+di ogni riga. Se anche Kraken 4H non fornisce l'ultima candela conclusa,
+il risultato resta `SCADUTO`; se manca la risposta, `NON_DISPONIBILE`.
+Nessun fallback silenzioso e nessuna interpolazione. Nessuna API privata.
+
+Modificati soltanto `serve.py`, regressioni `test_decision_desk.py`
+e questo checkpoint: il test di integrazione precedente simula ora le
+quattro richieste pubbliche e vieta la consultazione del dossier; aggiunto
+un test avversariale dove Kraken stesso ritarda la chiusura 4H e il
+confronto deve restare parziale. **Suite prevista 125 test.**
+Stato: **codice su ramo sperimentale, non ancora collaudato su Android**.
+Obbligatori precheck, applicazione controllata e riavvio del server prima
+di dichiarare la funzione riuscita.
