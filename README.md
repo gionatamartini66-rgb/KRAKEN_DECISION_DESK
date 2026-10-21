@@ -113,3 +113,35 @@ sintassi. I 116 test preesistenti non sono stati eliminati.
 **STATO: fix sviluppato, installazione Termux e verifica Chrome PENDENTI.**
 L'esito di `kdd-aggiorna --check` deve confermare almeno **117 test**,
 prima di ogni installazione. Nessuna modifica ai dati reali, ordini o segreti.
+
+## FASE 3A — Selettore timeframe reale SUI/EUR
+**Sviluppo su ramo `feature/sui-real-timeframes-20261021`.**
+Sostituiti i pulsanti `Ultime 40 / Ultime 100 / Tutte`, che cambiavano
+soltanto lo zoom, con quattro pulsanti per intervalli **reali**:
+`15m`, `1H`, `4H`, `1D`. Zoom e scorrimento restano gestuali sul grafico.
+La coppia è SUI/EUR Spot Kraken per tutti e quattro gli intervalli.
+Il grafico 4H esistente continua a utilizzare le candele CHIUSE già
+verificate nel dossier locale KDD, aggiornate da «Aggiorna dati ora».
+Per 15m/1H/1D il server effettua, solo alla richiesta della relativa
+pagina, una lettura **Kraken Spot REST pubblica** `OHLC` della medesima
+coppia con `interval=15/60/1440`, e usa soltanto le ultime 200 barre
+effettivamente chiuse. L'ultima riga in formazione restituita da Kraken
+è sempre esclusa, anche se erroneamente etichettata come chiusa.
+Il parser richiede timestamp UTC allineati e consecutivi, OHLC e volumi
+numerici coerenti, e almeno 30 barre: se la fonte non supera tali gate,
+KDD segnala errore con HTTP 503, senza interpolare candele o nascondere
+lacune. Il server non accede a saldi o chiavi private durante il cambio
+timeframe. EMA, S/R e pivot vengono ricalcolati per l'intervallo selezionato;
+i pivot richiedono una giornata UTC precedente completa del medesimo
+timeframe (96 barre 15m, 24 barre 1H, 6 barre 4H, 1 barra 1D).
+I dati 4H in dossier e gli altri intervalli via lettura pubblica possono
+avere orari di rilevazione diversi, sempre indicati.
+
+Sorgenti cambiati: `grafico_4h.py`, `serve.py` e regressioni in
+`test_decision_desk.py` (+3 test previsti, suite attesa 120).
+Nessun dato patrimoniale trasferito a GitHub, nessun ordine inviato.
+**Stato: sola implementazione e verifiche statiche, ancora da sottoporre
+a `kdd-aggiorna --check` sul Samsung. Non dichiarare installato.**
+Dopo il precheck e l'applicazione autorizzata, serve un riavvio controllato
+del server `serve.py`, cambiato in questa fase, e una verifica browser
+di tutti i quattro pulsanti.
