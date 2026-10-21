@@ -16,6 +16,8 @@ from pathlib import Path
 TOKEN = "SUI"
 TF = "4H"
 CANDLES_MAX = 200
+TIMEFRAMES = {"15m": (15, "15m"), "1h": (60, "1H"),
+              "4h": (240, "4H"), "1d": (1440, "1D")}
 
 def data_from_dossier(path: Path):
     src = json.loads(path.read_text(encoding="utf-8"))
@@ -56,6 +58,48 @@ def data_from_dossier(path: Path):
         ).isoformat(timespec="seconds"),
         "candles":ordered,
     }
+
+def data_from_kraken_ohlc(result, timeframe, now=None):
+    """Real consecutive Kraken Spot OHLC candles, discarding final uncommitted bar."""
+    if timeframe not in TIMEFRAMES:
+        raise ValueError("Timeframe non consentito")
+    minutes, label = TIMEFRAMES[timeframe]
+    seconds = minutes * 60
+    now = now or dt.datetime.now(dt.timezone.utc)
+    if now.tzinfo is None:
+        raise ValueError("Orario senza fuso orario")
+    series = [v for k, v in result.items() if k != "last"]
+    if len(series) != 1 or not isinstance(series[0], list) or len(series[0]) < 31:
+        raise ValueError("Storico Kraken incompleto o inatteso")
+    # Kraken documents the final OHLC row as the uncommitted interval.
+    raw = series[0][:-1][-CANDLES_MAX:]
+    closed, previous = [], None
+    for row in raw:
+        if not isinstance(row, (list, tuple)) or len(row) < 7:
+            raise ValueError("Candela Kraken malformata")
+        ts = row[0]
+        if type(ts) is not int or ts % seconds:
+            raise ValueError("Timestamp non allineato al timeframe")
+        if previous is not None and ts - previous != seconds:
+            raise ValueError("Lacuna temporale: nessuna candela interpolata")
+        if ts + seconds > now.timestamp() + 2:
+            raise ValueError("Candela non conclusa")
+        previous = ts
+        o, h, l, c, volume = map(float, (row[1], row[2], row[3], row[4], row[6]))
+        if not all(math.isfinite(v) for v in (o, h, l, c, volume)) or not (
+                0 < l <= min(o, c) <= max(o, c) <= h and volume >= 0):
+            raise ValueError("OHLCV Kraken non valido")
+        closed.append({"time": ts, "open": o, "high": h, "low": l,
+                       "close": c, "volume": volume})
+    if len(closed) < 30:
+        raise ValueError("Storico di candele chiuse insufficiente")
+    return {"observed_utc": now.isoformat(timespec="seconds"),
+            "pair": "SUI/EUR", "token": TOKEN, "timeframe": label,
+            "closed_at_utc": dt.datetime.fromtimestamp(
+                closed[-1]["time"] + seconds, dt.timezone.utc
+            ).isoformat(timespec="seconds"),
+            "candles": closed, "interval_seconds": seconds,
+            "source": "Kraken Spot pubblico /0/public/OHLC"}
 
 
 def ema_points(candles, period):
