@@ -79,7 +79,7 @@ def with_controls(page: str, result: str = "") -> str:
         "border-radius:9px;background:#80cbff;color:#06162b;font-weight:700' "
         f"type='submit'{disabled}>↻ Aggiorna dati ora</button>"
         "</form><p><a style='font-weight:700;color:#8aceff' href='/grafico/sui-4h'>"
-        "📈 Prova grafico reale SUI 4H (candele e volumi)</a></p>"
+        "📈 Grafico SUI/EUR · 15m / 1H / 4H / 1D</a></p>"
         "<p>Server solo su questo Samsung · prezzi pubblici · nessun ordine.</p>"
         f"<p id='kdd-refresh-status' role='status'>{html.escape(message)}</p>"
         "</section>"
@@ -132,6 +132,22 @@ def with_controls(page: str, result: str = "") -> str:
     return page.replace(target, toolbar + js + target, 1)
 
 
+def load_sui_chart(timeframe, public_kraken=None):
+    """4H remains sourced from the verified dossier; other frames are Kraken OHLC.
+    
+    No account lookup or private API is involved in switching timeframes.
+    """
+    if timeframe not in grafico_4h.TIMEFRAMES:
+        raise ValueError("Timeframe non consentito")
+    if timeframe == "4h":
+        return grafico_4h.page_from_dossier(desk.DIR / "dossier_multifonte.json")
+    interval = grafico_4h.TIMEFRAMES[timeframe][0]
+    fetch = public_kraken or desk.kraken
+    result = fetch("OHLC", pair="SUIEUR", interval=interval)
+    candles = grafico_4h.data_from_kraken_ohlc(result, timeframe)
+    return grafico_4h.page_from_data(candles)
+
+
 def host_valido(host):
     return host == f"{HOST}:{PORT}"
 
@@ -178,12 +194,19 @@ class Handler(BaseHTTPRequestHandler):
                            "application/json; charset=utf-8")
             return
         if url.path == "/grafico/sui-4h":
+            query = urllib.parse.parse_qs(url.query)
+            frames = query.get("tf", ["4h"])
+            if len(frames) != 1 or frames[0] not in grafico_4h.TIMEFRAMES:
+                self.send_html(400, "<h1>Timeframe non valido</h1>"
+                    "<p><a href='/grafico/sui-4h?tf=4h'>Torna al 4H</a></p>")
+                return
             try:
-                graph = grafico_4h.page_from_dossier(desk.DIR / "dossier_multifonte.json")
-            except (ValueError, KeyError, OSError) as exc:
-                self.send_html(503, "<h1>Grafico SUI 4H non disponibile</h1>"
-                    "<p>Occorre aggiornare i dati Kraken nel cruscotto.</p>"
-                    "<p><a href='/'>Torna al cruscotto</a></p>")
+                graph = load_sui_chart(frames[0])
+            except (ValueError, KeyError, OSError, RuntimeError, TypeError):
+                self.send_html(503, "<h1>Serie di candele chiuse non disponibile</h1>"
+                    "<p>Dati Kraken assenti, incompleti o temporaneamente irraggiungibili. "
+                    "Nessun prezzo o volume è stato inventato.</p>"
+                    "<p><a href='/grafico/sui-4h?tf=4h'>Torna al 4H</a></p>")
                 return
             self.send_html(200, graph)
             return

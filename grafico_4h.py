@@ -1,5 +1,5 @@
-"""POC 1: grafico locale SUI/EUR 4H con candele e volumi reali chiusi.
-Niente ordini, chiavi o indicatori fittizi. Dati dal dossier Kraken esistente.
+"""KDD: grafico locale SUI/EUR per timeframe 15m, 1H, 4H, 1D.
+Solo Kraken Spot pubblico e dossier locale, candele chiuse reali, nessun ordine.
 """
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ from pathlib import Path
 TOKEN = "SUI"
 TF = "4H"
 CANDLES_MAX = 200
+TIMEFRAMES = {"15m": (15, "15m"), "1h": (60, "1H"),
+              "4h": (240, "4H"), "1d": (1440, "1D")}
 
 def data_from_dossier(path: Path):
     src = json.loads(path.read_text(encoding="utf-8"))
@@ -57,6 +59,48 @@ def data_from_dossier(path: Path):
         "candles":ordered,
     }
 
+def data_from_kraken_ohlc(result, timeframe, now=None):
+    """Real consecutive Kraken Spot OHLC candles, discarding final uncommitted bar."""
+    if timeframe not in TIMEFRAMES:
+        raise ValueError("Timeframe non consentito")
+    minutes, label = TIMEFRAMES[timeframe]
+    seconds = minutes * 60
+    now = now or dt.datetime.now(dt.timezone.utc)
+    if now.tzinfo is None:
+        raise ValueError("Orario senza fuso orario")
+    series = [v for k, v in result.items() if k != "last"]
+    if len(series) != 1 or not isinstance(series[0], list) or len(series[0]) < 31:
+        raise ValueError("Storico Kraken incompleto o inatteso")
+    # Kraken documents the final OHLC row as the uncommitted interval.
+    raw = series[0][:-1][-CANDLES_MAX:]
+    closed, previous = [], None
+    for row in raw:
+        if not isinstance(row, (list, tuple)) or len(row) < 7:
+            raise ValueError("Candela Kraken malformata")
+        ts = row[0]
+        if type(ts) is not int or ts % seconds:
+            raise ValueError("Timestamp non allineato al timeframe")
+        if previous is not None and ts - previous != seconds:
+            raise ValueError("Lacuna temporale: nessuna candela interpolata")
+        if ts + seconds > now.timestamp() + 2:
+            raise ValueError("Candela non conclusa")
+        previous = ts
+        o, h, l, c, volume = map(float, (row[1], row[2], row[3], row[4], row[6]))
+        if not all(math.isfinite(v) for v in (o, h, l, c, volume)) or not (
+                0 < l <= min(o, c) <= max(o, c) <= h and volume >= 0):
+            raise ValueError("OHLCV Kraken non valido")
+        closed.append({"time": ts, "open": o, "high": h, "low": l,
+                       "close": c, "volume": volume})
+    if len(closed) < 30:
+        raise ValueError("Storico di candele chiuse insufficiente")
+    return {"observed_utc": now.isoformat(timespec="seconds"),
+            "pair": "SUI/EUR", "token": TOKEN, "timeframe": label,
+            "closed_at_utc": dt.datetime.fromtimestamp(
+                closed[-1]["time"] + seconds, dt.timezone.utc
+            ).isoformat(timespec="seconds"),
+            "candles": closed, "interval_seconds": seconds,
+            "source": "Kraken Spot pubblico /0/public/OHLC"}
+
 
 def ema_points(candles, period):
     """EMA sull'ultimo campione di candele chiuse; SMA iniziale di 'period' chiusure.
@@ -75,8 +119,8 @@ def ema_points(candles, period):
     return points
 
 
-def daily_pivots(candles):
-    """Pivot CLASSICI del giorno UTC precedente, esclusivamente da 6 barre 4H chiuse.
+def daily_pivots(candles, interval_seconds=14400):
+    """Pivot CLASSICI del giorno UTC precedente, con barre complete del timeframe.
 
     Il riferimento è il giorno UTC nel quale cade la chiusura più recente:
     non si usano candele in formazione né dati del giorno corrente.
@@ -84,13 +128,14 @@ def daily_pivots(candles):
     if not candles:
         return None
     last_close = dt.datetime.fromtimestamp(
-        candles[-1]["time"] + 14400, dt.timezone.utc)
+        candles[-1]["time"] + interval_seconds, dt.timezone.utc)
     prev_day = last_close.date() - dt.timedelta(days=1)
     start = int(dt.datetime.combine(prev_day, dt.time.min,
                                      dt.timezone.utc).timestamp())
     day = [row for row in candles if start <= row["time"] < start + 86400]
-    if len(day) != 6 or [row["time"] for row in day] != [
-            start + 14400 * i for i in range(6)]:
+    expected = 86400 // interval_seconds
+    if 86400 % interval_seconds or len(day) != expected or [row["time"] for row in day] != [
+            start + interval_seconds * i for i in range(expected)]:
         return None
     high = max(row["high"] for row in day)
     low = min(row["low"] for row in day)
@@ -156,19 +201,34 @@ def structural_levels(candles, tolerance=0.009):
             "resistances": group(pivots("high"), False)}
 
 
-def technical_from_candles(candles):
+def technical_from_candles(candles, interval_seconds=14400):
     return {
         "ema20": ema_points(candles, 20),
         "ema50": ema_points(candles, 50),
-        "pivots": daily_pivots(candles),
+        "pivots": daily_pivots(candles, interval_seconds=interval_seconds),
         "structure": structural_levels(candles),
     }
 
 
 def page_from_dossier(path: Path):
-    x = data_from_dossier(path)
+    return page_from_data(data_from_dossier(path))
+
+
+def page_from_data(x):
+    """Real 15m/1H/4H/1D candles, one renderer for all timeframes."""
+    frame = x.get("timeframe", "4H")
+    interval = x.get("interval_seconds", 14400)
+    if frame not in ("15m", "1H", "4H", "1D"):
+        raise ValueError("Timeframe non valido")
+    active = {"15m": "15m", "1H": "1h", "4H": "4h", "1D": "1d"}[frame]
+    links = " ".join(
+        '<a class="tf-link" href="/grafico/sui-4h?tf=' + key +
+        '"' + (' aria-current="page"' if key == active else "") +
+        '>' + html.escape(label) + '</a>'
+        for key, (_, label) in TIMEFRAMES.items())
     candle_json = json.dumps(x["candles"], separators=(",",":"), allow_nan=False)
-    technical_json = json.dumps(technical_from_candles(x["candles"]),
+    technical_json = json.dumps(technical_from_candles(
+        x["candles"], interval_seconds=interval),
                                 separators=(",",":"), allow_nan=False)
     pair = html.escape(x["pair"], quote=True)
     observed = html.escape(x["observed_utc"], quote=True)
@@ -180,7 +240,7 @@ def page_from_dossier(path: Path):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>KDD | Prova SUI 4H</title>
+<title>KDD | SUI/EUR __TF__</title>
 <style>
 :root{color-scheme:dark;font-family:system-ui,Arial,sans-serif;background:#0b1221;color:#eaf0fa}
 *{box-sizing:border-box}body{margin:0;padding:12px;max-width:1120px;margin-inline:auto}
@@ -215,6 +275,10 @@ header{display:flex;justify-content:space-between;align-items:center;gap:12px;fl
 .level-details td:nth-child(2){font-weight:600;text-align:right;white-space:nowrap}
 .level-details td:last-child,.level-details th:last-child{font-size:.82rem;color:#b7c9dd;padding-left:8px}
 .level-details .method{margin:9px 0;font-size:.85rem}
+.tf-link{display:inline-flex;align-items:center;justify-content:center;min-width:60px;
+min-height:42px;padding:8px 13px;border-radius:8px;border:1px solid #5e8cbb;
+background:#253c5e;color:white;text-decoration:none;font-weight:650}
+.tf-link[aria-current="page"]{background:#89cfff;color:#09172b;border-color:#89cfff}
 button{font:inherit;min-height:40px;padding:8px 14px;border-radius:8px;
  background:#253c5e;border:1px solid #5e8cbb;color:white}
 button:focus-visible,a:focus-visible{outline:3px solid #a2e2ff}
@@ -226,17 +290,16 @@ footer{font-size:.83rem;color:#b3c1d8;line-height:1.5;margin:14px 0 26px}
 </head>
 <body>
 <header>
-<div><h1>📈 KDD · Prova grafico SUI/EUR · 4H</h1>
+<div><h1>📈 KDD · Grafico SUI/EUR · __TF__</h1>
 <small>Kraken Spot · candele CHIUSE · orari UTC · nessun ordine</small></div>
 <a href="/">← Torna al cruscotto</a>
 </header>
 <section class="panel">
 <div id="graph-status" role="status">Preparazione grafico…</div>
-<div class="buttons" aria-label="Zoom grafico">
-<button type="button" data-range="40">Ultime 40</button>
-<button type="button" data-range="100">Ultime 100</button>
-<button type="button" data-range="all">Tutte</button>
-</div>
+<nav class="buttons" aria-label="Timeframe grafico">
+__TIMEFRAME_BUTTONS__
+</nav>
+<p class="muted">Seleziona l'intervallo reale delle candele. Zoom e scorrimento col dito.</p>
 <div class="legend" aria-label="Livelli e indicatori">
 <label><input type="checkbox" id="show-ema20" checked> EMA20 (oro)</label>
 <label><input type="checkbox" id="show-ema50" checked> EMA50 (azzurro)</label>
@@ -265,19 +328,19 @@ I pivot mantengono le etichette sull'asse disattivate.</p>
 <span data-ema="20"><i class="ema-swatch ema20" aria-hidden="true"></i>EMA20</span>
 <span data-ema="50"><i class="ema-swatch ema50" aria-hidden="true"></i>EMA50</span>
 </div>
-<div id="price-plot" aria-label="Grafico candlestick SUI/EUR 4H"></div>
+<div id="price-plot" aria-label="Grafico candlestick SUI/EUR __TF__"></div>
 </div>
 <h2 style="font-size:1rem">Volumi scambiati (SUI)</h2>
-<div id="volume-plot" aria-label="Istogramma dei volumi SUI/EUR 4H"></div>
+<div id="volume-plot" aria-label="Istogramma volumi SUI/EUR __TF__"></div>
 <p class="muted">Dati raccolti: __OBSERVED__. Ultima candela chiusa: __CLOSED__.
-Il grafico usa 200 candele 4H al massimo. L'ultimo prezzo non è live:
-per aggiornare torna al cruscotto e premi «Aggiorna dati ora».</p>
-<p class="muted"><b>FASE 2 / INDICATORI ESPLORATIVI 4H.</b>
+Il grafico usa fino a 200 candele __TF__ chiuse. Fonte: __SOURCE__.
+L'ultimo prezzo mostrato è una chiusura, non una quotazione live.</p>
+<p class="muted"><b>INDICATORI ESPLORATIVI __TF__.</b>
 EMA20/50 calcolate esclusivamente sulle candele CHIUSE presenti (massimo 200,
 seme SMA iniziale). Supporti e resistenze: estremi locali confermati con
 almeno due swing vicini; se mancano non viene inventata una linea.
 Pivot P/S1–S3/R1–R3: formule classiche sul giorno UTC precedente, solo se
-sono presenti tutte e sei le candele 4H necessarie. Il grafico limita il
+è presente l'intera giornata UTC precedente di candele chiuse. Il grafico limita il
 numero delle linee per leggibilità, mentre la tabella conserva i valori
 completi. Le vicinanze fra indicatori non costituiscono conferme indipendenti:
 sono una descrizione geometrica; nessun segnale BUY/SELL.
@@ -293,6 +356,7 @@ Dati Kraken Spot pubblici, non grafico ufficiale TradingView.</footer>
 (function(){
 "use strict";
 const rows = __BARS__;
+const timeframeLabel = '__TF__';
 const tech = __TECHNICAL__;
 const msg=document.getElementById('graph-status');
 const stats=document.getElementById('candle-stats');
@@ -455,10 +519,10 @@ try {
         price:tech.ema50[tech.ema50.length-1].value,note:'50 chiusure'}] : [])]},
     {name:'Supporti strutturali',family:'S/R',items:
       tech.structure.supports.map((v,i)=>({label:'S'+(i+1),
-        price:v.price,note:v.touches+' swing 4H'}))},
+        price:v.price,note:v.touches+' swing '+timeframeLabel}))},
     {name:'Resistenze strutturali',family:'S/R',items:
       tech.structure.resistances.map((v,i)=>({label:'R'+(i+1),
-        price:v.price,note:v.touches+' swing 4H'}))},
+        price:v.price,note:v.touches+' swing '+timeframeLabel}))},
     {name:'Pivot classici UTC',family:'Pivot',items:
       tech.pivots?pivotNames.map(n=>({label:n,price:tech.pivots[n],
         note:tech.pivots.reference_day_utc})) : []},
@@ -546,12 +610,8 @@ try {
     });
   }
   sync(chart,volumeChart);sync(volumeChart,chart);
-  document.querySelectorAll('button[data-range]').forEach(btn=>
-    btn.addEventListener('click',()=>{
-      const n=btn.dataset.range==='all'?rows.length:Number(btn.dataset.range);
-      const from=Math.max(0,rows.length-n);
-      chart.timeScale().setVisibleLogicalRange({from:from,to:rows.length-1});
-    }));
+  // Timeframe buttons navigate to independent Kraken OHLC series.
+  // Pan and zoom remain native gestures of the chart.
   function show(row){
     const fmt=new Intl.NumberFormat('it-IT',{maximumFractionDigits:6});
     const time=new Date(row.time*1000).toLocaleString('it-IT',{timeZone:'UTC'});
@@ -570,7 +630,7 @@ try {
     scheduleAxisLabels();
   });
   observer.observe(document.getElementById('price-plot'));
-  msg.textContent='Grafico generato: '+rows.length+' candele 4H reali + volumi. Scorri e ingrandisci.';
+  msg.textContent='Grafico generato: '+rows.length+' candele '+timeframeLabel+' reali + volumi. Scorri e ingrandisci.';
 }catch(e){
   msg.classList.add('error');
   msg.textContent='Errore di visualizzazione: '+e.message+
@@ -583,4 +643,7 @@ try {
     return (template.replace("__BARS__", candle_json)
             .replace("__TECHNICAL__", technical_json)
             .replace("__OBSERVED__", observed).replace("__CLOSED__", closed)
-            .replace("__NOTICE__", html.escape(notice)))
+            .replace("__NOTICE__", html.escape(notice))
+            .replace("__TIMEFRAME_BUTTONS__", links)
+            .replace("__TF__", html.escape(frame))
+            .replace("__SOURCE__", html.escape(x.get("source", "Dossier Kraken KDD"))))
