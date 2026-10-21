@@ -249,3 +249,9 @@ confronto deve restare parziale. **Suite prevista 125 test.**
 Stato: **codice su ramo sperimentale, non ancora collaudato su Android**.
 Obbligatori precheck, applicazione controllata e riavvio del server prima
 di dichiarare la funzione riuscita.
+
+## Navigatore: priorita informazioni on-chain (21 ottobre 2026)
+
+L'autore ha indicato i **dati on-chain** come priorita per la prossima integrazione decisionale, assieme a fondamentali, notizie sui token, macroeconomia e geopolitica. L'obiettivo e' riconoscere variazioni verificabili nell'offerta e nell'uso reale della rete prima di interpretare opportunita spot.
+
+Il disegno e i vincoli si trovano in [NAVIGATORE_ONCHAIN_V001.md](NAVIGATORE_ONCHAIN_V001.md). Il lavoro e' **solo documentale**: non sono stati aggiunti moduli, credenziali, richieste a fonti esterne o ordini. Per sviluppare la funzione serve una nuova autorizzazione tecnica delimitata, iniziando dalla verifica dell'identita del token e delle fonti su una sola rete. La roadmap in [ROADMAP_KDD.md](ROADMAP_KDD.md) rimane vincolante.

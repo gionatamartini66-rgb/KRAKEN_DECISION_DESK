@@ -37,6 +37,14 @@ La roadmap `ROADMAP_KDD.md` registra la dipendenza principale già concordata:
 
 La capacità multitimeframe già costruita resta preservata come strumento disponibile. Correzioni urgenti motivate da difetti riproducibili possono essere considerate nel rispetto del perimetro già autorizzato, senza trasformarsi in espansioni funzionali incontrollate.
 
+### 4A. Priorità informativa successiva — on-chain (21/10)
+
+L'autore ha indicato che il prossimo navigatore deve mettere **soprattutto dati on-chain** al servizio delle decisioni, assieme a fondamentali, notizie specifiche del token, macro e geopolitica. I canali informativi compongono una **unica futura integrazione**, non quattro progetti autonomi. Design controllato: [NAVIGATORE_ONCHAIN_V001.md](NAVIGATORE_ONCHAIN_V001.md).
+
+**Primo limite interpretativo:** transazioni on-chain ≠ operazioni Kraken; deposito a un exchange ≠ vendita; indirizzo ≠ persona; unlock ≠ cessione; crescita di indirizzi ≠ crescita di utenti; notizia ≠ causalità. Identità token, chain/contract, finestra temporale e fonti hanno precedenza su qualsiasi conclusione.
+
+**Stato di governo: REQUISITO DOCUMENTATO; IMPLEMENTAZIONE NON AUTORIZZATA.** Iniziare solo con un mandato tecnico esplicito, verifiche G0 delle fonti e un pilota delimitato; nessuna chiave Kraken aggiuntiva, API commerciali implicite, sorveglianza personale o trading automatico.
+
 ## 5. Procedura per una decisione proposta da GPT
 
 Una proposta utile presenta, nei limiti della copertura dati verificata:
