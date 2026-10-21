@@ -89,3 +89,27 @@ aggiustamenti del margine pixel restano necessari dopo l'installazione
 controllata. Il prossimo incremento funzionale sarà il multitimeframe
 15m/1H/4H/1D, subordinato alla verifica dei dati chiusi disponibili e
 delle fonti; nessun segnale BUY/SELL automatico.
+
+## FASE 2D — Hotfix JavaScript del grafico vuoto, 21/10/2026
+**Difetto osservato su Chrome Android:** il server e l'aggiornamento saldi
+funzionano, ma la pagina SUI/EUR 4H resta a "Preparazione grafico…":
+senza candele, volumi o sintesi. Non è un problema di dati Kraken.
+**Causa identificata nel codice:** dentro la tripla stringa Python del
+template HTML, il frammento JavaScript `sull\\'asse` viene interpretato
+da Python come `sull'asse`. Il JavaScript effettivamente inviato al browser
+contiene quindi una stringa con apostrofo non protetto, che produce
+`SyntaxError: Unexpected identifier 'asse'` prima che il `try/catch`
+dello script possa funzionare. I precedenti controlli analizzavano
+il testo sorgente prima della trasformazione del template Python: perciò
+**116 test PASS non garantivano JavaScript eseguibile nel browser**.
+
+**Rimedio su GitHub:** stringa JavaScript riscritta usando doppi apici,
+così l'apostrofo resta parte del testo; nuovo test di regressione che
+genera la pagina dal template Python e verifica la stringa effettivamente
+emessa. Se Node.js è disponibile, il test prova anche `node --check`
+sullo script HTML estratto. Diagnosi del bug riprodotta con parser V8
+sulla trasformazione della stringa Python; nuova versione PASS per la
+sintassi. I 116 test preesistenti non sono stati eliminati.
+**STATO: fix sviluppato, installazione Termux e verifica Chrome PENDENTI.**
+L'esito di `kdd-aggiorna --check` deve confermare almeno **117 test**,
+prima di ogni installazione. Nessuna modifica ai dati reali, ordini o segreti.
