@@ -378,7 +378,7 @@ try {
       if(visible)occupied.push(item.y);
       else hidden++;
     }
-    axisNote.textContent='S/R sull\'asse: prezzi a 5 decimali.'+
+    axisNote.textContent="S/R sull'asse: prezzi a 5 decimali."+
       (hidden?' '+hidden+' etichett'+(hidden===1?'a omessa':'e omesse')+
        ' per vicinanza o fuori scala; le linee restano visibili.':' Tutte le etichette distinguibili.')+
       ' Prezzi completi nella tabella.';
