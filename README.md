@@ -25,6 +25,23 @@ L'autore in passato evitava gli short soprattutto perché gli riusciva più natu
 
 **Nessun nuovo cantiere viene aperto da questa cristallizzazione.** Si riprende la roadmap dal nodo del delta spot: funzionalità grafiche, volume anomalo, avvio server e analisi short restano capacità, osservazioni o possibili requisiti futuri, senza scavalcare le dipendenze autorizzate. La pubblicazione di questi documenti non installa software sul Samsung né abilita operazioni Kraken.
 
+## Audit offline A/B del delta spot — 21 ottobre 2026
+
+**Stato del codice:** implementazione proposta su ramo GitHub; collaudo Python Termux PENDENTE. Questo intervento è **limitato alla verifica G0/G2 già in roadmap**, non una nuova sperimentazione.
+
+Il modulo già esistente `studio_delta.py` dispone della nuova modalità **sola lettura**, senza accessi Kraken, chiamate di rete o scrittura di file:
+
+```sh
+cd ~/kraken-decision-desk/KRAKEN_DECISION_DESK_V001
+python studio_delta.py --audit-offline
+```
+
+Legge esclusivamente il percorso privato originale `esperimenti_delta/` accanto al modulo Python. Controlla le coppie A/B tramite checksum del file A, unicità/identità dei candidati, integrità SHA256 del file esiti rispetto alla fase B, e per ogni orizzonte +1h/+4h/+24h verifica timestamp e coerenza aritmetica **solo dove il dato è già stato registrato**. Non ricostruisce prezzi assenti; `ASSENTE` non significa fallimento della strategia. Se le fasi usano un campo testuale esplicito omonimo (es. `scelta`), ne dichiara soltanto l'uguaglianza o la differenza **testuale**, non inventa semantiche decisionali né mostra il contenuto.
+
+L'output terminale include solo indicatori di integrità, nomi pubblici dei token e copertura per orizzonte; **mai prezzi, scelte testuali, importi, saldi, hash o contenuto dei file sorgente**. `python studio_delta.py` **senza il flag** mantiene invece la precedente verifica prospettica, che può interrogare Kraken e aggiornare file locali: sono due modalità diverse.
+
+Per installare questa variazione seguire il solito ponte controllato `kdd-aggiorna --check`, poi `--apply` con conferma umana e backup soltanto dopo PASS. Suite attesa: **128 test** (125 precedenti + 3 regressioni specifiche). Il browser KDD non richiede riavvio per questo controllo da terminale. **Nessuno snapshot A/B né altri dati operativi vanno aggiunti a GitHub.** L'output di audit determina se la validazione prospettica è davvero completa; un report `INCOMPLETO` resta INCOMPLETO, senza inferenze.
+
 ## Regola di sicurezza fondamentale
 **Non trasferire su GitHub dati personali/finanziari, credenziali o stato operativo**. Il repository conserva solo sorgenti selezionati e licenze di dipendenze pubbliche. Rimangono **esclusivamente sul Samsung**:
 - `~/.config/kraken-decision-desk/readonly.json` e ogni altro segreto/chiave, anche nei backup;
