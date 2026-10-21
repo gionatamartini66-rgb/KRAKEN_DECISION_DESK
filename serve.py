@@ -201,13 +201,14 @@ def render_sui_comparison(report):
             continue
         vol = item["volume_vs_media20"]
         vol_text = "non calcolabile" if vol is None else f'{vol:.2f} × media delle 20 barre precedenti'
+        volume_text = f"{item['volume']:.4f}"
         rows.append(
             f'<article class="frame"><h2>{title}</h2>'
             f'<p class="status">AGGIORNATO · {esc(item["candele"])} barre chiuse</p>'
             f'<p><strong>{esc(labels[item["orientamento"]])}</strong></p>'
             f'<p>Close: <b>{price(item["close"])} €</b> · '
             f'EMA20: {price(item["ema20"])} € · EMA50: {price(item["ema50"])} €</p>'
-            f'<p>Volume ultima candela: {esc(f"{item['volume']:.4f}")} SUI; '
+            f'<p>Volume ultima candela: {esc(volume_text)} SUI; '
             f'rapporto: {esc(vol_text)}</p>'
             f'<p>S/R euristici più vicini: supporto {price(item["supporto_vicino"])} €; '
             f'resistenza {price(item["resistenza_vicina"])} €</p>'
