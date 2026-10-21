@@ -857,51 +857,70 @@ class DeskTests(unittest.TestCase):
         import grafico_4h as g
         import serve
         import datetime as dt
-        import tempfile, pathlib
-        import json
+        from unittest import mock
         now=dt.datetime(2026,10,21,7,42,tzinfo=dt.timezone.utc)
         frames=self._mtf_fixture(now)
-        with tempfile.TemporaryDirectory() as folder:
-            path=pathlib.Path(folder)/"dossier.json"
-            frame=frames["4H"]
-            payload={"creato_utc":now.isoformat(),
-                     "grafici_4h":{"SUI":{"stato":"OK","coppia":"SUI/EUR",
-                       "serie_ohlcv_chiuse":[{
-                           "apertura_ts_utc":c["time"],"open":c["open"],
-                           "high":c["high"],"low":c["low"],"close":c["close"],
-                           "volume_base":c["volume"]} for c in frame["candles"]]}}}
-            path.write_text(json.dumps(payload))
-            called=[]
-            def fake(endpoint,**kwargs):
-                self.assertEqual(endpoint,"OHLC")
-                self.assertEqual(kwargs["pair"],"SUIEUR")
-                called.append(kwargs["interval"])
-                if kwargs["interval"]==60:
-                    raise OSError("mock offline")
-                seconds=kwargs["interval"]*60
-                frame_label={15:"15m",1440:"1D"}[kwargs["interval"]]
-                candles=frames[frame_label]["candles"]
-                records=[[c["time"],str(c["open"]),str(c["high"]),str(c["low"]),
-                    str(c["close"]),"1",str(c["volume"]),"1"] for c in candles]
-                last=records[-1][:]
-                last[0]+=seconds
-                return {"PAIR":records+[last],"last":last[0]}
-            summary=serve.load_sui_comparison(
-                public_kraken=fake,dossier_path=path,now=now)
-        self.assertEqual(called,[15,60,1440])
+        called=[]
+        def fake(endpoint,**kwargs):
+            self.assertEqual(endpoint,"OHLC")
+            self.assertEqual(kwargs["pair"],"SUIEUR")
+            called.append(kwargs["interval"])
+            if kwargs["interval"]==60:
+                raise OSError("mock offline")
+            seconds=kwargs["interval"]*60
+            frame_label={15:"15m",240:"4H",1440:"1D"}[kwargs["interval"]]
+            bars=frames[frame_label]["candles"]
+            records=[[c["time"],str(c["open"]),str(c["high"]),str(c["low"]),
+                str(c["close"]),"1",str(c["volume"]),"1"] for c in bars]
+            last=records[-1][:]
+            last[0]+=seconds
+            return {"PAIR":records+[last],"last":last[0]}
+        # A stale/missing local dossier cannot influence MTF: all 4
+        # timeframes are sourced from public Kraken on demand.
+        with mock.patch.object(g,"data_from_dossier",
+                               side_effect=AssertionError("No local dossier")):
+            summary=serve.load_sui_comparison(public_kraken=fake,now=now)
+        self.assertEqual(called,[15,60,240,1440])
         self.assertEqual(summary["stato"],"PARZIALE")
         self.assertEqual(summary["timeframe"][1]["stato"],"NON_DISPONIBILE")
         self.assertEqual(summary["timeframe"][2]["stato"],"AGGIORNATO")
-        html=serve.render_sui_comparison(summary)
-        self.assertIn('Confronto SUI/EUR',html)
-        self.assertIn('tf=15m',html)
-        self.assertIn('tf=1h',html)
-        self.assertIn('tf=4h',html)
-        self.assertIn('tf=1d',html)
-        self.assertIn('CONFRONTO',html.upper())
-        self.assertNotIn('readonly.json',html)
+        self.assertEqual(summary["timeframe"][2]["fonte"],
+                         "Kraken Spot pubblico /0/public/OHLC")
+        page=serve.render_sui_comparison(summary)
+        self.assertIn("Confronto SUI/EUR",page)
+        self.assertIn("tf=15m",page)
+        self.assertIn("tf=1h",page)
+        self.assertIn("tf=4h",page)
+        self.assertIn("tf=1d",page)
+        self.assertIn("CONFRONTO",page.upper())
+        self.assertNotIn("readonly.json",page)
+        self.assertNotIn("necessario per il 4H",page)
         dashboard=serve.with_controls("<html><h2>1 · Decisioni e posizioni</h2></html>")
         self.assertIn("href='/analisi/sui-mtf'",dashboard)
+
+    def test_mtf_live_4h_missing_close_marks_stale_without_fallback(self):
+        import serve
+        import datetime as dt
+        now=dt.datetime(2026,10,21,8,5,tzinfo=dt.timezone.utc)
+        frames=self._mtf_fixture(now)
+        def fake(endpoint,**kwargs):
+            self.assertEqual(endpoint,"OHLC")
+            seconds=kwargs["interval"]*60
+            label={15:"15m",60:"1H",240:"4H",1440:"1D"}[kwargs["interval"]]
+            bars=frames[label]["candles"]
+            if label=="4H":
+                bars=bars[:-1]  # Kraken has not supplied the latest 4H close yet
+            records=[[c["time"],str(c["open"]),str(c["high"]),str(c["low"]),
+                str(c["close"]),"1",str(c["volume"]),"1"] for c in bars]
+            # Last row is always uncommitted and will be discarded by parser.
+            last=records[-1][:]
+            last[0]=int(now.timestamp()//seconds)*seconds
+            return {"PAIR":records+[last],"last":last[0]}
+        report=serve.load_sui_comparison(public_kraken=fake,now=now)
+        self.assertEqual([row["stato"] for row in report["timeframe"]],
+                         ["AGGIORNATO","AGGIORNATO","SCADUTO","AGGIORNATO"])
+        self.assertEqual(report["quadro"],"CONFRONTO_INCOMPLETO")
+        self.assertEqual(report["stato"],"PARZIALE")
 
     def test_graph_full_pivots_stay_in_payload_when_plot_filters_lines(self):
         import grafico_4h as g

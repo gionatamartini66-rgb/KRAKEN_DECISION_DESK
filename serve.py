@@ -150,26 +150,23 @@ def load_sui_chart(timeframe, public_kraken=None):
     return grafico_4h.page_from_data(candles)
 
 
-def load_sui_comparison(public_kraken=None, dossier_path=None, now=None):
-    """Public-only, on-demand cross-timeframe comparison.
+def load_sui_comparison(public_kraken=None, now=None):
+    """Read four independent closed Kraken Spot intervals on demand.
 
-    Each timeframe keeps its own closed candle and observation time.
-    Failed downloads remain missing, never replaced by another series.
+    An out-of-date local 4H chart dossier must never block or bias the
+    comparison. If Kraken 4H is missing, report it missing instead of
+    substituting an older dossier or silently interpolating candles.
     """
     fetch = public_kraken or desk.kraken
     now = now or dt.datetime.now(dt.timezone.utc)
-    path = dossier_path or desk.DIR / "dossier_multifonte.json"
+    keys = {"15m": "15m", "1H": "1h", "4H": "4h", "1D": "1d"}
     frames = {}
-    for name in ("15m", "1H", "4H", "1D"):
+    for name, key in keys.items():
         try:
-            if name == "4H":
-                frames[name] = grafico_4h.data_from_dossier(path)
-            else:
-                key = {"15m": "15m", "1H": "1h", "1D": "1d"}[name]
-                interval = grafico_4h.TIMEFRAMES[key][0]
-                result = fetch("OHLC", pair="SUIEUR", interval=interval)
-                frames[name] = grafico_4h.data_from_kraken_ohlc(
-                    result, key, now=now)
+            interval = grafico_4h.TIMEFRAMES[key][0]
+            result = fetch("OHLC", pair="SUIEUR", interval=interval)
+            frames[name] = grafico_4h.data_from_kraken_ohlc(
+                result, key, now=now)
         except (ValueError, OSError, RuntimeError, TypeError, KeyError, IndexError) as exc:
             frames[name] = {"errore": "Acquisizione o validazione: " + type(exc).__name__}
     return grafico_4h.compare_timeframes(frames, now=now)
@@ -252,7 +249,10 @@ __CARDS__
 S/R sono livelli euristici calcolati dalla cronologia disponibile.
 La classificazione rispetto alle EMA non misura la probabilità di guadagno.
 Nessuna operazione, nessun segnale BUY/SELL.</p>
-<p><a href="/">↻ Aggiorna dossier dal cruscotto</a> (necessario per il 4H)</p>
+<p class="note">Il confronto interroga Kraken Spot pubblico per tutti e quattro
+gli intervalli a ogni apertura. Il grafico 4H separato conserva il
+proprio dossier locale, aggiornabile dal cruscotto.</p>
+<p><a href="/">← Torna al cruscotto</a></p>
 </body></html>"""
         .replace("__STATE__", esc(report["stato"]))
         .replace("__PICTURE__", esc(picture))
