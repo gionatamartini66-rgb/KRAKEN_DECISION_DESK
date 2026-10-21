@@ -32,7 +32,7 @@ Questa sequenza **rimane invariata**; la scoperta di nuove funzioni o un grafico
 | --- | --- | --- | --- |
 | 1 | **G0 — Verifica source-bound del delta spot** | Riportata come eseguita nella cronologia KDD | Evidenze originarie recuperabili e verificabili |
 | 2 | **G2 — Esperimento delimitato su candidati reali** (INJ, QNT, AVA, PUMP) | Riportato come eseguito; segnalato contributo informativo, **non prova di redditività** | Separare riscontri da ipotesi e limiti sperimentali |
-| 3 | **Decisione/adjudication sul delta spot**: mantenere, limitare oppure scartare | **APERTO — prossimo nodo decisionale** | Giudizio esplicito motivato dalle prove G0/G2, senza nuove sperimentazioni parallele |
+| 3 | **Decisione/adjudication sul delta spot**: mantenere, limitare oppure scartare | **USO LIMITATO — giudizio preliminare 21/10; convalida scientifica incompleta** | Controllare i congelamenti A/B originali e gli eventuali esiti +1h/+4h/+24h, senza nuovi esperimenti |
 | 4 | **Una sola integrazione successiva**, delimitata dal giudizio | **NON APERTA** | Scelta umana, perimetro, dati, regressioni e criterio di successo |
 | 5 | **Motore decisionale GPT per casi reali** | **DA CONSOLIDARE dopo i gate precedenti** | Confronto di candidati reali, condizioni d'ingresso/uscita, invalidazione, spread, book, volumi, fee, alternative e opportunità non eseguite; nessuna delega di ordini |
 
@@ -66,4 +66,6 @@ L'obiettivo è migliorare la **qualità verificabile delle decisioni**, non somm
 
 Ogni modifica tecnica passa per ramo/commit revisionabile, test preventivo `kdd-aggiorna --check`, eventuale applicazione volontaria `--apply` con backup e test, e prova sul Samsung se cambia il comportamento visivo. **La pubblicazione su GitHub non installa software né modifica il conto Kraken.**
 
-**Prossima decisione attiva:** adjudication delle prove G0/G2 sul delta spot. Nessun nuovo cantiere è aperto da questo aggiornamento documentale.
+**Primo giudizio del 21/10 — delta spot:** **LIMITARNE L'USO**, come osservazione della microstruttura con controllo di coppia/finestra/copertura, non come segnale di trading o ranking predittivo. La prima prova ha evidenziato convergenze e divergenze prezzo/delta; la prova A/B successiva (SUI, QNT, PUMP, ONDO) non ha modificato alcuna delle quattro decisioni riferite. Il codice G0 è stato letto, ma i congelamenti privati e gli esiti prospettici non sono stati accessibili direttamente: **adjudication scientifica ancora INCOMPLETA**. I riferimenti e i limiti sono registrati in [GIUDIZIO_DELTA_SPOT_G0_G2.md](GIUDIZIO_DELTA_SPOT_G0_G2.md).
+
+**Prossimo passo:** rilettura source-bound degli originali A/B e dei risultati +1h/+4h/+24h, se disponibili nel runtime privato. **Nessun nuovo cantiere e nessun passaggio automatico alla prossima integrazione.**
