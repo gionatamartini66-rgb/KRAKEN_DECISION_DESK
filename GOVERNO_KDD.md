@@ -33,7 +33,7 @@ La roadmap `ROADMAP_KDD.md` registra la dipendenza principale già concordata:
 
 **G0 delta spot → G2 esperimento delimitato (INJ, QNT, AVA, PUMP) → decisione motivata sul delta → una sola integrazione giustificata → motore GPT su opportunità reali.**
 
-**Aggiornamento 21/10:** la decisione d'uso preliminare è **LIMITARE** il delta spot a osservazione secondaria, solo con coppia, finestra, copertura e freschezza verificabili; non autorizza segnali BUY/SELL, ranking privilegiati né previsioni. La **validazione scientifica G0/G2 rimane INCOMPLETA**: le fasi A/B congelate e gli esiti +1h/+4h/+24h sono dati locali privati non acquisiti direttamente nella ricognizione. Vedi [GIUDIZIO_DELTA_SPOT_G0_G2.md](GIUDIZIO_DELTA_SPOT_G0_G2.md). **Nessuna nuova sperimentazione o implementazione nasce implicitamente da questo giudizio**, da uno screenshot, da una notizia o dalla scoperta di un indicatore. Nessuna nuova sperimentazione o implementazione nasce implicitamente da uno screenshot, da una notizia, dalla scoperta di un indicatore o da questo documento.
+**Aggiornamento 21/10 — prova A/B completata entro il campione:** decisione di uso del delta spot = **LIMITARE** a osservazione secondaria, soltanto con coppia, finestra, copertura e freschezza verificabili. Da output di Termux: fasi A/B integre, **4 token**, **12/12 orizzonti** a +1h/+4h/+24h presenti, **0/4 azioni cambiate**; delta della candela negativo e prezzi successivi positivi per tutti e quattro. **Nessuna prova di miglioramento decisionale, rendimento o validità predittiva generale**. Vedi [GIUDIZIO_DELTA_SPOT_G0_G2.md](GIUDIZIO_DELTA_SPOT_G0_G2.md). La fonte primaria locale resta sul Samsung; il rapporto conserva solo sintesi priva di snapshot privati. **Nessuna nuova sperimentazione o implementazione nasce implicitamente dal giudizio**, da uno screenshot, da una notizia o da un indicatore.
 
 La capacità multitimeframe già costruita resta preservata come strumento disponibile. Correzioni urgenti motivate da difetti riproducibili possono essere considerate nel rispetto del perimetro già autorizzato, senza trasformarsi in espansioni funzionali incontrollate.
 
@@ -61,6 +61,6 @@ Gli aggiornamenti di codice attraversano verifiche isolate, applicazione volonta
 
 **Acquisito dall'autore:** KDD deve leggere mercati ribassisti e lavorare opportunisticamente in **spot** anche durante le discese, quando esistano rimbalzi, rotazioni o strategie di gestione del rischio sensate. Gli short erano stati evitati in passato perché l'autore individuava più naturalmente movimenti rialzisti, **non per un divieto teorico universale**.
 
-**Disposizione:** ANALISI SHORT AMMESSA; SHORT REALI NON AUTORIZZATI; REGIMI DI MERCATO TUTTI IN SCOPE; ROADMAP INVARIATA; NESSUN GO A NUOVI MODULI. La priorità esecutiva rimane la decisione sul delta spot a valle delle prove G0/G2.
+**Disposizione:** ANALISI SHORT AMMESSA; SHORT REALI NON AUTORIZZATI; REGIMI DI MERCATO TUTTI IN SCOPE; ROADMAP INVARIATA; NESSUN GO A NUOVI MODULI. La fase di adjudication del delta spot è chiusa per il campione A/B esaminato: uso LIMITATO. La successiva integrazione richiede scelta e perimetro espliciti dell'autore; nessuna abilitazione automatica.
 
 Il presente documento cristallizza l'indirizzo e i limiti. Qualsiasi mutamento di diritti operativi esige un nuovo intervento esplicito dell'autore.
