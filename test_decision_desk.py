@@ -690,6 +690,91 @@ class DeskTests(unittest.TestCase):
                 text=True,capture_output=True,timeout=10)
             self.assertEqual(outcome.returncode,0,outcome.stderr)
 
+    def test_timeframes_public_ohlc_are_real_closed_candles(self):
+        import grafico_4h as g
+        import datetime as dt
+        for name, (minutes, label) in g.TIMEFRAMES.items():
+            with self.subTest(timeframe=name):
+                duration=minutes*60
+                beginning=86400*21000
+                current=beginning+80*duration
+                start=beginning
+                raws=[[start+duration*i,"1.0000","1.1000","0.9000",
+                       "1.0100","1.0000","123.45",100]
+                      for i in range(81)]
+                payload={'PAIR':raws, 'last':current}
+                now=dt.datetime.fromtimestamp(current+duration//2,dt.timezone.utc)
+                result=g.data_from_kraken_ohlc(payload,name,now=now)
+                self.assertEqual(result['timeframe'],label)
+                self.assertEqual(result['interval_seconds'],duration)
+                self.assertEqual(len(result['candles']),80)
+                self.assertEqual(result['candles'][-1]['time'],current-duration)
+                self.assertTrue(result['closed_at_utc'])
+                self.assertEqual(result['candles'][-1]['volume'],123.45)
+                self.assertNotIn(current,[row['time'] for row in result['candles']])
+                # Missing intervals must fail, never silently interpolate.
+                with self.assertRaises(ValueError):
+                    g.data_from_kraken_ohlc({'PAIR':raws[:15]+raws[16:],
+                                             'last':current},name,now=now)
+                broken=[list(r) for r in raws]
+                broken[20][2]="0.10"
+                with self.assertRaises(ValueError):
+                    g.data_from_kraken_ohlc({'PAIR':broken,
+                                             'last':current},name,now=now)
+        with self.assertRaises(ValueError):
+            g.data_from_kraken_ohlc({},'1n')
+
+    def test_timeframe_tabs_fetch_correct_public_intervals(self):
+        import grafico_4h as g
+        import serve
+        import datetime as dt
+        from unittest import mock
+        # A single public pair in EUR, with a different real period in each case.
+        for name, (minutes, label) in g.TIMEFRAMES.items():
+            if name == '4h':
+                continue
+            with self.subTest(frame=name):
+                duration=minutes*60
+                beginning=86400*21000
+                current=beginning+80*duration
+                candles=[[beginning+i*duration,'1','1.1','0.9','1','1','5',1]
+                         for i in range(81)]
+                now=dt.datetime.fromtimestamp(current+duration//2,dt.timezone.utc)
+                def fake(endpoint,**kwargs):
+                    self.assertEqual(endpoint,'OHLC')
+                    self.assertEqual(kwargs,{'pair':'SUIEUR','interval':minutes})
+                    return {'SUIEUR':candles,'last':current}
+                with mock.patch.object(g.dt,'datetime',wraps=dt.datetime) as clock:
+                    clock.now.return_value=now
+                    page=serve.load_sui_chart(name,public_kraken=fake)
+                self.assertIn('aria-current="page"',' '.join(
+                    line for line in page.splitlines() if 'tf='+name in line))
+                self.assertIn('Grafico SUI/EUR · '+label,page)
+                self.assertIn('Kraken Spot pubblico',page)
+                self.assertIn('Tutti i livelli e i prezzi esatti',page)
+                self.assertNotIn('Ultime 40',page)
+        with self.assertRaises(ValueError):
+            serve.load_sui_chart('1n')
+        with mock.patch.object(g,'page_from_dossier',return_value='legacy 4h') as existing:
+            self.assertEqual(serve.load_sui_chart('4h'),'legacy 4h')
+            existing.assert_called_once()
+
+    def test_timeframe_pivots_require_complete_previous_utc_day(self):
+        import grafico_4h as g
+        import datetime as dt
+        start=int(dt.datetime(2026,10,19,tzinfo=dt.timezone.utc).timestamp())
+        for sec in (900,3600,14400,86400):
+            with self.subTest(seconds=sec):
+                n=86400//sec
+                bars=[dict(time=start+i*sec,open=10.0,high=11.0,
+                           low=9.0,close=10.0,volume=1) for i in range(n)]
+                bars.append(dict(time=start+86400,open=12.0,
+                                 high=13.0,low=11.0,close=12.0,volume=1))
+                result=g.daily_pivots(bars,interval_seconds=sec)
+                self.assertIsNotNone(result)
+                self.assertEqual(result['reference_day_utc'],'2026-10-19')
+                self.assertIsNone(g.daily_pivots(bars[1:],interval_seconds=sec))
+
     def test_graph_full_pivots_stay_in_payload_when_plot_filters_lines(self):
         import grafico_4h as g
         start=int(dt.datetime(2026,10,19,tzinfo=dt.timezone.utc).timestamp())
