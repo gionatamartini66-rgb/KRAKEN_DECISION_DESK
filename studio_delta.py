@@ -218,6 +218,8 @@ def audit_offline(root=None):
             a, b = paired(b_path, root=base)
             rows_a = a['candidati']
             rows_b = b['candidati']
+            if not rows_a or not rows_b:
+                raise ValueError('Nessun candidato nei congelamenti')
             if (len({x['token'] for x in rows_a}) != len(rows_a)
                     or len({x['token'] for x in rows_b}) != len(rows_b)):
                 raise ValueError('Duplicati nei token dei candidati')
@@ -236,7 +238,9 @@ def audit_offline(root=None):
                 if (saved.get('fase_B_nome') != b_path.name
                         or saved.get('fase_B_sha256') != expect
                         or not isinstance(saved.get('esiti'), dict)
-                        or set(saved['esiti']) - set(a_map)):
+                        or set(saved['esiti']) - set(a_map)
+                        or any(not isinstance(v, dict)
+                               for v in saved['esiti'].values())):
                     entry['esiti'] = 'METADATI_INCOERENTI'
                 else:
                     entry['esiti'] = 'FILE_INTEGRO'
