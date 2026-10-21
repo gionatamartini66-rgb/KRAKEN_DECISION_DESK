@@ -119,8 +119,8 @@ def ema_points(candles, period):
     return points
 
 
-def daily_pivots(candles):
-    """Pivot CLASSICI del giorno UTC precedente, esclusivamente da 6 barre 4H chiuse.
+def daily_pivots(candles, interval_seconds=14400):
+    """Pivot CLASSICI del giorno UTC precedente, con barre complete del timeframe.
 
     Il riferimento è il giorno UTC nel quale cade la chiusura più recente:
     non si usano candele in formazione né dati del giorno corrente.
@@ -128,13 +128,14 @@ def daily_pivots(candles):
     if not candles:
         return None
     last_close = dt.datetime.fromtimestamp(
-        candles[-1]["time"] + 14400, dt.timezone.utc)
+        candles[-1]["time"] + interval_seconds, dt.timezone.utc)
     prev_day = last_close.date() - dt.timedelta(days=1)
     start = int(dt.datetime.combine(prev_day, dt.time.min,
                                      dt.timezone.utc).timestamp())
     day = [row for row in candles if start <= row["time"] < start + 86400]
-    if len(day) != 6 or [row["time"] for row in day] != [
-            start + 14400 * i for i in range(6)]:
+    expected = 86400 // interval_seconds
+    if 86400 % interval_seconds or len(day) != expected or [row["time"] for row in day] != [
+            start + interval_seconds * i for i in range(expected)]:
         return None
     high = max(row["high"] for row in day)
     low = min(row["low"] for row in day)
@@ -200,19 +201,34 @@ def structural_levels(candles, tolerance=0.009):
             "resistances": group(pivots("high"), False)}
 
 
-def technical_from_candles(candles):
+def technical_from_candles(candles, interval_seconds=14400):
     return {
         "ema20": ema_points(candles, 20),
         "ema50": ema_points(candles, 50),
-        "pivots": daily_pivots(candles),
+        "pivots": daily_pivots(candles, interval_seconds=interval_seconds),
         "structure": structural_levels(candles),
     }
 
 
 def page_from_dossier(path: Path):
-    x = data_from_dossier(path)
+    return page_from_data(data_from_dossier(path))
+
+
+def page_from_data(x):
+    """Real 15m/1H/4H/1D candles, one renderer for all timeframes."""
+    frame = x.get("timeframe", "4H")
+    interval = x.get("interval_seconds", 14400)
+    if frame not in ("15m", "1H", "4H", "1D"):
+        raise ValueError("Timeframe non valido")
+    active = {"15m": "15m", "1H": "1h", "4H": "4h", "1D": "1d"}[frame]
+    links = " ".join(
+        '<a class="tf-link" href="/grafico/sui-4h?tf=' + key +
+        '"' + (' aria-current="page"' if key == active else "") +
+        '>' + html.escape(label) + '</a>'
+        for key, (_, label) in TIMEFRAMES.items())
     candle_json = json.dumps(x["candles"], separators=(",",":"), allow_nan=False)
-    technical_json = json.dumps(technical_from_candles(x["candles"]),
+    technical_json = json.dumps(technical_from_candles(
+        x["candles"], interval_seconds=interval),
                                 separators=(",",":"), allow_nan=False)
     pair = html.escape(x["pair"], quote=True)
     observed = html.escape(x["observed_utc"], quote=True)
