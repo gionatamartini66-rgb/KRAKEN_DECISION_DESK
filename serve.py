@@ -79,7 +79,7 @@ def with_controls(page: str, result: str = "") -> str:
         "border-radius:9px;background:#80cbff;color:#06162b;font-weight:700' "
         f"type='submit'{disabled}>↻ Aggiorna dati ora</button>"
         "</form><p><a style='font-weight:700;color:#8aceff' href='/grafico/sui-4h'>"
-        "📈 Prova grafico reale SUI 4H (candele e volumi)</a></p>"
+        "📈 Grafico SUI/EUR · 15m / 1H / 4H / 1D</a></p>"
         "<p>Server solo su questo Samsung · prezzi pubblici · nessun ordine.</p>"
         f"<p id='kdd-refresh-status' role='status'>{html.escape(message)}</p>"
         "</section>"
