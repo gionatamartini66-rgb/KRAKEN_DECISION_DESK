@@ -192,13 +192,15 @@ def parse_stake(tx, kind, acquired, coverage):
     if more:
         raise SourceProblem('RISPOSTA_INCOMPLETA', 'objectChanges con pagine ulteriori')
     out = []
-    seen = set()
+    seen = {}
     for change in changes:
         if not isinstance(change, dict):
             raise SourceProblem('RISPOSTA_INCOMPLETA', 'objectChange malformato')
         obj = change.get('address')
-        created = change.get('idCreated') is True
-        deleted = change.get('idDeleted') is True
+        if type(change.get('idCreated')) is not bool or type(change.get('idDeleted')) is not bool:
+            raise SourceProblem('RISPOSTA_INCOMPLETA', 'idCreated/idDeleted non booleani')
+        created = change['idCreated']
+        deleted = change['idDeleted']
         if created and deleted:
             raise SourceProblem('EVENTO_NON_VERIFICABILE', 'cambiamento contraddittorio')
         for side, marked, event in (
@@ -215,14 +217,16 @@ def parse_stake(tx, kind, acquired, coverage):
             if not isinstance(obj, str) or not re.fullmatch(r'0x[0-9a-fA-F]{1,64}',obj):
                 raise SourceProblem('EVENTO_NON_VERIFICABILE','id oggetto StakedSui non valido')
             key = (obj.lower(),event)
-            if key in seen:
-                continue
             raw = _dict(state.get('json'), 'contents.json').get('principal')
             try:
                 amount = units(raw)
             except ValueError as exc:
                 raise SourceProblem('EVENTO_NON_VERIFICABILE','principal non valido') from exc
-            seen.add(key)
+            if key in seen:
+                if seen[key] != amount:
+                    raise SourceProblem('RISPOSTA_INCOERENTE', 'principal discordante per stesso digest/oggetto/evento')
+                continue
+            seen[key] = amount
             out.append(Observation(
                 kind='FATTO_OSSERVATO', asset='SUI',chain='sui:mainnet',asset_id=COIN,
                 event=event,quantity=amount,unit='SUI',transaction=digest,
@@ -298,14 +302,24 @@ def run(*, request=post_graphql, include_circulation=False, circulation=read_cir
             raise SourceProblem('IDENTITA_NON_VERIFICATA','chainIdentifier non mainnet')
         service = _dict(ident.get('serviceConfig'),'serviceConfig')
         rng = service.get('availableRange')
-        if not isinstance(rng,dict) or not isinstance(rng.get('first'),dict) or not isinstance(rng.get('last'),dict):
+        try:
+            if not isinstance(rng, dict) or not isinstance(rng.get('first'), dict) or not isinstance(rng.get('last'), dict):
+                raise ValueError('estremi intervallo assenti')
+            first_cp = uint(rng['first'].get('sequenceNumber'), allow_zero=True)
+            last_cp = uint(rng['last'].get('sequenceNumber'), allow_zero=True)
+            if first_cp > last_cp:
+                raise ValueError('estremi intervallo invertiti')
+        except ValueError:
             report['coverage']='NON_DETERMINABILE'
         else:
-            report['coverage']={'first_checkpoint':rng['first'].get('sequenceNumber'),
-                  'last_checkpoint':rng['last'].get('sequenceNumber'),
-                  'scope':'Query.transactions filter=function; campione limitato'}
+            report['coverage']={'first_checkpoint':first_cp,
+                  'last_checkpoint':last_cp,
+                  'scope':'Query.transactions filter=function; campione limitato; contiguita interna non dimostrata'}
         report['statuses']['identity']='VERIFICATA'
-        global_seen=set()
+        global_seen={}
+        seen_sources={}
+        conflicted_keys=set()
+        conflict_families=set()
         for label,func in (('staking',STAKING),('unstaking',UNSTAKING)):
             try:
                 d,_=ask(FILTER,{'function':func})
@@ -335,11 +349,23 @@ def run(*, request=post_graphql, include_circulation=False, circulation=read_cir
                     if found:
                         for o in found:
                             key=(o.transaction,o.details['staked_sui_object'],o.event)
-                            if key in global_seen:
-                                report['statuses']['cross_filter_duplicate']='SCARTATO'
+                            if key in conflicted_keys:
+                                conflict_families.add(label)
                                 continue
-                            global_seen.add(key)
-                            report['observations'].append(o.to_decision_context())
+                            prior=global_seen.get(key)
+                            if prior is not None:
+                                if prior.quantity != o.quantity:
+                                    del global_seen[key]
+                                    conflicted_keys.add(key)
+                                    conflict_families.update(seen_sources[key])
+                                    conflict_families.add(label)
+                                    report['statuses']['cross_filter_conflict']='RISPOSTA_INCOERENTE'
+                                    continue
+                                report['statuses']['cross_filter_duplicate']='SCARTATO'
+                                seen_sources[key].add(label)
+                                continue
+                            global_seen[key]=o
+                            seen_sources[key]={label}
                         status='OGGETTO_VERIFICATO_ATTRIBUZIONE_NON_DIMOSTRATA'
                     elif status != 'OGGETTO_VERIFICATO_ATTRIBUZIONE_NON_DIMOSTRATA':
                         status=event_status
@@ -352,6 +378,10 @@ def run(*, request=post_graphql, include_circulation=False, circulation=read_cir
         report['statuses']['identity_detail']=str(exc)
         report['statuses']['staking']='NON_ESEGUITO_IDENTITA_NON_VERIFICATA'
         report['statuses']['unstaking']='NON_ESEGUITO_IDENTITA_NON_VERIFICATA'
+    if report['statuses'].get('identity') == 'VERIFICATA':
+        for family in conflict_families:
+            report['statuses'][family]='RISPOSTA_INCOERENTE'
+        report['observations'].extend(o.to_decision_context() for o in global_seen.values())
     if include_circulation:
         try:
             report['observations'].append(circulation().to_decision_context())
