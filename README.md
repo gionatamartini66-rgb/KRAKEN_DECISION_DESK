@@ -3,7 +3,27 @@
 **Stato operativo (20 ottobre 2026):** repository privato collegato a ChatGPT e a Termux; importati **19 file tecnici** con commit `3fab216ac1c66cb03f6d57c5c42bd1fdbb7ac175`, dopo 109/109 test locali superati. Il programma vivo continua sul Samsung. L'aggiornatore GitHub → Termux è ora disponibile nel repository, con 4 test isolati PASS (dry run/applicazione simulata/nessun cambiamento/rollback). **Aggiornatore installato e collaudato sul Samsung il 20 ottobre 2026**: test 109/109 prima e dopo un deploy innocuo, backup locale creato, verifica senza alterare portafoglio e credenziali. L'indicazione precedente di collaudo ancora in attesa è superata.
 
 ## Scopo
-KDD rileva dati di mercato pubblici Kraken e Binance, conserva fonti e orari, aiuta a esaminare strutture tecniche e condizioni di liquidità; GPT interpreta e formula proposte, l'autore discute e decide. Solo l'autore esegue eventuali ordini manualmente. Per ora spot, niente short/leva o ordini automatici. Il patrimonio strategico è **a gestione attiva**, non un vincolo a conservare ogni token.
+KDD rileva dati di mercato pubblici Kraken e Binance, conserva fonti e orari, aiuta a esaminare strutture tecniche e condizioni di liquidità; GPT interpreta e formula proposte, l'autore discute e decide. Solo l'autore esegue eventuali ordini manualmente. **Operatività reale iniziale: spot, nessuno short, futures o leva e nessun ordine automatico. Analisi di scenari short consentita senza esecuzione.** Il patrimonio strategico è **a gestione attiva**, non un vincolo a conservare ogni token.
+
+## Indirizzo strategico e roadmap — decisione dell'autore, 21 ottobre 2026
+
+**KDD «cross-over»: la capacità decisionale deve valere in regimi rialzisti, laterali, ribassisti e di transizione.** Non dipendiamo da un mercato sempre rialzista: in spot il sistema deve saper distinguere rimbalzi, ripartenze, forza relativa, rotazioni fra token, alleggerimenti, uscita o liquidità in USDC, oltre all'eventuale attesa motivata. Un long spot non guadagna direttamente dalla semplice discesa e mantenere USDC comporta rischi propri.
+
+L'autore in passato evitava gli short soprattutto perché gli riusciva più naturale riconoscere i movimenti rialzisti. **Analizzare short e regimi ribassisti è ammesso; eseguire short, futures, margin o leva non è autorizzato.** L'apertura analitica non sblocca di per sé nuove sperimentazioni o permessi. Le scelte restano token-specifiche, sensibili a regime, liquidità, costo reale, macro e geopolitica, senza quote o soglie rigide imposte automaticamente.
+
+**Sequenza già concordata, da preservare:**
+
+1. G0, verifica source-bound del delta spot — riportata come svolta.
+2. G2, prova delimitata su INJ, QNT, AVA e PUMP — riportata come svolta; contributo informativo osservato, **nessuna redditività dimostrata**.
+3. **Adjudication sul delta spot — APERTA, nodo prioritario:** conservare, limitare oppure scartare in base alle evidenze originali.
+4. Solo dopo, **una integrazione delimitata e motivata** dal giudizio.
+5. Consolidamento delle valutazioni GPT su candidati reali, condizioni operative, alternative spot e costi netti.
+
+**Fonti di governo della decisione:** [ROADMAP_KDD.md](ROADMAP_KDD.md) e [GOVERNO_KDD.md](GOVERNO_KDD.md). Sono documenti del **repository tecnico GitHub**; non sostituiscono il mandato operativo completo conservato sul Samsung né modificano il README privato di Termux. Le fasi G0/G2 sono stati comunicati nella cronologia di lavoro: le prove originarie devono essere rilette prima dell'adjudication.
+
+**Stato operativo dell'infrastruttura, 21/10:** multitimeframe SUI/EUR 15m/1H/4H/1D e confronto fra intervalli verificati visivamente sul Samsung; correzione del 4H live pubblicata e collaudata fino a **125 test** nel ciclo Termux riferito dall'autore. Le sezioni successive del README sono **cronologia dei singoli checkpoint**, perciò eventuali scritte storiche «non ancora installato» non descrivono lo stato attuale.
+
+**Nessun nuovo cantiere viene aperto da questa cristallizzazione.** Si riprende la roadmap dal nodo del delta spot: funzionalità grafiche, volume anomalo, avvio server e analisi short restano capacità, osservazioni o possibili requisiti futuri, senza scavalcare le dipendenze autorizzate. La pubblicazione di questi documenti non installa software sul Samsung né abilita operazioni Kraken.
 
 ## Regola di sicurezza fondamentale
 **Non trasferire su GitHub dati personali/finanziari, credenziali o stato operativo**. Il repository conserva solo sorgenti selezionati e licenze di dipendenze pubbliche. Rimangono **esclusivamente sul Samsung**:

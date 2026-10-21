@@ -1,8 +1,10 @@
-# KDD - esclusione preventiva: il repository contiene SOLO codice approvato.
+# KDD - esclusione preventiva: il repository contiene SOLO codice e documenti approvati.
 # Regola deliberata: negare ogni file, consentire esplicitamente unicamente i nomi sotto.
 *
 !/.gitignore
 !/README.md
+!/ROADMAP_KDD.md
+!/GOVERNO_KDD.md
 !/IMPORTAZIONE_SICURA.md
 !/AGGIORNAMENTI_TERMUX.md
 !/scripts/
