@@ -1,5 +1,5 @@
-"""POC 1: grafico locale SUI/EUR 4H con candele e volumi reali chiusi.
-Niente ordini, chiavi o indicatori fittizi. Dati dal dossier Kraken esistente.
+"""KDD: grafico locale SUI/EUR per timeframe 15m, 1H, 4H, 1D.
+Solo Kraken Spot pubblico e dossier locale, candele chiuse reali, nessun ordine.
 """
 from __future__ import annotations
 
@@ -331,7 +331,7 @@ I pivot mantengono le etichette sull'asse disattivate.</p>
 <div id="price-plot" aria-label="Grafico candlestick SUI/EUR __TF__"></div>
 </div>
 <h2 style="font-size:1rem">Volumi scambiati (SUI)</h2>
-<div id="volume-plot" aria-label="Istogramma dei volumi SUI/EUR 4H"></div>
+<div id="volume-plot" aria-label="Istogramma volumi SUI/EUR __TF__"></div>
 <p class="muted">Dati raccolti: __OBSERVED__. Ultima candela chiusa: __CLOSED__.
 Il grafico usa fino a 200 candele __TF__ chiuse. Fonte: __SOURCE__.
 L'ultimo prezzo mostrato è una chiusura, non una quotazione live.</p>
