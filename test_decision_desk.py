@@ -839,7 +839,8 @@ class DeskTests(unittest.TestCase):
         import datetime as dt
         now=dt.datetime(2026,10,21,7,42,tzinfo=dt.timezone.utc)
         data=self._mtf_fixture(now)
-        data["15m"]["candles"][-1]["close"]=0.70
+        last=data["15m"]["candles"][-1]
+        last.update(open=0.90,high=0.91,low=0.86,close=0.88)
         self.assertEqual(g.compare_timeframes(data,now=now)["quadro"],
                          "CONFIGURAZIONE_MISTA")
         data=self._mtf_fixture(now)
