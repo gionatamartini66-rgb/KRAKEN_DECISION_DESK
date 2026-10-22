@@ -8,10 +8,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from math import isfinite
 from collections.abc import Mapping
 
-from onchain_nav_core import utc, KINDS  # reuse the G2R2 chain-neutral contract
+from onchain_nav_core import utc, uint  # reuse the G2R2 chain-neutral contract
 
 ASSET = 'SUI'
 PAIR = 'SUI/EUR'
@@ -124,6 +123,27 @@ def _iso(x):
     return _time(x).isoformat().replace('+00:00', 'Z')
 
 
+def _ohlcv_consistency(bar, label, *, four_hour=False):
+    """OHLCV consistency is different from verification of a candle close marker.
+
+    A legacy minimal synthetic example or a close-only producer can keep its
+    timestamp evidence but never acquire a claim of complete OHLCV integrity.
+    """
+    if not isinstance(bar, Mapping):
+        raise ValueError(label + ': barra non strutturata')
+    names = (('open', 'high', 'low', 'close', 'volume_base') if four_hour else
+             ('apertura', 'massimo', 'minimo', 'chiusura', 'volume_base'))
+    extra = names[:3] + names[4:]
+    if not any(k in bar for k in extra):
+        return 'NON_VERIFICATA_OHLCV_INCOMPLETO'
+    if not all(k in bar for k in names):
+        raise ValueError(label + ': tuple OHLCV parziali')
+    op, high, low, close, volume = (Decimal(_number(bar[k], label+' '+k)) for k in names)
+    if not (low > 0 and low <= min(op, close) <= max(op, close) <= high and volume >= 0):
+        raise ValueError(label + ': OHLCV incoerenti')
+    return 'COERENZA_NUMERICA_OHLCV_CONTROLLATA'
+
+
 def _timeframes(dossier, provenance, built):
     card = _card(dossier)
     graph = dossier.get('grafici_4h', {}) if isinstance(dossier, Mapping) else {}
@@ -140,6 +160,10 @@ def _timeframes(dossier, provenance, built):
                 raise ValueError('ultime_candele non disponibili')
             last = bars[-1]
             close = _number(last['chiusura'], label+' close', strictly_positive=True)
+            integrity_flags = [_ohlcv_consistency(b, label) for b in bars]
+            ohlcv_integrity = ('COERENZA_NUMERICA_OHLCV_CONTROLLATA' if
+                  all(x=='COERENZA_NUMERICA_OHLCV_CONTROLLATA' for x in integrity_flags)
+                  else 'NON_VERIFICATA_OHLCV_INCOMPLETO')
             proof = 'MARKER_NON_ATTESTATO'
             # Some legacy exports do not carry per-bar closure timestamps. They
             # can remain visible as unverified synthetic context, not certified OHLC.
@@ -169,6 +193,7 @@ def _timeframes(dossier, provenance, built):
             periods[label] = {'last_closed_utc':_iso(part['ultima_chiusura_utc']),
                               'close_eur':close, 'source':'Kraken OHLC, dossier_trade',
                               'bar_close_validation':proof,
+                              'ohlcv_integrity':ohlcv_integrity,
                               'age_at_dossier_seconds':age,
                               'freshness':'STORICA_NON_LIVE' if age > seconds*3 else 'CANDELA_CHIUSA_RECENTE',
                               'missing_bars':gaps}
@@ -181,6 +206,15 @@ def _timeframes(dossier, provenance, built):
                 raise ValueError('4H incomplete')
             close_t = _time(indicative['ultima_chiusura_utc'])
             close = _number(series[-1]['close'], '4H close', strictly_positive=True)
+            integrity_flags = [_ohlcv_consistency(b, '4H', four_hour=True) for b in series]
+            ohlcv_integrity = ('COERENZA_NUMERICA_OHLCV_CONTROLLATA' if
+                  all(x=='COERENZA_NUMERICA_OHLCV_CONTROLLATA' for x in integrity_flags)
+                  else 'NON_VERIFICATA_OHLCV_INCOMPLETO')
+            starts=[b.get('apertura_ts_utc') for b in series]
+            if any(type(t) is not int for t in starts):
+                raise ValueError('aperture 4H incomplete')
+            if any(b-a!=14400 for a,b in zip(starts,starts[1:])):
+                raise ValueError('serie 4H non contigua o non ordinata')
             start = series[-1].get('apertura_ts_utc')
             if type(start) is not int or start+14400 != int(close_t.timestamp()) or close_t > built:
                 raise ValueError('4H closing marker differs from last bar or built time')
@@ -189,9 +223,11 @@ def _timeframes(dossier, provenance, built):
                              'close_eur':close, 'closed_bars':len(series),
                              'source':'Kraken Spot OHLC 240, dossier_trade',
                              'bar_close_validation':'CHIUSURA_CONFERMATA',
+                             'ohlcv_integrity':ohlcv_integrity,
                              'age_at_dossier_seconds':age,
                              'freshness':'STORICA_NON_LIVE' if age>43200 else 'CANDELA_CHIUSA_RECENTE',
-                             'missing_bars':'NON_DETERMINABILE'}
+                             'missing_bars':'NON_DETERMINABILE',
+                             'missing_bars_in_sample':0 if len(series)>1 else 'NON_DETERMINABILE'}
         except (KeyError, TypeError, ValueError) as exc:
             invalid.append('4H: '+str(exc))
     if not periods:
@@ -240,10 +276,20 @@ def _costs(card, market, provenance):
     clean=[]
     for row in rows:
         if isinstance(row,Mapping) and row.get('coppia') == PAIR:
+            if row.get('errore') is not None:  # explicit failure, never a cost quote
+                continue
             try:
-                clean.append({'pair':PAIR,'costo_roundtrip_eur':_number(
-                     row['costo_roundtrip_eur'],'costo'),
-                     'n_conversioni':_int_nonnegative(row['n_conversioni'])})
+                entry={'pair':PAIR,'costo_roundtrip_eur':_number(
+                      row['costo_roundtrip_eur'],'costo'),
+                      'n_conversioni':_int_nonnegative(row['n_conversioni'])}
+                # Normally absent: dossier_trade.collect discards these upstream.
+                for name in ('importo_eur','costo_roundtrip_pct','fee_stimate_eur',
+                             'spread_slippage_stimati_eur','commissione_crypto_pct',
+                             'commissione_fx_pct','fee_maker_pct'):
+                    if name in row and row[name] is not None:
+                        entry[name]=_number(row[name],name)
+                entry['importo_originale_disponibile']='importo_eur' in entry
+                clean.append(entry)
             except (ValueError,KeyError,TypeError):
                 continue
     if not clean:
@@ -251,6 +297,7 @@ def _costs(card, market, provenance):
     return _section(provenance, source='costi_spot.py su dati pubblici; scenario non eseguibile',
         observed_utc=None,coverage='Solo simulazione per importo ipotetico; istante calcolo ignoto',
         evidence=clean[:3],limits=('Non si conoscono fee del conto e slippage effettivo.',
+              'Importo e parametri di costo completi persi a monte in dossier_trade.collect se assenti nella riga.',
               'Tempo dell acquisizione del book per il calcolo costi non tracciato.'))
 
 
@@ -281,8 +328,69 @@ def _public_context(extra, key, provenance):
        limits=('Il testo sorgente e le alternative del chiamante non attraversano il confine pubblico.',
                'Per pubblicare contenuti reali serve un produttore attestato e un contratto pubblico di origine.'))
 
+def _declared_sui_source(url, kind, provenance):
+    # In the current G2R2 producer these are constant source URLs, not arbitrary
+    # URLs provided by a caller. Matching them does NOT authenticate the caller.
+    expected = ('https://graphql.mainnet.sui.io/graphql' if kind=='FATTO_OSSERVATO'
+                else 'https://sui-circulation.suiexplorer.com/api/current_month_sui_circulation')
+    if url == expected or (provenance == FIXTURE and kind=='DATO_PROGRAMMATO' and url=='https://sui.io/supply'):
+        return url
+    raise ValueError('URL fonte diverso dal contratto G2R2 corrente')
+
+
+def _reported_coverage(report, provenance):
+    """Preserve typed G2R2 reported bounds, never imply a complete history."""
+    cov=report.get('coverage')
+    if cov=='NON_DETERMINABILE' or cov is None:
+        return {'status':'NON_DETERMINABILE'}
+    if not isinstance(cov,Mapping):
+        return {'status':'COPERTURA_MALFORMATA'}
+    try:
+        first=uint(cov['first_checkpoint'],allow_zero=True)
+        last=uint(cov['last_checkpoint'],allow_zero=True)
+        if first>last:
+            raise ValueError('intervallo invertito')
+        # Source's fixed scope string; legacy synthetic BATCH_ONLY is a declared
+        # test marker, not arbitrary producer text or a complete-history claim.
+        scope=cov.get('scope')
+        canonical='Query.transactions filter=function; campione limitato; contiguita interna non dimostrata'
+        if scope!=canonical and not (provenance==FIXTURE and scope=='BATCH_ONLY'):
+            raise ValueError('scope non canonico')
+        return {'status':'RIPORTATA_NON_RIVERIFICATA',
+                'first_checkpoint':first,'last_checkpoint':last,'scope':scope}
+    except (ValueError,KeyError,TypeError,OverflowError):
+        return {'status':'COPERTURA_MALFORMATA'}
+
+
+def _existing_coingecko_fundamentals(card, built):
+    """Bounded numeric projection from dossier_trade.token_fundamentals (not auth)."""
+    raw=card.get('fondamentali_coingecko') if isinstance(card,Mapping) else None
+    if not isinstance(raw,Mapping) or raw.get('errore') or raw.get('id')!='sui':
+        return None
+    # Constant KDD producer endpoint/asset, no arbitrary URL echo.
+    expected=('https://api.coingecko.com/api/v3/coins/sui'
+              '?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false')
+    if raw.get('fonte')!=expected:
+        return None
+    try:
+        observed=_iso(raw['aggiornato_utc'])
+        if _time(observed)>built:
+            return None
+        values={'coin_id':'sui', 'source_reported_url':expected,
+                'source_authentication':'NON_DIMOSTRATA', 'source_observed_utc':observed}
+        for field in ('prezzo_usd','capitalizzazione_usd','offerta_circolante','offerta_totale'):
+            if raw.get(field) is not None:
+                values[field]=_number(raw[field],field)
+        if len(values)==4:
+            return None
+        return values
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
 # Contractual statuses allowed by the actual Sui G2R2 report.
-_ONCHAIN_STATUSES = ('identity','staking','unstaking','circulation')
+_ONCHAIN_STATUSES = ('identity','staking','unstaking','circulation',
+                     'staking_coverage','unstaking_coverage')
 _ONCHAIN_EVENTS = {'STAKED_SUI_OGGETTO_CREATO':'staking',
                    'STAKED_SUI_OGGETTO_CONSUMATO':'unstaking',
                    'CIRCOLAZIONE_PROGRAMMATA_FINE_MESE':'circulation'}
@@ -303,6 +411,7 @@ def _onchain(report, provenance, built):
     if report_time > built:
         return _section(status='TEMPO_INCOERENTE',limits=('Report successivo alla costruzione del dossier.',))
     clean, invalid, chronological=[],0,0
+    seen_facts, conflicting_facts = {}, set()
     for o in obs:
         try:
             if not isinstance(o, Mapping) or (o.get('asset'),o.get('chain'),o.get('asset_id')) != (ASSET,CHAIN,ASSET_ID):
@@ -320,8 +429,7 @@ def _onchain(report, provenance, built):
                 raise ValueError('unita non SUI')
             qty = _number(o['quantity'],'onchain quantity', strictly_positive=True)
             source = _string(o['source'],max_len=255)
-            if not source.startswith('https://') or '.invalid' in source:
-                raise ValueError('fonte non qualificata')
+            source=_declared_sui_source(source, kind, provenance)
             coverage = _string(o['coverage'])
             acquire=_time(o['acquired_utc'])
             event_t=_time(o['event_utc']) if o.get('event_utc') else None
@@ -339,6 +447,7 @@ def _onchain(report, provenance, built):
                     raise ValueError('digest/checkpoint assenti')
                 if isinstance(checkpoint,bool) or not str(checkpoint).isascii() or not str(checkpoint).isdecimal():
                     raise ValueError('checkpoint non numerico')
+                uint(str(checkpoint),allow_zero=True)
                 # Sui digest base58; a special nominal marker is allowed only
                 # in a synthetic fixture, and never exported as a real digest.
                 alphabet='123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
@@ -370,6 +479,8 @@ def _onchain(report, provenance, built):
                         all(c in '0123456789abcdefABCDEF' for c in obj[2:]) and
                         fam in ('staking','unstaking') and attrib=='NON_DIMOSTRATA'):
                     raise ValueError('metadati oggetto non validi')
+                if fam!=_ONCHAIN_EVENTS[event]:
+                    raise ValueError('famiglia filtro incompatibile con evento')
                 if Decimal(principal)/Decimal(10**9)!=Decimal(qty):
                     raise ValueError('principal MIST diverso da quantita SUI')
                 accepted_details={'staked_sui_object':obj.lower(),
@@ -378,7 +489,7 @@ def _onchain(report, provenance, built):
             raw_econ=o.get('economic_relevance')
             if raw_econ is not None:
                 _string(raw_econ)
-            clean.append({'kind':kind,'event':event,'quantity':qty,'unit':'SUI',
+            entry={'kind':kind,'event':event,'quantity':qty,'unit':'SUI',
                'transaction':transaction_output if kind=='FATTO_OSSERVATO' else None,
                'block_reference':str(checkpoint) if kind=='FATTO_OSSERVATO' else None,
                'event_utc':_iso(o['event_utc']) if event_t else None,
@@ -388,14 +499,32 @@ def _onchain(report, provenance, built):
                'reported_verification':reported,
                'integration_verification':'CONTRATTO_FORMALE_VALIDATO_FONTE_NON_RIVERIFICATA',
                'source':'FONTE_DICHIARATA_DAL_PRODUTTORE_NON_AUTENTICATA',
+               'reported_source_url':source,
+               'reported_source_authentication':'NON_DIMOSTRATA',
                'reference_period':o.get('reference_period') if kind=='DATO_PROGRAMMATO' else None,
                'details':accepted_details,
                'economic_relevance': ('Cambiamento oggetto StakedSui, significato direzionale indeterminato.'
-                 if kind=='FATTO_OSSERVATO' else 'Contesto programmatico, non direzione prezzo.')})
+                 if kind=='FATTO_OSSERVATO' else 'Contesto programmatico, non direzione prezzo.')}
+            if kind=='FATTO_OSSERVATO' and accepted_details is not None:
+                key=(transaction_output, accepted_details['staked_sui_object'],event)
+                if key in conflicting_facts:
+                    invalid+=1
+                    continue
+                if key in seen_facts:
+                    if seen_facts[key]!=entry:
+                        clean.remove(seen_facts[key])
+                        del seen_facts[key]
+                        conflicting_facts.add(key)
+                        invalid+=2
+                    # Identical duplicates are not separate facts.
+                    continue
+                seen_facts[key]=entry
+            clean.append(entry)
         except (ValueError,TypeError,KeyError):
             invalid+=1
     state=('TEMPO_INCOERENTE' if chronological else
-           (provenance if clean else 'NESSUNA_OSSERVAZIONE_UTILIZZABILE'))
+           ('RISPOSTA_INCOERENTE' if conflicting_facts else
+           (provenance if clean else 'NESSUNA_OSSERVAZIONE_UTILIZZABILE')))
     return _section(state,
        source='G2R2 report fornito dal chiamante, autenticita tecnica non attestata',
        observed_utc=_iso(report['acquired_utc']),
@@ -407,9 +536,13 @@ def _onchain(report, provenance, built):
                         ('OGGETTO_VERIFICATO_ATTRIBUZIONE_NON_DIMOSTRATA',
                          'EVENTO_NON_VERIFICABILE','RISPOSTA_INCOMPLETA',
                          'TRANSAZIONE_FALLITA','NON_ESEGUITO_IDENTITA_NON_VERIFICATA')) or
+                       (k in ('staking_coverage','unstaking_coverage') and statuses.get(k) in
+                        ('COPERTURA_INSUFFICIENTE','CAMPIONE_LIMITATO_NON_GENERALE')) or
                        (k=='circulation' and statuses.get(k) in
                         ('PROGRAMMA_ACQUISITO','FONTE_NON_DISPONIBILE','RISPOSTA_INCOMPLETA'))},
                  'rejected_observations':invalid,
+                 'conflicting_fact_keys':len(conflicting_facts),
+                 'reported_coverage':_reported_coverage(report,provenance),
                  'producer_attestation':'DICHIARAZIONE_NON_AUTENTICATA',
                  'independently_checked':'IDENTITA_CONTRATTO_E_CRONOLOGIA_SOLTANTO'},
        alternative=('Non prova acquisti, vendite, intenzioni o flusso netto.',),
@@ -432,6 +565,10 @@ def build(*, snapshot=None, existing_dossier=None, onchain_report=None,
     captured=_time(acquired_utc or datetime.now(timezone.utc).isoformat())
     sections={}
     sections['mercato']=_market(snapshot,observed)
+    market_t=sections['mercato']['observed_utc']
+    if market_t and _time(market_t)>captured:
+        sections['mercato']['status']='TEMPO_INCOERENTE'
+        sections['mercato']['limits'].append('Prezzo futuro rispetto alla costruzione; quarantena dei dipendenti.')
     card=_card(existing_dossier)
     snapshot_mismatch=False
     if isinstance(existing_dossier, Mapping) and card is not None:
@@ -449,30 +586,53 @@ def build(*, snapshot=None, existing_dossier=None, onchain_report=None,
     else:
         safe_dossier=existing_dossier
     sections['multitimeframe']=_timeframes(safe_dossier,observed,captured)
-    sections['liquidita']=_liquidity(sections['mercato'],card,observed)
-    sections['costi']=_costs(card,sections['mercato'],observed)
+    if sections['mercato']['status']=='TEMPO_INCOERENTE':
+        sections['liquidita']=_section(status='TEMPO_INCOERENTE',
+            limits=('Market ticker temporalmente impossibile; book non pubblicabile.',))
+        sections['costi']=_section(status='TEMPO_INCOERENTE',
+            limits=('Market ticker temporalmente impossibile; simulazioni sospese.',))
+    else:
+        sections['liquidita']=_liquidity(sections['mercato'],card,observed)
+        sections['costi']=_costs(card,sections['mercato'],observed)
     if snapshot_mismatch:
         for k in ('multitimeframe','liquidita','costi'):
             if k=='liquidita':
                 # Ticker metrics remain, but no book can be borrowed from a
                 # different snapshot; ticker time never becomes book time.
                 sections[k]['limits'].append('Dossier Kraken NON_ALLINEATO: book escluso.')
+            elif sections[k]['status']=='TEMPO_INCOERENTE':
+                sections[k]['limits'].append('Inoltre snapshot NON_ALLINEATO rispetto al dossier.')
             else:
                 sections[k]=_section(status='NON_ALLINEATO',
                     limits=('kraken_istantanea_utc e rilevazione_utc non corrispondono.',))
     sections['onchain']=_onchain(onchain_report,observed,captured)
     for key in ('fondamentali','notizie_token','macroeconomia','geopolitica'):
         sections[key]=_public_context(public_context,key,observed)
+    # Existing KDD CoinGecko producer already supplies bounded public numeric
+    # fields. Preserve a typed demonstration without advertising authentication.
+    cg=_existing_coingecko_fundamentals(card if not snapshot_mismatch and
+        sections['mercato']['status']!='TEMPO_INCOERENTE' else None, captured)
+    if cg is not None:
+        sections['fondamentali']['evidence']={'coingecko_reported_numbers':cg}
+        sections['fondamentali']['status']='FONTE_NUMERICA_RIPORTATA_NON_ATTESTATA'
+        sections['fondamentali']['source']='dossier_trade.token_fundamentals, provenienza non autenticata'
+        sections['fondamentali']['observed_utc']=cg['source_observed_utc']
+        sections['fondamentali']['coverage']='Soli valori numerici CoinGecko dichiarati, identita SUI; nessun testo terzo.'
+        sections['fondamentali']['limits'].append('Sorgente HTTPS riportata ma produttore non autenticato; senza gate pubblico.')
     # Structural presence is not availability of an authenticated public source.
     unavailable_statuses={UNAVAILABLE,'RISPOSTA_INCOMPLETA','NON_VERIFICABILE',
-                          'IDENTITA_NON_VERIFICATA','NESSUNA_OSSERVAZIONE_UTILIZZABILE',
-                          'TEMPO_INCOERENTE','NON_ALLINEATO'}
-    structural_missing=[k for k in CHANNELS if sections[k]['status'] in unavailable_statuses]
-    public_attested=[]  # no trusted public acquisition/attestation in this adapter
-    missing=list(CHANNELS)  # source availability, rather than nine filled boxes
+                           'IDENTITA_NON_VERIFICATA','NESSUNA_OSSERVAZIONE_UTILIZZABILE',
+                           'TEMPO_INCOERENTE','NON_ALLINEATO','RISPOSTA_INCOERENTE'}
+    public_attested=[]  # no authenticated producer here
+    missing=list(CHANNELS)
     market_t=sections['mercato']['observed_utc']
     chain_t=sections['onchain']['observed_utc']
-    if market_t and chain_t:
+    if (sections['mercato']['status']=='TEMPO_INCOERENTE' or
+        sections['onchain']['status']=='TEMPO_INCOERENTE'):
+        time_info={'status':'TEMPO_INCOERENTE',
+                   'market_utc':market_t,'onchain_acquired_utc':chain_t,
+                   'warning':'Allineamento di acquisizione non interpretabile con una fonte futura.'}
+    elif market_t and chain_t:
         delta=abs((_time(market_t)-_time(chain_t)).total_seconds())
         time_info={'market_utc':market_t,'onchain_acquired_utc':chain_t,
                    'difference_seconds':int(delta),
@@ -500,13 +660,27 @@ def build(*, snapshot=None, existing_dossier=None, onchain_report=None,
             state='CONTESTO_DATATO_NON_QUOTAZIONE_LIVE'
         channel_times[k]={'status':state,'source_utc':t,'age_at_dossier_seconds':lag}
     time_info['per_channel']=channel_times
+    # Availability indices MUST reflect final statuses, including future-source
+    # invalidation in the temporal pass, never the preliminary draft.
+    structural_missing=[k for k in CHANNELS if sections[k]['status'] in unavailable_statuses]
+    structural_present=[k for k in CHANNELS if k not in structural_missing]
+    availability={}
+    for k in CHANNELS:
+        sec=sections[k]
+        validity='NON_VALIDA' if k in structural_missing else 'FORMA_AMMESSA_NON_AUTENTICATA'
+        availability[k]={'struttura':'PRESENTE' if sec['evidence'] is not None else 'ASSENTE',
+                         'validita':validity,
+                         'freschezza':channel_times[k]['status'],
+                         'provenienza':'NON_ATTESTATA',
+                         'utilizzabilita':'LIMITATA_CON_VERIFICA_ESTERNA' if k in structural_present else 'NON_UTILIZZABILE'}
     return {'schema':'KDD_NAVIGATORE_P4_V001','asset':ASSET,'market_pair':PAIR,
             'market_type':'KRAKEN_SPOT','asset_identity':{'chain':CHAIN,'asset_id':ASSET_ID},
             'built_utc':_iso(captured.isoformat()), 'input_provenance':provenance,
             'sections':sections,'temporal_alignment':time_info,
             'missing_sections':missing,'structurally_missing_sections':structural_missing,
-            'structurally_present_sections':[k for k in CHANNELS if k not in structural_missing],
+            'structurally_present_sections':structural_present,
             'public_sources_attested':public_attested,
+             'section_availability':availability,
             'source_provenance_gate':'Nessuna fonte attestata direttamente dal compositore',
             'decision_status':'CONTESTO_INFORMATIVO_NON_PREDITTIVO',
             'possible_interpretations':['Valutare fatti solo dopo verifica di fonti e tempo.'],
