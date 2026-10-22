@@ -29,6 +29,11 @@
 !/kdd_export_public_v001.py
 !/test_kdd_export_public_v001.py
 !/test_kdd_export_public_g2r1.py
+!/test_kdd_export_public_g2r2.py
+!/scripts/kdd_publication_lab.py
+!/scripts/test_kdd_publication_lab.py
+!/scripts/test_kdd_export_preflight_g2r2.py
+!/KDD_D2_G2R2_REPORT.md
 !/kraken_readonly.py
 !/mercati_spot.py
 !/piano_gpt.py
