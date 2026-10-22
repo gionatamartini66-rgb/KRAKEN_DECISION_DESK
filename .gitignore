@@ -23,6 +23,8 @@
 !/flusso_spot.py
 !/grafico_4h.py
 !/kdd_saldi.py
+!/kdd_export_public_v001.py
+!/test_kdd_export_public_v001.py
 !/kraken_readonly.py
 !/mercati_spot.py
 !/piano_gpt.py
