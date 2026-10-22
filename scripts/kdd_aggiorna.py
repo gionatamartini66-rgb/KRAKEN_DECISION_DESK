@@ -196,7 +196,7 @@ def apply(root: Path, live: Path, *, commit_sha: str, dry_run: bool) -> None:
         staging.chmod(0o700)
         # Copia solo LOCALE: nessun dato viene inviato alla rete.
         # Prende TUTTI i .py residenti per preservare il fingerprint locale,
-        # quindi sovrascrive solo i 16 file autorizzati.
+        # quindi sovrascrive solo i file Python in allowlist autorizzati.
         for src in live.glob('*.py'):
             if src.is_symlink():
                 raise SafetyError('symlink Python nel programma live: intervento manuale richiesto')
