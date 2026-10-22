@@ -11,6 +11,10 @@
 !/onchain_nav_sui.py
 !/test_onchain_nav.py
 !/ONCHAIN_SUI_G2_REPORT.md
+!/navigatore_dossier.py
+!/test_navigatore_dossier.py
+!/ESEMPIO_SUI_EUR_SINTETICO.json
+!/KDD_P4_DOSSIER_G2_REPORT.md
 !/IMPORTAZIONE_SICURA.md
 !/AGGIORNAMENTI_TERMUX.md
 !/scripts/
