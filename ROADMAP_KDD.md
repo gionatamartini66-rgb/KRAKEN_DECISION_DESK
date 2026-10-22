@@ -50,6 +50,10 @@ La distinzione fra le fasi non impedisce di **ragionare ora sul portafoglio**: i
 
 **Vincolo di priorità:** questo ponte è **infrastruttura di accesso ai dati**, non il Punto 5 e non una scorciatoia per aggirare P08/P09 del dossier pubblico. I report privati del wallet, pur leggibili da ChatGPT con permesso, **non sono dati pubblici**. Non caricare file privati su GitHub. Prima di trasferire quelli reali, armonizzare con specifico GO [GOVERNO_KDD.md](GOVERNO_KDD.md) e il mandato locale, che oggi li assegnano solo al Samsung.
 
+### G2 pubblico — stato di implementazione sul ramo sperimentale, 22/10
+
+GO G2 dell'autore limitato all'esportatore dei contatori pubblici; **non è un GO al deploy né ai dati personali**. Ramo `experiments/kdd-drive-public-export-g2-20261022`: modulo offline `kdd_export_public_v001.py`, 24 test sintetici PASS, hook post-refresh in `decision_desk.py` **disattivato per impostazione predefinita** e attivabile soltanto con opt-in `KDD_DRIVE_PUBLIC_EXPORT=1`, aggiornamenti sperimentali a allowlist GitHub e updater. Destinazione ammessa: sola cartella preesistente `KDD_TEST_SAMSUNG`. Nessuna gestione di password, wallet, prezzi eseguibili, trading o sincronizzazione di cartelle intere. **Stato: implementato su branch per revisione, non validato sul Samsung, nessun merge.** Il prossimo gate è un G0 avversariale indipendente, quindi eventuale GO separato per il test Android e l'installazione. FolderSync automatico ancora OFF.
+
 ## 4. Primo caso patrimoniale e misura dell'utilità
 
 **Caso iniziale:** riesaminare se e come costituire una liquidità operativa indicativa di circa **150 EUR equivalenti in USDC**, soltanto se economicamente giustificato. La vecchia ipotesi di vendere ETH/SUI è **scaduta e non costituisce ordine**. La fotografia storica del 21/10 è una base di confronto, non il saldo corrente del 22/10. Prima di una decisione di esecuzione servono saldo aggiornato, quotazioni, spread/book, minimi, costi e conferma umana.
