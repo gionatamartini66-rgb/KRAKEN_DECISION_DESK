@@ -24,6 +24,8 @@ Il nucleo generale G2R2 è **riutilizzato** tramite `from onchain_nav_core impor
 
 Il dossier `KDD_NAVIGATORE_P4_V001` contiene `asset`, `market_pair`, `market_type`, `asset_identity`, `built_utc`, `input_provenance`, nove sezioni, allineamento temporale, lista esplicita dei canali mancanti, interpretazioni compatibili e alternative, proibizioni e stato decisionale non predittivo. Ogni sezione conserva: `status`, `source`, `observed_utc`, `coverage`, `evidence`, `compatible`, `alternative`, `limits`. Non vi sono segnali BUY/SELL, punteggi di trading, accesso a conti o suggerimenti di sizing.
 
+Per le metriche di book e le simulazioni dei costi, l'orario autonomo di acquisizione **non è disponibile** negli attuali campi del dossier: il prototipo registra `book_acquired_utc=null` e `observed_utc=null` per la simulazione dei costi; non usa il timestamp del ticker come sostituto.
+
 L'allineamento temporale separa tempo **dell'evento on-chain**, tempo **dell'acquisizione on-chain**, momento di **acquisizione del prezzo**, chiusure delle barre OHLC, data di un fatto macro/notizia e momento di composizione. Espone differenze e convenzioni per canale; la regola descrittiva dei 60 minuti confronta due istanti di acquisizione, **non** è una soglia di trading e non dimostra contemporaneità causale. Un canale successivo alla composizione viene segnalato `TEMPO_INCOERENTE`. Candele OHLC 4H non vengono attribuite al dossier se la chiusura non coincide con l'apertura dell'ultima candela più quattro ore.
 
 ## 4. Riutilizzo dei componenti e lacune
