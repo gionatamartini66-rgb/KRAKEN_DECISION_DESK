@@ -37,6 +37,15 @@ class G2R2Remediation(unittest.TestCase):
         self.assertIsNone(out['sections']['liquidita']['evidence'])
         self.assertEqual(out['sections']['mercato']['evidence']['prezzo_eur'],'1.25')  # audit, not usable
 
+    def test_p15_future_market_alignment_never_claims_synchrony(self):
+        m=market();m['rilevazione_utc']='2026-10-21T20:20:00Z'
+        e=existing();e['kraken_istantanea_utc']='2026-10-20T20:20:00Z'
+        out=make(snapshot=m,existing_dossier=e)
+        self.assertEqual(out['temporal_alignment']['status'],'TEMPO_INCOERENTE')
+        self.assertEqual(out['sections']['costi']['status'],'TEMPO_INCOERENTE')
+        self.assertEqual(out['sections']['liquidita']['status'],'TEMPO_INCOERENTE')
+        self.assertIn('NON_ALLINEATO',' '.join(out['sections']['costi']['limits']))
+
     def test_p15_legitimate_book_and_costs_retained(self):
         e=existing();e['kraken_istantanea_utc']=T
         out=make(existing_dossier=e,provenance='PUBLIC_REPORTED')

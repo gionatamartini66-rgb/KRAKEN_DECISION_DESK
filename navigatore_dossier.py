@@ -600,6 +600,8 @@ def build(*, snapshot=None, existing_dossier=None, onchain_report=None,
                 # Ticker metrics remain, but no book can be borrowed from a
                 # different snapshot; ticker time never becomes book time.
                 sections[k]['limits'].append('Dossier Kraken NON_ALLINEATO: book escluso.')
+            elif sections[k]['status']=='TEMPO_INCOERENTE':
+                sections[k]['limits'].append('Inoltre snapshot NON_ALLINEATO rispetto al dossier.')
             else:
                 sections[k]=_section(status='NON_ALLINEATO',
                     limits=('kraken_istantanea_utc e rilevazione_utc non corrispondono.',))
@@ -625,7 +627,12 @@ def build(*, snapshot=None, existing_dossier=None, onchain_report=None,
     missing=list(CHANNELS)
     market_t=sections['mercato']['observed_utc']
     chain_t=sections['onchain']['observed_utc']
-    if market_t and chain_t:
+    if (sections['mercato']['status']=='TEMPO_INCOERENTE' or
+        sections['onchain']['status']=='TEMPO_INCOERENTE'):
+        time_info={'status':'TEMPO_INCOERENTE',
+                   'market_utc':market_t,'onchain_acquired_utc':chain_t,
+                   'warning':'Allineamento di acquisizione non interpretabile con una fonte futura.'}
+    elif market_t and chain_t:
         delta=abs((_time(market_t)-_time(chain_t)).total_seconds())
         time_info={'market_utc':market_t,'onchain_acquired_utc':chain_t,
                    'difference_seconds':int(delta),

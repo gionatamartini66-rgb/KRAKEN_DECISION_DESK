@@ -12,7 +12,7 @@ Prima delle modifiche: eseguiti localmente 22 test G2, 27 G2R1, 50 G2R2 **99/99 
 
 | Asse | Modifica / prova | Limite non eliminato |
 | --- | --- | --- |
-| **P15 — tempo** | Prezzo cronologicamente successivo alla costruzione segnato `TEMPO_INCOERENTE` prima di generare i dipendenti. `liquidita` e `costi` non ricevono evidenze ammissibili. Prezzo strutturato disponibile soltanto come audit non utilizzabile. Prova positiva: book e costo legittimi ancora presenti a snapshot coerente. | Book senza timestamp proprio, perciò nessuna freschezza inventata. |
+| **P15 — tempo** | Prezzo cronologicamente successivo alla costruzione segnato `TEMPO_INCOERENTE` prima di generare i dipendenti. `liquidita` e `costi` non ricevono evidenze ammissibili. Prezzo strutturato disponibile soltanto come audit non utilizzabile; anche `temporal_alignment` non segnala sincronismo quando una fonte è futura, compreso il caso di refresh simultaneamente discordante. Prova positiva: book e costo legittimi ancora presenti a snapshot coerente. | Book senza timestamp proprio, perciò nessuna freschezza inventata. |
 | **P05 — indici** | Calcolo liste `structurally_*` *dopo* le mutazioni degli stati; `section_availability` esplicita presenza strutturale dell'evidenza, validità, freschezza, provenienza e utilizzabilità per ciascuno dei nove canali. | Etichette legacy `structurally_present_sections` mantenute per compatibilità, ora corrispondono alle sezioni strutturalmente ammissibili; nessuna source attested. |
 | **P11 — on-chain** | Oggetto StakedSui e `filter_family` coerente con tipo evento, confronti per `(digest,object,event)`. Doppioni identici deduplicati; conflitti di payload scartati e diagnosticati (`conflicting_fact_keys`, `RISPOSTA_INCOERENTE`). Non modificato produttore G2R2. | Autenticità del digest non provabile dal solo formato. Eventi senza `details` ammessi solo per vecchie fixture, non nel ramo `PUBLIC_REPORTED`. |
 | **P06/P07 — audit** | Conservati `reported_coverage` con estremi e scope tipizzati, `staking_coverage`,`unstaking_coverage`, `reported_source_url` su allowlist esatta di endpoint canonici e marcatori di fonte dichiarata non autenticata; casi malformed esplicitati. | Una URL testuale non è un'attestazione. La copertura dichiarata non prova storia completa; nessun uso di nuove fonti. |
@@ -27,7 +27,7 @@ Prima delle modifiche: eseguiti localmente 22 test G2, 27 G2R1, 50 G2R2 **99/99 
 | --- | --- | --- |
 | Prima del cambiamento | 22 nominali G2 + 27 G2R1 + 50 G2R2 correnti | **99/99 PASS** |
 | Prima del cambiamento | Sonde SOL, 17 condizioni | **8/17 PASS; 9/17 non soddisfatte** |
-| Dopo la remediation | 22 G2 + 27 G2R1 + 50 G2R2 + 21 G2R2 nuove | **120/120 PASS** |
+| Dopo la remediation | 22 G2 + 27 G2R1 + 50 G2R2 + 22 G2R2 nuove | **121/121 PASS** |
 | Dopo la remediation | Sonde SOL (una sola riga adattata per gestire `evidence=None` nel ramo correttamente quarantinato) | **15/17 PASS; due FAIL attesi P08 e P09**, blocchi di provenienza non mascherati |
 | Dopo | `py_compile` e test di controllo di dati validi, malformed, canary e origine riportata | **PASS** per le prove incluse |
 
@@ -43,7 +43,7 @@ La sonda SOL è stata conservata **senza mutarne le aspettative**. Solo il campo
 
 ## 5. Compatibilità e gate
 
-I test 50 G2R2 *correnti* passano, senza toccare `onchain_nav_core.py`, `onchain_nav_sui.py` o la loro suite. Le 99 prove nominali G2R1/G2R2 restano verdi; le 21 nuove includono ingressi leciti mantenuti e avversari respinti. L'attestazione source-bound viene mantenuta distinta da un'autenticazione assente. Le prove sono eseguite su fixture e in locale, senza rete e senza account privati.
+I test 50 G2R2 *correnti* passano, senza toccare `onchain_nav_core.py`, `onchain_nav_sui.py` o la loro suite. Le 99 prove nominali G2R1/G2R2 restano verdi; le 22 nuove includono ingressi leciti mantenuti e avversari respinti. L'attestazione source-bound viene mantenuta distinta da un'autenticazione assente. Le prove sono eseguite su fixture e in locale, senza rete e senza account privati.
 
 **Verdetto PARTIAL.** Le anomalie software P05/P06/P07/P10/P11/P12/P15 sono corrette nel perimetro testato; P08 e P09 hanno BLOCKER di origine non risolvibili con una modifica cosmetica al compositore. Ne segue **NO-GO al completamento del Punto 4**, alla pubblicazione di contenuti testuali reali, all'avvio del Punto 5, al merge e al deploy Android. Un prossimo lotto pubblico congelato richiede prima valutazione indipendente delle modifiche e verifica del trust boundary a monte, su GO umano distinto. Le condizioni contrattuali sono riportate in `KDD_P4_G2R2_CONTRATTO_PROVENIENZA_V001.md`.
 
