@@ -162,6 +162,8 @@ class DossierTests(unittest.TestCase):
         self.assertEqual(x['temporal_alignment']['per_channel']['multitimeframe']['status'],
                          'ULTIMA_CANDELA_CHIUSA_NON_QUOTAZIONE_LIVE')
         self.assertEqual(x['temporal_alignment']['per_channel']['onchain']['age_at_dossier_seconds'],300)
+        self.assertEqual(x['temporal_alignment']['per_channel']['costi']['status'], 'NON_DETERMINABILE')
+        self.assertIsNone(x['sections']['liquidita']['evidence']['book_acquired_utc'])
 
     def test_wrong_fundamentals_asset_rejected(self):
         v=extra();v['fondamentali']['asset_id']='NOT_SUI'
