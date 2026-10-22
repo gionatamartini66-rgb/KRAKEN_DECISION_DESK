@@ -1,0 +1,297 @@
+{
+  "schema": "KDD_NAVIGATORE_P4_V001",
+  "asset": "SUI",
+  "market_pair": "SUI/EUR",
+  "market_type": "KRAKEN_SPOT",
+  "asset_identity": {
+    "chain": "sui:mainnet",
+    "asset_id": "0x2::sui::SUI"
+  },
+  "built_utc": "2026-10-21T20:15:00Z",
+  "input_provenance": "FIXTURE",
+  "sections": {
+    "mercato": {
+      "status": "FIXTURE_SINTETICA",
+      "source": "Kraken Spot REST pubblico, snapshot esistente KDD",
+      "observed_utc": "2026-10-21T20:00:00Z",
+      "coverage": "Sola coppia spot SUI/EUR; prezzo indicativo e stima volume 24h.",
+      "evidence": {
+        "asset": "SUI",
+        "pair": "SUI/EUR",
+        "prezzo_eur": "1.25",
+        "spread_pct": "0.2",
+        "volume_24h_eur_stimato": "250000",
+        "costo_min_eur": "5",
+        "quantita_min": "1"
+      },
+      "compatible": [
+        "Prezzo e spread descrivono il mercato al momento della rilevazione."
+      ],
+      "alternative": [
+        "Il volume 24h stimato non e profondita eseguibile."
+      ],
+      "limits": [
+        "Non certifica tradabilita in Italia, fee, slippage o prezzo di ordine.",
+        "Variazione giornaliera e volume rolling 24h sono finestre diverse."
+      ]
+    },
+    "multitimeframe": {
+      "status": "FIXTURE_SINTETICA",
+      "source": "dossier_trade.py + analisi_v02.py, da Kraken pubblico",
+      "observed_utc": "2026-10-21T19:45:00Z",
+      "coverage": "Candele chiuse per 15m,1H,4H",
+      "evidence": {
+        "15m": {
+          "last_closed_utc": "2026-10-21T19:45:00Z",
+          "close_eur": "1.25",
+          "source": "Kraken OHLC, dossier_trade"
+        },
+        "1H": {
+          "last_closed_utc": "2026-10-21T19:00:00Z",
+          "close_eur": "1.25",
+          "source": "Kraken OHLC, dossier_trade"
+        },
+        "4H": {
+          "last_closed_utc": "2026-10-21T16:00:00Z",
+          "close_eur": "1.25",
+          "closed_bars": 1,
+          "source": "Kraken Spot OHLC 240, dossier_trade"
+        }
+      },
+      "compatible": [],
+      "alternative": [
+        "Confluenze tecniche non equivalgono a probabilita di rendimento."
+      ],
+      "limits": [
+        "Timeframe assente: 1D",
+        "Le chiusure di timeframe differenti non sono istanti identici."
+      ]
+    },
+    "liquidita": {
+      "status": "FIXTURE_SINTETICA",
+      "source": "mercati_spot.py / decision_desk.py: Kraken ticker pubblico; analisi_v02.book_metrics (Depth 10)",
+      "observed_utc": "2026-10-21T20:00:00Z",
+      "coverage": "Ticker coppia; depth top-10 soltanto se disponibile.",
+      "evidence": {
+        "spread_pct": "0.2",
+        "volume_24h_eur_stimato": "250000",
+        "spread_book_pct": "0.21",
+        "profondita_bid10_eur": "5000",
+        "profondita_ask10_eur": "4500"
+      },
+      "compatible": [],
+      "alternative": [
+        "Book modificabile; volume 24h non e profondita corrente."
+      ],
+      "limits": [
+        "Non misura slippage eseguibile senza importo e libro fresco.",
+        "Kraken resta mercato di esecuzione, non Binance."
+      ]
+    },
+    "costi": {
+      "status": "FIXTURE_SINTETICA",
+      "source": "costi_spot.py su dati pubblici; scenario non eseguibile",
+      "observed_utc": "2026-10-21T20:00:00Z",
+      "coverage": "Solo simulazione per importo ipotetico",
+      "evidence": [
+        {
+          "pair": "SUI/EUR",
+          "costo_roundtrip_eur": "2.5",
+          "n_conversioni": 0
+        }
+      ],
+      "compatible": [],
+      "alternative": [],
+      "limits": [
+        "Non si conoscono fee del conto e slippage effettivo."
+      ]
+    },
+    "onchain": {
+      "status": "FIXTURE_SINTETICA",
+      "source": "Sui Mainnet GraphQL / programma Foundation (G2R2 report)",
+      "observed_utc": "2026-10-21T20:10:00Z",
+      "coverage": "336500000..336600000 (campione)",
+      "evidence": {
+        "observations": [
+          {
+            "kind": "FATTO_OSSERVATO",
+            "event": "STAKED_SUI_OGGETTO_CREATO",
+            "quantity": "1.5",
+            "unit": "SUI",
+            "transaction": "DIGEST_FIXTURE",
+            "block_reference": "336592287",
+            "event_utc": "2026-10-21T20:02:00Z",
+            "acquired_utc": "2026-10-21T20:10:00Z",
+            "knowable_utc": null,
+            "coverage": "un evento",
+            "verification": "VERIFICATO",
+            "source": "https://graphql.mainnet.sui.io/graphql",
+            "compatible": [
+              "Object created"
+            ],
+            "prohibited": [
+              "BUY/SELL"
+            ],
+            "limits": [
+              "Non e vendita"
+            ],
+            "reference_period": null
+          }
+        ],
+        "source_statuses": {
+          "identity": "VERIFICATA",
+          "staking": "OGGETTO_VERIFICATO_ATTRIBUZIONE_NON_DIMOSTRATA"
+        }
+      },
+      "compatible": [
+        "Creazione o consumo verificato di oggetto StakedSui; rilevanza economica ipotetica."
+      ],
+      "alternative": [
+        "Non prova acquisti, vendite, intenzioni o flusso netto."
+      ],
+      "limits": [
+        "Fonte ed estrazione da validare indipendentemente; campione non censuario.",
+        "Attribution Move PTB non dimostrata; non aggregare staking/unstaking.",
+        "Circolazione programmata e oggetti on-chain hanno semantiche differenti."
+      ]
+    },
+    "fondamentali": {
+      "status": "FIXTURE_SINTETICA",
+      "source": "https://example.invalid/fixture",
+      "observed_utc": "2026-10-21T20:00:00Z",
+      "coverage": "Un episodio sintetico",
+      "evidence": {
+        "fact": "Fatto esclusivamente sintetico"
+      },
+      "compatible": [],
+      "alternative": [
+        "Un altro meccanismo potrebbe contribuire."
+      ],
+      "limits": [
+        "Informazione riportata nel payload; acquisizione diretta non effettuata da questo componente."
+      ]
+    },
+    "notizie_token": {
+      "status": "FIXTURE_SINTETICA",
+      "source": "https://example.invalid/fixture",
+      "observed_utc": "2026-10-21T20:00:00Z",
+      "coverage": "Un episodio sintetico",
+      "evidence": {
+        "fact": "Fatto esclusivamente sintetico"
+      },
+      "compatible": [],
+      "alternative": [
+        "Un altro meccanismo potrebbe contribuire."
+      ],
+      "limits": [
+        "Informazione riportata nel payload; acquisizione diretta non effettuata da questo componente."
+      ]
+    },
+    "macroeconomia": {
+      "status": "FIXTURE_SINTETICA",
+      "source": "https://example.invalid/fixture",
+      "observed_utc": "2026-10-21T20:00:00Z",
+      "coverage": "Un episodio sintetico",
+      "evidence": {
+        "fact": "Fatto esclusivamente sintetico"
+      },
+      "compatible": [],
+      "alternative": [
+        "Un altro meccanismo potrebbe contribuire."
+      ],
+      "limits": [
+        "Informazione riportata nel payload; acquisizione diretta non effettuata da questo componente."
+      ]
+    },
+    "geopolitica": {
+      "status": "FIXTURE_SINTETICA",
+      "source": "https://example.invalid/fixture",
+      "observed_utc": "2026-10-21T20:00:00Z",
+      "coverage": "Un episodio sintetico",
+      "evidence": {
+        "fact": "Fatto esclusivamente sintetico"
+      },
+      "compatible": [],
+      "alternative": [
+        "Un altro meccanismo potrebbe contribuire."
+      ],
+      "limits": [
+        "Informazione riportata nel payload; acquisizione diretta non effettuata da questo componente."
+      ]
+    }
+  },
+  "temporal_alignment": {
+    "market_utc": "2026-10-21T20:00:00Z",
+    "onchain_acquired_utc": "2026-10-21T20:10:00Z",
+    "difference_seconds": 600,
+    "status": "ALLINEAMENTO_ACQUISIZIONE_ENTRO_60_MIN",
+    "warning": "Tempi di acquisizione comparabili NON rendono contemporanei gli eventi on-chain.",
+    "per_channel": {
+      "mercato": {
+        "status": "ACQUISIZIONE_ENTRO_60_MIN",
+        "source_utc": "2026-10-21T20:00:00Z",
+        "age_at_dossier_seconds": 900
+      },
+      "multitimeframe": {
+        "status": "ULTIMA_CANDELA_CHIUSA_NON_QUOTAZIONE_LIVE",
+        "source_utc": "2026-10-21T19:45:00Z",
+        "age_at_dossier_seconds": 1800
+      },
+      "liquidita": {
+        "status": "ACQUISIZIONE_ENTRO_60_MIN",
+        "source_utc": "2026-10-21T20:00:00Z",
+        "age_at_dossier_seconds": 900
+      },
+      "costi": {
+        "status": "ACQUISIZIONE_ENTRO_60_MIN",
+        "source_utc": "2026-10-21T20:00:00Z",
+        "age_at_dossier_seconds": 900
+      },
+      "onchain": {
+        "status": "ACQUISIZIONE_ENTRO_60_MIN",
+        "source_utc": "2026-10-21T20:10:00Z",
+        "age_at_dossier_seconds": 300
+      },
+      "fondamentali": {
+        "status": "CONTESTO_DATATO_NON_QUOTAZIONE_LIVE",
+        "source_utc": "2026-10-21T20:00:00Z",
+        "age_at_dossier_seconds": 900
+      },
+      "notizie_token": {
+        "status": "CONTESTO_DATATO_NON_QUOTAZIONE_LIVE",
+        "source_utc": "2026-10-21T20:00:00Z",
+        "age_at_dossier_seconds": 900
+      },
+      "macroeconomia": {
+        "status": "CONTESTO_DATATO_NON_QUOTAZIONE_LIVE",
+        "source_utc": "2026-10-21T20:00:00Z",
+        "age_at_dossier_seconds": 900
+      },
+      "geopolitica": {
+        "status": "CONTESTO_DATATO_NON_QUOTAZIONE_LIVE",
+        "source_utc": "2026-10-21T20:00:00Z",
+        "age_at_dossier_seconds": 900
+      }
+    }
+  },
+  "missing_sections": [],
+  "decision_status": "CONTESTO_INFORMATIVO_NON_PREDITTIVO",
+  "possible_interpretations": [
+    "Valutare se un fatto cambia le ipotesi, solo dopo verifica delle fonti e del tempo."
+  ],
+  "alternative_interpretations": [
+    "L evento osservato potrebbe non riguardare domanda o offerta negoziabile."
+  ],
+  "prohibited_interpretations": [
+    "BUY/SELL automatico",
+    "Previsioni o probabilita arbitrarie",
+    "Staking = acquisto",
+    "Unstaking = vendita",
+    "Unlock = vendita",
+    "RSS = analisi macroeconomica",
+    "Volumi Binance = liquidita eseguibile su Kraken"
+  ],
+  "private_data_access": false,
+  "execution_permissions": false,
+  "decision_utility": "NON_DIMOSTRATA"
+}
