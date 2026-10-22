@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""KDD D2/G2R1: manual public-counter export. No private APIs or trading.
+"""KDD D2/G2R2: public exporter DISABLED pending Android trust boundary.
 
-Fail closed on missing directory-descriptor operations, unsafe destinations or
-missing exact opt-in. Does not start FolderSync, polling or any network I/O.
+A real directory can be renamed after any anchoring check. No public writes,
+network, account data, polling or automatic deployment.
 """
 from __future__ import annotations
 
 import argparse
 import datetime as dt
-import fcntl
 import json
 import os
 from pathlib import Path
-import secrets
 import stat
 
 SCHEMA = 'kdd_public_market_v002'
@@ -80,37 +78,6 @@ def _safe_directory(absolute: Path) -> int:
     except BaseException:
         os.close(current)
         raise
-
-
-def _pinned_target(dest_dir: Path) -> int:
-    # Exact approved address, including ancestors; tests may explicitly patch
-    # DEFAULT_DEST in a sealed temporary sandbox, not from CLI/environment.
-    if os.fspath(dest_dir) != os.fspath(DEFAULT_DEST):
-        raise ExportError('Destinazione diversa dal percorso approvato')
-    # The containing directory must not be writable by other POSIX principals.
-    # This checks Linux mode bits only; Android FUSE access semantics still
-    # require a separate device-level security review before deployment.
-    parent = _safe_directory(DEFAULT_DEST.parent)
-    try:
-        mode = os.fstat(parent).st_mode
-        if mode & (stat.S_IWGRP | stat.S_IWOTH):
-            raise ExportError('Genitore della destinazione scrivibile da terzi')
-    finally:
-        os.close(parent)
-    return _safe_directory(DEFAULT_DEST)
-
-
-def _assert_anchored(fd: int) -> None:
-    """Reject a swapped/moved destination; all publication uses fd-relative I/O."""
-    other = _safe_directory(DEFAULT_DEST)
-    try:
-        a, b = os.fstat(fd), os.fstat(other)
-        if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
-            raise ExportError('Destinazione sostituita durante la pubblicazione')
-        if not stat.S_ISDIR(a.st_mode):
-            raise ExportError('Destinazione non directory')
-    finally:
-        os.close(other)
 
 
 def _read_source(source_dir: Path) -> dict:
@@ -195,74 +162,24 @@ def freshness_at_read(doc: dict, read_utc: dt.datetime) -> dict:
             'eta_secondi': int(seconds)}
 
 
-def _target_regular_or_absent(dirfd: int) -> None:
-    try:
-        entry = os.stat(OUTPUT_NAME, dir_fd=dirfd, follow_symlinks=False)
-    except FileNotFoundError:
-        return
-    except (OSError, TypeError, NotImplementedError) as e:
-        raise ExportError('Impossibile verificare il file di output') from e
-    if not stat.S_ISREG(entry.st_mode):
-        raise ExportError('Output esistente non regolare o symlink')
+# G2R2. Shared storage is deliberately NOT a publication target.
+# An open directory descriptor follows an inode after its parent is moved;
+# there is no atomic "is still under this pathname" primitive here. The
+# previous writer has been removed, not made cosmetically stricter.
+# The separate experimental private-stage prototype may prepare this document,
+# but it cannot transfer it to Android shared storage.
+PUBLICATION_POLICY = 'NO_GO_SHARED_STORAGE_RENAME_CAPABLE_ACTOR'
 
 
 def publish(source_dir: Path, dest_dir: Path, now: dt.datetime | None = None,
             *, environ: dict | None = None) -> dict:
-    """One publication with exact opt-in. No pathname-based tempfile/rename."""
+    """Fail closed: no file is opened or published, even with opt-in.
+
+    The '1' flag is necessary but insufficient for authorization and safe
+    publication. FolderSync and the existing KDD refresh hook are untouched.
+    """
     _opt_in(environ)
-    if not getattr(os, 'supports_dir_fd', None) or os.open not in os.supports_dir_fd or os.stat not in os.supports_dir_fd or os.rename not in os.supports_dir_fd:
-        raise ExportError('Directory descriptor operations unavailable')
-    directory = _pinned_target(Path(dest_dir))
-    temp = None
-    try:
-        try:
-            fcntl.flock(directory, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except (OSError, ValueError) as e:
-            raise ExportError('Blocco concorrente o filesystem senza locking') from e
-        _assert_anchored(directory)
-        _target_regular_or_absent(directory)
-        try:
-            os.fsync(directory)  # test capability BEFORE any file publication
-        except OSError as e:
-            raise ExportError('Filesystem non garantisce fsync directory') from e
-        payload = prepare(source_dir, now)
-        # Validate after potentially slow source preparation; do not follow a
-        # replacement symlink after validation.
-        _assert_anchored(directory)
-        temp = '.kdd_market_' + secrets.token_hex(16) + '.tmp'
-        try:
-            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
-                         os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory)
-        except (OSError, NotImplementedError, TypeError) as e:
-            raise ExportError('Impossibile creare temporaneo confinato') from e
-        try:
-            with os.fdopen(fd, 'wb') as stream:
-                blob = (json.dumps(payload, ensure_ascii=False, sort_keys=True,
-                                   allow_nan=False, indent=2) + '\n').encode('utf-8')
-                stream.write(blob)
-                stream.flush()
-                os.fsync(stream.fileno())
-        except BaseException:
-            raise
-        _assert_anchored(directory)
-        _target_regular_or_absent(directory)
-        try:
-            os.rename(temp, OUTPUT_NAME, src_dir_fd=directory, dst_dir_fd=directory)
-            temp = None
-            # Fsync the containing directory where supported. A failed fsync
-            # cannot undo a completed rename; document operational ambiguity.
-            os.fsync(directory)
-        except (OSError, NotImplementedError, TypeError) as e:
-            raise ExportError('Pubblicazione atomica o fsync non supportata') from e
-        _assert_anchored(directory)
-        return payload
-    finally:
-        if temp is not None:
-            try:
-                os.unlink(temp, dir_fd=directory)
-            except OSError:
-                pass
-        os.close(directory)
+    raise ExportError('NON_PUBBLICATO: destinazione condivisa non confinabile nel modello D2-S02')
 
 
 def export_if_enabled(source_dir: Path, *, dest_dir: Path = DEFAULT_DEST,
