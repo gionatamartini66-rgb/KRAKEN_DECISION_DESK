@@ -71,13 +71,14 @@
       "status": "FIXTURE_SINTETICA",
       "source": "mercati_spot.py / decision_desk.py: Kraken ticker pubblico; analisi_v02.book_metrics (Depth 10)",
       "observed_utc": "2026-10-21T20:00:00Z",
-      "coverage": "Ticker coppia; depth top-10 soltanto se disponibile.",
+      "coverage": "Timestamp riferito al ticker; ora del book top-10 non dimostrata.",
       "evidence": {
         "spread_pct": "0.2",
         "volume_24h_eur_stimato": "250000",
         "spread_book_pct": "0.21",
         "profondita_bid10_eur": "5000",
-        "profondita_ask10_eur": "4500"
+        "profondita_ask10_eur": "4500",
+        "book_acquired_utc": null
       },
       "compatible": [],
       "alternative": [
@@ -85,14 +86,15 @@
       ],
       "limits": [
         "Non misura slippage eseguibile senza importo e libro fresco.",
-        "Kraken resta mercato di esecuzione, non Binance."
+        "Kraken resta mercato di esecuzione, non Binance.",
+        "Book non allineabile temporalmente senza il suo timestamp autonomo."
       ]
     },
     "costi": {
       "status": "FIXTURE_SINTETICA",
       "source": "costi_spot.py su dati pubblici; scenario non eseguibile",
-      "observed_utc": "2026-10-21T20:00:00Z",
-      "coverage": "Solo simulazione per importo ipotetico",
+      "observed_utc": null,
+      "coverage": "Solo simulazione per importo ipotetico; istante calcolo ignoto",
       "evidence": [
         {
           "pair": "SUI/EUR",
@@ -103,7 +105,8 @@
       "compatible": [],
       "alternative": [],
       "limits": [
-        "Non si conoscono fee del conto e slippage effettivo."
+        "Non si conoscono fee del conto e slippage effettivo.",
+        "Tempo dell acquisizione del book per il calcolo costi non tracciato."
       ]
     },
     "onchain": {
@@ -243,9 +246,8 @@
         "age_at_dossier_seconds": 900
       },
       "costi": {
-        "status": "ACQUISIZIONE_ENTRO_60_MIN",
-        "source_utc": "2026-10-21T20:00:00Z",
-        "age_at_dossier_seconds": 900
+        "status": "NON_DETERMINABILE",
+        "source_utc": null
       },
       "onchain": {
         "status": "ACQUISIZIONE_ENTRO_60_MIN",
