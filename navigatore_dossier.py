@@ -155,13 +155,16 @@ def _liquidity(market, card, provenance):
             values.update({key:_number(book[key],key) for key in
                            ('spread_book_pct','profondita_bid10_eur','profondita_ask10_eur')})
             src+='; analisi_v02.book_metrics (Depth 10)'
+            # No acquisition timestamp for depth in the existing dossier.
+            values['book_acquired_utc']=None
         except (KeyError,ValueError):
             pass
     return _section(provenance, source=src,observed_utc=market['observed_utc'],
-        coverage='Ticker coppia; depth top-10 soltanto se disponibile.',evidence=values,
+        coverage='Timestamp riferito al ticker; ora del book top-10 non dimostrata.',evidence=values,
         alternative=('Book modificabile; volume 24h non e profondita corrente.',),
         limits=('Non misura slippage eseguibile senza importo e libro fresco.',
-                'Kraken resta mercato di esecuzione, non Binance.'))
+                'Kraken resta mercato di esecuzione, non Binance.',
+                'Book non allineabile temporalmente senza il suo timestamp autonomo.'))
 
 
 def _costs(card, market, provenance):
@@ -184,8 +187,9 @@ def _costs(card, market, provenance):
     if not clean:
         return _section(limits=('Simulazione costo SUI/EUR non presente o non validabile.',))
     return _section(provenance, source='costi_spot.py su dati pubblici; scenario non eseguibile',
-        observed_utc=market['observed_utc'],coverage='Solo simulazione per importo ipotetico',
-        evidence=clean[:3],limits=('Non si conoscono fee del conto e slippage effettivo.',))
+        observed_utc=None,coverage='Solo simulazione per importo ipotetico; istante calcolo ignoto',
+        evidence=clean[:3],limits=('Non si conoscono fee del conto e slippage effettivo.',
+             'Tempo dell acquisizione del book per il calcolo costi non tracciato.'))
 
 
 def _public_context(extra, key, provenance):
