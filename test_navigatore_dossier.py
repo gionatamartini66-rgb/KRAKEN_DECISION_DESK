@@ -70,7 +70,8 @@ class DossierTests(unittest.TestCase):
         self.assertEqual(x['market_pair'],PAIR)
         self.assertEqual(len(x['sections']),9)
         self.assertEqual(set(x['sections']['multitimeframe']['evidence']), {'15m','1H','4H'})
-        self.assertEqual(x['missing_sections'],[])
+        self.assertEqual(len(x['missing_sections']),9)
+        self.assertEqual(x['public_sources_attested'],[])
         self.assertEqual(x['temporal_alignment']['status'],'ALLINEAMENTO_ACQUISIZIONE_ENTRO_60_MIN')
         self.assertEqual(x['decision_utility'],'NON_DIMOSTRATA')
 
