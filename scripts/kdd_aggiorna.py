@@ -23,7 +23,8 @@ REPOSITORY = 'gionatamartini66-rgb/KRAKEN_DECISION_DESK'
 PY_FILES = (
     'analisi_v02.py', 'binance_reference.py', 'costi_spot.py',
     'decision_desk.py', 'dossier_trade.py', 'flusso_spot.py',
-    'grafico_4h.py', 'kdd_saldi.py', 'kraken_readonly.py',
+    'grafico_4h.py', 'kdd_saldi.py', 'kdd_export_public_v001.py',
+    'test_kdd_export_public_v001.py', 'kraken_readonly.py',
     'mercati_spot.py', 'piano_gpt.py', 'ricerca_setup.py',
     'serve.py', 'studio_delta.py', 'test_decision_desk.py',
     'verifica_piani.py',
@@ -140,7 +141,8 @@ def write_atomic(dest: Path, data: bytes, mode: int | None = None) -> None:
 
 def isolated_test(staging: Path) -> None:
     # Non serve rete. I test usano fixture sintetiche e file privati SOLO locali.
-    proc = command([sys.executable, '-m', 'unittest', '-q', 'test_decision_desk'],
+    proc = command([sys.executable, '-m', 'unittest', '-q', 'test_decision_desk',
+                    'test_kdd_export_public_v001'],
                    cwd=staging, timeout=150)
     if proc.stdout.strip():
         print(proc.stdout[-1700:])
