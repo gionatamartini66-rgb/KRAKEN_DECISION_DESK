@@ -803,6 +803,17 @@ def refresh():
           '|', len(status_dossier.get('token_analizzati',[])), 'candidati',
           '| analisi GPT non ricalcolata')
     output(data)
+    # G2 sperimentale: dati MERCATO pubblici soltanto, opt-in esplicito.
+    # La mancata esportazione non deve invalidare refresh/report KDD.
+    try:
+        import kdd_export_public_v001 as public_export
+        exported = public_export.export_if_enabled(DIR)
+        if exported is not None:
+            print('EXPORT MERCATO PUBBLICO:', exported['freschezza'],
+                  '| origine', exported['rilevazione_utc'])
+    except Exception as exc:
+        # Nessun contenuto di snapshot/chiavi/stack trace nei log del ponte.
+        print('ATTENZIONE EXPORT MERCATO PUBBLICO:', type(exc).__name__)
 
 def output(data):
     report = build_report(data, load('portafoglio.json',{'posizioni':[]}),load('config.json',{}),
