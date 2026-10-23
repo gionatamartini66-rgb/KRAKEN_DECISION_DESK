@@ -1,6 +1,8 @@
-# KDD — ROADMAP CANONICA (23 OTTOBRE 2026)
+# KDD — ROADMAP CANONICA / BUSSOLA DI BORDO (23 OTTOBRE 2026)
 
-**Versione consolidata per sostituzione, non diario incrementale.** Fonte di governo: [GOVERNO_KDD.md](GOVERNO_KDD.md) e mandato operativo originario sul Samsung, non alterati da questa revisione. Stato tecnico del codice fondato sui sorgenti GitHub; il README integrale contiene il mandato e la cronologia locale fino al 22/10. Sul Samsung il 23/10 è stato verificato il ponte D2 sintetico, NON l'equivalenza del runtime vivo al repository. **Nessuna autorizzazione implicita a codice, trasferimenti dati, trade, merge o deploy.**
+**Unica rotta operativa.** Il [README integrale](README.md) conserva il mandato originale e la cronologia; [GOVERNO_KDD.md](GOVERNO_KDD.md) stabilisce autorità e limiti. Qui si indicano **stato, dipendenze, primo passo e criteri di chiusura**. Il codice su GitHub non dimostra da solo l'installazione sul Samsung.
+
+**Regola per ogni operatore: aggiornare PER SOSTITUZIONE.** Quando un passo si completa, fallisce o cambia, **sovrascrivere o cassare qui le istruzioni operative superate** e aggiornare il primo passo. Non aggiungere diari, appendici cumulative, ulteriori roadmap o mandati concorrenti. Conservare invece **prove e decisioni storiche** nel README, nei rapporti originari e nella cronologia Git: non distruggere la storia per ripulire la bussola. Nessun documento costituisce GO implicito a codice, merge, deploy, dati privati o trading.
 
 ## 1. Destinazione
 
@@ -8,47 +10,38 @@
 
 Kraken Spot è la sede di riferimento per prezzi negoziabili e ordini **eseguiti soltanto dall'autore**. **Obiettivo di copertura: consultare qualsiasi coppia Spot quotata su Kraken**, con identità della coppia e valuta di quotazione preservate, e con verifica separata dell'effettiva negoziabilità per il conto italiano. `mercati_spot.py` già seleziona EUR/USD/USDC: non ricostruirlo, ma estenderlo senza imporre EUR quale unica quota. Scanner economico sull'universo, approfondimento multitimeframe mirato sulle coppie rilevanti o richieste; SUI/EUR è soltanto il pilota. Binance Spot pubblico è **impronta di fondo del mercato**, riferimento comparativo di partecipazione, prezzi, book e volumi mediante `binance_reference.py` già esistente; non costituisce liquidità negoziabile su Kraken e non va sommato come volume di coppie diverse senza normalizzazione e copertura esplicite. Contesto on-chain, tokenomics, news, macro e geopolitica sono rilevanti solo se fonte, identità, tempo e limiti sono espliciti. **Analisi short ammessa; operazioni short/futures/leva/margin non autorizzate.** Nessun ordine automatico o API generativa a pagamento.
 
-## 2. Sequenza di sviluppo e gate — stato attuale
+## 2. Stato consolidato — non ripetere lavori esistenti
 
-| Passaggio | Esito accertato | Prossimo gate |
+| Area | Stato verificabile al 23/10/2026 | Limite ancora aperto |
 | --- | --- | --- |
-| **1 — G0 delta spot** | Ricognizione condotta. Il delta misura la microstruttura della coppia/finestra campionata, non direzione futura. | Chiuso per la domanda storica. |
-| **2 — G2 casi spot** | Prove delimitate su INJ, QNT, AVA, PUMP; nessuna redditività dimostrata. | Evidenze circoscritte ai casi trattati. |
-| **3 — Adjudication delta A/B** | **CHIUSO: USO LIMITATO**; QNT/SUI/PUMP/ONDO, 4 casi, 12/12 orizzonti +1h/+4h/+24h, 0/4 cambi di azione; hash A/B verificati in Termux. | Non promuovere a segnale o ranking; non ripetere il medesimo campione per cambiare il verdetto. |
-| **4 — Navigatore integrato on-chain-first SUI/EUR** | **G2 prototipo, G2R1 e G2R2 implementati in rami isolati; gate live NO-GO.** Correzioni tecniche sostanziali, P08/P09 aperti. | G0 Red Team indipendente sulla PR #14, poi decisione di Supervisione su provenienza upstream e possibilità di collaudo con lotto pubblico congelato. |
-| **5 — Motore decisionale GPT su casi reali** | **NON AUTORIZZATO COME NUOVO SVILUPPO.** Analisi patrimoniali G0 in chat sempre possibili con dati correttamente datati. | Dopo superamento/giudizio esplicito sui gate precedenti e GO umano distinto. |
+| **Fasi 1–3, delta spot** | **CHIUSE: USO LIMITATO.** Prova A/B: 4 casi, 12 orizzonti, 0/4 decisioni cambiate. Dettagli in [GIUDIZIO_DELTA_SPOT_G0_G2.md](GIUDIZIO_DELTA_SPOT_G0_G2.md). | Nessun altro cantiere delta senza utilità concreta e mandato. |
+| **Mercato e portafoglio KDD** | **PRESENTE / PARZIALE.** `mercati_spot.py` tratta EUR/USD/USDC; `binance_reference.py` è il comparatore spot pubblico; `kraken_readonly.py` e `kdd_saldi.py` leggono e registrano BalanceEx. | Copertura qualunque coppia Kraken da completare; verificare corrispondenza col runtime Samsung. |
+| **Grafici e analisi tecnica** | **PRESENTE / PARZIALE.** Funzioni 15m/1H/4H/1D, EMA20/50, pivot e strutture in `grafico_4h.py`; rotte ancora dedicate a SUI/EUR in `serve.py`. | Prova su Chrome, confronto numerico e generalizzazione per coppia, senza ricostruire le funzioni. |
+| **Punto 4, navigatore on-chain-first** | **PROTOTIPI NON PROMOSSI.** PR #12–#14; #14 in bozza. P08 (testo esterno) e P09 (identità/origine produttore) non chiusi. | Red Team G0 indipendente, prova della fonte upstream; niente merge/deploy sulla sola base dei test. |
+| **D2, Samsung → GPT** | **PASS SOLO DEL TRASPORTO SINTETICO MANUALE** del 23/10: staging privato → SAF → FolderSync → Drive → GPT, snapshot/manifest coerenti. PR #15–#17 in bozza; pubblicazione diretta del vecchio exporter disabilitata nella #17. | Manca integrazione con dati reali pubblici KDD e lettura automatizzata verificata. FolderSync non pianificato. |
+| **Proposta GPT, dashboard e archivio** | **COMPONENTI ESISTENTI.** `piano_gpt.py` valida, `decision_desk.py` mostra, `verifica_piani.py` archivia/riesamina `piano_gpt.json`. | Manca il canale controllato per consegnare il piano dalla chat al telefono, NON il motore di pubblicazione. |
+| **Punto 5, utilità decisionale integrata** | **NON COMPLETATO** come circuito KDD–GPT–autore automatico sul piano informativo; analisi in chat G0 restano possibili con dati datati. | Caso reale comparativo con proposta/alternativa, visualizzazione e riesame; GO separati per eventuale sviluppo. |
 
-La distinzione fra le fasi non impedisce di **ragionare ora sul portafoglio**: impedisce soltanto di attribuire a moduli non convalidati una capacità già operativa o di iniziare sviluppo non autorizzato.
+## 3. Sequenza attiva — un primo passo, il resto subordinato
 
-### Dettaglio Punto 4 e lavori in corso
+**PRIMO PASSO ORA: C0 / G0 — verificare e correggere la definizione dei dati, prima del ponte operativo.** L'ispezione statica di `main` ha individuato incongruenze riproducibili da approfondire:
 
-- **PR #12 / G2**: `1cff221dd1f47463a9349c8ef3567b3c110f74bd`, 22 nominali PASS, primo Red Team FAIL sul gate non fidato.
-- **PR #13 / G2R1**: `be7e17776c31fc711aaed75cfc35a1c5632a5b4c`, 49 nominali PASS; Sol 99/99 combinati con 50 correnti on-chain, nuove criticità di integrità/fedeltà.
-- **PR #14 / G2R2**: `d474bd6c614b6cbd7a06ba69bc4311ffa34a0f32`; la Costruttrice dichiara 121/121 PASS e miglioramento da 8/17 a 15/17 controprove indipendenti. **Resta da verificare autonomamente da Sol; PR in bozza e non unita.**
-- **Blocker P08**: i contenuti pubblici di fondamentali/notizie/macro/geopolitica non hanno un trasporto testuale affidabile completo.
-- **Blocker P09**: identità del produttore e origine dei payload non autenticati. HTTPS, etichette e digest ben formati non bastano.
-- **Controllo source-bound supplementare**: `dossier_trade.COINGECKO_IDS` include ICNT e KAS, non SUI, mentre il prototipo G2R2 mostra un caso numerico CoinGecko SUI. Sol deve distinguere fixture ammissibile da produttore canonico realmente disponibile.
-- **Regola:** nessun nuovo ciclo correttivo, fonte live, Punto 5, merge o deploy sulla base dei soli test dichiarati. Le correzioni del Punto 4 restano un cantiere unico, senza proliferazione di moduli.
+- `dossier_trade.py` espone `portafoglio_aggiornato_da_api_private: False` fisso e un'avvertenza sulle quantità «manuali», mentre `kdd_saldi.py` registra la provenienza BalanceEx e `fonte_quantita`. **NON cambiare semplicemente False in True**: distinguere lettura riuscita, ultima lettura precedente, mancato aggiornamento e fonte ignota.
+- `decision_desk.py` assegna `rilevazione_utc` al termine di varie chiamate: è l'orario di composizione KDD, **non automaticamente l'istante nativo di tutte le quotazioni Kraken**.
+- Incrociare `dossier_multifonte.json`, `dossier_stato.json` e `ultimo_report.json` per non dichiarare freschi un saldo o un dossier non allineati. Non leggere né copiare le credenziali.
 
-## 3. Nuova priorità infrastrutturale parallela — patrimonio informativo su Drive
+**C0 si chiude** con diagnosi su sorgenti reali e casi deterministici (BalanceEx riuscito/fallito/assente, saldo obsoleto, tempi di mercato discordanti), più specifica di **sole modifiche minime**. Non serve modificare il codice durante G0.
 
-**Scelta di architettura dell'autore, 22/10:** consentire a ChatGPT di consultare autonomamente **tutto il patrimonio informativo utile di KDD** tramite Google Drive privato, senza che l'autore debba esportare foto, ZIP e file ogni volta.
-
-**Modello prescelto:** **Samsung/Termux = origine ed esecuzione; Google Drive = archivio privato sincronizzato e leggibile da GPT; GitHub = codice/versionamento; ChatGPT = analisi e supervisione.** Il runtime non migra su Drive. Il ponte dei dati deve essere **solo in uscita** dal Samsung, senza sincronizzazione inversa né permessi di scrittura sul conto. **Non perdere il secondo verso funzionale del prodotto:** GPT formula una proposta discutibile con l'autore, poi un canale distinto, controllato e non ancora implementato deve rendere il piano visibile in KDD, registrare revisioni e verificare gli esiti; NON realizzarlo con il mirror inverso di FolderSync.
-
-**Stato sperimentale aggiornato al 23/10:** il 22/10 il primo trasporto manuale Android→FolderSync→Drive→GPT aveva consegnato due documenti pubblici non patrimoniali; resta una prova datata. Il 23/10, sul Samsung, è stato collaudato l'accesso Android SAF alla cartella `KDD_TEST_SAMSUNG/KDD_SAF_LAB`, il passaggio da staging privato Termux a documento SAF con lettura di ritorno e un protocollo **snapshot + manifest sintetici**. Dopo una seconda sincronizzazione manuale FolderSync, GPT ha recuperato su Drive entrambi i JSON `kdd_snapshot_lab_c4ff825d88ee4bb9.json` e `kdd_commit_lab_c4ff825d88ee4bb9.json`: run_id, lunghezza 192 byte, schema, SHA-256 e contenuto sintetico coerenti. I rifiuti di snapshot troncati e manifest assenti/incompleti sono stati verificati con anomalie simulate in locale, non interruzioni fisiche di Android. **Questo prova il trasporto osservato e il controllo dei documenti nella sessione, NON l'automazione, l'autenticazione ostile o il collegamento al runtime KDD reale.** FolderSync resta non pianificato. La PR #17 G2R2 è draft e vieta tuttora la vecchia scrittura diretta nella cartella condivisa. Nessun documento patrimoniale o credenziale è stato pubblicato; il saldo letto via Kraken read-only resta sul Samsung.
-
-### Sequenza del ponte, autonoma dalle sperimentazioni del Punto 4
-
-| Gate | Lavoro | Stato / condizione |
+| Dopo C0 | Lavoro minimo | Prova di completamento / gate |
 | --- | --- | --- |
-| **D0 — Ricognizione G0** | Distinguere la cartella condivisa `/storage/emulated/0/Kraken` dalla directory effettiva `~/kraken-decision-desk/KRAKEN_DECISION_DESK_V001`, inventariare file, campi privati, segreti e aggiornamenti reali, senza copiarli. | **PARZIALMENTE VERIFICATO** dai percorsi del codice e dal canale di prova Android; resta inventario completo della directory reale, dei segreti e dei permessi sul dispositivo. |
-| **D1 — Contratto dei dati e sicurezza** | Definire area *leggibile da GPT* (saldi, prezzi, dossier, storici, decisioni, documenti pertinenti) e area *backup cifrato non leggibile da GPT*. Prevedere minimi permessi, esclusioni esplicite, hash, metadati di acquisizione, versione, marcatori stale, errori e separazione saldi/mercato. | **DA APPROVARE**; la governance attuale mantiene dati operativi sul Samsung. Non si caricano segreti in chiaro. |
-| **D2 — Pilota G2 delimitato** | Riutilizzare in un componente KDD reale i risultati pubblici già acquisiti (non solo contatori), pubblicare da staging privato tramite SAF con snapshot/manifest e verificare al consumo provenienza, età, integrità, coerenza e fallimenti. | **TRASPORTO SINTETICO MANUALE VERIFICATO 23/10; INTEGRAZIONE KDD NON INIZIATA.** PR #15–#17 draft non unite; vecchio publisher diretto disabilitato. Richiede nuovo GO G2 per codice sperimentale, separato da deploy e sincronizzazione automatica. |
-| **D3 — Archivio informativo completo** | Solo dopo prova positiva, estendere progressivamente a dossier, storico, piani e documentazione; eventuale backup cifrato separato. Evitare copie ridondanti del repository GitHub. | **NON INIZIATO**. |
-| **D4 — Regime di esercizio** | Lettura dell'ultima fotografia effettivamente disponibile, monitoraggio di età/versione/errori e recovery, senza pretendere aggiornamento live se il Samsung è offline. | **NON INIZIATO**. |
+| **C1 — G2 DA AUTORIZZARE** | Correggere *nei moduli esistenti* fonte, stato e orari di saldo/mercato; rimuovere dichiarazioni obsolete. | Test con fonte presente/assente/vecchia/fallita; nessun T0, saldo o conto alterato; codice solo su ramo isolato. |
+| **D2 — G2 DA AUTORIZZARE** | Esportare informazioni **pubbliche reali** già prodotte da KDD tramite staging privato, SAF e Drive; consumer deterministico su schema, hash, versione, provenienza, età e coerenza. | Pilota SUI/EUR reale, errore e obsolescenza riconosciuti, nessun segreto/saldo; GO distinti per codice, Android e schedulazione. |
+| **P4 — G0 IN PARALLELO** | Verifica indipendente della PR #14 e soluzione concreta di P08/P09. | Fonti esterne attribuite e riproducibili; non aggirare il gate con fixture. |
+| **COPERTURA MERCATI — DA COMPLETARE** | Consultazione di **qualsiasi coppia Kraken Spot** con quote e id esatti, eleggibilità utente/SEE distinta; scanner economico generale e 4 timeframe solo sui casi utili. Binance come impronta di mercato comparativa, non come sede di trading. | Selezione coppia, confronto e grafici coerenti, costi e limiti API espliciti; non scaricare tutte le OHLC di tutte le coppie. |
+| **RITORNO GPT — DA REALIZZARE** | Trasferire in modo separato e autorizzato il piano GPT nei componenti **già esistenti**, senza mirror inverso indiscriminato di FolderSync. | Piano datato, **PROPOSTA NON ESEGUITA**, dashboard, archivio e riesame funzionanti; nessun ordine. |
+| **PROVA DEL PRODOTTO — FINALE** | Caso reale: KDD osserva → GPT propone e confronta → autore decide → dashboard conserva → GPT riesamina. | Analisi utile e falsificabile con costi, rischi, scadenza, alternative e verifiche, non numero di grafici o PASS. |
 
-**Vincolo di priorità:** questo ponte è **infrastruttura di accesso ai dati**, non il Punto 5 e non una scorciatoia per aggirare P08/P09 del dossier pubblico. I report privati del wallet, pur leggibili da ChatGPT con permesso, **non sono dati pubblici**. Non caricare file privati su GitHub. Prima di trasferire quelli reali, armonizzare con specifico GO [GOVERNO_KDD.md](GOVERNO_KDD.md) e il mandato locale, che oggi li assegnano solo al Samsung.
+**Confini:** il ponte D2 non equivale al navigatore P4 o al motore decisionale P5. Il rischio sperimentale D2-S02 (rinomina concorrente di directory nel vecchio publisher) resta registrato, **non dimostra un aggressore sul Samsung** e non è risolto dall'hash; non riabilitare la scrittura diretta disabilitata. Proteggere soprattutto autenticità/provenienza, integrità, coerenza, freschezza e continuità. **Nessuna integrazione, merge, installazione o automatismo finanziario è autorizzato soltanto dalla presente roadmap.**
 
 ## 4. Primo caso patrimoniale e misura dell'utilità
 
@@ -65,4 +58,3 @@ Ogni proposta GPT dovrà mostrare: scenario e regime; fonte e ora; ragioni favor
 - GitHub→Termux soltanto tramite [AGGIORNAMENTI_TERMUX.md](AGGIORNAMENTI_TERMUX.md): `kdd-aggiorna --check`, backup, `--apply` con GO, test, rollback e riavvio/prova visiva quando necessario. Una PR aperta o un commit non sono installazione.
 - La Supervisione mantiene il governo dell'architettura completa; Sol valuta indipendentemente il Punto 4. **GO tecnico per un ramo ≠ GO a main ≠ GO al deploy ≠ GO finanziario**.
 
-**Prossima attività utile:** nessun altro laboratorio ornamentale. Sul ponte, predisporre con GO distinto un solo componente sperimentale che estragga dal KDD già esistente dati reali pubblici per coppia Kraken, li prepari in area privata, li trasferisca via SAF e renda possibile una lettura verificata in GPT; solo dopo valutare deploy e sincronizzazione pianificata. In parallelo preservare la verifica G0 indipendente di Sol sul Punto 4 e affrontare P08/P09 con fonti concrete. Prima di esportare il patrimonio privato occorrono decisione esplicita e aggiornamento di `GOVERNO_KDD.md`. **Nessun merge, deploy, spesa o operazione finanziaria impliciti in questa roadmap.**
