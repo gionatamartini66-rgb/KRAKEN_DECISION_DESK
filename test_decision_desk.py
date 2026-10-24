@@ -2198,7 +2198,7 @@ class DeskTests(unittest.TestCase):
         local=json.loads(port.read_text(encoding='utf-8'))
         identifier=local.get('t0_id')
         self.assertTrue(isinstance(identifier,str) and
-                        re.fullmatch(r'T0_\\d{4}-\\d{2}-\\d{2}_\\d{4}_KRAKEN_PRO',
+                        re.fullmatch(r'T0_\d{4}-\d{2}-\d{2}_\d{4}_KRAKEN_PRO',
                                      identifier) is not None,
                         'Identificatore T0 locale non valido')
         original=root/'storico_portafoglio'/(identifier+'.json')
