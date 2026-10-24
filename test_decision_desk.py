@@ -2052,6 +2052,29 @@ class DeskTests(unittest.TestCase):
         self.assertNotIn('Nessun accesso al conto, nessuna API privata',
                          ' '.join(result['avvertenze']))
 
+    def test_c1_rigenera_non_attribuisce_vecchio_tentativo_a_saldo_nuovo(self):
+        import datetime as dt
+        now=dt.datetime(2026,10,24,10,tzinfo=dt.timezone.utc)
+        portfolio={
+            'fonte_quantita':'Kraken BalanceEx API privata SOLA LETTURA, 2026-10-24T09:58:00+00:00',
+            'data_ora_saldo_privato_utc':'2026-10-24T09:58:00+00:00'}
+        vecchio={'stato':'FALLITO',
+                 'controllato_utc':'2026-10-24T08:00:00+00:00',
+                 'errore_tipo':'ConnectionError'}
+        result=d.stato_saldo(portfolio,vecchio,now=now)
+        self.assertEqual(result['freschezza_saldo'],'RECENTE')
+        self.assertEqual(result['coerenza_tentativo_con_saldo'],'NON_CORRELATO_AL_SALDO')
+        self.assertEqual(result['ultimo_tentativo'],'NON_DOCUMENTATO')
+        self.assertIsNone(result['ultimo_errore_tipo'])
+        corrente={'stato':'RIUSCITO','controllato_utc':'2026-10-24T09:58:01+00:00'}
+        result=d.stato_saldo(portfolio,corrente,now=now)
+        self.assertEqual(result['coerenza_tentativo_con_saldo'],'ORDINE_TEMPORALE_COMPATIBILE')
+        self.assertEqual(result['ultimo_tentativo'],'RIUSCITO')
+        futuro={'stato':'RIUSCITO','controllato_utc':'2026-10-24T11:00:00+00:00'}
+        result=d.stato_saldo(portfolio,futuro,now=now)
+        self.assertEqual(result['coerenza_tentativo_con_saldo'],'ORARIO_TENTATIVO_FUTURO')
+        self.assertEqual(result['ultimo_tentativo'],'NON_DOCUMENTATO')
+
     def test_private_balance_sync_preserves_t0_and_excludes_cash_from_positions(self):
         import kdd_saldi
         import tempfile, json
