@@ -1,4 +1,4 @@
-# KDD — ROADMAP CANONICA / BUSSOLA DI BORDO (23 OTTOBRE 2026)
+# KDD — ROADMAP CANONICA / BUSSOLA DI BORDO (24 OTTOBRE 2026)
 
 **Unica rotta operativa.** Il [README integrale](README.md) conserva il mandato originale e la cronologia; [GOVERNO_KDD.md](GOVERNO_KDD.md) stabilisce autorità e limiti. Qui si indicano **stato, dipendenze, primo passo e criteri di chiusura**. Il codice su GitHub non dimostra da solo l'installazione sul Samsung.
 
