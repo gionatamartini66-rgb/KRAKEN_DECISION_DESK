@@ -4,6 +4,7 @@ import datetime as dt
 import hmac
 import html
 import json
+import re
 import secrets
 import threading
 import time
@@ -78,10 +79,8 @@ def with_controls(page: str, result: str = "") -> str:
         "<button id='kdd-refresh-button' style='font:inherit;padding:12px 18px;border:0;"
         "border-radius:9px;background:#80cbff;color:#06162b;font-weight:700' "
         f"type='submit'{disabled}>↻ Aggiorna dati ora</button>"
-        "</form><p><a style='font-weight:700;color:#8aceff' href='/grafico/sui-4h'>"
-        "📈 Grafico SUI/EUR · 15m / 1H / 4H / 1D</a></p>"
-        "<p><a style='font-weight:700;color:#8aceff' href='/analisi/sui-mtf'>"
-        "🔎 Confronto multitimeframe SUI/EUR (4 intervalli)</a></p>"
+        "</form><p><a style='font-weight:700;color:#8aceff' href='/mercati/spot'>"
+        "🌐 Seleziona coppia Kraken Spot · grafici 15m / 1H / 4H / 1D</a></p>"
         "<p>Server solo su questo Samsung · prezzi pubblici · nessun ordine.</p>"
         f"<p id='kdd-refresh-status' role='status'>{html.escape(message)}</p>"
         "</section>"
@@ -172,12 +171,18 @@ def load_sui_comparison(public_kraken=None, now=None):
     return grafico_4h.compare_timeframes(frames, now=now)
 
 
-def render_sui_comparison(report):
+def render_sui_comparison(report, *, pair_key=None):
     """Escaped server-side HTML. No JavaScript or private assets."""
     def esc(value):
         return html.escape(str(value), quote=True)
     def price(value):
         return f"{value:.5f}" if isinstance(value, (int, float)) else "—"
+    pair = report["coppia"]
+    base, quote = pair.split("/", 1)
+    if pair_key is not None and not re.fullmatch(r"[A-Za-z0-9_.-]{2,48}", pair_key):
+        raise ValueError("Chiave Kraken non valida")
+    graph_root = ("/grafico/spot?pair=" + urllib.parse.quote(pair_key, safe="") +
+                  "&tf=" if pair_key else "/grafico/sui-4h?tf=")
     labels = {
         "PREZZO_SOPRA_EMA20_SOPRA_EMA50": "Close > EMA20 > EMA50",
         "PREZZO_SOTTO_EMA20_SOTTO_EMA50": "Close < EMA20 < EMA50",
@@ -188,7 +193,8 @@ def render_sui_comparison(report):
     for item in report["timeframe"]:
         name = esc(item["timeframe"])
         link = {"15m": "15m", "1H": "1h", "4H": "4h", "1D": "1d"}[item["timeframe"]]
-        title = f'<a href="/grafico/sui-4h?tf={link}">{name} → grafico</a>'
+        title = ('<a href="' + esc(graph_root + link) + '">' +
+                 name + ' → grafico</a>')
         if item["stato"] != "AGGIORNATO":
             reason = esc(item.get("motivo", "Candela chiusa non recente"))
             state = esc(item["stato"])
@@ -203,12 +209,12 @@ def render_sui_comparison(report):
             f'<article class="frame"><h2>{title}</h2>'
             f'<p class="status">AGGIORNATO · {esc(item["candele"])} barre chiuse</p>'
             f'<p><strong>{esc(labels[item["orientamento"]])}</strong></p>'
-            f'<p>Close: <b>{price(item["close"])} €</b> · '
-            f'EMA20: {price(item["ema20"])} € · EMA50: {price(item["ema50"])} €</p>'
-            f'<p>Volume ultima candela: {esc(volume_text)} SUI; '
+            f'<p>Close: <b>{price(item["close"])} {esc(quote)}</b> · '
+            f'EMA20: {price(item["ema20"])} {esc(quote)} · EMA50: {price(item["ema50"])} {esc(quote)}</p>'
+            f'<p>Volume ultima candela: {esc(volume_text)} {esc(base)}; '
             f'rapporto: {esc(vol_text)}</p>'
-            f'<p>S/R euristici più vicini: supporto {price(item["supporto_vicino"])} €; '
-            f'resistenza {price(item["resistenza_vicina"])} €</p>'
+            f'<p>S/R euristici più vicini: supporto {price(item["supporto_vicino"])} {esc(quote)}; '
+            f'resistenza {price(item["resistenza_vicina"])} {esc(quote)}</p>'
             f'<p class="time">Candela chiusa: {esc(item["chiusura_utc"])} UTC<br>'
             f'Rilevazione: {esc(item["rilevazione_utc"])} UTC<br>'
             f'Fonte: {esc(item["fonte"])}</p></article>'
@@ -227,7 +233,7 @@ def render_sui_comparison(report):
     # Static read-only HTML; values are local market observations, not trades.
     return ("""<!doctype html><html lang="it"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>KDD | Confronto SUI multitimeframe</title>
+<title>KDD | Confronto __PAIR__ multitimeframe</title>
 <style>:root{color-scheme:dark;font-family:system-ui;background:#0b1221;color:#eaf0fa}
 body{margin:auto;padding:14px;max-width:860px;line-height:1.5}
 h1{font-size:1.28rem}h2{font-size:1.06rem;margin:0 0 10px}
@@ -237,8 +243,8 @@ border-radius:12px;margin:12px 0;padding:14px}
 .status{color:#85e6bc}.warning{color:#ffd48a}
 .note{color:#b3c1d8;font-size:.92rem}
 strong{color:#dce9ff}</style></head><body>
-<p><a href="/">← Cruscotto</a> · <a href="/grafico/sui-4h?tf=4h">Grafico SUI 4H</a></p>
-<h1>🔎 KDD · Confronto SUI/EUR</h1>
+<p><a href="/">← Cruscotto</a> · <a href="/mercati/spot">Seleziona coppia</a> · <a href="__GRAPH_URL__">Grafico 4H</a></p>
+<h1>🔎 KDD · Confronto __PAIR__</h1>
 <p>15m · 1H · 4H · 1D — candele Kraken Spot CHIUSE</p>
 <section class="top"><h2>Quadro descrittivo: __STATE__</h2>
 <p>__PICTURE__</p><p class="note">__WARNING__</p>
@@ -258,6 +264,8 @@ proprio dossier locale, aggiornabile dal cruscotto.</p>
         .replace("__PICTURE__", esc(picture))
         .replace("__WARNING__", esc(report["avvertenza"]))
         .replace("__OBSERVED__", esc(report["rilevazione_confronto_utc"]))
+        .replace("__PAIR__", esc(pair))
+        .replace("__GRAPH_URL__", esc(graph_root + "4h"))
         .replace("__CARDS__", "".join(rows)))
 
 
