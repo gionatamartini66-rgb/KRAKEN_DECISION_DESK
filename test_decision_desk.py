@@ -937,7 +937,8 @@ class DeskTests(unittest.TestCase):
         self.assertNotIn("readonly.json",page)
         self.assertNotIn("necessario per il 4H",page)
         dashboard=serve.with_controls("<html><h2>1 · Decisioni e posizioni</h2></html>")
-        self.assertIn("href='/analisi/sui-mtf'",dashboard)
+        self.assertIn("href='/mercati/spot'",dashboard)
+        self.assertNotIn("href='/analisi/sui-mtf'",dashboard)
 
     def test_mtf_live_4h_missing_close_marks_stale_without_fallback(self):
         import serve
