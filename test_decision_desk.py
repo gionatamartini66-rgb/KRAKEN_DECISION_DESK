@@ -1425,7 +1425,7 @@ class DeskTests(unittest.TestCase):
                  unittest.mock.patch.object(pg,'load',return_value=plan), \
                  unittest.mock.patch.object(vp.desk,'save'), \
                  unittest.mock.patch.object(vp.desk,'kraken') as k:
-                out=vp.check_all(max_queries=0)
+                out=vp.check_all(max_queries=4)
                 self.assertEqual(out['corrente']['stato'],'SENZA_LIVELLI')
                 self.assertEqual(out['storico']['non_operativi'],1)
                 self.assertEqual(out['storico']['stato'],'VERIFICATO')
