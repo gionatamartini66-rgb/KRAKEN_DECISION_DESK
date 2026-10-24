@@ -1,0 +1,33 @@
+name: KDD C1 regression (temporary)
+on:
+  push:
+    branches:
+      - 'experiments/kdd-c1-provenienza-20261024'
+permissions:
+  contents: read
+jobs:
+  c1-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact PR commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Select Python 3
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile KDD Python sources
+        run: python -m compileall -q .
+      - name: Run five real C1 regression tests from checkout
+        run: |
+          python -m unittest -v \
+            test_decision_desk.DeskTests.test_c1_fonte_storica_distinta_da_freschezza_e_fallimento \
+            test_decision_desk.DeskTests.test_c1_privato_non_blocca_aggiornamento_pubblico \
+            test_decision_desk.DeskTests.test_c1_dossier_dichiara_fonte_e_ultimo_tentativo \
+            test_decision_desk.DeskTests.test_c1_report_conserva_timestamp_e_separa_saldo \
+            test_decision_desk.DeskTests.test_c1_rigenera_non_attribuisce_vecchio_tentativo_a_saldo_nuovo
+      - name: Run full existing suite (local confidential fixtures may be unavailable)
+        if: success()
+        run: python -m unittest -q test_decision_desk
