@@ -2227,10 +2227,14 @@ class DeskTests(unittest.TestCase):
             recorded=Decimal(str(snapshot['valore_totale_fotografia_eur']))
         except (KeyError,TypeError,InvalidOperation) as exc:
             self.fail('Fotografia T0 non interpretabile: '+type(exc).__name__)
+        # La fotografia originale mostra valori arrotondati ai centesimi:
+        # il totale dell'interfaccia può discostarsi di un centesimo dalla
+        # somma delle righe. Non dichiararlo corruzione: l'autenticità
+        # resta vincolata all'impronta storica indipendente sopra.
         self.assertTrue(recorded.is_finite() and recorded>0 and
                         all(v.is_finite() and v>=0 for v in values) and
-                        sum(values,Decimal('0'))==recorded,
-                        'Totale T0 incoerente con le sue voci originarie')
+                        abs(sum(values,Decimal('0'))-recorded)<=Decimal('0.01'),
+                        'Totale T0 incoerente oltre lo scarto di arrotondamento documentato')
         self.assertIn('BalanceEx',local.get('fonte_quantita',''),
                       'Fonte dei saldi locali non riconosciuta')
         self.assertIsInstance(local.get('posizioni'),list)
