@@ -254,6 +254,9 @@ def collect(source=None):
     try: external["coingecko_global"]=global_context()
     except Exception as exc: external["coingecko_global"]={"errore":type(exc).__name__+": "+str(exc)[:80]}
     derivatives=derivatives_context(now.timestamp())
+    # Lettura unica del portafoglio per la sola metadata di provenienza.
+    portafoglio = desk.load('portafoglio.json', {}) or {}
+    saldo = desk.stato_saldo(portafoglio, source.get('saldo_refresh'), now=now)
     dossier={
         "schema":1,"creato_utc":desk.NOW().isoformat(timespec="seconds"),
         "kraken_istantanea_utc":source["rilevazione_utc"],"eta_kraken_minuti_al_dossier":round(age,2),
@@ -263,16 +266,18 @@ def collect(source=None):
         "fonti_esterne":external,
         "contesto_derivati_btc":derivatives,
         "contesto_macro_news":"Ricerca GPT separata: non inferire macro dai soli RSS",
-        "portafoglio_quantita_fonte":desk.load("portafoglio.json",{}).get("fonte_quantita"),
-        "portafoglio_aggiornato_da_api_private":False,
+        "portafoglio_quantita_fonte":portafoglio.get("fonte_quantita"),
+        "portafoglio_aggiornato_da_api_private":saldo['portafoglio_aggiornato_da_api_private'],
+        "stato_saldo":saldo,
+        "orari_fonti":source.get('orari_fonti', {}),
         "portafoglio_noto":all(x.get("quantita") is not None
-                                for x in desk.load("portafoglio.json",{"posizioni":[]}).get("posizioni",[]))
-                             and bool(desk.load("portafoglio.json",{"posizioni":[]}).get("posizioni",[])),
+                                for x in portafoglio.get("posizioni",[]))
+                             and bool(portafoglio.get("posizioni",[])),
         "limiti":["Campione dello scanner, non ricerca esaustiva di tutti i token.",
                   "Candele chiuse; supporti/resistenze solo estremi storici, non segnali validati.",
                   "OI/CVD Futures Kraken BTC non disponibili per ogni token e non aggregati globali.",
                   "Flusso buy/sell spot recente da Kraken Trades: al piu 1000 esecuzioni per coppia; NON CVD storico, heatmap o mercato aggregato. Copertura e lacune per token indicate.",
-                  "Quantità manuali trascritte da screenshot Kraken Pro, non lette automaticamente; saldo EUR liberamente utilizzabile, precisione dei saldi e costi di carico non verificati; nessun sizing del patrimonio disponibile.",
+                  "Origine, acquisizione e tentativo di aggiornamento saldo in stato_saldo; un dato precedente o fallito non vale come saldo attuale. Disponibilità spot, prezzo di carico e costi da verificare prima di dimensionare operazioni.",
                   "Nessun ordine o controllo privato della negoziabilità SEE."]
     }
     desk.save("dossier_multifonte.json",dossier)
