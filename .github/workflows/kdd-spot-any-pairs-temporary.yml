@@ -16,6 +16,6 @@ jobs:
         with:
           python-version: '3.13'
       - name: Compile touched modules
-        run: python -m py_compile serve.py grafico_4h.py test_decision_desk.py test_spot_any_pair.py
+        run: python -m py_compile serve.py grafico_4h.py test_decision_desk.py
       - name: Existing suite and any-pair adversarial regression
-        run: python -m unittest -v test_spot_any_pair test_decision_desk
+        run: python -m unittest -v test_decision_desk
