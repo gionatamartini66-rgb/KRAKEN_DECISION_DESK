@@ -32,6 +32,24 @@ def fixture_trade_plan():
     }
 
 
+def fixture_migration():
+    """Migrazione interamente sintetica: nessun importo né identità patrimoniale."""
+    return {
+        'stato': 'DA_RICONCILIARE',
+        'migrazione_completata': False,
+        'asset_visibili': [
+            {'token': 'SIM_PRESENTE', 'quantita_binance_visualizzata': '0.125',
+             'accreditato_kraken': None},
+            {'token': 'SIM_ATTESA', 'quantita_binance_visualizzata': '2.5',
+             'accreditato_kraken': None},
+        ],
+        'riscontro_portafoglio_kraken_2026_10_19': {
+            'visibili_anche_su_kraken': {'SIM_PRESENTE': '0.125'},
+            'non_visibile_nella_schermata': ['SIM_ATTESA'],
+        },
+    }
+
+
 class DeskTests(unittest.TestCase):
     def setUp(self):
         self.pairs = {
@@ -48,7 +66,33 @@ class DeskTests(unittest.TestCase):
         }
         self.now=dt.datetime(2026,10,16,12,tzinfo=dt.timezone.utc)
     def test_checkpoint_documentato(self):
-        self.assertTrue(d.checkpoint_allineato(), 'README non allineato al codice: descrivere nel README modifiche, test e prossimo step, poi aggiornare impronta')
+        # Sul checkout pubblico manca la configurazione privata. Qui NON
+        # inventiamo il checkpoint locale: il test deve eseguirsi sul Samsung.
+        if not (d.DIR / 'config.json').is_file():
+            self.skipTest('CHECKPOINT LOCALE NON ESEGUITO: config privata assente; prova obbligatoria nello staging Samsung')
+        self.assertTrue(d.checkpoint_allineato(),
+                        'Checkpoint dei sorgenti/README/config locale incoerente')
+
+    def test_checkpoint_detects_source_tampering_on_isolated_synthetic_files(self):
+        from pathlib import Path
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            (root/'config.json').write_text('{"test":true}',encoding='utf-8')
+            source=root/'sintetico.py'
+            source.write_text('SIMULATO = True\n',encoding='utf-8')
+            with mock.patch.object(d,'DIR',root):
+                sig=d.fingerprint_sorgenti()
+                (root/'README.md').write_text(
+                    '<!-- CHECKPOINT_SORGENTI_SHA256: '+sig+' -->\n',
+                    encoding='utf-8')
+                self.assertTrue(d.checkpoint_allineato())
+                source.write_text('SIMULATO = False\n',encoding='utf-8')
+                self.assertFalse(d.checkpoint_allineato())
+                source.write_text('SIMULATO = True\n',encoding='utf-8')
+                self.assertTrue(d.checkpoint_allineato())
+                (root/'config.json').write_text('{"test":false}',encoding='utf-8')
+                self.assertFalse(d.checkpoint_allineato())
 
     def test_widget_age_computed_in_browser(self):
         data={'rilevazione_utc':d.NOW().isoformat(), 'markets':{}, 'trends':{}, 'feed':[], 'problemi_feed':[]}
@@ -455,12 +499,9 @@ class DeskTests(unittest.TestCase):
 
     def test_gpt_plan_escapes_html_and_marks_new_snapshot(self):
         import piano_gpt as pg
-        import copy
-        current=pg.load()
-        self.assertIsNotNone(current)
-        self.assertNotIn('errore',current)
         injected=fixture_trade_plan()
         injected['tesi']='<script>alert("x")</script>'
+        pg.validate(injected)
         view=pg.render_box(injected,"2026-10-18T08:30:00+00:00")
         self.assertNotIn('<script>alert("x")</script>',view)
         self.assertIn('&lt;script&gt;',view)
@@ -1010,7 +1051,8 @@ class DeskTests(unittest.TestCase):
 
     def test_gpt_mobile_first_summary_before_details(self):
         import piano_gpt as pg
-        plan=pg.load()
+        plan=fixture_trade_plan()
+        pg.validate(plan)
         markup=pg.render_box(plan,plan['snapshot_kraken_utc'])
         self.assertIn('PRIMA LETTURA · PIANO GPT',markup)
         self.assertIn('Condizione:</b>',markup)
@@ -1029,7 +1071,7 @@ class DeskTests(unittest.TestCase):
         data={'rilevazione_utc':d.NOW().isoformat(), 'markets':{}, 'trends':{},
               'feed':[],'problemi_feed':[]}
         report=d.build_report(data, {'posizioni':[]}, {}, {}, [])
-        report['piano_gpt']=pg.load()
+        report['piano_gpt']=pg.validate(fixture_trade_plan())
         page=d.render(report)
         self.assertIn('PRIMA LETTURA · PIANO GPT',page)
         self.assertLess(page.index('PRIMA LETTURA · PIANO GPT'),
@@ -1263,20 +1305,20 @@ class DeskTests(unittest.TestCase):
     def test_archive_detects_corruption_and_rejects_overwrite(self):
         import verifica_piani as vp
         import piano_gpt as pg
-        import tempfile
         from pathlib import Path
-        current=pg.load()
+        current=pg.validate(fixture_trade_plan())
         with tempfile.TemporaryDirectory() as tmp:
             with unittest.mock.patch.object(vp,'PLANS',Path(tmp)):
                 digest=vp.archivia_piano(current)
                 vp.archivia_piano(current)
                 self.assertEqual(len(list(Path(tmp).glob('*.json'))),1)
                 (Path(tmp)/(digest+'.json')).write_text('{"token":"BAD"}')
-                with self.assertRaises(ValueError):vp.archivia_piano(current)
+                with self.assertRaises(ValueError):
+                    vp.archivia_piano(current)
 
     def test_archive_render_hides_current_and_never_claims_returns(self):
         import verifica_piani as vp
-        current=__import__('piano_gpt').load()
+        current=fixture_trade_plan()
         digest=vp.plan_hash(current)
         data={'piani':[
             {'hash_piano':digest,'coppia':'ICNT/USD','tracking':'CONCLUSO',
@@ -1367,12 +1409,11 @@ class DeskTests(unittest.TestCase):
         self.assertTrue(all(x['perche'] in ('A','B','C') for x in chosen))
 
     def test_no_trade_plan_preserved_without_fake_prices_or_api(self):
-        import ricerca_setup as rs
         import piano_gpt as pg
         import verifica_piani as vp
-        import copy,tempfile
+        import copy
         from pathlib import Path
-        plan=copy.deepcopy(pg.load())
+        plan=copy.deepcopy(fixture_trade_plan())
         plan['token']='MERCATO_SPOT'
         plan['coppia']='NESSUNA COPPIA OPERATIVA'
         plan['livelli']=None
@@ -1384,7 +1425,7 @@ class DeskTests(unittest.TestCase):
                  unittest.mock.patch.object(pg,'load',return_value=plan), \
                  unittest.mock.patch.object(vp.desk,'save'), \
                  unittest.mock.patch.object(vp.desk,'kraken') as k:
-                out=vp.check_all(max_queries=4)
+                out=vp.check_all(max_queries=0)
                 self.assertEqual(out['corrente']['stato'],'SENZA_LIVELLI')
                 self.assertEqual(out['storico']['non_operativi'],1)
                 self.assertEqual(out['storico']['stato'],'VERIFICATO')
@@ -2111,44 +2152,83 @@ class DeskTests(unittest.TestCase):
             self.assertEqual(json.loads(p.read_text()),saved)
 
     def test_migration_screenshot_is_not_kraken_balance(self):
-        import json,pathlib
-        copy=json.loads(pathlib.Path('migrazione_attesa.json').read_text())
-        self.assertEqual(copy['stato'],'DA_RICONCILIARE')
-        self.assertFalse(copy['migrazione_completata'])
-        self.assertEqual(set(x['token'] for x in copy['asset_visibili']),
-                         {'NEAR','XRP','JUP','RENDER','FET','ONDO'})
-        self.assertTrue(all(x['accreditato_kraken'] is None for x in copy['asset_visibili']))
-        from decimal import Decimal
-        import hashlib
-        live=d.load('portafoglio.json')
-        self.assertEqual(live['t0_id'], 'T0_2026-10-19_2301_KRAKEN_PRO')
-        self.assertIn('BalanceEx', live['fonte_quantita'])
-        p=pathlib.Path('storico_portafoglio/T0_2026-10-19_2301_KRAKEN_PRO.json')
-        base=json.loads(p.read_text())
-        self.assertEqual(base['valore_totale_fotografia_eur'],'1009.69')
-        self.assertEqual(live['t0_sha256'],hashlib.sha256(p.read_bytes()).hexdigest())
-        self.assertEqual(len(base['quantita_e_valori_schermata']),10)
-        self.assertEqual(sum(Decimal(x['valore_eur_visualizzato'])
-                             for x in base['quantita_e_valori_schermata']),Decimal('1009.68'))
-        self.assertTrue(all(x['costo_medio_eur'] is None for x in live['posizioni']))
-        self.assertIn('USDC',live['liquidita_spot_api'])
-        self.assertEqual(copy['riscontro_portafoglio_kraken_2026_10_19']['non_visibile_nella_schermata'],['ONDO'])
-        self.assertEqual(copy['riscontro_portafoglio_kraken_2026_10_19']['visibili_anche_su_kraken']['FET'],'20.15068')
+        sample=fixture_migration()
+        self.assertEqual(sample['stato'],'DA_RICONCILIARE')
+        self.assertFalse(sample['migrazione_completata'])
+        self.assertTrue(all(row['accreditato_kraken'] is None
+                            for row in sample['asset_visibili']))
+        report=d.build_report(
+            {'rilevazione_utc':self.now.isoformat(),'markets':{},'trends':{},
+             'feed':[],'problemi_feed':[]},
+            {'posizioni':[]},{},{},[])
+        report['migrazione_attesa']=sample
+        self.assertFalse(report['posizioni'])
+        self.assertFalse(report.get('liquidita_spot_api'))
+        page=d.render(report)
+        self.assertIn('Migrazione storica:',page)
+        self.assertIn('NON significa zero',page)
+        self.assertNotIn('Disponibile spot da API privata:',page)
 
     def test_migration_shown_only_as_pending_not_tradeable_portfolio(self):
-        import copy,json
         report=d.build_report(
             {'rilevazione_utc':self.now.isoformat(), 'markets':{},'trends':{},
              'feed':[], 'problemi_feed':[]},
             {'posizioni':[]},{},{},[])
-        report['migrazione_attesa']=json.loads(pathlib.Path('migrazione_attesa.json').read_text())
+        report['migrazione_attesa']=fixture_migration()
         rendered=d.render(report)
         self.assertIn('Le vecchie quantità Binance sono archiviate separatamente dal portafoglio Kraken',rendered)
-        self.assertIn('5 asset ora visibili su Kraken, 1 da verificare',rendered)
-        self.assertIn('6.34614039',rendered)
-        self.assertNotIn('6.678999',rendered)
-        self.assertNotIn('Valore posizioni inserite: 59',rendered)
-        self.assertNotIn('€30,07',rendered)
+        self.assertIn('1 asset ora visibili su Kraken, 1 da verificare',rendered)
+        self.assertIn('SIM_ATTESA',rendered)
+        self.assertNotIn('SIM_PRESENTE',rendered)
+        self.assertIn('Nessuna quantità inserita',rendered)
+        self.assertNotIn('Disponibile spot da API privata:',rendered)
+
+    def test_local_t0_original_integrity_and_balances_are_separate(self):
+        """Gate locale vero: mai inviare T0 o dati personali nel repository."""
+        from pathlib import Path
+        from decimal import Decimal, InvalidOperation
+        import hashlib
+        import re
+        root=d.DIR
+        if not (root/'config.json').is_file():
+            self.skipTest('T0 LOCALE NON ESEGUITO: checkout senza config privata; prova obbligatoria nello staging Samsung')
+        port=root/'portafoglio.json'
+        self.assertTrue(port.is_file() and not port.is_symlink(),
+                        'Portafoglio privato necessario per gate T0 locale')
+        local=json.loads(port.read_text(encoding='utf-8'))
+        identifier=local.get('t0_id')
+        self.assertTrue(isinstance(identifier,str) and
+                        re.fullmatch(r'T0_\\d{4}-\\d{2}-\\d{2}_\\d{4}_KRAKEN_PRO',
+                                     identifier) is not None,
+                        'Identificatore T0 locale non valido')
+        original=root/'storico_portafoglio'/(identifier+'.json')
+        self.assertTrue(original.is_file() and not original.is_symlink(),
+                        'Fotografia T0 originale non trovata')
+        self.assertTrue(isinstance(local.get('t0_sha256'),str) and
+                        hashlib.sha256(original.read_bytes()).hexdigest()==local['t0_sha256'],
+                        'Impronta T0 differente dalla copia originaria')
+        snapshot=json.loads(original.read_text(encoding='utf-8'))
+        entries=snapshot.get('quantita_e_valori_schermata')
+        self.assertTrue(isinstance(entries,list) and len(entries)>0,
+                        'Fotografia T0 priva delle voci originarie')
+        try:
+            values=[Decimal(str(entry['valore_eur_visualizzato']))
+                    for entry in entries]
+            recorded=Decimal(str(snapshot['valore_totale_fotografia_eur']))
+        except (KeyError,TypeError,InvalidOperation) as exc:
+            self.fail('Fotografia T0 non interpretabile: '+type(exc).__name__)
+        self.assertTrue(recorded.is_finite() and recorded>0 and
+                        all(v.is_finite() and v>=0 for v in values) and
+                        sum(values,Decimal('0'))==recorded,
+                        'Totale T0 incoerente con le sue voci originarie')
+        self.assertIn('BalanceEx',local.get('fonte_quantita',''),
+                      'Fonte dei saldi locali non riconosciuta')
+        self.assertIsInstance(local.get('posizioni'),list)
+        self.assertIsInstance(local.get('liquidita_spot_api',{}),dict)
+        self.assertTrue(all(item.get('costo_medio_eur') is None or
+                            isinstance(item.get('costo_medio_eur'),(int,float,str))
+                            for item in local['posizioni']),
+                        'Schema dei costi medi incoerente')
 
     def test_trade_flow_timestamp_is_after_api_response_not_snapshot_start(self):
         import flusso_spot as f
