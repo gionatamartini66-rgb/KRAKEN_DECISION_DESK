@@ -1007,7 +1007,7 @@ class DeskTests(unittest.TestCase):
         html=serve.with_controls("<html><h2>1 · Decisioni e posizioni</h2></html>")
         self.assertIn('href=\'/mercati/spot\'',html)
         self.assertNotIn('href=\'/grafico/sui-4h\'',html)
-        self.assertIn("Grafico SUI/EUR · 15m / 1H / 4H / 1D",html)
+        self.assertIn("Seleziona coppia Kraken Spot · grafici 15m / 1H / 4H / 1D",html)
         self.assertNotIn("EMA 20",html)
 
     def test_4h_closed_candles_without_last_in_progress(self):
