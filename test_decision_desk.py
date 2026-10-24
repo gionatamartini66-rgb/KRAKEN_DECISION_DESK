@@ -32,6 +32,24 @@ def fixture_trade_plan():
     }
 
 
+def fixture_migration():
+    """Migrazione interamente sintetica: nessun importo né identità patrimoniale."""
+    return {
+        'stato': 'DA_RICONCILIARE',
+        'migrazione_completata': False,
+        'asset_visibili': [
+            {'token': 'SIM_PRESENTE', 'quantita_binance_visualizzata': '0.125',
+             'accreditato_kraken': None},
+            {'token': 'SIM_ATTESA', 'quantita_binance_visualizzata': '2.5',
+             'accreditato_kraken': None},
+        ],
+        'riscontro_portafoglio_kraken_2026_10_19': {
+            'visibili_anche_su_kraken': {'SIM_PRESENTE': '0.125'},
+            'non_visibile_nella_schermata': ['SIM_ATTESA'],
+        },
+    }
+
+
 class DeskTests(unittest.TestCase):
     def setUp(self):
         self.pairs = {
@@ -48,7 +66,33 @@ class DeskTests(unittest.TestCase):
         }
         self.now=dt.datetime(2026,10,16,12,tzinfo=dt.timezone.utc)
     def test_checkpoint_documentato(self):
-        self.assertTrue(d.checkpoint_allineato(), 'README non allineato al codice: descrivere nel README modifiche, test e prossimo step, poi aggiornare impronta')
+        # Sul checkout pubblico manca la configurazione privata. Qui NON
+        # inventiamo il checkpoint locale: il test deve eseguirsi sul Samsung.
+        if not (d.DIR / 'config.json').is_file():
+            self.skipTest('CHECKPOINT LOCALE NON ESEGUITO: config privata assente; prova obbligatoria nello staging Samsung')
+        self.assertTrue(d.checkpoint_allineato(),
+                        'Checkpoint dei sorgenti/README/config locale incoerente')
+
+    def test_checkpoint_detects_source_tampering_on_isolated_synthetic_files(self):
+        from pathlib import Path
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            (root/'config.json').write_text('{"test":true}',encoding='utf-8')
+            source=root/'sintetico.py'
+            source.write_text('SIMULATO = True\n',encoding='utf-8')
+            with mock.patch.object(d,'DIR',root):
+                sig=d.fingerprint_sorgenti()
+                (root/'README.md').write_text(
+                    '<!-- CHECKPOINT_SORGENTI_SHA256: '+sig+' -->\n',
+                    encoding='utf-8')
+                self.assertTrue(d.checkpoint_allineato())
+                source.write_text('SIMULATO = False\n',encoding='utf-8')
+                self.assertFalse(d.checkpoint_allineato())
+                source.write_text('SIMULATO = True\n',encoding='utf-8')
+                self.assertTrue(d.checkpoint_allineato())
+                (root/'config.json').write_text('{"test":false}',encoding='utf-8')
+                self.assertFalse(d.checkpoint_allineato())
 
     def test_widget_age_computed_in_browser(self):
         data={'rilevazione_utc':d.NOW().isoformat(), 'markets':{}, 'trends':{}, 'feed':[], 'problemi_feed':[]}
@@ -455,12 +499,9 @@ class DeskTests(unittest.TestCase):
 
     def test_gpt_plan_escapes_html_and_marks_new_snapshot(self):
         import piano_gpt as pg
-        import copy
-        current=pg.load()
-        self.assertIsNotNone(current)
-        self.assertNotIn('errore',current)
         injected=fixture_trade_plan()
         injected['tesi']='<script>alert("x")</script>'
+        pg.validate(injected)
         view=pg.render_box(injected,"2026-10-18T08:30:00+00:00")
         self.assertNotIn('<script>alert("x")</script>',view)
         self.assertIn('&lt;script&gt;',view)
@@ -1010,7 +1051,8 @@ class DeskTests(unittest.TestCase):
 
     def test_gpt_mobile_first_summary_before_details(self):
         import piano_gpt as pg
-        plan=pg.load()
+        plan=fixture_trade_plan()
+        pg.validate(plan)
         markup=pg.render_box(plan,plan['snapshot_kraken_utc'])
         self.assertIn('PRIMA LETTURA · PIANO GPT',markup)
         self.assertIn('Condizione:</b>',markup)
@@ -1029,7 +1071,7 @@ class DeskTests(unittest.TestCase):
         data={'rilevazione_utc':d.NOW().isoformat(), 'markets':{}, 'trends':{},
               'feed':[],'problemi_feed':[]}
         report=d.build_report(data, {'posizioni':[]}, {}, {}, [])
-        report['piano_gpt']=pg.load()
+        report['piano_gpt']=pg.validate(fixture_trade_plan())
         page=d.render(report)
         self.assertIn('PRIMA LETTURA · PIANO GPT',page)
         self.assertLess(page.index('PRIMA LETTURA · PIANO GPT'),
@@ -1263,20 +1305,20 @@ class DeskTests(unittest.TestCase):
     def test_archive_detects_corruption_and_rejects_overwrite(self):
         import verifica_piani as vp
         import piano_gpt as pg
-        import tempfile
         from pathlib import Path
-        current=pg.load()
+        current=pg.validate(fixture_trade_plan())
         with tempfile.TemporaryDirectory() as tmp:
             with unittest.mock.patch.object(vp,'PLANS',Path(tmp)):
                 digest=vp.archivia_piano(current)
                 vp.archivia_piano(current)
                 self.assertEqual(len(list(Path(tmp).glob('*.json'))),1)
                 (Path(tmp)/(digest+'.json')).write_text('{"token":"BAD"}')
-                with self.assertRaises(ValueError):vp.archivia_piano(current)
+                with self.assertRaises(ValueError):
+                    vp.archivia_piano(current)
 
     def test_archive_render_hides_current_and_never_claims_returns(self):
         import verifica_piani as vp
-        current=__import__('piano_gpt').load()
+        current=fixture_trade_plan()
         digest=vp.plan_hash(current)
         data={'piani':[
             {'hash_piano':digest,'coppia':'ICNT/USD','tracking':'CONCLUSO',
@@ -1367,12 +1409,11 @@ class DeskTests(unittest.TestCase):
         self.assertTrue(all(x['perche'] in ('A','B','C') for x in chosen))
 
     def test_no_trade_plan_preserved_without_fake_prices_or_api(self):
-        import ricerca_setup as rs
         import piano_gpt as pg
         import verifica_piani as vp
-        import copy,tempfile
+        import copy
         from pathlib import Path
-        plan=copy.deepcopy(pg.load())
+        plan=copy.deepcopy(fixture_trade_plan())
         plan['token']='MERCATO_SPOT'
         plan['coppia']='NESSUNA COPPIA OPERATIVA'
         plan['livelli']=None
@@ -1976,6 +2017,105 @@ class DeskTests(unittest.TestCase):
             out=b.collect(["MISSING"],{}, {},shortlist=[])
         self.assertEqual(out["status"],"NO_PAIR")
 
+    def test_c1_fonte_storica_distinta_da_freschezza_e_fallimento(self):
+        import datetime as dt
+        now=dt.datetime(2026,10,24,8,tzinfo=dt.timezone.utc)
+        p={'fonte_quantita':'Kraken BalanceEx API privata SOLA LETTURA, 2026-10-24T06:00:00+00:00',
+           'data_ora_saldo_privato_utc':'2026-10-24T06:00:00+00:00',
+           'posizioni':[{'token':'BTC','quantita':'1'}]}
+        state=d.stato_saldo(p, {'stato':'FALLITO','errore_tipo':'ConnectionError'}, now=now)
+        self.assertTrue(state['portafoglio_aggiornato_da_api_private'])
+        self.assertEqual(state['freschezza_saldo'],'NON_RECENTE')
+        self.assertEqual(state['eta_saldo_minuti'],120.0)
+        self.assertEqual(state['ultimo_tentativo'],'FALLITO')
+        self.assertEqual(state['ultimo_errore_tipo'],'ConnectionError')
+        self.assertFalse(d.stato_saldo({},now=now)['portafoglio_aggiornato_da_api_private'])
+        self.assertEqual(d.stato_saldo({},now=now)['freschezza_saldo'],'ASSENTE_O_IGNOTO')
+        self.assertEqual(d.stato_saldo({'fonte_quantita':'manuale'},now=now)['origine'],
+                         'IGNOTA_O_ALTRA')
+        p['data_ora_saldo_privato_utc']='non valido'
+        self.assertEqual(d.stato_saldo(p,now=now)['freschezza_saldo'],'ORARIO_NON_VALIDO')
+        p['data_ora_saldo_privato_utc']=(now+dt.timedelta(minutes=10)).isoformat()
+        future=d.stato_saldo(p,now=now)
+        self.assertEqual(future['freschezza_saldo'],'ORARIO_FUTURO_NON_ATTENDIBILE')
+        self.assertFalse(future['portafoglio_aggiornato_da_api_private'])
+
+    def test_c1_privato_non_blocca_aggiornamento_pubblico(self):
+        import kraken_readonly as account
+        from unittest import mock
+        with mock.patch.object(account,'AUTH') as auth, mock.patch.object(account,'refresh') as get:
+            auth.is_file.return_value=False
+            self.assertEqual(d.aggiorna_saldo_sola_lettura()['stato'],'NON_CONFIGURATO')
+            get.assert_not_called()
+            auth.is_file.return_value=True
+            get.side_effect=SystemExit('permessi non corretti')
+            result=d.aggiorna_saldo_sola_lettura()
+            self.assertEqual(result['stato'],'FALLITO')
+            self.assertEqual(result['errore_tipo'],'SystemExit')
+            get.side_effect=ConnectionError('offline')
+            self.assertEqual(d.aggiorna_saldo_sola_lettura()['errore_tipo'],'ConnectionError')
+            get.side_effect=None
+            self.assertEqual(d.aggiorna_saldo_sola_lettura()['stato'],'RIUSCITO')
+
+    def test_c1_dossier_dichiara_fonte_e_ultimo_tentativo(self):
+        import dossier_trade as dd
+        from unittest import mock
+        now=d.NOW().isoformat(timespec='seconds')
+        p={'fonte_quantita':'Kraken BalanceEx API privata SOLA LETTURA, '+now,
+           'data_ora_saldo_privato_utc':now,'posizioni':[{'token':'BTC','quantita':'1'}]}
+        source={'rilevazione_utc':now,'schede_v02':[],
+                'saldo_refresh':{'stato':'FALLITO','errore_tipo':'ConnectionError'},
+                'orari_fonti':{'composizione_kdd_utc':now}}
+        with mock.patch.object(dd.desk,'load',return_value=p), \
+             mock.patch.object(dd.desk,'save'), \
+             mock.patch.object(dd,'recupera_4h',return_value={}), \
+             mock.patch.object(dd,'global_context',return_value={}), \
+             mock.patch.object(dd,'derivatives_context',return_value={}):
+            result=dd.collect(source=source)
+        self.assertTrue(result['portafoglio_aggiornato_da_api_private'])
+        self.assertEqual(result['stato_saldo']['ultimo_tentativo'],'FALLITO')
+        self.assertEqual(result['orari_fonti']['composizione_kdd_utc'],now)
+        self.assertTrue(result['portafoglio_noto'])
+        self.assertNotIn('Quantità manuali trascritte',' '.join(result['limiti']))
+
+    def test_c1_report_conserva_timestamp_e_separa_saldo(self):
+        now=d.NOW().isoformat(timespec='seconds')
+        p={'posizioni':[],'fonte_quantita':'Kraken BalanceEx API privata SOLA LETTURA, '+now,
+           'data_ora_saldo_privato_utc':now}
+        data={'rilevazione_utc':now,'markets':{},'trends':{},'feed':[],
+              'problemi_feed':[], 'saldo_refresh':{'stato':'RIUSCITO'},
+              'orari_fonti':{'kraken_ticker_richiesta_utc':now,
+                             'kraken_ticker_risposta_utc':now,'composizione_kdd_utc':now}}
+        result=d.build_report(data,p,{},{},[])
+        self.assertEqual(result['orari_fonti'],data['orari_fonti'])
+        self.assertEqual(result['saldo_stato']['ultimo_tentativo'],'RIUSCITO')
+        self.assertEqual(result['saldo_stato']['origine'],'KRAKEN_BALANCEEX')
+        self.assertNotIn('Nessun accesso al conto, nessuna API privata',
+                         ' '.join(result['avvertenze']))
+
+    def test_c1_rigenera_non_attribuisce_vecchio_tentativo_a_saldo_nuovo(self):
+        import datetime as dt
+        now=dt.datetime(2026,10,24,10,tzinfo=dt.timezone.utc)
+        portfolio={
+            'fonte_quantita':'Kraken BalanceEx API privata SOLA LETTURA, 2026-10-24T09:58:00+00:00',
+            'data_ora_saldo_privato_utc':'2026-10-24T09:58:00+00:00'}
+        vecchio={'stato':'FALLITO',
+                 'controllato_utc':'2026-10-24T08:00:00+00:00',
+                 'errore_tipo':'ConnectionError'}
+        result=d.stato_saldo(portfolio,vecchio,now=now)
+        self.assertEqual(result['freschezza_saldo'],'RECENTE')
+        self.assertEqual(result['coerenza_tentativo_con_saldo'],'NON_CORRELATO_AL_SALDO')
+        self.assertEqual(result['ultimo_tentativo'],'NON_DOCUMENTATO')
+        self.assertIsNone(result['ultimo_errore_tipo'])
+        corrente={'stato':'RIUSCITO','controllato_utc':'2026-10-24T09:58:01+00:00'}
+        result=d.stato_saldo(portfolio,corrente,now=now)
+        self.assertEqual(result['coerenza_tentativo_con_saldo'],'ORDINE_TEMPORALE_COMPATIBILE')
+        self.assertEqual(result['ultimo_tentativo'],'RIUSCITO')
+        futuro={'stato':'RIUSCITO','controllato_utc':'2026-10-24T11:00:00+00:00'}
+        result=d.stato_saldo(portfolio,futuro,now=now)
+        self.assertEqual(result['coerenza_tentativo_con_saldo'],'ORARIO_TENTATIVO_FUTURO')
+        self.assertEqual(result['ultimo_tentativo'],'NON_DOCUMENTATO')
+
     def test_private_balance_sync_preserves_t0_and_excludes_cash_from_positions(self):
         import kdd_saldi
         import tempfile, json
@@ -2012,44 +2152,112 @@ class DeskTests(unittest.TestCase):
             self.assertEqual(json.loads(p.read_text()),saved)
 
     def test_migration_screenshot_is_not_kraken_balance(self):
-        import json,pathlib
-        copy=json.loads(pathlib.Path('migrazione_attesa.json').read_text())
-        self.assertEqual(copy['stato'],'DA_RICONCILIARE')
-        self.assertFalse(copy['migrazione_completata'])
-        self.assertEqual(set(x['token'] for x in copy['asset_visibili']),
-                         {'NEAR','XRP','JUP','RENDER','FET','ONDO'})
-        self.assertTrue(all(x['accreditato_kraken'] is None for x in copy['asset_visibili']))
-        from decimal import Decimal
-        import hashlib
-        live=d.load('portafoglio.json')
-        self.assertEqual(live['t0_id'], 'T0_2026-10-19_2301_KRAKEN_PRO')
-        self.assertIn('BalanceEx', live['fonte_quantita'])
-        p=pathlib.Path('storico_portafoglio/T0_2026-10-19_2301_KRAKEN_PRO.json')
-        base=json.loads(p.read_text())
-        self.assertEqual(base['valore_totale_fotografia_eur'],'1009.69')
-        self.assertEqual(live['t0_sha256'],hashlib.sha256(p.read_bytes()).hexdigest())
-        self.assertEqual(len(base['quantita_e_valori_schermata']),10)
-        self.assertEqual(sum(Decimal(x['valore_eur_visualizzato'])
-                             for x in base['quantita_e_valori_schermata']),Decimal('1009.68'))
-        self.assertTrue(all(x['costo_medio_eur'] is None for x in live['posizioni']))
-        self.assertIn('USDC',live['liquidita_spot_api'])
-        self.assertEqual(copy['riscontro_portafoglio_kraken_2026_10_19']['non_visibile_nella_schermata'],['ONDO'])
-        self.assertEqual(copy['riscontro_portafoglio_kraken_2026_10_19']['visibili_anche_su_kraken']['FET'],'20.15068')
+        sample=fixture_migration()
+        self.assertEqual(sample['stato'],'DA_RICONCILIARE')
+        self.assertFalse(sample['migrazione_completata'])
+        self.assertTrue(all(row['accreditato_kraken'] is None
+                            for row in sample['asset_visibili']))
+        report=d.build_report(
+            {'rilevazione_utc':self.now.isoformat(),'markets':{},'trends':{},
+             'feed':[],'problemi_feed':[]},
+            {'posizioni':[]},{},{},[])
+        report['migrazione_attesa']=sample
+        self.assertFalse(report['posizioni'])
+        self.assertFalse(report.get('liquidita_spot_api'))
+        page=d.render(report)
+        self.assertIn('Migrazione storica:',page)
+        self.assertIn('NON significa zero',page)
+        self.assertNotIn('Disponibile spot da API privata:',page)
 
     def test_migration_shown_only_as_pending_not_tradeable_portfolio(self):
-        import copy,json
         report=d.build_report(
             {'rilevazione_utc':self.now.isoformat(), 'markets':{},'trends':{},
              'feed':[], 'problemi_feed':[]},
             {'posizioni':[]},{},{},[])
-        report['migrazione_attesa']=json.loads(pathlib.Path('migrazione_attesa.json').read_text())
+        report['migrazione_attesa']=fixture_migration()
         rendered=d.render(report)
         self.assertIn('Le vecchie quantità Binance sono archiviate separatamente dal portafoglio Kraken',rendered)
-        self.assertIn('5 asset ora visibili su Kraken, 1 da verificare',rendered)
-        self.assertIn('6.34614039',rendered)
-        self.assertNotIn('6.678999',rendered)
-        self.assertNotIn('Valore posizioni inserite: 59',rendered)
-        self.assertNotIn('€30,07',rendered)
+        self.assertIn('1 asset ora visibili su Kraken, 1 da verificare',rendered)
+        self.assertIn('SIM_ATTESA',rendered)
+        self.assertNotIn('SIM_PRESENTE',rendered)
+        self.assertIn('Nessuna quantità inserita',rendered)
+        self.assertNotIn('Disponibile spot da API privata:',rendered)
+
+    def test_local_t0_original_integrity_and_balances_are_separate(self):
+        """Gate locale vero: mai inviare T0 o dati personali nel repository."""
+        from pathlib import Path
+        from decimal import Decimal, InvalidOperation
+        import hashlib
+        import re
+        import os
+        root=d.DIR
+        if not (root/'config.json').is_file():
+            self.skipTest('T0 LOCALE NON ESEGUITO: checkout senza config privata; prova obbligatoria nello staging Samsung')
+        port=root/'portafoglio.json'
+        self.assertTrue(port.is_file() and not port.is_symlink(),
+                        'Portafoglio privato necessario per gate T0 locale')
+        local=json.loads(port.read_text(encoding='utf-8'))
+        identifier=local.get('t0_id')
+        self.assertTrue(isinstance(identifier,str) and
+                        re.fullmatch(r'T0_\d{4}-\d{2}-\d{2}_\d{4}_KRAKEN_PRO',
+                                     identifier) is not None,
+                        'Identificatore T0 locale non valido')
+        original=root/'storico_portafoglio'/(identifier+'.json')
+        self.assertTrue(original.is_file() and not original.is_symlink(),
+                        'Fotografia T0 originale non trovata')
+        self.assertTrue(isinstance(local.get('t0_sha256'),str) and
+                        hashlib.sha256(original.read_bytes()).hexdigest()==local['t0_sha256'],
+                        'Impronta T0 differente dalla copia originaria')
+        # Il solo hash in portafoglio.json non autentica T0: i due file
+        # potrebbero essere modificati insieme. Richiediamo un'impronta
+        # precedentemente attestata, recuperata da prova PRIVATA INDIPENDENTE.
+        # Non ricavarla di nuovo dal T0 corrente: sarebbe una verifica circolare.
+        trusted=os.environ.get('KDD_T0_TRUSTED_SHA256','')
+        proof=os.environ.get('KDD_T0_TRUSTED_PROOF','')
+        # Due rappresentazioni alternative della prova storica:
+        # hash originale privato, oppure prova SHA-256 ridotta a 96 bit
+        # derivata in modo deterministico dal medesimo hash. Entrambe devono
+        # provenire da una copia INDIPENDENTE, mai dal file corrente.
+        digest=hashlib.sha256(original.read_bytes()).hexdigest()
+        expected_proof=hashlib.sha256(
+            ('KDD-T0-20261024-VERIFICA-RETROSPETTIVA:'+digest).encode()
+        ).hexdigest()[:24]
+        valid_hash=re.fullmatch(r'[a-f0-9]{64}',trusted) is not None
+        valid_proof=re.fullmatch(r'[a-f0-9]{24}',proof) is not None
+        self.assertTrue(valid_hash or valid_proof,
+                        'ATTESTAZIONE T0 LOCALE ASSENTE: occorre riferimento storico indipendente; gate NON SUPERATO')
+        if valid_hash:
+            self.assertEqual(digest,trusted,
+                             'T0 locale diverso dall\'impronta storica indipendente')
+        if valid_proof:
+            self.assertEqual(expected_proof,proof,
+                             'T0 locale diverso dalla prova storica indipendente')
+        snapshot=json.loads(original.read_text(encoding='utf-8'))
+        entries=snapshot.get('quantita_e_valori_schermata')
+        self.assertTrue(isinstance(entries,list) and len(entries)>0,
+                        'Fotografia T0 priva delle voci originarie')
+        try:
+            values=[Decimal(str(entry['valore_eur_visualizzato']))
+                    for entry in entries]
+            recorded=Decimal(str(snapshot['valore_totale_fotografia_eur']))
+        except (KeyError,TypeError,InvalidOperation) as exc:
+            self.fail('Fotografia T0 non interpretabile: '+type(exc).__name__)
+        # La fotografia originale mostra valori arrotondati ai centesimi:
+        # il totale dell'interfaccia può discostarsi di un centesimo dalla
+        # somma delle righe. Non dichiararlo corruzione: l'autenticità
+        # resta vincolata all'impronta storica indipendente sopra.
+        self.assertTrue(recorded.is_finite() and recorded>0 and
+                        all(v.is_finite() and v>=0 for v in values) and
+                        abs(sum(values,Decimal('0'))-recorded)<=Decimal('0.01'),
+                        'Totale T0 incoerente oltre lo scarto di arrotondamento documentato')
+        self.assertIn('BalanceEx',local.get('fonte_quantita',''),
+                      'Fonte dei saldi locali non riconosciuta')
+        self.assertIsInstance(local.get('posizioni'),list)
+        self.assertIsInstance(local.get('liquidita_spot_api',{}),dict)
+        self.assertTrue(all(item.get('costo_medio_eur') is None or
+                            isinstance(item.get('costo_medio_eur'),(int,float,str))
+                            for item in local['posizioni']),
+                        'Schema dei costi medi incoerente')
 
     def test_trade_flow_timestamp_is_after_api_response_not_snapshot_start(self):
         import flusso_spot as f
