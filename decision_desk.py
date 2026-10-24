@@ -146,6 +146,70 @@ def fetch_feed(name, url, kind):
     except Exception as exc:
         return [], f'{name}: {exc.__class__.__name__}'
 
+def stato_saldo(portfolio, tentativo=None, now=None):
+    """Distingue fonte dell'ultima acquisizione, età e tentativo di refresh.
+
+    Il fatto che un saldo derivi da BalanceEx NON significa che sia corrente.
+    Il limite di 30 minuti è un indicatore prudenziale, non una regola di trading.
+    """
+    now = now or NOW()
+    source = portfolio.get('fonte_quantita') if isinstance(portfolio, dict) else None
+    raw_time = portfolio.get('data_ora_saldo_privato_utc') if isinstance(portfolio, dict) else None
+    known_source = isinstance(source, str) and source.startswith(
+        'Kraken BalanceEx API privata SOLA LETTURA, ')
+    acquired = None
+    age = None
+    state = 'ASSENTE_O_IGNOTO'
+    if known_source and isinstance(raw_time, str):
+        try:
+            acquired = dt.datetime.fromisoformat(raw_time.replace('Z', '+00:00'))
+            if acquired.tzinfo is None:
+                raise ValueError('fuso orario assente')
+            acquired = acquired.astimezone(dt.timezone.utc)
+            age = (now - acquired).total_seconds() / 60
+            if age < -2:
+                state = 'ORARIO_FUTURO_NON_ATTENDIBILE'
+            elif age < 0:
+                state = 'OROLOGI_NON_ALLINEATI'
+            else:
+                state = 'RECENTE' if age <= 30 else 'NON_RECENTE'
+        except (TypeError, ValueError, OverflowError):
+            acquired = None
+            age = None
+            state = 'ORARIO_NON_VALIDO'
+    elif known_source:
+        state = 'ORARIO_ASSENTE'
+    attempt = tentativo if isinstance(tentativo, dict) else {}
+    return {
+        'origine': 'KRAKEN_BALANCEEX' if known_source else 'IGNOTA_O_ALTRA',
+        'portafoglio_aggiornato_da_api_private': bool(known_source and acquired is not None
+                                                     and age is not None and age >= 0),
+        'acquisizione_saldo_utc': acquired.isoformat(timespec='seconds') if acquired else None,
+        'eta_saldo_minuti': round(age, 2) if age is not None and age >= 0 else None,
+        'freschezza_saldo': state,
+        'ultimo_tentativo': attempt.get('stato', 'NON_DOCUMENTATO'),
+        'ultimo_tentativo_utc': attempt.get('controllato_utc'),
+        'ultimo_errore_tipo': attempt.get('errore_tipo'),
+    }
+
+
+def aggiorna_saldo_sola_lettura():
+    """Se la lettura privata fallisce, non blocca il refresh pubblico né cancella saldi."""
+    state = 'NON_CONFIGURATO'
+    errore = None
+    try:
+        import kraken_readonly as account
+        if account.AUTH.is_file():
+            account.refresh()
+            state = 'RIUSCITO'
+    except (Exception, SystemExit) as exc:
+        state = 'FALLITO'
+        errore = type(exc).__name__
+        print('ATTENZIONE: saldo privato non aggiornato:', errore)
+    return {'stato': state, 'controllato_utc': NOW().isoformat(timespec='seconds'),
+            'errore_tipo': errore}
+
+
 def load_decisions():
     p = DIR / 'decisioni.jsonl'
     if not p.exists(): return []
@@ -239,9 +303,12 @@ def build_report(data, portfolio, conf, ctx, decisions):
         else: market = 'BTC: quadro tecnico misto'
     age_minutes = max(0, (now - rilevazione).total_seconds()/60)
     freshness = 'Freschezza da ricalcolare alla consultazione; timestamp originale sempre disponibile.'
+    saldo = stato_saldo(portfolio, data.get('saldo_refresh'), now=now)
     posizioni_non_aggiornate = sum(1 for h in portfolio.get('posizioni',[]) if h.get('quantita') is None)
     return {'rilevazione_utc': data['rilevazione_utc'], 'mercato': market,
-            'freschezza': freshness, 'revisione_portafoglio': decision_state('PORTAFOGLIO', decisions, now),
+            'freschezza': freshness, 'saldo_stato': saldo,
+            'orari_fonti': data.get('orari_fonti', {}),
+            'revisione_portafoglio': decision_state('PORTAFOGLIO', decisions, now),
             'contesto': context_status(ctx, now), 'posizioni': holdings, 'candidati': gainers[:18], 'schede_v02': schede,
             'totale_stimato_eur': sum(x.get('valore_eur',0) for x in holdings),
             'totale_parziale': bool(posizioni_non_aggiornate) or any('errore' in x for x in holdings), 'posizioni_non_aggiornate': posizioni_non_aggiornate,
@@ -255,7 +322,10 @@ def build_report(data, portfolio, conf, ctx, decisions):
                'Il volume 24h in EUR è stimato: volume token * ultimo prezzo.',
                'Radar gainer = selezione da approfondire, mai segnale automatico di acquisto.',
                'Fonti macro sono titoli ufficiali; il software NON deduce automaticamente implicazioni geopolitiche o monetarie.',
-               'Nessun accesso al conto, nessuna API privata, nessun ordine, nessuna tassazione calcolata.'
+               ('Saldo spot: fonte '+saldo['origine']+', acquisizione '+str(saldo['acquisizione_saldo_utc'])+
+                ', eta minuti '+str(saldo['eta_saldo_minuti'])+', freschezza '+saldo['freschezza_saldo']+
+                ', ultimo tentativo '+saldo['ultimo_tentativo']+'. Dato precedente non equivale a saldo attuale.'),
+               'Kraken BalanceEx solo lettura se configurato; nessun ordine, nessuna tassazione calcolata.'
             ]}
 
 def fmt(x, places=2):
@@ -619,21 +689,19 @@ def stato_dossier_per_report(data):
 
 
 def refresh():
-    # Aggiorna automaticamente SOLO i saldi con chiave di lettura, se già configurata.
-    # Se la lettura fallisce, mantieni l'ultimo saldo datato: mai azzerarlo.
-    try:
-        import kraken_readonly as account
-        if account.AUTH.is_file():
-            account.refresh()
-    except Exception as exc:
-        print('ATTENZIONE: saldo privato non aggiornato:', type(exc).__name__)
+    # Lettura privata indipendente dalla raccolta pubblica, senza cancellare il saldo vecchio.
+    saldo_refresh = aggiorna_saldo_sola_lettura()
     portfolio = load('portafoglio.json', {'posizioni':[]})
     conf = load('config.json', {})
     ctx = load('contesto.json', {})
     print('Recupero coppie Kraken (lettura pubblica)...')
+    pairs_started = NOW().isoformat(timespec='seconds')
     pairs = kraken('AssetPairs')
+    pairs_received = NOW().isoformat(timespec='seconds')
     time.sleep(1.1)
+    ticker_started = NOW().isoformat(timespec='seconds')
     tickers = kraken('Ticker')
+    ticker_received = NOW().isoformat(timespec='seconds')
     markets = market_pairs_and_ticker(pairs, tickers)  # prezzo EUR portafoglio e radar storico
     markets_multi, rates = multi.assemble(
         pairs, tickers, min_vol=num(conf.get('scanner',{}).get('volume_24h_min_eur',500000)),
@@ -777,8 +845,19 @@ def refresh():
                        'reason':type(exc).__name__, 'tokens':[]}
     print('Binance spot pubblico:', binance_ref['status'], '|',
           len(binance_ref.get('tokens',[])), 'token')
-    data = {'binance_reference':binance_ref,
-            'rilevazione_utc': NOW().isoformat(timespec='seconds'), 'markets': markets,
+    # Questi sono orari misurati dal telefono, NON timestamp nativi dell'exchange.
+    composed_utc = NOW().isoformat(timespec='seconds')
+    data = {'saldo_refresh': saldo_refresh,
+            'orari_fonti': {
+                'kraken_asset_pairs_richiesta_utc': pairs_started,
+                'kraken_asset_pairs_risposta_utc': pairs_received,
+                'kraken_ticker_richiesta_utc': ticker_started,
+                'kraken_ticker_risposta_utc': ticker_received,
+                'binance_risposta_utc': binance_ref.get('observed_utc'),
+                'composizione_kdd_utc': composed_utc,
+                'nota': 'Orari locali di osservazione, non timestamp Kraken nativi'},
+            'binance_reference':binance_ref,
+            'rilevazione_utc': composed_utc, 'markets': markets,
             'n_coppie_multi': sum(x['n_coppie'] for x in markets_multi.values()),
             'n_token_multi': len(markets_multi), 'fx_rilevati': rates,
             'trends': trends, 'schede_v02': schede, 'ricerca_setup': ricerca,
