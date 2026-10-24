@@ -180,7 +180,30 @@ def stato_saldo(portfolio, tentativo=None, now=None):
     elif known_source:
         state = 'ORARIO_ASSENTE'
     attempt = tentativo if isinstance(tentativo, dict) else {}
+    coerenza_tentativo = 'NON_DOCUMENTATA'
+    checked_raw = attempt.get('controllato_utc')
+    if attempt and checked_raw is None:
+        coerenza_tentativo = 'ORARIO_TENTATIVO_NON_FORNITO'
+    elif checked_raw is not None:
+        try:
+            checked = dt.datetime.fromisoformat(checked_raw.replace('Z', '+00:00'))
+            if checked.tzinfo is None:
+                raise ValueError('fuso orario tentativo assente')
+            checked = checked.astimezone(dt.timezone.utc)
+            if checked > now + dt.timedelta(minutes=2):
+                coerenza_tentativo = 'ORARIO_TENTATIVO_FUTURO'
+                attempt = {}
+            elif acquired is not None and checked < acquired - dt.timedelta(seconds=2):
+                # rigenera puo' combinare un vecchio snapshot con un saldo aggiornato in seguito.
+                coerenza_tentativo = 'NON_CORRELATO_AL_SALDO'
+                attempt = {}
+            else:
+                coerenza_tentativo = 'ORDINE_TEMPORALE_COMPATIBILE'
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            coerenza_tentativo = 'ORARIO_TENTATIVO_NON_VALIDO'
+            attempt = {}
     return {
+        'coerenza_tentativo_con_saldo': coerenza_tentativo,
         'origine': 'KRAKEN_BALANCEEX' if known_source else 'IGNOTA_O_ALTRA',
         'portafoglio_aggiornato_da_api_private': bool(known_source and acquired is not None
                                                      and age is not None and age >= 0),
