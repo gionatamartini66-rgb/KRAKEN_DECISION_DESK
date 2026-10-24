@@ -269,6 +269,103 @@ proprio dossier locale, aggiornabile dal cruscotto.</p>
         .replace("__CARDS__", "".join(rows)))
 
 
+
+# Identita scelta dal catalogo Kraken; nessun token privilegiato.
+SPOT_KEY_RE = re.compile(r"[A-Za-z0-9_.-]{2,48}\Z")
+SPOT_NAME_RE = re.compile(r"[A-Za-z0-9._-]{1,40}/[A-Za-z0-9._-]{1,40}\Z")
+
+
+def spot_catalog(public_kraken=None):
+    """Coppie AssetPairs attualmente online: non prova accessibilita sul conto."""
+    fetch = public_kraken or desk.kraken
+    raw = fetch("AssetPairs")
+    if not isinstance(raw, dict):
+        raise ValueError("Catalogo Kraken non verificabile")
+    out = {}
+    for key, row in raw.items():
+        if not isinstance(key, str) or not SPOT_KEY_RE.fullmatch(key):
+            continue
+        if key.lower().endswith(".d") or not isinstance(row, dict):
+            continue
+        name = row.get("wsname")
+        if row.get("status") != "online" or not isinstance(name, str):
+            continue
+        if not SPOT_NAME_RE.fullmatch(name):
+            continue
+        base, quote = name.split("/", 1)
+        out[key] = {"pair_key": key, "pair": name, "base": base, "quote": quote,
+                    "eligibilita_conto": "NON_VERIFICATA"}
+    if not out:
+        raise ValueError("Nessuna coppia online verificabile")
+    return out
+
+
+def spot_lookup(pair_key, catalog):
+    if (not isinstance(pair_key, str) or not SPOT_KEY_RE.fullmatch(pair_key)
+            or pair_key not in catalog):
+        raise ValueError("Coppia assente o non online nel catalogo Kraken")
+    return catalog[pair_key]
+
+
+def spot_selector(catalog):
+    """Lista navigabile delle coppie senza default e senza lettura portafoglio."""
+    options = "".join(
+        '<option value="' + html.escape(p["pair_key"], quote=True) + '">' +
+        html.escape(p["pair"]) + ' · ' + html.escape(p["pair_key"]) + '</option>'
+        for p in sorted(catalog.values(), key=lambda p: (p["pair"], p["pair_key"]))
+    )
+    return ("""<!doctype html><html lang="it"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KDD · Coppie Kraken Spot</title>
+<style>:root{color-scheme:dark;font-family:system-ui;background:#0b1221;color:#eaf0fa}
+body{max-width:760px;margin:auto;padding:16px}a{color:#8aceff}
+form{background:#18263c;padding:16px;border-radius:12px}
+select,button{font:inherit;padding:10px;margin:10px 0;width:100%}
+button{background:#80cbff;border:0;border-radius:9px;color:#06162b;font-weight:bold}
+p{line-height:1.5}</style></head><body>
+<p><a href="/">← Cruscotto</a></p><h1>Mercati Kraken Spot · scegli la coppia</h1>
+<p>Catalogo pubblico AssetPairs online. La negoziabilita per il conto italiano
+non e verificata. Nessuna coppia preselezionata; nessun ordine.</p>
+<form method="get" action="/analisi/spot">
+<label for="pair">Coppia Kraken (base/quote)</label>
+<select name="pair" id="pair" required><option value="">— Seleziona una coppia —</option>
+__OPTIONS__</select>
+<input type="hidden" name="tf" value="4h">
+<button type="submit">Confronta 15m · 1H · 4H · 1D</button>
+<button type="submit" formaction="/grafico/spot">Apri grafico della coppia</button>
+</form><p>Confronto: quattro richieste OHLC pubbliche; grafico: una.
+Solo candele chiuse, niente valori inventati.</p>
+</body></html>""".replace("__OPTIONS__", options))
+
+
+def load_spot_chart(pair_key, timeframe, *, public_kraken=None, now=None):
+    if timeframe not in grafico_4h.TIMEFRAMES:
+        raise ValueError("Timeframe non valido")
+    fetch = public_kraken or desk.kraken
+    meta = spot_lookup(pair_key, spot_catalog(fetch))
+    raw = fetch("OHLC", pair=pair_key, interval=grafico_4h.TIMEFRAMES[timeframe][0])
+    series = grafico_4h.data_from_kraken_ohlc(
+        raw, timeframe, now=now, pair=meta["pair"], token=meta["base"],
+        pair_key=pair_key)
+    return grafico_4h.page_from_data(series)
+
+
+def load_spot_comparison(pair_key, *, public_kraken=None, now=None):
+    fetch = public_kraken or desk.kraken
+    meta = spot_lookup(pair_key, spot_catalog(fetch))
+    now = now or dt.datetime.now(dt.timezone.utc)
+    frames = {}
+    for label, frame in (("15m", "15m"), ("1H", "1h"), ("4H", "4h"), ("1D", "1d")):
+        try:
+            raw = fetch("OHLC", pair=pair_key, interval=grafico_4h.TIMEFRAMES[frame][0])
+            frames[label] = grafico_4h.data_from_kraken_ohlc(
+                raw, frame, now=now, pair=meta["pair"], token=meta["base"],
+                pair_key=pair_key)
+        except (OSError, RuntimeError, ValueError, KeyError, IndexError, TypeError) as exc:
+            frames[label] = {"errore": type(exc).__name__}
+    return grafico_4h.compare_timeframes(frames, now=now, pair=meta["pair"])
+
+
 def host_valido(host):
     return host == f"{HOST}:{PORT}"
 
@@ -310,6 +407,32 @@ class Handler(BaseHTTPRequestHandler):
         if not self.check_host():
             return
         url = urllib.parse.urlsplit(self.path)
+        if url.path in ("/mercati/spot", "/grafico/spot", "/analisi/spot"):
+            query = urllib.parse.parse_qs(url.query)
+            try:
+                values = query.get("pair", [])
+                if url.path == "/mercati/spot" or not values:
+                    self.send_html(200, spot_selector(spot_catalog()))
+                    return
+                if len(values) != 1:
+                    self.send_html(400, "<h1>Identita coppia non valida</h1>")
+                    return
+                pair_key = values[0]
+                if url.path == "/grafico/spot":
+                    tf = query.get("tf", ["4h"])
+                    if len(tf) != 1 or tf[0] not in grafico_4h.TIMEFRAMES:
+                        self.send_html(400, "<h1>Timeframe non valido</h1>")
+                        return
+                    page = load_spot_chart(pair_key, tf[0])
+                else:
+                    summary = load_spot_comparison(pair_key)
+                    page = render_sui_comparison(summary, pair_key=pair_key)
+                self.send_html(200, page)
+            except ValueError:
+                self.send_html(400, "<h1>Coppia Kraken non valida o non online</h1>")
+            except (OSError, RuntimeError, KeyError, TypeError, IndexError):
+                self.send_html(503, "<h1>Kraken pubblico non disponibile</h1>")
+            return
         if url.path == "/stato":
             self.send_body(200, json.dumps(job_snapshot(), ensure_ascii=False),
                            "application/json; charset=utf-8")
