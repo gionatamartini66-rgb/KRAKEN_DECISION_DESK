@@ -1,0 +1,21 @@
+name: KDD Spot Any Pair G2 isolated
+on:
+  push:
+    branches:
+      - experiments/kdd-any-spot-g2-20261024
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compile touched modules
+        run: python -m py_compile serve.py grafico_4h.py test_decision_desk.py test_spot_any_pair.py
+      - name: Existing suite and any-pair adversarial regression
+        run: python -m unittest -v test_spot_any_pair test_decision_desk
