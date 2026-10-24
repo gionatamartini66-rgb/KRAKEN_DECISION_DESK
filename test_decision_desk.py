@@ -1976,6 +1976,82 @@ class DeskTests(unittest.TestCase):
             out=b.collect(["MISSING"],{}, {},shortlist=[])
         self.assertEqual(out["status"],"NO_PAIR")
 
+    def test_c1_fonte_storica_distinta_da_freschezza_e_fallimento(self):
+        import datetime as dt
+        now=dt.datetime(2026,10,24,8,tzinfo=dt.timezone.utc)
+        p={'fonte_quantita':'Kraken BalanceEx API privata SOLA LETTURA, 2026-10-24T06:00:00+00:00',
+           'data_ora_saldo_privato_utc':'2026-10-24T06:00:00+00:00',
+           'posizioni':[{'token':'BTC','quantita':'1'}]}
+        state=d.stato_saldo(p, {'stato':'FALLITO','errore_tipo':'ConnectionError'}, now=now)
+        self.assertTrue(state['portafoglio_aggiornato_da_api_private'])
+        self.assertEqual(state['freschezza_saldo'],'NON_RECENTE')
+        self.assertEqual(state['eta_saldo_minuti'],120.0)
+        self.assertEqual(state['ultimo_tentativo'],'FALLITO')
+        self.assertEqual(state['ultimo_errore_tipo'],'ConnectionError')
+        self.assertFalse(d.stato_saldo({},now=now)['portafoglio_aggiornato_da_api_private'])
+        self.assertEqual(d.stato_saldo({},now=now)['freschezza_saldo'],'ASSENTE_O_IGNOTO')
+        self.assertEqual(d.stato_saldo({'fonte_quantita':'manuale'},now=now)['origine'],
+                         'IGNOTA_O_ALTRA')
+        p['data_ora_saldo_privato_utc']='non valido'
+        self.assertEqual(d.stato_saldo(p,now=now)['freschezza_saldo'],'ORARIO_NON_VALIDO')
+        p['data_ora_saldo_privato_utc']=(now+dt.timedelta(minutes=10)).isoformat()
+        future=d.stato_saldo(p,now=now)
+        self.assertEqual(future['freschezza_saldo'],'ORARIO_FUTURO_NON_ATTENDIBILE')
+        self.assertFalse(future['portafoglio_aggiornato_da_api_private'])
+
+    def test_c1_privato_non_blocca_aggiornamento_pubblico(self):
+        import kraken_readonly as account
+        from unittest import mock
+        with mock.patch.object(account,'AUTH') as auth, mock.patch.object(account,'refresh') as get:
+            auth.is_file.return_value=False
+            self.assertEqual(d.aggiorna_saldo_sola_lettura()['stato'],'NON_CONFIGURATO')
+            get.assert_not_called()
+            auth.is_file.return_value=True
+            get.side_effect=SystemExit('permessi non corretti')
+            result=d.aggiorna_saldo_sola_lettura()
+            self.assertEqual(result['stato'],'FALLITO')
+            self.assertEqual(result['errore_tipo'],'SystemExit')
+            get.side_effect=ConnectionError('offline')
+            self.assertEqual(d.aggiorna_saldo_sola_lettura()['errore_tipo'],'ConnectionError')
+            get.side_effect=None
+            self.assertEqual(d.aggiorna_saldo_sola_lettura()['stato'],'RIUSCITO')
+
+    def test_c1_dossier_dichiara_fonte_e_ultimo_tentativo(self):
+        import dossier_trade as dd
+        from unittest import mock
+        now=d.NOW().isoformat(timespec='seconds')
+        p={'fonte_quantita':'Kraken BalanceEx API privata SOLA LETTURA, '+now,
+           'data_ora_saldo_privato_utc':now,'posizioni':[{'token':'BTC','quantita':'1'}]}
+        source={'rilevazione_utc':now,'schede_v02':[],
+                'saldo_refresh':{'stato':'FALLITO','errore_tipo':'ConnectionError'},
+                'orari_fonti':{'composizione_kdd_utc':now}}
+        with mock.patch.object(dd.desk,'load',return_value=p), \\
+             mock.patch.object(dd.desk,'save'), \\
+             mock.patch.object(dd,'recupera_4h',return_value={}), \\
+             mock.patch.object(dd,'global_context',return_value={}), \\
+             mock.patch.object(dd,'derivatives_context',return_value={}):
+            result=dd.collect(source=source)
+        self.assertTrue(result['portafoglio_aggiornato_da_api_private'])
+        self.assertEqual(result['stato_saldo']['ultimo_tentativo'],'FALLITO')
+        self.assertEqual(result['orari_fonti']['composizione_kdd_utc'],now)
+        self.assertTrue(result['portafoglio_noto'])
+        self.assertNotIn('Quantità manuali trascritte',' '.join(result['limiti']))
+
+    def test_c1_report_conserva_timestamp_e_separa_saldo(self):
+        now=d.NOW().isoformat(timespec='seconds')
+        p={'posizioni':[],'fonte_quantita':'Kraken BalanceEx API privata SOLA LETTURA, '+now,
+           'data_ora_saldo_privato_utc':now}
+        data={'rilevazione_utc':now,'markets':{},'trends':{},'feed':[],
+              'problemi_feed':[], 'saldo_refresh':{'stato':'RIUSCITO'},
+              'orari_fonti':{'kraken_ticker_richiesta_utc':now,
+                             'kraken_ticker_risposta_utc':now,'composizione_kdd_utc':now}}
+        result=d.build_report(data,p,{},{},[])
+        self.assertEqual(result['orari_fonti'],data['orari_fonti'])
+        self.assertEqual(result['saldo_stato']['ultimo_tentativo'],'RIUSCITO')
+        self.assertEqual(result['saldo_stato']['origine'],'KRAKEN_BALANCEEX')
+        self.assertNotIn('Nessun accesso al conto, nessuna API privata',
+                         ' '.join(result['avvertenze']))
+
     def test_private_balance_sync_preserves_t0_and_excludes_cash_from_positions(self):
         import kdd_saldi
         import tempfile, json
