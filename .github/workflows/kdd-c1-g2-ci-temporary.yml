@@ -5,7 +5,7 @@ on:
     branches:
       - experiments/kdd-c1-g2-reconciled-20261024
     paths:
-      - .github/workflows/kdd-g2-ci-temporary.yml
+      - .github/workflows/kdd-c1-g2-ci-temporary.yml
 permissions:
   contents: read
 concurrency:
