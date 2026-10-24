@@ -10,6 +10,8 @@ import datetime as dt
 import html
 import json
 import math
+import re
+import urllib.parse
 import statistics
 from pathlib import Path
 
@@ -59,10 +61,14 @@ def data_from_dossier(path: Path):
         "candles":ordered,
     }
 
-def data_from_kraken_ohlc(result, timeframe, now=None):
+def data_from_kraken_ohlc(result, timeframe, now=None, *, pair='SUI/EUR', token='SUI', pair_key=None):
     """Real consecutive Kraken Spot OHLC candles, discarding final uncommitted bar."""
     if timeframe not in TIMEFRAMES:
         raise ValueError("Timeframe non consentito")
+    if (not isinstance(pair, str) or
+            re.fullmatch(r"[A-Za-z0-9._-]{1,40}/[A-Za-z0-9._-]{1,40}", pair) is None or
+            not isinstance(token, str) or token != pair.split("/", 1)[0]):
+        raise ValueError("Identità coppia Kraken non valida")
     minutes, label = TIMEFRAMES[timeframe]
     seconds = minutes * 60
     now = now or dt.datetime.now(dt.timezone.utc)
@@ -94,7 +100,7 @@ def data_from_kraken_ohlc(result, timeframe, now=None):
     if len(closed) < 30:
         raise ValueError("Storico di candele chiuse insufficiente")
     return {"observed_utc": now.isoformat(timespec="seconds"),
-            "pair": "SUI/EUR", "token": TOKEN, "timeframe": label,
+            "pair": pair, "token": token, "pair_key": pair_key, "timeframe": label,
             "closed_at_utc": dt.datetime.fromtimestamp(
                 closed[-1]["time"] + seconds, dt.timezone.utc
             ).isoformat(timespec="seconds"),
@@ -272,7 +278,7 @@ def summarize_timeframe(data, now=None):
     }
 
 
-def compare_timeframes(frames, now=None):
+def compare_timeframes(frames, now=None, *, pair='SUI/EUR'):
     """Compare four independently acquired frames without implying an order."""
     now = now or dt.datetime.now(dt.timezone.utc)
     labels = ("15m", "1H", "4H", "1D")
@@ -302,7 +308,7 @@ def compare_timeframes(frames, now=None):
             picture = "ALLINEAMENTO_RIBASSISTA_DESCRITTIVO"
         else:
             picture = "CONFIGURAZIONE_MISTA"
-    return {"coppia": "SUI/EUR", "rilevazione_confronto_utc": now.isoformat(
+    return {"coppia": pair, "rilevazione_confronto_utc": now.isoformat(
                 timespec="seconds"), "stato": "COMPLETO" if complete else "PARZIALE",
             "quadro": picture, "timeframe": details,
             "avvertenza": ("Ultime chiusure a orari differenti: confrontare la posizione "
@@ -321,16 +327,25 @@ def page_from_data(x):
     if frame not in ("15m", "1H", "4H", "1D"):
         raise ValueError("Timeframe non valido")
     active = {"15m": "15m", "1H": "1h", "4H": "4h", "1D": "1d"}[frame]
+    key = x.get("pair_key")
+    if key is not None and not re.fullmatch(r"[A-Za-z0-9_.-]{2,48}", key):
+        raise ValueError("Chiave Kraken non valida")
+    path = ("/grafico/spot?pair=" + urllib.parse.quote(key, safe="") + "&tf="
+            if key else "/grafico/sui-4h?tf=")
     links = " ".join(
-        '<a class="tf-link" href="/grafico/sui-4h?tf=' + key +
-        '"' + (' aria-current="page"' if key == active else "") +
+        '<a class="tf-link" href="' + html.escape(path + frame_key, quote=True) +
+        '"' + (' aria-current="page"' if frame_key == active else "") +
         '>' + html.escape(label) + '</a>'
-        for key, (_, label) in TIMEFRAMES.items())
+        for frame_key, (_, label) in TIMEFRAMES.items())
     candle_json = json.dumps(x["candles"], separators=(",",":"), allow_nan=False)
     technical_json = json.dumps(technical_from_candles(
         x["candles"], interval_seconds=interval),
                                 separators=(",",":"), allow_nan=False)
     pair = html.escape(x["pair"], quote=True)
+    token = x.get("token")
+    if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", token):
+        raise ValueError("Token grafico non valido")
+    token_js = json.dumps(token, ensure_ascii=True)
     observed = html.escape(x["observed_utc"], quote=True)
     closed = html.escape(x["closed_at_utc"], quote=True)
     notice = ("TradingView Lightweight Charts™. "
@@ -718,7 +733,7 @@ try {
     const time=new Date(row.time*1000).toLocaleString('it-IT',{timeZone:'UTC'});
     stats.textContent=time+' UTC · O '+fmt.format(row.open)+' · H '+fmt.format(row.high)+
      ' · L '+fmt.format(row.low)+' · C '+fmt.format(row.close)+
-     ' · Vol '+fmt.format(row.volume)+' SUI';
+     ' · Vol '+fmt.format(row.volume)+' '+__TOKEN_JS__;
   }
   show(rows[rows.length-1]);
   const byTime=new Map(rows.map(v=>[v.time,v]));
@@ -741,10 +756,13 @@ try {
 </script>
 </body>
 </html>"""
+    template = template.replace("SUI/EUR", "__PAIR__").replace("(SUI)", "(__TOKEN__)")
     return (template.replace("__BARS__", candle_json)
             .replace("__TECHNICAL__", technical_json)
             .replace("__OBSERVED__", observed).replace("__CLOSED__", closed)
             .replace("__NOTICE__", html.escape(notice))
             .replace("__TIMEFRAME_BUTTONS__", links)
             .replace("__TF__", html.escape(frame))
+            .replace("__PAIR__", pair).replace("__TOKEN__", html.escape(token))
+            .replace("__TOKEN_JS__", token_js)
             .replace("__SOURCE__", html.escape(x.get("source", "Dossier Kraken KDD"))))
