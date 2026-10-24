@@ -2025,10 +2025,10 @@ class DeskTests(unittest.TestCase):
         source={'rilevazione_utc':now,'schede_v02':[],
                 'saldo_refresh':{'stato':'FALLITO','errore_tipo':'ConnectionError'},
                 'orari_fonti':{'composizione_kdd_utc':now}}
-        with mock.patch.object(dd.desk,'load',return_value=p), \\
-             mock.patch.object(dd.desk,'save'), \\
-             mock.patch.object(dd,'recupera_4h',return_value={}), \\
-             mock.patch.object(dd,'global_context',return_value={}), \\
+        with mock.patch.object(dd.desk,'load',return_value=p), \
+             mock.patch.object(dd.desk,'save'), \
+             mock.patch.object(dd,'recupera_4h',return_value={}), \
+             mock.patch.object(dd,'global_context',return_value={}), \
              mock.patch.object(dd,'derivatives_context',return_value={}):
             result=dd.collect(source=source)
         self.assertTrue(result['portafoglio_aggiornato_da_api_private'])
