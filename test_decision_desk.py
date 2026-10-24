@@ -2189,6 +2189,7 @@ class DeskTests(unittest.TestCase):
         from decimal import Decimal, InvalidOperation
         import hashlib
         import re
+        import os
         root=d.DIR
         if not (root/'config.json').is_file():
             self.skipTest('T0 LOCALE NON ESEGUITO: checkout senza config privata; prova obbligatoria nello staging Samsung')
@@ -2207,6 +2208,15 @@ class DeskTests(unittest.TestCase):
         self.assertTrue(isinstance(local.get('t0_sha256'),str) and
                         hashlib.sha256(original.read_bytes()).hexdigest()==local['t0_sha256'],
                         'Impronta T0 differente dalla copia originaria')
+        # Il solo hash in portafoglio.json non autentica T0: i due file
+        # potrebbero essere modificati insieme. Richiediamo un'impronta
+        # precedentemente attestata, recuperata da prova PRIVATA INDIPENDENTE.
+        # Non ricavarla di nuovo dal T0 corrente: sarebbe una verifica circolare.
+        trusted=os.environ.get('KDD_T0_TRUSTED_SHA256','')
+        self.assertTrue(re.fullmatch(r'[a-f0-9]{64}',trusted) is not None,
+                        'ATTESTAZIONE T0 LOCALE ASSENTE: occorre impronta storica indipendente; gate NON SUPERATO')
+        self.assertTrue(hashlib.sha256(original.read_bytes()).hexdigest()==trusted,
+                        'T0 locale non corrisponde all\'impronta storica indipendente')
         snapshot=json.loads(original.read_text(encoding='utf-8'))
         entries=snapshot.get('quantita_e_valori_schermata')
         self.assertTrue(isinstance(entries,list) and len(entries)>0,
