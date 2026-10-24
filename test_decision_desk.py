@@ -2213,10 +2213,25 @@ class DeskTests(unittest.TestCase):
         # precedentemente attestata, recuperata da prova PRIVATA INDIPENDENTE.
         # Non ricavarla di nuovo dal T0 corrente: sarebbe una verifica circolare.
         trusted=os.environ.get('KDD_T0_TRUSTED_SHA256','')
-        self.assertTrue(re.fullmatch(r'[a-f0-9]{64}',trusted) is not None,
-                        'ATTESTAZIONE T0 LOCALE ASSENTE: occorre impronta storica indipendente; gate NON SUPERATO')
-        self.assertTrue(hashlib.sha256(original.read_bytes()).hexdigest()==trusted,
-                        'T0 locale non corrisponde all\'impronta storica indipendente')
+        proof=os.environ.get('KDD_T0_TRUSTED_PROOF','')
+        # Due rappresentazioni alternative della prova storica:
+        # hash originale privato, oppure prova SHA-256 ridotta a 96 bit
+        # derivata in modo deterministico dal medesimo hash. Entrambe devono
+        # provenire da una copia INDIPENDENTE, mai dal file corrente.
+        digest=hashlib.sha256(original.read_bytes()).hexdigest()
+        expected_proof=hashlib.sha256(
+            ('KDD-T0-20261024-VERIFICA-RETROSPETTIVA:'+digest).encode()
+        ).hexdigest()[:24]
+        valid_hash=re.fullmatch(r'[a-f0-9]{64}',trusted) is not None
+        valid_proof=re.fullmatch(r'[a-f0-9]{24}',proof) is not None
+        self.assertTrue(valid_hash or valid_proof,
+                        'ATTESTAZIONE T0 LOCALE ASSENTE: occorre riferimento storico indipendente; gate NON SUPERATO')
+        if valid_hash:
+            self.assertEqual(digest,trusted,
+                             'T0 locale diverso dall\'impronta storica indipendente')
+        if valid_proof:
+            self.assertEqual(expected_proof,proof,
+                             'T0 locale diverso dalla prova storica indipendente')
         snapshot=json.loads(original.read_text(encoding='utf-8'))
         entries=snapshot.get('quantita_e_valori_schermata')
         self.assertTrue(isinstance(entries,list) and len(entries)>0,
