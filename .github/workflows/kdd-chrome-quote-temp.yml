@@ -94,11 +94,11 @@ jobs:
                   print("CHROME_BROWSER_CHART_PASS",driver.find_element(By.TAG_NAME,"h1").text,flush=True)
                   driver.get(base+"/grafico/spot?pair=ADAUSDT&tf=4h")
                   WebDriverWait(driver,20).until(lambda d: "Grafico generato:" in d.find_element(By.ID,"graph-status").text)
-                  content=driver.find_element(By.ID,"levels-list").text
+                  content=driver.find_element(By.ID,"levels-list").get_attribute("textContent")
                   assert "Prezzo USDT" in content, content[:180]
                   ema=driver.execute_script("""return Array.from(
                     document.querySelectorAll('#levels-list tr'))
-                    .filter(r => r.innerText.includes('EMA20'))
+                    .filter(r => r.textContent.includes('EMA20'))
                     .map(r => r.querySelectorAll('td')[1]?.textContent)
                     .filter(Boolean)[0]""")
                   assert ema and any(ch in "123456789" for ch in ema), f"Micro EMA rounded to zero: {ema}"
