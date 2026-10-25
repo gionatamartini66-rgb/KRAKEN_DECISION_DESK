@@ -2561,6 +2561,21 @@ class AnyKrakenSpotTests(unittest.TestCase):
         self.assertIn("Grafico XBT/EUR", graph)
         self.assertNotIn("Grafico SUI/EUR", graph)
 
+    def test_micro_volume_remains_nonzero_in_quote_aware_comparison(self):
+        report = serve.load_spot_comparison(
+            "ADAUSDT", public_kraken=self.fake, now=self.now)
+        self.assertEqual(report["stato"], "COMPLETO")
+        report["timeframe"][0]["volume"] = 1e-9
+        report["timeframe"][1]["volume"] = 0.0
+        report["timeframe"][2]["volume"] = 1.234567891
+        page = serve.render_sui_comparison(report, pair_key="ADAUSDT")
+        self.assertIn("Volume ultima candela: 1e-09 ADA", page)
+        self.assertIn("Volume ultima candela: 0 ADA", page)
+        self.assertIn("Volume ultima candela: 1.234567891 ADA", page)
+        self.assertNotIn("Volume ultima candela: 0.0000 ADA", page)
+        self.assertIn("controlla", page)
+        self.assertNotIn("4H separato conserva il", page)
+
     def test_tiny_crypto_quote_displays_significant_price_not_fake_zero(self):
         report = serve.load_spot_comparison(
             "ADAUSDT", public_kraken=self.fake, now=self.now)
