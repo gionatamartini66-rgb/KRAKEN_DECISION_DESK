@@ -383,6 +383,10 @@ def spot_observed_candidates(catalog, snapshot):
                 break
         if key is None or key in used:
             continue
+        base = catalog[key]["base"].upper()
+        normalized = {"XBT": "BTC", "XDG": "DOGE"}.get(base, base)
+        if str(item.get("token") or "").upper() != normalized:
+            continue
         used.add(key)
         found.append({
             "pair_key": key, "pair": name,
