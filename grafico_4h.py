@@ -354,6 +354,7 @@ def page_from_data(x):
     if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", token):
         raise ValueError("Token grafico non valido")
     token_js = json.dumps(token, ensure_ascii=True)
+    quote_js = json.dumps(x["pair"].split("/", 1)[1], ensure_ascii=True)
     positive_lows = [r["low"] for r in x["candles"]]
     if (not positive_lows or not all(isinstance(v, (int, float)) and
             math.isfinite(v) and v > 0 for v in positive_lows)):
@@ -635,22 +636,23 @@ try {
     }
   }
   levelToggle('#show-pivots',pivotEntries,false);
-  const eur = new Intl.NumberFormat('it-IT',{maximumFractionDigits:6});
+  const quote=__QUOTE_JS__;
+  const priceText=new Intl.NumberFormat('it-IT',{maximumFractionDigits:__PRECISION__});
   const supports=tech.structure.supports.length;
   const resistances=tech.structure.resistances.length;
   document.querySelector('#tech-summary').textContent=
-    'Ultima EMA20: '+eur.format(tech.ema20[tech.ema20.length-1].value)+
-    (tech.ema50.length?' · EMA50: '+eur.format(tech.ema50[tech.ema50.length-1].value):
+    'Ultima EMA20: '+priceText.format(tech.ema20[tech.ema20.length-1].value)+
+    (tech.ema50.length?' · EMA50: '+priceText.format(tech.ema50[tech.ema50.length-1].value):
       ' · EMA50: storico insufficiente')+
     ' · S/R confermati: '+supports+' supporti, '+resistances+' resistenze'+
     ' (almeno due swing per livello).'+
     (tech.pivots?' Pivot del '+tech.pivots.reference_day_utc+
-       ' UTC: P '+eur.format(tech.pivots.P)+'.':
+       ' UTC: P '+priceText.format(tech.pivots.P)+'.':
        ' Pivot giornalieri: dati completi giorno precedente insufficienti.');
 
-  const exact=new Intl.NumberFormat('it-IT',{maximumFractionDigits:8});
+  // All indicators, levels and OHLC use the selected quote precision.
   const categories=[
-    {name:'Medie esponenziali (chiusure 4H)',family:'EMA',items:[
+    {name:'Medie esponenziali (chiusure '+timeframeLabel+')',family:'EMA',items:[
       {label:'EMA20',price:tech.ema20[tech.ema20.length-1].value,note:'20 chiusure'},
       ...(tech.ema50.length ? [{label:'EMA50',
         price:tech.ema50[tech.ema50.length-1].value,note:'50 chiusure'}] : [])]},
@@ -677,14 +679,14 @@ try {
     }else{
       const table=document.createElement('table');
       const header=document.createElement('tr');
-      ['Livello','Prezzo EUR','Origine'].forEach(name=>{
+      ['Livello','Prezzo '+quote,'Origine'].forEach(name=>{
         const th=document.createElement('th');
         th.textContent=name;header.appendChild(th);
       });
       table.appendChild(header);
       for(const item of section.items){
         const tr=document.createElement('tr');
-        [item.label,exact.format(item.price),item.note].forEach(value=>{
+        [item.label,priceText.format(item.price),item.note].forEach(value=>{
           const td=document.createElement('td');
           td.textContent=value;tr.appendChild(td);
         });
@@ -717,8 +719,8 @@ try {
   const strip=document.getElementById('nearby-summary');
   if(confluences.length){
     const shown=confluences.slice(0,2).map(items=>
-      exact.format(Math.min(...items.map(x=>x.price)))+'–'+
-      exact.format(Math.max(...items.map(x=>x.price)))+' € ('+
+      priceText.format(Math.min(...items.map(x=>x.price)))+'–'+
+      priceText.format(Math.max(...items.map(x=>x.price)))+' '+quote+' ('+
       items.map(x=>x.label+' '+x.family).join(', ')+')');
     strip.textContent='Vicinanze entro 0,5% (solo descrittive): '+
       shown.join(' · ')+'. Nessuna conferma di tenuta o breakout.';
@@ -750,11 +752,11 @@ try {
   // Timeframe buttons navigate to independent Kraken OHLC series.
   // Pan and zoom remain native gestures of the chart.
   function show(row){
-    const fmt=new Intl.NumberFormat('it-IT',{maximumFractionDigits:6});
+    const fmtVolume=new Intl.NumberFormat('it-IT',{maximumFractionDigits:6});
     const time=new Date(row.time*1000).toLocaleString('it-IT',{timeZone:'UTC'});
-    stats.textContent=time+' UTC · O '+fmt.format(row.open)+' · H '+fmt.format(row.high)+
-     ' · L '+fmt.format(row.low)+' · C '+fmt.format(row.close)+
-     ' · Vol '+fmt.format(row.volume)+' '+__TOKEN_JS__;
+    stats.textContent=time+' UTC · O '+priceText.format(row.open)+' · H '+priceText.format(row.high)+
+     ' · L '+priceText.format(row.low)+' · C '+priceText.format(row.close)+
+     ' '+quote+' · Vol '+fmtVolume.format(row.volume)+' '+__TOKEN_JS__;
   }
   show(rows[rows.length-1]);
   const byTime=new Map(rows.map(v=>[v.time,v]));
@@ -790,6 +792,7 @@ try {
             .replace("__TF__", html.escape(frame))
             .replace("__PAIR__", pair).replace("__TOKEN__", html.escape(token))
             .replace("__TOKEN_JS__", token_js)
+            .replace("__QUOTE_JS__", quote_js)
             .replace("__COMPARE_URL__", html.escape(comparison_url, quote=True))
             .replace("__PRECISION__", str(decimal_places))
             .replace("__MIN_MOVE__", f"{min_move:.{decimal_places}f}")
