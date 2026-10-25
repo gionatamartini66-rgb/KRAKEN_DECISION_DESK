@@ -10,12 +10,22 @@ import datetime as dt
 import html
 import json
 import math
+import re
+import urllib.parse
 import statistics
 from pathlib import Path
 
 TOKEN = "SUI"
 TF = "4H"
 CANDLES_MAX = 200
+
+
+def market_round(value):
+    """Preserve sub-micro market levels; legacy 8dp for ordinary prices."""
+    if value != 0 and abs(value) < 1e-6:
+        return float(f"{value:.12g}")
+    return round(value, 8)
+
 TIMEFRAMES = {"15m": (15, "15m"), "1h": (60, "1H"),
               "4h": (240, "4H"), "1d": (1440, "1D")}
 
@@ -59,10 +69,14 @@ def data_from_dossier(path: Path):
         "candles":ordered,
     }
 
-def data_from_kraken_ohlc(result, timeframe, now=None):
+def data_from_kraken_ohlc(result, timeframe, now=None, *, pair='SUI/EUR', token='SUI', pair_key=None):
     """Real consecutive Kraken Spot OHLC candles, discarding final uncommitted bar."""
     if timeframe not in TIMEFRAMES:
         raise ValueError("Timeframe non consentito")
+    if (not isinstance(pair, str) or
+            re.fullmatch(r"[A-Za-z0-9._-]{1,40}/[A-Za-z0-9._-]{1,40}", pair) is None or
+            not isinstance(token, str) or token != pair.split("/", 1)[0]):
+        raise ValueError("Identità coppia Kraken non valida")
     minutes, label = TIMEFRAMES[timeframe]
     seconds = minutes * 60
     now = now or dt.datetime.now(dt.timezone.utc)
@@ -94,7 +108,7 @@ def data_from_kraken_ohlc(result, timeframe, now=None):
     if len(closed) < 30:
         raise ValueError("Storico di candele chiuse insufficiente")
     return {"observed_utc": now.isoformat(timespec="seconds"),
-            "pair": "SUI/EUR", "token": TOKEN, "timeframe": label,
+            "pair": pair, "token": token, "pair_key": pair_key, "timeframe": label,
             "closed_at_utc": dt.datetime.fromtimestamp(
                 closed[-1]["time"] + seconds, dt.timezone.utc
             ).isoformat(timespec="seconds"),
@@ -112,10 +126,10 @@ def ema_points(candles, period):
     alpha = 2.0 / (period + 1)
     values = [row["close"] for row in candles]
     ema = sum(values[:period]) / period
-    points = [{"time": candles[period - 1]["time"], "value": round(ema, 8)}]
+    points = [{"time": candles[period - 1]["time"], "value": market_round(ema)}]
     for i in range(period, len(candles)):
         ema += alpha * (values[i] - ema)
-        points.append({"time": candles[i]["time"], "value": round(ema, 8)})
+        points.append({"time": candles[i]["time"], "value": market_round(ema)})
     return points
 
 
@@ -143,13 +157,13 @@ def daily_pivots(candles, interval_seconds=14400):
     p = (high + low + close) / 3.0
     spread = high - low
     return {"reference_day_utc": prev_day.isoformat(),
-            "P": round(p, 8),
-            "R1": round(2 * p - low, 8),
-            "S1": round(2 * p - high, 8),
-            "R2": round(p + spread, 8),
-            "S2": round(p - spread, 8),
-            "R3": round(high + 2 * (p - low), 8),
-            "S3": round(low - 2 * (high - p), 8)}
+            "P": market_round(p),
+            "R1": market_round(2 * p - low),
+            "S1": market_round(2 * p - high),
+            "R2": market_round(p + spread),
+            "S2": market_round(p - spread),
+            "R3": market_round(high + 2 * (p - low)),
+            "S3": market_round(low - 2 * (high - p))}
 
 
 def structural_levels(candles, tolerance=0.009):
@@ -194,7 +208,7 @@ def structural_levels(candles, tolerance=0.009):
             candidates.append((level, len(cl), max(x[0] for x in cl)))
         # Prossimità al prezzo corrente, a parità tocchi/recenza.
         candidates.sort(key=lambda z: (abs(z[0] - last), -z[1], -z[2]))
-        return [{"price": round(p, 8), "touches": n,
+        return [{"price": market_round(p), "touches": n,
                  "last_swing_time": candles[i]["time"]}
                 for p, n, i in candidates[:3]]
     return {"supports": group(pivots("low"), True),
@@ -272,7 +286,7 @@ def summarize_timeframe(data, now=None):
     }
 
 
-def compare_timeframes(frames, now=None):
+def compare_timeframes(frames, now=None, *, pair='SUI/EUR'):
     """Compare four independently acquired frames without implying an order."""
     now = now or dt.datetime.now(dt.timezone.utc)
     labels = ("15m", "1H", "4H", "1D")
@@ -302,7 +316,7 @@ def compare_timeframes(frames, now=None):
             picture = "ALLINEAMENTO_RIBASSISTA_DESCRITTIVO"
         else:
             picture = "CONFIGURAZIONE_MISTA"
-    return {"coppia": "SUI/EUR", "rilevazione_confronto_utc": now.isoformat(
+    return {"coppia": pair, "rilevazione_confronto_utc": now.isoformat(
                 timespec="seconds"), "stato": "COMPLETO" if complete else "PARZIALE",
             "quadro": picture, "timeframe": details,
             "avvertenza": ("Ultime chiusure a orari differenti: confrontare la posizione "
@@ -321,16 +335,40 @@ def page_from_data(x):
     if frame not in ("15m", "1H", "4H", "1D"):
         raise ValueError("Timeframe non valido")
     active = {"15m": "15m", "1H": "1h", "4H": "4h", "1D": "1d"}[frame]
+    key = x.get("pair_key")
+    if key is not None and not re.fullmatch(r"[A-Za-z0-9_.-]{2,48}", key):
+        raise ValueError("Chiave Kraken non valida")
+    path = ("/grafico/spot?pair=" + urllib.parse.quote(key, safe="") + "&tf="
+            if key else "/grafico/sui-4h?tf=")
     links = " ".join(
-        '<a class="tf-link" href="/grafico/sui-4h?tf=' + key +
-        '"' + (' aria-current="page"' if key == active else "") +
+        '<a class="tf-link" href="' + html.escape(path + frame_key, quote=True) +
+        '"' + (' aria-current="page"' if frame_key == active else "") +
         '>' + html.escape(label) + '</a>'
-        for key, (_, label) in TIMEFRAMES.items())
+        for frame_key, (_, label) in TIMEFRAMES.items())
     candle_json = json.dumps(x["candles"], separators=(",",":"), allow_nan=False)
     technical_json = json.dumps(technical_from_candles(
         x["candles"], interval_seconds=interval),
                                 separators=(",",":"), allow_nan=False)
-    pair = html.escape(x["pair"], quote=True)
+    # Friendly labels must never overwrite the exact pair identity from Kraken.
+    pair = html.escape(x.get("display_pair", x["pair"]), quote=True)
+    token = x.get("display_token", x.get("token"))
+    if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", token):
+        raise ValueError("Token grafico non valido")
+    token_js = json.dumps(token, ensure_ascii=True)
+    quote_js = json.dumps(x["pair"].split("/", 1)[1], ensure_ascii=True)
+    positive_lows = [r["low"] for r in x["candles"]]
+    if (not positive_lows or not all(isinstance(v, (int, float)) and
+            math.isfinite(v) and v > 0 for v in positive_lows)):
+        raise ValueError("Prezzo minimo OHLC non valido")
+    smallest = min(positive_lows)
+    if smallest < 1e-12:
+        # Explicitly decline to misrepresent smaller quotes as zero
+        # with the 12dp precision currently supported by this view.
+        raise ValueError("Prezzo sotto la precisione supportata dal grafico")
+    decimal_places = max(5, min(12, math.ceil(-math.log10(smallest)) + 3))
+    min_move = 10 ** (-decimal_places)
+    comparison_url = ("/analisi/spot?pair=" + urllib.parse.quote(key, safe="")
+                      if key else "/analisi/sui-mtf")
     observed = html.escape(x["observed_utc"], quote=True)
     closed = html.escape(x["closed_at_utc"], quote=True)
     notice = ("TradingView Lightweight Charts™. "
@@ -400,7 +438,7 @@ footer{font-size:.83rem;color:#b3c1d8;line-height:1.5;margin:14px 0 26px}
 __TIMEFRAME_BUTTONS__
 </nav>
 <p class="muted">Seleziona l'intervallo reale delle candele. Zoom e scorrimento col dito.</p>
-<p><a href="/analisi/sui-mtf" style="font-weight:700">🔎 Confronta 15m · 1H · 4H · 1D</a></p>
+<p><a href="__COMPARE_URL__" style="font-weight:700">🔎 Confronta 15m · 1H · 4H · 1D</a></p>
 <div class="legend" aria-label="Livelli e indicatori">
 <label><input type="checkbox" id="show-ema20" checked> EMA20 (oro)</label>
 <label><input type="checkbox" id="show-ema50" checked> EMA50 (azzurro)</label>
@@ -481,7 +519,7 @@ try {
   const candleSeries=chart.addSeries(LightweightCharts.CandlestickSeries,{
     upColor:'#23bb91',downColor:'#ee6b77',borderVisible:false,
     wickUpColor:'#23bb91',wickDownColor:'#ee6b77',priceLineVisible:false,
-    priceFormat:{type:'price',precision:5,minMove:0.00001},
+    priceFormat:{type:'price',precision:__PRECISION__,minMove:__MIN_MOVE__},
     lastValueVisible:true});
   candleSeries.setData(rows.map(v=>({
     time:v.time,open:v.open,high:v.high,low:v.low,close:v.close})));
@@ -490,7 +528,7 @@ try {
   function addEma(points,color,selector,legendSelector){
     const series=chart.addSeries(LightweightCharts.LineSeries,{
       color:color,lineWidth:2,priceLineVisible:false,lastValueVisible:false,
-      priceFormat:{type:'price',precision:5,minMove:0.00001},
+      priceFormat:{type:'price',precision:__PRECISION__,minMove:__MIN_MOVE__},
       crosshairMarkerVisible:false,title:''});
     series.setData(points);
     const control=document.querySelector(selector);
@@ -599,22 +637,23 @@ try {
     }
   }
   levelToggle('#show-pivots',pivotEntries,false);
-  const eur = new Intl.NumberFormat('it-IT',{maximumFractionDigits:6});
+  const quote=__QUOTE_JS__;
+  const priceText=new Intl.NumberFormat('it-IT',{maximumFractionDigits:__PRECISION__});
   const supports=tech.structure.supports.length;
   const resistances=tech.structure.resistances.length;
   document.querySelector('#tech-summary').textContent=
-    'Ultima EMA20: '+eur.format(tech.ema20[tech.ema20.length-1].value)+
-    (tech.ema50.length?' · EMA50: '+eur.format(tech.ema50[tech.ema50.length-1].value):
+    'Ultima EMA20: '+priceText.format(tech.ema20[tech.ema20.length-1].value)+
+    (tech.ema50.length?' · EMA50: '+priceText.format(tech.ema50[tech.ema50.length-1].value):
       ' · EMA50: storico insufficiente')+
     ' · S/R confermati: '+supports+' supporti, '+resistances+' resistenze'+
     ' (almeno due swing per livello).'+
     (tech.pivots?' Pivot del '+tech.pivots.reference_day_utc+
-       ' UTC: P '+eur.format(tech.pivots.P)+'.':
+       ' UTC: P '+priceText.format(tech.pivots.P)+'.':
        ' Pivot giornalieri: dati completi giorno precedente insufficienti.');
 
-  const exact=new Intl.NumberFormat('it-IT',{maximumFractionDigits:8});
+  // All indicators, levels and OHLC use the selected quote precision.
   const categories=[
-    {name:'Medie esponenziali (chiusure 4H)',family:'EMA',items:[
+    {name:'Medie esponenziali (chiusure '+timeframeLabel+')',family:'EMA',items:[
       {label:'EMA20',price:tech.ema20[tech.ema20.length-1].value,note:'20 chiusure'},
       ...(tech.ema50.length ? [{label:'EMA50',
         price:tech.ema50[tech.ema50.length-1].value,note:'50 chiusure'}] : [])]},
@@ -641,14 +680,14 @@ try {
     }else{
       const table=document.createElement('table');
       const header=document.createElement('tr');
-      ['Livello','Prezzo EUR','Origine'].forEach(name=>{
+      ['Livello','Prezzo '+quote,'Origine'].forEach(name=>{
         const th=document.createElement('th');
         th.textContent=name;header.appendChild(th);
       });
       table.appendChild(header);
       for(const item of section.items){
         const tr=document.createElement('tr');
-        [item.label,exact.format(item.price),item.note].forEach(value=>{
+        [item.label,priceText.format(item.price),item.note].forEach(value=>{
           const td=document.createElement('td');
           td.textContent=value;tr.appendChild(td);
         });
@@ -681,8 +720,8 @@ try {
   const strip=document.getElementById('nearby-summary');
   if(confluences.length){
     const shown=confluences.slice(0,2).map(items=>
-      exact.format(Math.min(...items.map(x=>x.price)))+'–'+
-      exact.format(Math.max(...items.map(x=>x.price)))+' € ('+
+      priceText.format(Math.min(...items.map(x=>x.price)))+'–'+
+      priceText.format(Math.max(...items.map(x=>x.price)))+' '+quote+' ('+
       items.map(x=>x.label+' '+x.family).join(', ')+')');
     strip.textContent='Vicinanze entro 0,5% (solo descrittive): '+
       shown.join(' · ')+'. Nessuna conferma di tenuta o breakout.';
@@ -714,11 +753,11 @@ try {
   // Timeframe buttons navigate to independent Kraken OHLC series.
   // Pan and zoom remain native gestures of the chart.
   function show(row){
-    const fmt=new Intl.NumberFormat('it-IT',{maximumFractionDigits:6});
+    const fmtVolume=new Intl.NumberFormat('it-IT',{maximumFractionDigits:6});
     const time=new Date(row.time*1000).toLocaleString('it-IT',{timeZone:'UTC'});
-    stats.textContent=time+' UTC · O '+fmt.format(row.open)+' · H '+fmt.format(row.high)+
-     ' · L '+fmt.format(row.low)+' · C '+fmt.format(row.close)+
-     ' · Vol '+fmt.format(row.volume)+' SUI';
+    stats.textContent=time+' UTC · O '+priceText.format(row.open)+' · H '+priceText.format(row.high)+
+     ' · L '+priceText.format(row.low)+' · C '+priceText.format(row.close)+
+     ' '+quote+' · Vol '+fmtVolume.format(row.volume)+' '+__TOKEN_JS__;
   }
   show(rows[rows.length-1]);
   const byTime=new Map(rows.map(v=>[v.time,v]));
@@ -741,10 +780,22 @@ try {
 </script>
 </body>
 </html>"""
+    template = (template.replace("SUI/EUR", "__PAIR__")
+                .replace("(SUI)", "(__TOKEN__)")
+                .replace("/analisi/sui-mtf", "__COMPARE_URL__")
+                .replace("cinque decimali", "__DECIMALS__ decimali")
+                .replace("5 decimali", "__DECIMALS__ decimali"))
     return (template.replace("__BARS__", candle_json)
             .replace("__TECHNICAL__", technical_json)
             .replace("__OBSERVED__", observed).replace("__CLOSED__", closed)
             .replace("__NOTICE__", html.escape(notice))
             .replace("__TIMEFRAME_BUTTONS__", links)
             .replace("__TF__", html.escape(frame))
+            .replace("__PAIR__", pair).replace("__TOKEN__", html.escape(token))
+            .replace("__TOKEN_JS__", token_js)
+            .replace("__QUOTE_JS__", quote_js)
+            .replace("__COMPARE_URL__", html.escape(comparison_url, quote=True))
+            .replace("__PRECISION__", str(decimal_places))
+            .replace("__MIN_MOVE__", f"{min_move:.{decimal_places}f}")
+            .replace("__DECIMALS__", str(decimal_places))
             .replace("__SOURCE__", html.escape(x.get("source", "Dossier Kraken KDD"))))

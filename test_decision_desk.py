@@ -937,7 +937,8 @@ class DeskTests(unittest.TestCase):
         self.assertNotIn("readonly.json",page)
         self.assertNotIn("necessario per il 4H",page)
         dashboard=serve.with_controls("<html><h2>1 · Decisioni e posizioni</h2></html>")
-        self.assertIn("href='/analisi/sui-mtf'",dashboard)
+        self.assertIn("href='/mercati/spot'",dashboard)
+        self.assertNotIn("href='/analisi/sui-mtf'",dashboard)
 
     def test_mtf_live_4h_missing_close_marks_stale_without_fallback(self):
         import serve
@@ -1004,8 +1005,9 @@ class DeskTests(unittest.TestCase):
 
     def test_graph_is_linked_from_live_mobile_dashboard_not_promised_full(self):
         html=serve.with_controls("<html><h2>1 · Decisioni e posizioni</h2></html>")
-        self.assertIn('href=\'/grafico/sui-4h\'',html)
-        self.assertIn("Grafico SUI/EUR · 15m / 1H / 4H / 1D",html)
+        self.assertIn('href=\'/mercati/spot\'',html)
+        self.assertNotIn('href=\'/grafico/sui-4h\'',html)
+        self.assertIn("Seleziona coppia Kraken Spot · grafici 15m / 1H / 4H / 1D",html)
         self.assertNotIn("EMA 20",html)
 
     def test_4h_closed_candles_without_last_in_progress(self):
@@ -2344,5 +2346,445 @@ class DeskTests(unittest.TestCase):
                               {'posizioni':[{'token':'BTC','quantita':None,'costo_medio_eur':None}]},{},{},[])
         self.assertEqual(report['posizioni'],[])
         self.assertEqual(report['totale_stimato_eur'],0)
+
+# Copertura G2: coppie arbitrarie senza preferenza SUI/EUR.
+import grafico_4h as g
+from unittest import mock
+
+class AnyKrakenSpotTests(unittest.TestCase):
+    def setUp(self):
+        self.now = dt.datetime(2026, 10, 24, 20, 42, tzinfo=dt.timezone.utc)
+        self.pairs = {
+            "ADAUSDT": {"wsname": "ADA/USDT", "status": "online"},
+            "XXBTZEUR": {"wsname": "XBT/EUR", "status": "online"},
+            "SUIPERP": {"wsname": "SUI/EUR", "status": "cancel_only"},
+            "ETHUSD.d": {"wsname": "ETH/USD", "status": "online"},
+            "BAD": {"wsname": "<svg/onload=alert(1)>/EUR", "status": "online"},
+            "DOTGBP": {"wsname": "DOT/GBP", "status": "online"},
+        }
+        self.calls = []
+
+    def fake(self, endpoint, **params):
+        self.calls.append((endpoint, dict(params)))
+        if endpoint == "AssetPairs":
+            self.assertFalse(params)
+            return self.pairs
+        self.assertEqual(endpoint, "OHLC")
+        self.assertIn(params["pair"], ("ADAUSDT", "DOTGBP", "XXBTZEUR"))
+        interval = params["interval"] * 60
+        current = (int(self.now.timestamp()) // interval) * interval
+        raw = []
+        for i in range(81):
+            close = 1 + .005*i
+            raw.append([current - (80-i)*interval, str(close),
+                        str(close+.015), str(close-.015), str(close),
+                        "0", "125", 1])
+        return {params["pair"]: raw, "last": current}
+
+    def test_market_catalog_includes_non_eur_and_does_not_force_sui(self):
+        catalog = serve.spot_catalog(self.fake)
+        self.assertEqual(set(catalog), {"ADAUSDT", "XXBTZEUR", "DOTGBP"})
+        self.assertEqual(catalog["ADAUSDT"]["quote"], "USDT")
+        self.assertEqual(catalog["DOTGBP"]["quote"], "GBP")
+        self.assertEqual(catalog["ADAUSDT"]["eligibilita_conto"], "NON_VERIFICATA")
+        page = serve.spot_selector(catalog)
+        self.assertIn("ADA/USDT", page)
+        self.assertIn("DOT/GBP", page)
+        self.assertIn('value=""', page)
+        self.assertNotIn('value="SUIEUR"', page)
+        self.assertNotIn("<svg", page)
+        self.assertNotIn("portafoglio", page.lower())
+
+    def test_invalid_nononline_and_injection_pair_are_refused_before_ohlc(self):
+        for key in ("SUIEUR", "SUIPERP", "BAD", "../api", "", "<svg>"):
+            with self.subTest(key=key):
+                self.calls.clear()
+                with self.assertRaises(ValueError):
+                    serve.load_spot_chart(key, "4h", public_kraken=self.fake,
+                                          now=self.now)
+                self.assertEqual([ep for ep,_ in self.calls], ["AssetPairs"])
+
+    def test_chart_for_ada_usdt_not_eur_or_sui(self):
+        html = serve.load_spot_chart("ADAUSDT", "4h", public_kraken=self.fake,
+                                     now=self.now)
+        self.assertIn("Grafico ADA/USDT · 4H", html)
+        self.assertIn("Volumi scambiati (ADA)", html)
+        self.assertIn("pair=ADAUSDT&amp;tf=15m", html)
+        self.assertIn("pair=ADAUSDT&amp;tf=1d", html)
+        self.assertNotIn("Grafico SUI/EUR", html)
+        self.assertNotIn(" SUI';", html)
+        self.assertEqual(self.calls[1], ("OHLC", {"pair":"ADAUSDT","interval":240}))
+
+    def test_chart_comparison_link_uses_selected_market_not_sui(self):
+        page = serve.load_spot_chart("ADAUSDT", "4h",
+                                     public_kraken=self.fake, now=self.now)
+        self.assertIn('href="/analisi/spot?pair=ADAUSDT"', page)
+        self.assertNotIn('href="/analisi/sui-mtf"', page)
+        self.assertNotIn("__COMPARE_URL__", page)
+        self.assertIn("precision:5,minMove:0.00001", page)
+
+    def test_graph_quotes_apply_to_levels_confluence_and_ohlcv_not_only_title(self):
+        page = serve.load_spot_chart("ADAUSDT", "4h",
+                                     public_kraken=self.fake, now=self.now)
+        self.assertIn('const quote="USDT";', page)
+        self.assertIn("['Livello','Prezzo '+quote,'Origine']", page)
+        self.assertNotIn("Prezzo EUR", page)
+        self.assertIn("stats.textContent=time+' UTC · O '+priceText.format(row.open)",page)
+        self.assertIn("'+quote+' · Vol '",page)
+        self.assertIn("priceText.format(Math.min(",page)
+        self.assertNotIn("maximumFractionDigits:8",page)
+        self.assertNotIn("maximumFractionDigits:6});\n  const supports",page)
+
+    def test_tiny_chart_prices_keep_nonzero_axis_and_ema_values(self):
+        seconds = 14400
+        start = int(self.now.timestamp() // seconds) * seconds - 81*seconds
+        bars=[]
+        for i in range(80):
+            p=1.1e-9 * (1+i/1000)
+            bars.append({"time":start+i*seconds,"open":p,
+                "high":p*1.01,"low":p*0.99,"close":p,"volume":10.0})
+        frame={"pair":"SHIB/USD","token":"SHIB","pair_key":"SHIBUSD",
+            "timeframe":"4H","interval_seconds":seconds,
+            "observed_utc":self.now.isoformat(),
+            "closed_at_utc":self.now.isoformat(),"candles":bars}
+        self.assertGreater(g.ema_points(bars,20)[-1]["value"],0)
+        self.assertGreater(g.ema_points(bars,50)[-1]["value"],0)
+        page=g.page_from_data(frame)
+        self.assertIn("precision:12,minMove:0.000000000001",page)
+        self.assertIn('href="/analisi/spot?pair=SHIBUSD"',page)
+        self.assertNotIn("precision:5,minMove:0.00001",page)
+        self.assertNotIn('"value":0.0}',page)
+        self.assertIn("12 decimali",page)
+
+    def test_unrepresentable_chart_price_fails_explicitly(self):
+        seconds=14400
+        frame={"pair":"MICRO/USD","token":"MICRO","pair_key":"MICROUSD",
+            "timeframe":"4H","interval_seconds":seconds,
+            "observed_utc":self.now.isoformat(),
+            "closed_at_utc":self.now.isoformat(),
+            "candles":[{"time":i*seconds,"open":1e-14,"high":1.1e-14,
+                       "low":0.9e-14,"close":1e-14,"volume":10}
+                       for i in range(80)]}
+        with self.assertRaisesRegex(ValueError,"precisione supportata"):
+            g.page_from_data(frame)
+
+    def test_four_independent_closed_public_frames_keep_pair_and_quote(self):
+        report = serve.load_spot_comparison("ADAUSDT", public_kraken=self.fake,
+                                            now=self.now)
+        self.assertEqual(report["coppia"], "ADA/USDT")
+        self.assertEqual(report["stato"], "COMPLETO")
+        self.assertEqual([ep for ep,_ in self.calls],
+                         ["AssetPairs","OHLC","OHLC","OHLC","OHLC"])
+        self.assertEqual([args["interval"] for ep,args in self.calls[1:]],
+                         [15,60,240,1440])
+        self.assertTrue(all(args["pair"]=="ADAUSDT" for _,args in self.calls[1:]))
+        page = serve.render_sui_comparison(report, pair_key="ADAUSDT")
+        self.assertIn("Confronto ADA/USDT",page)
+        self.assertIn(" USDT",page)
+        self.assertIn(" ADA",page)
+        self.assertIn("pair=ADAUSDT&amp;tf=4h",page)
+        self.assertNotIn("Confronto SUI/EUR",page)
+
+    def test_incomplete_ohlc_is_not_silently_filled(self):
+        def missing(endpoint, **kwargs):
+            if endpoint=="OHLC" and kwargs["interval"]==60:
+                raise ConnectionError("public OHLC unavailable")
+            return self.fake(endpoint,**kwargs)
+        report=serve.load_spot_comparison("ADAUSDT",public_kraken=missing,
+                                          now=self.now)
+        self.assertEqual(report["stato"],"PARZIALE")
+        self.assertEqual(report["quadro"],"CONFRONTO_INCOMPLETO")
+        self.assertEqual(report["timeframe"][1]["stato"],"NON_DISPONIBILE")
+
+    def test_missing_blank_or_repeated_pair_id_is_rejected(self):
+        for path in ("/grafico/spot", "/analisi/spot"):
+            for query in ("", "pair=", "pair=A&pair=B", "pair=../../", "pair=bad%00"):
+                with self.subTest(path=path, query=query):
+                    with self.assertRaises(ValueError):
+                        serve.spot_request_pair(path, query)
+            self.assertEqual(serve.spot_request_pair(path, "pair=XXBTZEUR"),
+                             "XXBTZEUR")
+        self.assertIsNone(serve.spot_request_pair("/mercati/spot", ""))
+
+    def test_mobile_search_operates_on_full_catalog_without_default_selection(self):
+        page = serve.spot_selector(serve.spot_catalog(self.fake))
+        self.assertIn('type="search" id="filtro"', page)
+        self.assertIn('name="pair" id="pair" required', page)
+        self.assertIn("all.filter(", page)
+        self.assertIn("search.addEventListener('input',rebuild)", page)
+        self.assertIn("select.value = ''", page)
+        self.assertIn("replaceAll('BTC','XBT')", page)
+        self.assertIn("replaceAll('DOGE','XDG')", page)
+        self.assertIn("Visualizzate le prime 90; affina la ricerca.", page)
+        self.assertIn("ADA/USDT",page)
+        self.assertIn("DOT/GBP",page)
+        self.assertIn("BTC/EUR (Kraken XBT/EUR)",page)
+        self.assertIn("il cruscotto KDD e il pulsante Aggiorna",page)
+
+    def test_existing_kdd_shortlist_leads_spot_exploration(self):
+        catalog = serve.spot_catalog(self.fake)
+        snapshot = {
+            "rilevazione_utc": self.now.isoformat(),
+            "schede_v02": [
+                {"token": "ADA", "coppia_analisi": "ADA/USDT",
+                 "categoria": "consolidamento", "esito": "RIESAME MIRATO",
+                 "perche_selezionato": "Controllare la chiusura oraria",
+                 "sintesi": "Le chiusure sono ancora senza conferma.",
+                 "evidenze": ["Volumi in aumento"], "criticita": ["Spread da verificare"],
+                 "alternative": [{"pair": "ADA/USDT", "pair_key": "ADAUSDT"}]},
+                {"token": "DOT", "coppia_analisi": "DOT/GBP",
+                 "categoria": "tentativo di ripartenza", "esito": "DA VERIFICARE",
+                 "alternative": [{"pair": "DOT/GBP", "pair_key": "DOTGBP"}]},
+            ],
+        }
+        page = serve.spot_selector(catalog, snapshot=snapshot, now=self.now)
+        self.assertLess(page.index("Da esaminare: selezione KDD"),
+                        page.index("Esplora qualsiasi altra coppia"))
+        self.assertIn('href="/grafico/spot?pair=ADAUSDT&amp;tf=4h"', page)
+        self.assertIn('href="/analisi/spot?pair=DOTGBP"', page)
+        self.assertIn("Motivo della selezione:", page)
+        self.assertIn("Controllare la chiusura oraria", page)
+        self.assertIn("Le chiusure sono ancora senza conferma.", page)
+        self.assertIn("Elementi osservati:"," ".join(page.split("<")))
+        self.assertIn("Volumi in aumento", page)
+        self.assertIn("Criticità:", page)
+        self.assertIn("Spread da verificare", page)
+        self.assertIn("Rilevazione recente", page)
+        self.assertIn('const found = needle ? all.filter(', page)
+        self.assertIn('}) : [];', page)
+        self.assertNotIn("Visualizzate le prime 90; affina la ricerca.' : all", page)
+
+    def test_stale_kdd_shortlist_is_visible_but_identified_as_stale(self):
+        catalog = serve.spot_catalog(self.fake)
+        snapshot = {
+            "rilevazione_utc": (self.now - dt.timedelta(hours=4)).isoformat(),
+            "schede_v02": [{"token": "ADA", "coppia_analisi": "ADA/USDT",
+                            "esito": "RIESAME MIRATO",
+                            "alternative": [{"pair": "ADA/USDT", "pair_key": "ADAUSDT"}]}],
+        }
+        page = serve.spot_selector(catalog, snapshot=snapshot, now=self.now)
+        self.assertIn("RILEVAZIONE DA AGGIORNARE", page)
+        self.assertIn("Segnalazioni precedenti: dati da aggiornare", page)
+        self.assertIn("Apri KDD completo e aggiorna", page)
+        self.assertIn('href="/analisi/spot?pair=ADAUSDT"', page)
+
+    def test_kdd_shortlist_rejects_forged_pair_token_and_escapes_text(self):
+        catalog = serve.spot_catalog(self.fake)
+        snapshot = {
+            "rilevazione_utc": self.now.isoformat(),
+            "schede_v02": [
+                {"token": "BTC", "coppia_analisi": "ADA/USDT",
+                 "alternative": [{"pair": "ADA/USDT", "pair_key": "ADAUSDT"}]},
+                {"token": "ADA", "coppia_analisi": "ADA/USDT",
+                 "esito": "<svg onload=alert(1)>",
+                 "perche_selezionato": "<script>bad()</script>",
+                 "alternative": [{"pair": "ADA/USDT", "pair_key": "ADAUSDT"}]},
+                {"token": "ADA", "coppia_analisi": "DOT/GBP",
+                 "alternative": [{"pair": "DOT/GBP", "pair_key": "DOTGBP"}]},
+            ],
+        }
+        rows = serve.spot_observed_candidates(catalog, snapshot)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["pair_key"], "ADAUSDT")
+        page = serve.spot_selector(catalog, snapshot=snapshot, now=self.now)
+        self.assertIn("&lt;svg", page)
+        self.assertNotIn("<svg", page)
+        self.assertNotIn("<script>bad()", page)
+        self.assertIn("&lt;script&gt;", page)
+
+    def test_no_candidate_scan_does_not_invent_cryptocurrencies(self):
+        catalog = serve.spot_catalog(self.fake)
+        page = serve.spot_selector(catalog, snapshot={}, now=self.now)
+        self.assertIn("Nessun caso", page)
+        self.assertIn("Catalogo:", page)
+        self.assertNotIn("Da esaminare: selezione KDD", page)
+
+    def test_exchange_pair_alias_retains_original_rest_identity(self):
+        catalog = serve.spot_catalog(self.fake)
+        self.assertEqual(serve.spot_friendly_label(catalog["XXBTZEUR"]["pair"]),
+                         "BTC/EUR (Kraken XBT/EUR)")
+        self.assertIn("BTC/EUR (Kraken XBT/EUR)",
+                      serve.spot_selector(catalog, snapshot={}, now=self.now))
+        self.assertEqual(serve.spot_lookup("XXBTZEUR", catalog)["pair_key"], "XXBTZEUR")
+
+    def test_invalid_frame_prevents_even_catalog_call(self):
+        with self.assertRaises(ValueError):
+            serve.load_spot_chart("ADAUSDT","invalid",public_kraken=self.fake)
+        self.assertEqual(self.calls,[])
+
+    def test_ohlc_mismatched_response_symbol_is_rejected_before_render(self):
+        """A valid candle array from ANOTHER token may not inherit selected label."""
+        calls = []
+        def swapped(endpoint, **params):
+            if endpoint == "AssetPairs":
+                return self.pairs
+            calls.append(params["interval"])
+            raw = self.fake(endpoint, **params)
+            return {"UNRELATEDBTCUSD": raw[params["pair"]],
+                    "last": raw["last"]}
+        with self.assertRaises(serve.KrakenPairMismatch):
+            serve.load_spot_chart("ADAUSDT", "4h",
+                                  public_kraken=swapped, now=self.now)
+        self.assertEqual(calls, [240])
+        calls.clear()
+        result = serve.load_spot_comparison(
+            "ADAUSDT", public_kraken=swapped, now=self.now)
+        self.assertEqual(calls, [15, 60, 240, 1440])
+        self.assertEqual(result["stato"], "PARZIALE")
+        self.assertEqual(result["quadro"], "CONFRONTO_INCOMPLETO")
+        self.assertTrue(all(f["stato"] == "NON_DISPONIBILE"
+                            for f in result["timeframe"]))
+
+    def test_ohlc_alias_return_name_allowed_only_if_declared_by_kraken(self):
+        pairs = dict(self.pairs)
+        pairs["XXBTZEUR"] = dict(pairs["XXBTZEUR"], altname="XBTEUR")
+        def alias(endpoint, **params):
+            if endpoint == "AssetPairs":
+                return pairs
+            raw = self.fake(endpoint, **params)
+            assert params["pair"] == "XXBTZEUR"
+            return {"XBTEUR": raw["XXBTZEUR"], "last": raw["last"]}
+        graph = serve.load_spot_chart(
+            "XXBTZEUR", "4h", public_kraken=alias, now=self.now)
+        self.assertIn("Grafico BTC/EUR", graph)
+        self.assertIn("Volumi scambiati (BTC)", graph)
+        self.assertIn("Kraken usa XBT per BTC", graph)
+        self.assertNotIn("Grafico SUI/EUR", graph)
+        compare = serve.load_spot_comparison("XXBTZEUR",
+                                             public_kraken=alias, now=self.now)
+        self.assertEqual(compare["coppia"], "XBT/EUR")  # original Kraken identity
+        view = serve.render_sui_comparison(compare, pair_key="XXBTZEUR")
+        self.assertIn("Confronto BTC/EUR (Kraken XBT/EUR)", view)
+        self.assertIn("Volume ultima candela:", view)
+        self.assertIn(" BTC;", view)
+
+    def test_micro_volume_remains_nonzero_in_quote_aware_comparison(self):
+        report = serve.load_spot_comparison(
+            "ADAUSDT", public_kraken=self.fake, now=self.now)
+        self.assertEqual(report["stato"], "COMPLETO")
+        report["timeframe"][0]["volume"] = 1e-9
+        report["timeframe"][1]["volume"] = 0.0
+        report["timeframe"][2]["volume"] = 1.234567891
+        page = serve.render_sui_comparison(report, pair_key="ADAUSDT")
+        self.assertIn("Volume ultima candela: 1e-09 ADA", page)
+        self.assertIn("Volume ultima candela: 0 ADA", page)
+        self.assertIn("Volume ultima candela: 1.234567891 ADA", page)
+        self.assertNotIn("Volume ultima candela: 0.0000 ADA", page)
+        self.assertIn("controlla", page)
+        self.assertNotIn("4H separato conserva il", page)
+
+    def test_tiny_crypto_quote_displays_significant_price_not_fake_zero(self):
+        report = serve.load_spot_comparison(
+            "ADAUSDT", public_kraken=self.fake, now=self.now)
+        self.assertEqual(report["stato"], "COMPLETO")
+        first = report["timeframe"][0]
+        first["close"] = 0.000000001234567
+        first["ema20"] = 0.000000000987654
+        first["ema50"] = 0.000000000876543
+        page = serve.render_sui_comparison(report, pair_key="ADAUSDT")
+        self.assertIn("1.234567e-09 USDT", page)
+        self.assertIn("9.87654e-10 USDT", page)
+        self.assertNotIn("0.00000 USDT", page)
+
+    def test_ohlc_response_two_symbols_fail_closed_even_if_one_matches(self):
+        def double(endpoint, **params):
+            if endpoint == "AssetPairs":
+                return self.pairs
+            raw = self.fake(endpoint, **params)
+            raw["EXTRAUSD"] = raw[params["pair"]]
+            return raw
+        with self.assertRaises(serve.KrakenPairMismatch):
+            serve.load_spot_chart("ADAUSDT", "4h",
+                                  public_kraken=double, now=self.now)
+
+    def test_none_catalog_is_fail_closed(self):
+        with self.assertRaises(serve.KrakenMarketDataUnavailable):
+            serve.spot_catalog(lambda endpoint: {})
+        with self.assertRaises(serve.KrakenMarketDataUnavailable):
+            serve.spot_catalog(lambda endpoint: [])
+
+    def test_invalid_ohlc_is_source_error_not_invalid_selection(self):
+        def corrupted(endpoint, **params):
+            if endpoint == "AssetPairs":
+                return self.pairs
+            return {"ADAUSDT": [], "last": 0}
+        with self.assertRaises(serve.KrakenMarketDataUnavailable):
+            serve.load_spot_chart("ADAUSDT", "4h",
+                                  public_kraken=corrupted, now=self.now)
+        with self.assertRaises(ValueError):
+            serve.load_spot_chart("NOT_A_PAIR", "4h",
+                                  public_kraken=corrupted, now=self.now)
+
+    def test_local_http_routes_distinguish_400_invalid_pair_from_503_upstream(self):
+        """Real KDD HTTP Handler with synthetic exchange only; no phone/files."""
+        import threading
+        import urllib.request
+        import urllib.error
+        from http.server import ThreadingHTTPServer
+        def fake_provider(endpoint, **params):
+            if endpoint == "AssetPairs":
+                return self.pairs
+            if endpoint == "OHLC":
+                # Upstream data failure after valid catalog lookup.
+                return {"ADAUSDT": [], "last": 0}
+            raise AssertionError("Private or unexpected API call")
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        server = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+        server.daemon_threads = True
+        with (mock.patch.object(serve, "PORT", server.server_address[1]),
+              mock.patch.object(serve.desk, "kraken", side_effect=fake_provider)):
+            worker = threading.Thread(target=server.serve_forever,
+                                      daemon=True)
+            worker.start()
+            try:
+                base = "http://127.0.0.1:" + str(server.server_address[1])
+                for route, status in (
+                    ("/mercati/spot", 200),
+                    ("/grafico/spot", 400),
+                    ("/grafico/spot?pair=BADPAIR", 400),
+                    ("/grafico/spot?pair=ADAUSDT&tf=4h", 503),
+                    ("/analisi/spot?pair=ADAUSDT", 200)):
+                    with self.subTest(route=route):
+                        try:
+                            with opener.open(base + route, timeout=5) as response:
+                                actual = response.status
+                                page = response.read().decode("utf-8")
+                        except urllib.error.HTTPError as error:
+                            actual = error.code
+                            page = error.read().decode("utf-8")
+                        self.assertEqual(actual, status)
+                        if route.startswith("/analisi/spot"):
+                            self.assertIn("PARZIALE", page)
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=3)
+
+    def test_catalog_provider_outage_is_unavailable_not_bad_user_query(self):
+        def unavailable(endpoint, **params):
+            if endpoint == "AssetPairs":
+                return {}
+            raise AssertionError("Should not call OHLC")
+        with self.assertRaises(serve.KrakenMarketDataUnavailable):
+            serve.load_spot_chart("ADAUSDT", "4h", public_kraken=unavailable,
+                                  now=self.now)
+
+    def test_legacy_sui_url_retained_but_no_longer_on_home(self):
+        page=serve.with_controls("<h2>1 · Decisioni e posizioni</h2>")
+        self.assertIn('href=\'/mercati/spot\'',page)
+        self.assertNotIn('href=\'/grafico/sui-4h\'',page)
+        self.assertNotIn('href=\'/analisi/sui-mtf\'',page)
+        self.assertTrue(callable(serve.load_sui_chart))
+        self.assertTrue(callable(serve.load_sui_comparison))
+
+    def test_user_selected_pair_not_derived_from_portfolio(self):
+        with mock.patch.object(serve.desk, "load",
+                               side_effect=AssertionError("no private local files")):
+            catalog=serve.spot_catalog(self.fake)
+            report=serve.load_spot_comparison("DOTGBP",public_kraken=self.fake,
+                                              now=self.now)
+        self.assertIn("DOTGBP",catalog)
+        self.assertEqual(report["coppia"],"DOT/GBP")
+
 
 if __name__=='__main__': unittest.main(verbosity=2)
