@@ -2415,6 +2415,47 @@ class AnyKrakenSpotTests(unittest.TestCase):
         self.assertNotIn(" SUI';", html)
         self.assertEqual(self.calls[1], ("OHLC", {"pair":"ADAUSDT","interval":240}))
 
+    def test_chart_comparison_link_uses_selected_market_not_sui(self):
+        page = serve.load_spot_chart("ADAUSDT", "4h",
+                                     public_kraken=self.fake, now=self.now)
+        self.assertIn('href="/analisi/spot?pair=ADAUSDT"', page)
+        self.assertNotIn('href="/analisi/sui-mtf"', page)
+        self.assertNotIn("__COMPARE_URL__", page)
+        self.assertIn("precision:5,minMove:1e-05", page)
+
+    def test_tiny_chart_prices_keep_nonzero_axis_and_ema_values(self):
+        seconds = 14400
+        start = int(self.now.timestamp() // seconds) * seconds - 81*seconds
+        bars=[]
+        for i in range(80):
+            p=1.1e-9 * (1+i/1000)
+            bars.append({"time":start+i*seconds,"open":p,
+                "high":p*1.01,"low":p*0.99,"close":p,"volume":10.0})
+        frame={"pair":"SHIB/USD","token":"SHIB","pair_key":"SHIBUSD",
+            "timeframe":"4H","interval_seconds":seconds,
+            "observed_utc":self.now.isoformat(),
+            "closed_at_utc":self.now.isoformat(),"candles":bars}
+        self.assertGreater(g.ema_points(bars,20)[-1]["value"],0)
+        self.assertGreater(g.ema_points(bars,50)[-1]["value"],0)
+        page=g.page_from_data(frame)
+        self.assertIn("precision:12,minMove:1e-12",page)
+        self.assertIn('href="/analisi/spot?pair=SHIBUSD"',page)
+        self.assertNotIn("precision:5,minMove:0.00001",page)
+        self.assertNotIn('"value":0.0}',page)
+        self.assertIn("12 decimali",page)
+
+    def test_unrepresentable_chart_price_fails_explicitly(self):
+        seconds=14400
+        frame={"pair":"MICRO/USD","token":"MICRO","pair_key":"MICROUSD",
+            "timeframe":"4H","interval_seconds":seconds,
+            "observed_utc":self.now.isoformat(),
+            "closed_at_utc":self.now.isoformat(),
+            "candles":[{"time":i*seconds,"open":1e-14,"high":1.1e-14,
+                       "low":0.9e-14,"close":1e-14,"volume":10}
+                       for i in range(80)]}
+        with self.assertRaisesRegex(ValueError,"precisione supportata"):
+            g.page_from_data(frame)
+
     def test_four_independent_closed_public_frames_keep_pair_and_quote(self):
         report = serve.load_spot_comparison("ADAUSDT", public_kraken=self.fake,
                                             now=self.now)
