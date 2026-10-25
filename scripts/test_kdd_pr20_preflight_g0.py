@@ -85,15 +85,41 @@ class G0PreflightTests(unittest.TestCase):
             p.fetch_pinned(self.mirror)
             self.assertEqual(cmd.call_count,1+len(expected))
 
-    def test_branch_changed_rejected_if_not_local(self):
+    def test_branch_diverged_rejected_if_not_local(self):
+        calls=0
         def git(repo,*args,**kw):
-            if args[:2]==('cat-file','-e'): return mock.Mock(returncode=1,stdout='')
+            nonlocal calls
+            if args[:2]==('cat-file','-e'):
+                calls+=1
+                return mock.Mock(returncode=1 if calls==1 else 0,stdout='')
             if args[0]=='fetch': return mock.Mock(returncode=0,stdout='')
             if args[:2]==('rev-parse','FETCH_HEAD'):
                 return mock.Mock(returncode=0,stdout='deadbeef'*5+'\n')
+            if args[:2]==('merge-base','--is-ancestor'):
+                return mock.Mock(returncode=1,stdout='')
             raise AssertionError(args)
-        with mock.patch.object(p,'git',side_effect=git), self.assertRaisesRegex(p.Stop,'changed'):
+        with mock.patch.object(p,'git',side_effect=git), self.assertRaisesRegex(p.Stop,'no longer descends'):
             p.fetch_pinned(self.mirror)
+
+    def test_docs_only_branch_advance_does_not_invalidate_pinned_code(self):
+        calls=0
+        def git(repo,*args,**kw):
+            nonlocal calls
+            if args[:2]==('cat-file','-e'):
+                calls+=1
+                return mock.Mock(returncode=1 if calls==1 else 0,stdout='')
+            if args[0]=='fetch': return mock.Mock(returncode=0,stdout='')
+            if args[:2]==('rev-parse','FETCH_HEAD'):
+                return mock.Mock(returncode=0,stdout='a'*40+'\n')
+            if args[:2]==('merge-base','--is-ancestor'):
+                return mock.Mock(returncode=0,stdout='')
+            if args[:1]==('rev-parse',):
+                name=args[1].split(':',1)[1]
+                return mock.Mock(returncode=0,stdout=p.FILES[name]+'\n')
+            raise AssertionError(args)
+        with mock.patch.object(p,'git',side_effect=git):
+            p.fetch_pinned(self.mirror)
+        self.assertEqual(calls,2)
 
     def test_small_staging_budget(self):
         budget=p.staging_budget(self.live,self.mirror)
