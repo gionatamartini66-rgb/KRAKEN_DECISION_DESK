@@ -388,8 +388,12 @@ Solo candele chiuse, niente valori inventati.</p>
   const all = Array.from(select.options).slice(1).map(o => [o.value, o.textContent]);
   function rebuild() {
     const needle = search.value.trim().toLocaleUpperCase('it-IT');
-    const found = needle ? all.filter(([k,t]) => 
-      (k + ' ' + t).toLocaleUpperCase('it-IT').includes(needle)) : all;
+    // Kraken chiama XBT il BTC e talvolta XDG il DOGE.
+    const translated = needle.replaceAll('BTC','XBT').replaceAll('DOGE','XDG');
+    const found = needle ? all.filter(([k,t]) => {
+      const haystack = (k + ' ' + t).toLocaleUpperCase('it-IT');
+      return haystack.includes(needle) || haystack.includes(translated);
+    }) : all;
     // Cap options shown simultaneously on mobile, NOT the underlying catalog.
     const maxVisible = 90;
     const choices = found.slice(0,maxVisible).map(([k,t]) => new Option(t,k));
