@@ -121,8 +121,13 @@ def copy_public_selection(live, stage):
             public = {
                 key: str(card.get(key) or '')[:300]
                 for key in ('token', 'coppia_analisi', 'categoria',
-                            'esito', 'perche_selezionato')
+                            'esito', 'perche_selezionato', 'sintesi')
             }
+            for label in ('evidenze', 'criticita'):
+                values = card.get(label)
+                public[label] = ([str(value)[:180] for value in values[:5]
+                                  if isinstance(value, str)]
+                                 if isinstance(values, list) else [])
             options = card.get('alternative')
             public['alternative'] = []
             if isinstance(options, list):
