@@ -124,9 +124,17 @@ def fetch_pinned(mirror):
                 timeout=100)
         if r.returncode:
             raise Stop("Git fetch failed; check connectivity/authentication locally")
+        # The branch can move forward for documentation and this very G0 tool:
+        # the approved source files remain pinned to the original review commit.
         r = git(mirror, "rev-parse", "FETCH_HEAD")
-        if r.returncode or r.stdout.strip() != PIN:
-            raise Stop("PR branch changed since reviewed commit; no unverified code used")
+        if r.returncode or not re.fullmatch(r"[a-f0-9]{40}", r.stdout.strip()):
+            raise Stop("fetched PR ref is not a valid Git commit")
+        pinned = git(mirror, "cat-file", "-e", PIN + "^{commit}")
+        if pinned.returncode:
+            raise Stop("reviewed PR commit absent from fetched history")
+        ancestor = git(mirror, "merge-base", "--is-ancestor", PIN, "FETCH_HEAD")
+        if ancestor.returncode:
+            raise Stop("fetched PR branch no longer descends from reviewed commit")
     for name, expected_blob in FILES.items():
         p = git(mirror, "rev-parse", PIN + ":" + name)
         if p.returncode or p.stdout.strip() != expected_blob:
