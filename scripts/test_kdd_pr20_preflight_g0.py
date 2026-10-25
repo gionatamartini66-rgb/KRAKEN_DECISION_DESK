@@ -161,6 +161,31 @@ class G0PreflightTests(unittest.TestCase):
             p.execute_tests(self.live)
         self.assertIn('G0_REGRESSION_LOCAL: PASS',buf.getvalue())
 
+    def test_t0_original_is_checked_even_when_suite_does_not_fail(self):
+        t0 = self.live / 'storico_portafoglio' / 'T0_2026-10-19_0800_KRAKEN_PRO.json'
+        def corrupt_synthetic_t0(_stage):
+            t0.write_text('{"synthetic_corruption":true}')
+        with mock.patch.object(p,'validate_git_mirror'), \
+             mock.patch.object(p,'fetch_pinned'), \
+             mock.patch.object(p,'execute_tests', side_effect=corrupt_synthetic_t0), \
+             mock.patch.object(p,'stage_private'), \
+             mock.patch.dict('os.environ',{p.TRUST_PROOF:'a'*24},clear=True), \
+             mock.patch('pathlib.Path.home',return_value=self.root), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(p.Stop, 'live source/README/fixture changed'):
+                p.preflight(self.mirror,self.live)
+
+    def test_test_runner_does_not_inherit_pythonpath(self):
+        calls=[]
+        def fake_run(*args, **kwargs):
+            calls.append(kwargs['env'])
+            return mock.Mock(stdout='',stderr='Ran 157 tests in 0.1s\\n\\nOK\\n',returncode=0)
+        with mock.patch.object(p.subprocess, 'run', side_effect=fake_run), \
+             mock.patch.dict('os.environ',{'PYTHONPATH':'/tmp/other', 'PYTHONHOME':'/tmp/external'},clear=False), \
+             contextlib.redirect_stdout(io.StringIO()):
+            p.execute_tests(self.live)
+        self.assertNotIn('PYTHONPATH',calls[0]); self.assertNotIn('PYTHONHOME',calls[0])
+
     def test_failure_still_checks_originals(self):
         # The actual executable is not run against Termux: mock external git/test
         # and demonstrate that a failed check still compares original hashes.
