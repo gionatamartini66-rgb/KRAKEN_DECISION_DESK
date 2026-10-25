@@ -20,7 +20,8 @@ class TestPreview(unittest.TestCase):
     'saldo_refresh':{'secret':'PRIVATE_SYNTHETIC_NOT_FOR_PREVIEW'},
     'schede_v02':[{'token':'ADA','coppia_analisi':'ADA/USDT',
        'categoria':'consolidamento','esito':'RIESAME MIRATO',
-       'perche_selezionato':'Controlla volumi',
+       'perche_selezionato':'Controlla volumi', 'sintesi':'Serve chiusura oraria',
+       'evidenze':['Volumi sopra la media'],'criticita':['Spread non verificato'],
        'quantita_privata':'PRIVATE_SYNTHETIC_NOT_FOR_PREVIEW',
        'alternative':[{'pair':'ADA/USDT','pair_key':'ADAUSDT',
           'prezzo_eur':0.13}]}]
@@ -42,6 +43,9 @@ class TestPreview(unittest.TestCase):
   self.assertEqual(set(safe),{'rilevazione_utc','schede_v02'})
   self.assertEqual(safe['schede_v02'][0]['alternative'],
                    [{'pair':'ADA/USDT','pair_key':'ADAUSDT'}])
+  self.assertEqual(safe['schede_v02'][0]['evidenze'],['Volumi sopra la media'])
+  self.assertEqual(safe['schede_v02'][0]['criticita'],['Spread non verificato'])
+  self.assertEqual(safe['schede_v02'][0]['sintesi'],'Serve chiusura oraria')
   self.assertNotIn('PRIVATE_SYNTHETIC_NOT_FOR_PREVIEW',
                    (stage/'ultima_rilevazione.json').read_text())
   self.assertFalse((stage/'config.json').exists())
