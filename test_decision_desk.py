@@ -2460,6 +2460,8 @@ class AnyKrakenSpotTests(unittest.TestCase):
         self.assertIn("all.filter(", page)
         self.assertIn("search.addEventListener('input',rebuild)", page)
         self.assertIn("select.value = ''", page)
+        self.assertIn("replaceAll('BTC','XBT')", page)
+        self.assertIn("replaceAll('DOGE','XDG')", page)
         self.assertIn("Visualizzate le prime 90; affina la ricerca.", page)
         self.assertIn("ADA/USDT",page)
         self.assertIn("DOT/GBP",page)
