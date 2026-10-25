@@ -361,7 +361,7 @@ def spot_selector(catalog):
 <style>:root{color-scheme:dark;font-family:system-ui;background:#0b1221;color:#eaf0fa}
 body{max-width:760px;margin:auto;padding:16px}a{color:#8aceff}
 form{background:#18263c;padding:16px;border-radius:12px}
-select,button{font:inherit;padding:10px;margin:10px 0;width:100%}
+select,input,button{font:inherit;padding:10px;margin:10px 0;width:100%}
 button{background:#80cbff;border:0;border-radius:9px;color:#06162b;font-weight:bold}
 p{line-height:1.5}</style></head><body>
 <p><a href="/">← Cruscotto</a></p><h1>Mercati Kraken Spot · scegli la coppia</h1>
