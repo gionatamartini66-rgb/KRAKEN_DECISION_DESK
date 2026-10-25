@@ -15,6 +15,7 @@ checkout/commit/push/merge. Output contains only a bounded test summary.
 from __future__ import annotations
 
 import argparse
+import getpass
 import hashlib
 import os
 from pathlib import Path
@@ -175,6 +176,24 @@ def has_independent_proof():
                 re.fullmatch(r"[a-f0-9]{24}", proof))
 
 
+def obtain_historical_proof():
+    """Ask only on the Samsung console if an independent historical proof
+    is not already in the process environment; never save or print the value.
+    """
+    if has_independent_proof():
+        return
+    try:
+        answer = getpass.getpass("Prova storica T0 locale (24 o 64 cifre hex; non incollare in chat): ")
+    except (EOFError, KeyboardInterrupt, OSError):
+        raise Stop("historical T0 proof unavailable locally") from None
+    if re.fullmatch(r"[a-f0-9]{24}", answer):
+        os.environ[TRUST_PROOF] = answer
+    elif re.fullmatch(r"[a-f0-9]{64}", answer):
+        os.environ[TRUST_HASH] = answer
+    else:
+        raise Stop("historical T0 proof format invalid")
+
+
 def stage_private(live, stage, mirror):
     stage.chmod(0o700)
     # Only Python sources plus the fixtures strictly required by the two local tests.
@@ -276,8 +295,7 @@ def preflight(mirror, live):
     staging_budget(live, mirror)
     print("KDD_PR20_PIN:", PIN)
     print("MODE: READ-ONLY live; no order, no deploy, no restart")
-    if not has_independent_proof():
-        raise Stop("set a HISTORICAL T0 trusted proof in the local environment; never send it to chat")
+    obtain_historical_proof()
     # Snapshot limited to existing executable+config/README files. No values printed.
     targets = [p for p in live.glob("*.py") if p.is_file()]
     targets += [live / n for n in ("README.md", "config.json", "portafoglio.json")]
