@@ -353,8 +353,99 @@ def spot_request_pair(path, query):
     return values[0]
 
 
-def spot_selector(catalog):
-    """Lista navigabile delle coppie senza default e senza lettura portafoglio."""
+def spot_observed_candidates(catalog, snapshot):
+    """Use KDD's EXISTING ranked public scan, never rank by alphabet or invent setups.
+
+    Link only an exact catalogued Kraken pair. Do not read portfolio or balances.
+    """
+    if not isinstance(snapshot, dict):
+        return []
+    raw = snapshot.get("schede_v02")
+    if not isinstance(raw, list):
+        return []
+    found = []
+    used = set()
+    for item in raw[:12]:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("coppia_analisi")
+        options = item.get("alternative")
+        if not isinstance(name, str) or not isinstance(options, list):
+            continue
+        key = None
+        for candidate in options:
+            if not isinstance(candidate, dict) or candidate.get("pair") != name:
+                continue
+            possible = candidate.get("pair_key")
+            if (isinstance(possible, str) and possible in catalog
+                    and catalog[possible]["pair"] == name):
+                key = possible
+                break
+        if key is None or key in used:
+            continue
+        used.add(key)
+        found.append({
+            "pair_key": key, "pair": name,
+            "categoria": str(item.get("categoria") or "Caso da esaminare")[:90],
+            "esito": str(item.get("esito") or "Analisi da verificare")[:90],
+            "perche": str(item.get("perche_selezionato") or "")[:300],
+        })
+        if len(found) == 6:
+            break
+    return found
+
+
+def spot_priority_panel(catalog, snapshot, *, now=None):
+    """Shortlist from last completed KDD scan, with observation date and direct links."""
+    esc = lambda value: html.escape(str(value), quote=True)
+    rows = spot_observed_candidates(catalog, snapshot)
+    date = snapshot.get("rilevazione_utc") if isinstance(snapshot, dict) else None
+    now = now or dt.datetime.now(dt.timezone.utc)
+    if isinstance(date, str):
+        try:
+            observed = dt.datetime.fromisoformat(date.replace("Z", "+00:00"))
+            if observed.tzinfo is None:
+                raise ValueError("UTC offset absent")
+            age = (now - observed).total_seconds() / 60
+            status = ("RILEVAZIONE DA AGGIORNARE" if age > 30 or age < -2
+                      else "Rilevazione recente")
+            date_info = esc(date[:40]) + " · " + status
+        except ValueError:
+            date_info = "Orario della rilevazione non verificabile"
+    else:
+        date_info = "Rilevazione KDD non disponibile"
+    if not rows:
+        return ('<section class="priority"><h2>Segnalazioni già individuate da KDD</h2>'
+                '<p>Nessun caso dell’ultima analisi disponibile in questa anteprima. '
+                'Il cruscotto completo conserva posizioni, segnalazioni e piani; '
+                'il catalogo sotto resta esplorabile.</p></section>')
+    cards = []
+    for c in rows:
+        key = urllib.parse.quote(c["pair_key"], safe="")
+        graph = "/grafico/spot?pair=" + key + "&amp;tf=4h"
+        compare = "/analisi/spot?pair=" + key
+        cards.append(
+            '<article class="candidate"><h3>' + esc(c["pair"]) + '</h3>'
+            '<p><strong>' + esc(c["esito"]) + '</strong> · ' + esc(c["categoria"]) + '</p>'
+            + ('<p>' + esc(c["perche"]) + '</p>' if c["perche"] else "")
+            + '<p class="actions"><a href="' + graph + '">Grafico 4H</a>'
+            '<a href="' + compare + '">Confronta 15m · 1H · 4H · 1D</a></p>'
+            '</article>')
+    return ('<section class="priority"><h2>Da esaminare: selezione KDD</h2>'
+            '<p class="source">Ultimo scanner KDD · ' + date_info +
+            '. Questi casi non sono ordini né segnali di acquisto; '
+            'la negoziabilità del conto non è verificata.</p>'
+            + "".join(cards) + '</section>')
+
+
+def spot_selector(catalog, snapshot=None, *, now=None):
+    """Casi già selezionati da KDD, poi ricerca completa di qualunque coppia."""
+    if snapshot is None:
+        try:
+            snapshot = desk.load("ultima_rilevazione.json", {})
+        except (OSError, ValueError, TypeError):
+            snapshot = {}
+    priority = spot_priority_panel(catalog, snapshot, now=now)
     options = "".join(
         '<option value="' + html.escape(p["pair_key"], quote=True) + '">' +
         html.escape(p["pair"]) + ' · ' + html.escape(p["pair_key"]) + '</option>'
@@ -365,13 +456,22 @@ def spot_selector(catalog):
 <title>KDD · Coppie Kraken Spot</title>
 <style>:root{color-scheme:dark;font-family:system-ui;background:#0b1221;color:#eaf0fa}
 body{max-width:760px;margin:auto;padding:16px}a{color:#8aceff}
+.priority{background:#111c30;border:1px solid #34415d;border-radius:12px;padding:16px;margin:20px 0}
+.priority h2{margin-top:0}.candidate{background:#192a43;border-radius:10px;padding:12px;margin:12px 0}
+.candidate h3{margin:0}.candidate p{margin:8px 0}.actions{display:flex;flex-wrap:wrap;gap:12px}
+.actions a{display:inline-block;padding:8px 10px;background:#244967;border-radius:8px}
+.source{font-size:.92rem;color:#d2dae8}
 form{background:#18263c;padding:16px;border-radius:12px}
 select,input,button{font:inherit;padding:10px;margin:10px 0;width:100%}
 button{background:#80cbff;border:0;border-radius:9px;color:#06162b;font-weight:bold}
 p{line-height:1.5}</style></head><body>
-<p><a href="/">← Cruscotto</a></p><h1>Mercati Kraken Spot · scegli la coppia</h1>
+<p><a href="http://127.0.0.1:8765/">← KDD completo (porta 8765)</a></p>
+<h1>Mercati Kraken Spot</h1>
 <p>Catalogo pubblico AssetPairs online. La negoziabilita per il conto italiano
 non e verificata. Nessuna coppia preselezionata; nessun ordine.</p>
+__PRIORITY__
+<h2>Esplora qualsiasi altra coppia Kraken Spot</h2>
+<p>Scrivi un token o una valuta per cercare in tutto il catalogo, non soltanto tra le prime lettere.</p>
 <form method="get" action="/analisi/spot">
 <label for="filtro">Cerca coppia per token, valuta o codice Kraken</label>
 <input type="search" id="filtro" aria-controls="pair" autocomplete="off"
@@ -398,21 +498,24 @@ Solo candele chiuse, niente valori inventati.</p>
     const found = needle ? all.filter(([k,t]) => {
       const haystack = (k + ' ' + t).toLocaleUpperCase('it-IT');
       return haystack.includes(needle) || haystack.includes(translated);
-    }) : all;
+    }) : [];
+    // Empty until search: never flood the user with A-to-Z entries.
     // Cap options shown simultaneously on mobile, NOT the underlying catalog.
     const maxVisible = 90;
     const choices = found.slice(0,maxVisible).map(([k,t]) => new Option(t,k));
     const placeholder = new Option('— Seleziona una coppia —', '');
     select.replaceChildren(placeholder,...choices);
     select.value = '';
-    counter.textContent = found.length + ' coppie trovate su ' + all.length +
-      (found.length > maxVisible ? '. Visualizzate le prime 90; affina la ricerca.' : '.');
+    counter.textContent = needle ?
+      found.length + ' coppie trovate su ' + all.length +
+        (found.length > maxVisible ? '. Visualizzate le prime 90; affina la ricerca.' : '.') :
+      'Catalogo: ' + all.length + ' coppie. Scrivi un token per vedere i risultati.';
   }
   search.addEventListener('input',rebuild);
   rebuild();
 })();
 </script>
-</body></html>""".replace("__OPTIONS__", options))
+</body></html>""".replace("__OPTIONS__", options).replace("__PRIORITY__", priority))
 
 
 def load_spot_chart(pair_key, timeframe, *, public_kraken=None, now=None):
