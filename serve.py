@@ -210,7 +210,8 @@ def render_sui_comparison(report, *, pair_key=None):
             continue
         vol = item["volume_vs_media20"]
         vol_text = "non calcolabile" if vol is None else f'{vol:.2f} × media delle 20 barre precedenti'
-        volume_text = f"{item['volume']:.4f}"
+        # Non trasformare volumi base piccoli ma positivi in uno zero apparente.
+        volume_text = f"{item['volume']:.10g}"
         rows.append(
             f'<article class="frame"><h2>{title}</h2>'
             f'<p class="status">AGGIORNATO · {esc(item["candele"])} barre chiuse</p>'
@@ -262,8 +263,8 @@ S/R sono livelli euristici calcolati dalla cronologia disponibile.
 La classificazione rispetto alle EMA non misura la probabilità di guadagno.
 Nessuna operazione, nessun segnale BUY/SELL.</p>
 <p class="note">Il confronto interroga Kraken Spot pubblico per tutti e quattro
-gli intervalli a ogni apertura. Il grafico 4H separato conserva il
-proprio dossier locale, aggiornabile dal cruscotto.</p>
+gli intervalli a ogni apertura. Il grafico è una vista separata: controlla
+la fonte e l'ora riportate sulla sua pagina, che possono differire.</p>
 <p><a href="/">← Torna al cruscotto</a></p>
 </body></html>"""
         .replace("__STATE__", esc(report["stato"]))
