@@ -1,4 +1,4 @@
-import importlib.util, tempfile, unittest, sys, os, pathlib, subprocess, time, http.client, signal
+import importlib.util, tempfile, unittest, sys, os, pathlib, subprocess, time, http.client, signal, json
 from unittest import mock
 from pathlib import Path
 spec=importlib.util.spec_from_file_location('preview',str(Path(__file__).with_name('kdd_pr20_preview_samsung_g0.py')))
@@ -15,6 +15,16 @@ class TestPreview(unittest.TestCase):
   (self.live/'portafoglio.json').write_text('{"PRIVATE_SYNTHETIC":true}')
   (self.live/'storico_portafoglio').mkdir()
   (self.live/'storico_portafoglio'/'T0.json').write_text('PRIVATE_SYNTHETIC')
+  (self.live/'ultima_rilevazione.json').write_text(json.dumps({
+    'rilevazione_utc':'2026-10-25T12:00:00+00:00',
+    'saldo_refresh':{'secret':'PRIVATE_SYNTHETIC_NOT_FOR_PREVIEW'},
+    'schede_v02':[{'token':'ADA','coppia_analisi':'ADA/USDT',
+       'categoria':'consolidamento','esito':'RIESAME MIRATO',
+       'perche_selezionato':'Controlla volumi',
+       'quantita_privata':'PRIVATE_SYNTHETIC_NOT_FOR_PREVIEW',
+       'alternative':[{'pair':'ADA/USDT','pair_key':'ADAUSDT',
+          'prezzo_eur':0.13}]}]
+  },ensure_ascii=False))
   (self.live/'vendor').mkdir()
   for a in p.ASSETS:(self.live/'vendor'/a).write_text('synthetic vendor')
  def tearDown(self):self.t.cleanup()
@@ -25,10 +35,25 @@ class TestPreview(unittest.TestCase):
   stage=self.base/'stage';stage.mkdir()
   with mock.patch.object(p,'git',side_effect=git), mock.patch.object(p,'read_approved_blob',return_value=b'# public synthetic\n'):
    hashes=p.prepare(self.live,self.mirror,stage)
-  self.assertEqual({x.name for x in stage.iterdir()},{'decision_desk.py','serve.py','grafico_4h.py','piano_gpt.py','vendor'})
+  self.assertEqual({x.name for x in stage.iterdir()},{'decision_desk.py','serve.py','grafico_4h.py','piano_gpt.py','vendor','ultima_rilevazione.json'})
   self.assertEqual((stage/'serve.py').read_bytes(),b'# public synthetic\n')
   self.assertEqual(hashes[str(self.live/'serve.py')],p.digest(self.live/'serve.py'))
-  self.assertFalse(any(stage.rglob('*.json')))
+  safe=json.loads((stage/'ultima_rilevazione.json').read_text())
+  self.assertEqual(set(safe),{'rilevazione_utc','schede_v02'})
+  self.assertEqual(safe['schede_v02'][0]['alternative'],
+                   [{'pair':'ADA/USDT','pair_key':'ADAUSDT'}])
+  self.assertNotIn('PRIVATE_SYNTHETIC_NOT_FOR_PREVIEW',
+                   (stage/'ultima_rilevazione.json').read_text())
+  self.assertFalse((stage/'config.json').exists())
+  self.assertFalse((stage/'portafoglio.json').exists())
+ def test_missing_public_snapshot_keeps_preview_usable(self):
+  (self.live/'ultima_rilevazione.json').unlink()
+  with mock.patch.object(p,'git',return_value=mock.Mock(returncode=0,stdout='git@github.com:'+p.REPO+'.git')), \
+       mock.patch.object(p,'read_approved_blob',return_value=b'# public synthetic\\n'):
+   stage=self.base/'stage';stage.mkdir()
+   p.prepare(self.live,self.mirror,stage)
+  self.assertFalse((stage/'ultima_rilevazione.json').exists())
+
  def test_bad_mirror_blocks(self):
   with self.assertRaisesRegex(p.Stop,'mirror'):
    p.prepare(self.live,self.base/'absent',self.base)
