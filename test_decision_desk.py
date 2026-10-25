@@ -2438,7 +2438,7 @@ class AnyKrakenSpotTests(unittest.TestCase):
         self.assertGreater(g.ema_points(bars,20)[-1]["value"],0)
         self.assertGreater(g.ema_points(bars,50)[-1]["value"],0)
         page=g.page_from_data(frame)
-        self.assertIn("precision:12,minMove:1e-12",page)
+        self.assertIn("precision:12,minMove:0.000000000001",page)
         self.assertIn('href="/analisi/spot?pair=SHIBUSD"',page)
         self.assertNotIn("precision:5,minMove:0.00001",page)
         self.assertNotIn('"value":0.0}',page)
