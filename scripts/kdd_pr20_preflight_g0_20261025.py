@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -194,6 +195,21 @@ def obtain_historical_proof():
         raise Stop("historical T0 proof format invalid")
 
 
+def original_t0_path(live):
+    """Identify and validate the existing historical T0 input, without echoing it."""
+    private_file(live / "portafoglio.json")
+    try:
+        portfolio = json.loads((live / "portafoglio.json").read_text(encoding="utf-8"))
+        identifier = portfolio.get("t0_id")
+    except (ValueError, TypeError, OSError):
+        raise Stop("local T0 reference unreadable") from None
+    if not isinstance(identifier, str) or not T0_NAME.fullmatch(identifier):
+        raise Stop("local T0 reference invalid")
+    path = live / "storico_portafoglio" / (identifier + ".json")
+    private_file(path)
+    return path
+
+
 def stage_private(live, stage, mirror):
     stage.chmod(0o700)
     # Only Python sources plus the fixtures strictly required by the two local tests.
@@ -214,16 +230,8 @@ def stage_private(live, stage, mirror):
         safe_copy(live / name, stage / name)
     # Store T0 only inside this restricted temporary staging. Its historical
     # fingerprint must come from environment, NEVER calculated into env here.
-    import json
-    try:
-        p = json.loads((stage / "portafoglio.json").read_text(encoding="utf-8"))
-        identifier = p.get("t0_id")
-    except (ValueError, TypeError, OSError):
-        raise Stop("local T0 reference unreadable") from None
-    if not isinstance(identifier, str) or not T0_NAME.fullmatch(identifier):
-        raise Stop("local T0 reference invalid")
-    safe_copy(live / "storico_portafoglio" / (identifier + ".json"),
-              stage / "storico_portafoglio" / (identifier + ".json"))
+    source_t0 = original_t0_path(live)
+    safe_copy(source_t0, stage / "storico_portafoglio" / source_t0.name)
     for name in ASSETS:
         safe_copy(live / "vendor" / name, stage / "vendor" / name)
     original = (live / "README.md").read_text(encoding="utf-8")
@@ -242,7 +250,8 @@ def execute_tests(stage):
     env["PYTHONNOUSERSITE"] = "1"
     # Restricted module runner; no shell interpolation and no API credentials.
     for key in list(env):
-        if key.startswith("KRAKEN_") or key.startswith("OPENAI_") or key.startswith("DEEPSEEK_"):
+        if (key.startswith("KRAKEN_") or key.startswith("OPENAI_")
+                or key.startswith("DEEPSEEK_") or key in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP")):
             env.pop(key, None)
     try:
         result = subprocess.run([sys.executable, "-B", "-m", "unittest", "-q", "test_decision_desk"],
@@ -299,6 +308,7 @@ def preflight(mirror, live):
     # Snapshot limited to existing executable+config/README files. No values printed.
     targets = [p for p in live.glob("*.py") if p.is_file()]
     targets += [live / n for n in ("README.md", "config.json", "portafoglio.json")]
+    targets.append(original_t0_path(live))
     before = {str(p):sha(p) for p in targets}
     try:
         fetch_pinned(mirror)
