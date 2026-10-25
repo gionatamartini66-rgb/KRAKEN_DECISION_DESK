@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """PR20 preview: public-only Chrome demo on localhost:8766, not a KDD deploy.
 
-Load only approved GitHub source blobs and local public Python/vendor sources
-into a disposable private Termux directory. Never copy config, T0, plans,
-portfolio, balance snapshots or credentials. POST and KDD refresh are disabled.
+Load only approved GitHub source blobs and local public Python/vendor sources,
+plus a minimal public shortlist extracted from KDD's last market observation,
+into a disposable private Termux directory. Never copy raw market snapshots,
+config, T0, plans, portfolio, balance snapshots or credentials.
+POST and KDD refresh are disabled.
 The operational KDD localhost:8765 is not stopped or changed.
 """
 from __future__ import annotations
