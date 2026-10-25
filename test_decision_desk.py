@@ -2485,6 +2485,19 @@ class AnyKrakenSpotTests(unittest.TestCase):
         self.assertIn("Grafico XBT/EUR", graph)
         self.assertNotIn("Grafico SUI/EUR", graph)
 
+    def test_tiny_crypto_quote_displays_significant_price_not_fake_zero(self):
+        report = serve.load_spot_comparison(
+            "ADAUSDT", public_kraken=self.fake, now=self.now)
+        self.assertEqual(report["stato"], "COMPLETO")
+        first = report["timeframe"][0]
+        first["close"] = 0.000000001234567
+        first["ema20"] = 0.000000000987654
+        first["ema50"] = 0.000000000876543
+        page = serve.render_sui_comparison(report, pair_key="ADAUSDT")
+        self.assertIn("1.234567e-09 USDT", page)
+        self.assertIn("9.87654e-10 USDT", page)
+        self.assertNotIn("0.00000 USDT", page)
+
     def test_ohlc_response_two_symbols_fail_closed_even_if_one_matches(self):
         def double(endpoint, **params):
             if endpoint == "AssetPairs":
