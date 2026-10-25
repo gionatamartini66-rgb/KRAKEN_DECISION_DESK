@@ -293,8 +293,11 @@ def spot_catalog(public_kraken=None):
         if not SPOT_NAME_RE.fullmatch(name):
             continue
         base, quote = name.split("/", 1)
+        altname = row.get("altname")
+        if not isinstance(altname, str) or not SPOT_KEY_RE.fullmatch(altname):
+            altname = None
         out[key] = {"pair_key": key, "pair": name, "base": base, "quote": quote,
-                    "eligibilita_conto": "NON_VERIFICATA"}
+                    "altname": altname, "eligibilita_conto": "NON_VERIFICATA"}
     if not out:
         raise ValueError("Nessuna coppia online verificabile")
     return out
@@ -305,6 +308,27 @@ def spot_lookup(pair_key, catalog):
             or pair_key not in catalog):
         raise ValueError("Coppia assente o non online nel catalogo Kraken")
     return catalog[pair_key]
+
+
+class KrakenPairMismatch(RuntimeError):
+    """Kraken OHLC supplied candles under an unrelated market identifier."""
+
+
+def checked_spot_ohlc(raw, meta):
+    """Bind a single response market to the exact AssetPairs pair/altname.
+
+    REST OHLC response symbols need not equal wsname; never trust the first
+    non-'last' array and then label it with the requested pair.
+    """
+    if not isinstance(raw, dict):
+        raise KrakenPairMismatch("Risposta OHLC non valida")
+    symbols = [name for name in raw if name != "last"]
+    accepted = {meta["pair_key"]}
+    if meta.get("altname"):
+        accepted.add(meta["altname"])
+    if len(symbols) != 1 or symbols[0] not in accepted:
+        raise KrakenPairMismatch("Identita mercato OHLC differente dalla coppia richiesta")
+    return raw
 
 
 def spot_selector(catalog):
@@ -345,7 +369,8 @@ def load_spot_chart(pair_key, timeframe, *, public_kraken=None, now=None):
     meta = spot_lookup(pair_key, spot_catalog(fetch))
     raw = fetch("OHLC", pair=pair_key, interval=grafico_4h.TIMEFRAMES[timeframe][0])
     series = grafico_4h.data_from_kraken_ohlc(
-        raw, timeframe, now=now, pair=meta["pair"], token=meta["base"],
+        checked_spot_ohlc(raw, meta), timeframe, now=now,
+        pair=meta["pair"], token=meta["base"],
         pair_key=pair_key)
     return grafico_4h.page_from_data(series)
 
@@ -359,7 +384,8 @@ def load_spot_comparison(pair_key, *, public_kraken=None, now=None):
         try:
             raw = fetch("OHLC", pair=pair_key, interval=grafico_4h.TIMEFRAMES[frame][0])
             frames[label] = grafico_4h.data_from_kraken_ohlc(
-                raw, frame, now=now, pair=meta["pair"], token=meta["base"],
+                checked_spot_ohlc(raw, meta), frame, now=now,
+                pair=meta["pair"], token=meta["base"],
                 pair_key=pair_key)
         except (OSError, RuntimeError, ValueError, KeyError, IndexError, TypeError) as exc:
             frames[label] = {"errore": type(exc).__name__}
