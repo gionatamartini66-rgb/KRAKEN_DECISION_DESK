@@ -18,6 +18,14 @@ from pathlib import Path
 TOKEN = "SUI"
 TF = "4H"
 CANDLES_MAX = 200
+
+
+def market_round(value):
+    """Preserve sub-micro market levels; legacy 8dp for ordinary prices."""
+    if value != 0 and abs(value) < 1e-6:
+        return float(f"{value:.12g}")
+    return round(value, 8)
+
 TIMEFRAMES = {"15m": (15, "15m"), "1h": (60, "1H"),
               "4h": (240, "4H"), "1d": (1440, "1D")}
 
@@ -118,10 +126,10 @@ def ema_points(candles, period):
     alpha = 2.0 / (period + 1)
     values = [row["close"] for row in candles]
     ema = sum(values[:period]) / period
-    points = [{"time": candles[period - 1]["time"], "value": round(ema, 8)}]
+    points = [{"time": candles[period - 1]["time"], "value": market_round(ema)}]
     for i in range(period, len(candles)):
         ema += alpha * (values[i] - ema)
-        points.append({"time": candles[i]["time"], "value": round(ema, 8)})
+        points.append({"time": candles[i]["time"], "value": market_round(ema)})
     return points
 
 
@@ -149,13 +157,13 @@ def daily_pivots(candles, interval_seconds=14400):
     p = (high + low + close) / 3.0
     spread = high - low
     return {"reference_day_utc": prev_day.isoformat(),
-            "P": round(p, 8),
-            "R1": round(2 * p - low, 8),
-            "S1": round(2 * p - high, 8),
-            "R2": round(p + spread, 8),
-            "S2": round(p - spread, 8),
-            "R3": round(high + 2 * (p - low), 8),
-            "S3": round(low - 2 * (high - p), 8)}
+            "P": market_round(p),
+            "R1": market_round(2 * p - low),
+            "S1": market_round(2 * p - high),
+            "R2": market_round(p + spread),
+            "S2": market_round(p - spread),
+            "R3": market_round(high + 2 * (p - low)),
+            "S3": market_round(low - 2 * (high - p))}
 
 
 def structural_levels(candles, tolerance=0.009):
@@ -200,7 +208,7 @@ def structural_levels(candles, tolerance=0.009):
             candidates.append((level, len(cl), max(x[0] for x in cl)))
         # Prossimità al prezzo corrente, a parità tocchi/recenza.
         candidates.sort(key=lambda z: (abs(z[0] - last), -z[1], -z[2]))
-        return [{"price": round(p, 8), "touches": n,
+        return [{"price": market_round(p), "touches": n,
                  "last_swing_time": candles[i]["time"]}
                 for p, n, i in candidates[:3]]
     return {"supports": group(pivots("low"), True),
@@ -346,6 +354,19 @@ def page_from_data(x):
     if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", token):
         raise ValueError("Token grafico non valido")
     token_js = json.dumps(token, ensure_ascii=True)
+    positive_lows = [r["low"] for r in x["candles"]]
+    if (not positive_lows or not all(isinstance(v, (int, float)) and
+            math.isfinite(v) and v > 0 for v in positive_lows)):
+        raise ValueError("Prezzo minimo OHLC non valido")
+    smallest = min(positive_lows)
+    if smallest < 1e-12:
+        # Explicitly decline to misrepresent smaller quotes as zero
+        # with the 12dp precision currently supported by this view.
+        raise ValueError("Prezzo sotto la precisione supportata dal grafico")
+    decimal_places = max(5, min(12, math.ceil(-math.log10(smallest)) + 3))
+    min_move = 10 ** (-decimal_places)
+    comparison_url = ("/analisi/spot?pair=" + urllib.parse.quote(key, safe="")
+                      if key else "/analisi/sui-mtf")
     observed = html.escape(x["observed_utc"], quote=True)
     closed = html.escape(x["closed_at_utc"], quote=True)
     notice = ("TradingView Lightweight Charts™. "
@@ -415,7 +436,7 @@ footer{font-size:.83rem;color:#b3c1d8;line-height:1.5;margin:14px 0 26px}
 __TIMEFRAME_BUTTONS__
 </nav>
 <p class="muted">Seleziona l'intervallo reale delle candele. Zoom e scorrimento col dito.</p>
-<p><a href="/analisi/sui-mtf" style="font-weight:700">🔎 Confronta 15m · 1H · 4H · 1D</a></p>
+<p><a href="__COMPARE_URL__" style="font-weight:700">🔎 Confronta 15m · 1H · 4H · 1D</a></p>
 <div class="legend" aria-label="Livelli e indicatori">
 <label><input type="checkbox" id="show-ema20" checked> EMA20 (oro)</label>
 <label><input type="checkbox" id="show-ema50" checked> EMA50 (azzurro)</label>
@@ -496,7 +517,7 @@ try {
   const candleSeries=chart.addSeries(LightweightCharts.CandlestickSeries,{
     upColor:'#23bb91',downColor:'#ee6b77',borderVisible:false,
     wickUpColor:'#23bb91',wickDownColor:'#ee6b77',priceLineVisible:false,
-    priceFormat:{type:'price',precision:5,minMove:0.00001},
+    priceFormat:{type:'price',precision:__PRECISION__,minMove:__MIN_MOVE__},
     lastValueVisible:true});
   candleSeries.setData(rows.map(v=>({
     time:v.time,open:v.open,high:v.high,low:v.low,close:v.close})));
@@ -505,7 +526,7 @@ try {
   function addEma(points,color,selector,legendSelector){
     const series=chart.addSeries(LightweightCharts.LineSeries,{
       color:color,lineWidth:2,priceLineVisible:false,lastValueVisible:false,
-      priceFormat:{type:'price',precision:5,minMove:0.00001},
+      priceFormat:{type:'price',precision:__PRECISION__,minMove:__MIN_MOVE__},
       crosshairMarkerVisible:false,title:''});
     series.setData(points);
     const control=document.querySelector(selector);
@@ -756,7 +777,11 @@ try {
 </script>
 </body>
 </html>"""
-    template = template.replace("SUI/EUR", "__PAIR__").replace("(SUI)", "(__TOKEN__)")
+    template = (template.replace("SUI/EUR", "__PAIR__")
+                .replace("(SUI)", "(__TOKEN__)")
+                .replace("/analisi/sui-mtf", "__COMPARE_URL__")
+                .replace("cinque decimali", "__DECIMALS__ decimali")
+                .replace("5 decimali", "__DECIMALS__ decimali"))
     return (template.replace("__BARS__", candle_json)
             .replace("__TECHNICAL__", technical_json)
             .replace("__OBSERVED__", observed).replace("__CLOSED__", closed)
@@ -765,4 +790,8 @@ try {
             .replace("__TF__", html.escape(frame))
             .replace("__PAIR__", pair).replace("__TOKEN__", html.escape(token))
             .replace("__TOKEN_JS__", token_js)
+            .replace("__COMPARE_URL__", html.escape(comparison_url, quote=True))
+            .replace("__PRECISION__", str(decimal_places))
+            .replace("__MIN_MOVE__", repr(min_move))
+            .replace("__DECIMALS__", str(decimal_places))
             .replace("__SOURCE__", html.escape(x.get("source", "Dossier Kraken KDD"))))
