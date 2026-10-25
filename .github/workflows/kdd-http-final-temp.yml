@@ -1,0 +1,19 @@
+name: KDD Spot HTTP error contract - temporary
+on:
+  push:
+    branches: [experiments/kdd-any-spot-g2-20261024]
+permissions:
+  contents: read
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Syntax
+        run: python -m py_compile serve.py grafico_4h.py decision_desk.py test_decision_desk.py
+      - name: KDD full regression with HTTP status integration
+        run: python -m unittest -q test_decision_desk
