@@ -2646,8 +2646,17 @@ class AnyKrakenSpotTests(unittest.TestCase):
             return {"XBTEUR": raw["XXBTZEUR"], "last": raw["last"]}
         graph = serve.load_spot_chart(
             "XXBTZEUR", "4h", public_kraken=alias, now=self.now)
-        self.assertIn("Grafico XBT/EUR", graph)
+        self.assertIn("Grafico BTC/EUR", graph)
+        self.assertIn("Volumi scambiati (BTC)", graph)
+        self.assertIn("Kraken usa XBT per BTC", graph)
         self.assertNotIn("Grafico SUI/EUR", graph)
+        compare = serve.load_spot_comparison("XXBTZEUR",
+                                             public_kraken=alias, now=self.now)
+        self.assertEqual(compare["coppia"], "XBT/EUR")  # original Kraken identity
+        view = serve.render_sui_comparison(compare, pair_key="XXBTZEUR")
+        self.assertIn("Confronto BTC/EUR (Kraken XBT/EUR)", view)
+        self.assertIn("Volume ultima candela:", view)
+        self.assertIn(" BTC;", view)
 
     def test_micro_volume_remains_nonzero_in_quote_aware_comparison(self):
         report = serve.load_spot_comparison(
