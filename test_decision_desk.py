@@ -2566,8 +2566,8 @@ class AnyKrakenSpotTests(unittest.TestCase):
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         server = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
         server.daemon_threads = True
-        with mock.patch.object(serve, "PORT", server.server_address[1]), \\
-             mock.patch.object(serve.desk, "kraken", side_effect=fake_provider):
+        with (mock.patch.object(serve, "PORT", server.server_address[1]),
+              mock.patch.object(serve.desk, "kraken", side_effect=fake_provider)):
             worker = threading.Thread(target=server.serve_forever,
                                       daemon=True)
             worker.start()
