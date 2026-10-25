@@ -2379,7 +2379,7 @@ class AnyKrakenSpotTests(unittest.TestCase):
             raw.append([current - (80-i)*interval, str(close),
                         str(close+.015), str(close-.015), str(close),
                         "0", "125", 1])
-        return {"OHLC_PAIR": raw, "last": current}
+        return {params["pair"]: raw, "last": current}
 
     def test_market_catalog_includes_non_eur_and_does_not_force_sui(self):
         catalog = serve.spot_catalog(self.fake)
@@ -2447,6 +2447,54 @@ class AnyKrakenSpotTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             serve.load_spot_chart("ADAUSDT","invalid",public_kraken=self.fake)
         self.assertEqual(self.calls,[])
+
+    def test_ohlc_mismatched_response_symbol_is_rejected_before_render(self):
+        """A valid candle array from ANOTHER token may not inherit selected label."""
+        calls = []
+        def swapped(endpoint, **params):
+            if endpoint == "AssetPairs":
+                return self.pairs
+            calls.append(params["interval"])
+            raw = self.fake(endpoint, **params)
+            return {"UNRELATEDBTCUSD": raw[params["pair"]],
+                    "last": raw["last"]}
+        with self.assertRaises(serve.KrakenPairMismatch):
+            serve.load_spot_chart("ADAUSDT", "4h",
+                                  public_kraken=swapped, now=self.now)
+        self.assertEqual(calls, [240])
+        calls.clear()
+        result = serve.load_spot_comparison(
+            "ADAUSDT", public_kraken=swapped, now=self.now)
+        self.assertEqual(calls, [15, 60, 240, 1440])
+        self.assertEqual(result["stato"], "PARZIALE")
+        self.assertEqual(result["quadro"], "CONFRONTO_INCOMPLETO")
+        self.assertTrue(all(f["stato"] == "NON_DISPONIBILE"
+                            for f in result["timeframe"]))
+
+    def test_ohlc_alias_return_name_allowed_only_if_declared_by_kraken(self):
+        pairs = dict(self.pairs)
+        pairs["XXBTZEUR"] = dict(pairs["XXBTZEUR"], altname="XBTEUR")
+        def alias(endpoint, **params):
+            if endpoint == "AssetPairs":
+                return pairs
+            raw = self.fake(endpoint, **params)
+            assert params["pair"] == "XXBTZEUR"
+            return {"XBTEUR": raw["XXBTZEUR"], "last": raw["last"]}
+        graph = serve.load_spot_chart(
+            "XXBTZEUR", "4h", public_kraken=alias, now=self.now)
+        self.assertIn("Grafico XBT/EUR", graph)
+        self.assertNotIn("Grafico SUI/EUR", graph)
+
+    def test_ohlc_response_two_symbols_fail_closed_even_if_one_matches(self):
+        def double(endpoint, **params):
+            if endpoint == "AssetPairs":
+                return self.pairs
+            raw = self.fake(endpoint, **params)
+            raw["EXTRAUSD"] = raw[params["pair"]]
+            return raw
+        with self.assertRaises(serve.KrakenPairMismatch):
+            serve.load_spot_chart("ADAUSDT", "4h",
+                                  public_kraken=double, now=self.now)
 
     def test_none_catalog_is_fail_closed(self):
         with self.assertRaises(ValueError):
