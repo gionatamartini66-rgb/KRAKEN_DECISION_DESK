@@ -57,6 +57,24 @@ class G0PreflightTests(unittest.TestCase):
         with mock.patch.dict('os.environ',{p.TRUST_PROOF:'a'*24},clear=True):
             self.assertTrue(p.has_independent_proof())
 
+    def test_local_proof_prompt_is_not_persisted(self):
+        with mock.patch.dict('os.environ', {}, clear=True), \
+             mock.patch.object(p.getpass, 'getpass', return_value='c'*24):
+            p.obtain_historical_proof()
+            self.assertEqual(__import__('os').environ.get(p.TRUST_PROOF), 'c'*24)
+        self.assertNotIn('c'*24, (self.live/'README.md').read_text())
+
+    def test_bad_local_proof_is_rejected(self):
+        with mock.patch.dict('os.environ', {}, clear=True), \
+             mock.patch.object(p.getpass, 'getpass', return_value='invalid'):
+            with self.assertRaisesRegex(p.Stop, 'format invalid'):
+                p.obtain_historical_proof()
+
+    def test_present_proof_skips_prompt(self):
+        with mock.patch.dict('os.environ', {p.TRUST_PROOF:'d'*24}, clear=True), \
+             mock.patch.object(p.getpass, 'getpass', side_effect=AssertionError('prompt unnecessary')):
+            p.obtain_historical_proof()
+
     def test_staging_avoids_unneeded_private_documents(self):
         with tempfile.TemporaryDirectory() as td:
             stage=Path(td)
