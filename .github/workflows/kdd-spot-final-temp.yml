@@ -1,0 +1,18 @@
+name: KDD G2 Spot final adversarial suite - temporary
+on:
+  push:
+    branches:
+      - experiments/kdd-any-spot-g2-20261024
+jobs:
+  py313:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Syntax
+        run: python -m py_compile decision_desk.py serve.py grafico_4h.py test_decision_desk.py
+      - name: Full regression and adversarial corpus
+        run: python -m unittest -q test_decision_desk
