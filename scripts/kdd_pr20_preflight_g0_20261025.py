@@ -29,11 +29,11 @@ import tempfile
 
 REPO = "gionatamartini66-rgb/KRAKEN_DECISION_DESK"
 BRANCH = "experiments/kdd-any-spot-g2-20261024"
-PIN = "1628b14ff490948b31d6b49870ad77f138014806"
+PIN = "8948faffe097bdfcbd1f4cbdd12fc6e9849448b9"
 FILES = {
     "grafico_4h.py": "58cd52991067bebf67f3557c3c3577b707ffe6ea",
-    "serve.py": "d02b931fd8f99af22429b3e65e1c622eb3cea22e",
-    "test_decision_desk.py": "baa62d53dda39c60dc4f9446b930bf8df6f620c8",
+    "serve.py": "c09fd8acb4ff95a44497d55c4c935be04578a8d1",
+    "test_decision_desk.py": "86c1ab1384b8f4ba783811084ae24f5c50828489",
 }
 REQUIRED = ("config.json", "portafoglio.json")
 ASSETS = ("lightweight-charts-5.2.1.js", "LIGHTWEIGHT_CHARTS_LICENSE.txt",
@@ -277,8 +277,8 @@ def execute_tests(stage):
         raise Stop("regression not passing; details intentionally NOT exposed")
     if skipped and int(skipped.group(1)) > 0:
         raise Stop("tests skipped; Samsung local gate not closed")
-    if int(ran.group(1)) < 157:
-        raise Stop("fewer than the expected 157 tests")
+    if int(ran.group(1)) < 158:
+        raise Stop("fewer than the expected 158 tests")
     print("G0_REGRESSION_LOCAL: PASS (no skips)")
 
 
