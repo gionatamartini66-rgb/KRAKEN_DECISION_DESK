@@ -1,0 +1,19 @@
+name: KDD G2 Spot pair identity - temporary verification
+on:
+  push:
+    branches:
+      - experiments/kdd-any-spot-g2-20261024
+  workflow_dispatch:
+jobs:
+  py313:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compile isolated code
+        run: python -m py_compile decision_desk.py serve.py grafico_4h.py test_decision_desk.py
+      - name: Run existing and adversarial regressions
+        run: python -m unittest -q test_decision_desk
