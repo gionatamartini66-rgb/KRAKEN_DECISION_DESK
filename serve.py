@@ -353,6 +353,15 @@ def spot_request_pair(path, query):
     return values[0]
 
 
+def spot_friendly_label(pair):
+    """Show common token name while preserving Kraken's actual market symbol."""
+    base, quote = pair.split("/", 1)
+    aliases = {"XBT": "BTC", "XDG": "DOGE"}
+    if base in aliases:
+        return aliases[base] + "/" + quote + " (Kraken " + pair + ")"
+    return pair
+
+
 def spot_observed_candidates(catalog, snapshot):
     """Use KDD's EXISTING ranked public scan, never rank by alphabet or invent setups.
 
@@ -393,6 +402,11 @@ def spot_observed_candidates(catalog, snapshot):
             "categoria": str(item.get("categoria") or "Caso da esaminare")[:90],
             "esito": str(item.get("esito") or "Analisi da verificare")[:90],
             "perche": str(item.get("perche_selezionato") or "")[:300],
+            "sintesi": str(item.get("sintesi") or "")[:300],
+            "evidenze": [str(x)[:180] for x in item.get("evidenze", [])[:5]
+                          if isinstance(x, str)] if isinstance(item.get("evidenze"), list) else [],
+            "criticita": [str(x)[:180] for x in item.get("criticita", [])[:5]
+                          if isinstance(x, str)] if isinstance(item.get("criticita"), list) else [],
         })
         if len(found) == 6:
             break
@@ -405,13 +419,15 @@ def spot_priority_panel(catalog, snapshot, *, now=None):
     rows = spot_observed_candidates(catalog, snapshot)
     date = snapshot.get("rilevazione_utc") if isinstance(snapshot, dict) else None
     now = now or dt.datetime.now(dt.timezone.utc)
+    stale = True
     if isinstance(date, str):
         try:
             observed = dt.datetime.fromisoformat(date.replace("Z", "+00:00"))
             if observed.tzinfo is None:
                 raise ValueError("UTC offset absent")
             age = (now - observed).total_seconds() / 60
-            status = ("RILEVAZIONE DA AGGIORNARE" if age > 30 or age < -2
+            stale = age > 30 or age < -2
+            status = ("RILEVAZIONE DA AGGIORNARE" if stale
                       else "Rilevazione recente")
             date_info = esc(date[:40]) + " · " + status
         except ValueError:
@@ -429,17 +445,26 @@ def spot_priority_panel(catalog, snapshot, *, now=None):
         graph = "/grafico/spot?pair=" + key + "&amp;tf=4h"
         compare = "/analisi/spot?pair=" + key
         cards.append(
-            '<article class="candidate"><h3>' + esc(c["pair"]) + '</h3>'
+            '<article class="candidate"><h3>' + esc(spot_friendly_label(c["pair"])) + '</h3>'
             '<p><strong>' + esc(c["esito"]) + '</strong> · ' + esc(c["categoria"]) + '</p>'
-            + ('<p>' + esc(c["perche"]) + '</p>' if c["perche"] else "")
+            + ('<p><strong>Motivo della selezione:</strong> ' + esc(c["perche"]) + '</p>' if c["perche"] else "")
+            + ('<p>' + esc(c["sintesi"]) + '</p>' if c["sintesi"] else "")
+            + ('<p><strong>Elementi osservati:</strong> ' + esc("; ".join(c["evidenze"])) + '</p>' if c["evidenze"] else "")
+            + ('<p><strong>Criticità:</strong> ' + esc("; ".join(c["criticita"])) + '</p>' if c["criticita"] else "")
             + '<p class="actions"><a href="' + graph + '">Grafico 4H</a>'
             '<a href="' + compare + '">Confronta 15m · 1H · 4H · 1D</a></p>'
             '</article>')
-    return ('<section class="priority"><h2>Da esaminare: selezione KDD</h2>'
+    heading = ("Segnalazioni precedenti: dati da aggiornare" if stale
+               else "Da esaminare: selezione KDD")
+    link = ('<p class="warning">Queste segnalazioni sono vecchie. '
+            '<a href="http://127.0.0.1:8765/">Apri KDD completo e aggiorna</a>. '
+            'I grafici si aggiornano quando li apri, ma non aggiornano lo scanner.</p>'
+            if stale else "")
+    return ('<section class="priority"><h2>' + heading + '</h2>'
             '<p class="source">Ultimo scanner KDD · ' + date_info +
             '. Questi casi non sono ordini né segnali di acquisto; '
             'la negoziabilità del conto non è verificata.</p>'
-            + "".join(cards) + '</section>')
+            + link + "".join(cards) + '</section>')
 
 
 def spot_selector(catalog, snapshot=None, *, now=None):
@@ -452,7 +477,7 @@ def spot_selector(catalog, snapshot=None, *, now=None):
     priority = spot_priority_panel(catalog, snapshot, now=now)
     options = "".join(
         '<option value="' + html.escape(p["pair_key"], quote=True) + '">' +
-        html.escape(p["pair"]) + ' · ' + html.escape(p["pair_key"]) + '</option>'
+        html.escape(spot_friendly_label(p["pair"])) + ' · ' + html.escape(p["pair_key"]) + '</option>'
         for p in sorted(catalog.values(), key=lambda p: (p["pair"], p["pair_key"]))
     )
     return ("""<!doctype html><html lang="it"><head>
@@ -464,15 +489,21 @@ body{max-width:760px;margin:auto;padding:16px}a{color:#8aceff}
 .priority h2{margin-top:0}.candidate{background:#192a43;border-radius:10px;padding:12px;margin:12px 0}
 .candidate h3{margin:0}.candidate p{margin:8px 0}.actions{display:flex;flex-wrap:wrap;gap:12px}
 .actions a{display:inline-block;padding:8px 10px;background:#244967;border-radius:8px}
-.source{font-size:.92rem;color:#d2dae8}
+.source{font-size:.92rem;color:#d2dae8}.warning{color:#ffdc92;font-weight:600}
+.context{background:#203652;border-left:4px solid #8aceff;padding:12px 16px;border-radius:8px}
 form{background:#18263c;padding:16px;border-radius:12px}
 select,input,button{font:inherit;padding:10px;margin:10px 0;width:100%}
 button{background:#80cbff;border:0;border-radius:9px;color:#06162b;font-weight:bold}
 p{line-height:1.5}</style></head><body>
 <p><a href="http://127.0.0.1:8765/">← KDD completo (porta 8765)</a></p>
 <h1>Mercati Kraken Spot</h1>
-<p>Catalogo pubblico AssetPairs online. La negoziabilita per il conto italiano
-non e verificata. Nessuna coppia preselezionata; nessun ordine.</p>
+<p class="context"><b>Questa è la sezione di consultazione, non il KDD completo.</b>
+Per aggiornare i prezzi del portafoglio e le segnalazioni, usa
+<a href="http://127.0.0.1:8765/">il cruscotto KDD e il pulsante Aggiorna</a>.
+Qui i grafici interrogano Kraken quando li apri; il catalogo non rinnova lo scanner.</p>
+<p>BTC è chiamato XBT da Kraken: BTC/USDC e XBT/USDC sono la stessa coppia.
+Catalogo pubblico AssetPairs online; la negoziabilità per il conto italiano
+non è verificata. Nessuna coppia preselezionata e nessun ordine.</p>
 __PRIORITY__
 <h2>Esplora qualsiasi altra coppia Kraken Spot</h2>
 <p>Scrivi un token o una valuta per cercare in tutto il catalogo, non soltanto tra le prime lettere.</p>
