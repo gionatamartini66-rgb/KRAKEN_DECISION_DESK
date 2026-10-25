@@ -15,6 +15,7 @@ jobs:
           python-version: '3.13'
       - name: Official public Kraken AssetPairs and OHLC smoke - NO private endpoints
         run: |
+          python - <<'PY'
           import datetime as dt
           import json
           import time
@@ -79,3 +80,4 @@ jobs:
           assert report["coppia"]=="XBT/EUR"
           assert report["stato"]=="COMPLETO", "Real comparison incomplete - investigate rather than weaken"
           print("LIVE_KRAKEN_PUBLIC_SMOKE_PASS", flush=True)
+          PY
