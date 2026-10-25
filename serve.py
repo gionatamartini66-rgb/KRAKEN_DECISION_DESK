@@ -281,12 +281,16 @@ SPOT_KEY_RE = re.compile(r"[A-Za-z0-9_.-]{2,48}\Z")
 SPOT_NAME_RE = re.compile(r"[A-Za-z0-9._-]{1,40}/[A-Za-z0-9._-]{1,40}\Z")
 
 
+class KrakenMarketDataUnavailable(RuntimeError):
+    """Data/source failure is not a user-invalid pair or timeframe."""
+
+
 def spot_catalog(public_kraken=None):
     """Coppie AssetPairs attualmente online: non prova accessibilita sul conto."""
     fetch = public_kraken or desk.kraken
     raw = fetch("AssetPairs")
     if not isinstance(raw, dict):
-        raise ValueError("Catalogo Kraken non verificabile")
+        raise KrakenMarketDataUnavailable("Catalogo Kraken non verificabile")
     out = {}
     for key, row in raw.items():
         if not isinstance(key, str) or not SPOT_KEY_RE.fullmatch(key):
@@ -305,7 +309,7 @@ def spot_catalog(public_kraken=None):
         out[key] = {"pair_key": key, "pair": name, "base": base, "quote": quote,
                     "altname": altname, "eligibilita_conto": "NON_VERIFICATA"}
     if not out:
-        raise ValueError("Nessuna coppia online verificabile")
+        raise KrakenMarketDataUnavailable("Nessuna coppia online verificabile")
     return out
 
 
@@ -416,11 +420,15 @@ def load_spot_chart(pair_key, timeframe, *, public_kraken=None, now=None):
     fetch = public_kraken or desk.kraken
     meta = spot_lookup(pair_key, spot_catalog(fetch))
     raw = fetch("OHLC", pair=pair_key, interval=grafico_4h.TIMEFRAMES[timeframe][0])
-    series = grafico_4h.data_from_kraken_ohlc(
-        checked_spot_ohlc(raw, meta), timeframe, now=now,
-        pair=meta["pair"], token=meta["base"],
-        pair_key=pair_key)
-    return grafico_4h.page_from_data(series)
+    # Pair/timeframe input was already validated. From here, ValueError is
+    # malformed/insufficient upstream OHLC, not a client-side 400.
+    try:
+        series = grafico_4h.data_from_kraken_ohlc(
+            checked_spot_ohlc(raw, meta), timeframe, now=now,
+            pair=meta["pair"], token=meta["base"], pair_key=pair_key)
+        return grafico_4h.page_from_data(series)
+    except (ValueError, TypeError, KeyError, IndexError) as exc:
+        raise KrakenMarketDataUnavailable("OHLC o grafico pubblico non verificabile") from exc
 
 
 def load_spot_comparison(pair_key, *, public_kraken=None, now=None):
