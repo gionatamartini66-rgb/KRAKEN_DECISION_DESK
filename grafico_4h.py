@@ -792,6 +792,6 @@ try {
             .replace("__TOKEN_JS__", token_js)
             .replace("__COMPARE_URL__", html.escape(comparison_url, quote=True))
             .replace("__PRECISION__", str(decimal_places))
-            .replace("__MIN_MOVE__", repr(min_move))
+            .replace("__MIN_MOVE__", f"{min_move:.{decimal_places}f}")
             .replace("__DECIMALS__", str(decimal_places))
             .replace("__SOURCE__", html.escape(x.get("source", "Dossier Kraken KDD"))))
