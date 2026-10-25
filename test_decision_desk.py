@@ -2443,6 +2443,27 @@ class AnyKrakenSpotTests(unittest.TestCase):
         self.assertEqual(report["quadro"],"CONFRONTO_INCOMPLETO")
         self.assertEqual(report["timeframe"][1]["stato"],"NON_DISPONIBILE")
 
+    def test_missing_blank_or_repeated_pair_id_is_rejected(self):
+        for path in ("/grafico/spot", "/analisi/spot"):
+            for query in ("", "pair=", "pair=A&pair=B", "pair=../../", "pair=bad%00"):
+                with self.subTest(path=path, query=query):
+                    with self.assertRaises(ValueError):
+                        serve.spot_request_pair(path, query)
+            self.assertEqual(serve.spot_request_pair(path, "pair=XXBTZEUR"),
+                             "XXBTZEUR")
+        self.assertIsNone(serve.spot_request_pair("/mercati/spot", ""))
+
+    def test_mobile_search_operates_on_full_catalog_without_default_selection(self):
+        page = serve.spot_selector(serve.spot_catalog(self.fake))
+        self.assertIn('type="search" id="filtro"', page)
+        self.assertIn('name="pair" id="pair" required', page)
+        self.assertIn("all.filter(", page)
+        self.assertIn("search.addEventListener('input',rebuild)", page)
+        self.assertIn("select.value = ''", page)
+        self.assertIn("Visualizzate le prime 90; affina la ricerca.", page)
+        self.assertIn("ADA/USDT",page)
+        self.assertIn("DOT/GBP",page)
+
     def test_invalid_frame_prevents_even_catalog_call(self):
         with self.assertRaises(ValueError):
             serve.load_spot_chart("ADAUSDT","invalid",public_kraken=self.fake)
