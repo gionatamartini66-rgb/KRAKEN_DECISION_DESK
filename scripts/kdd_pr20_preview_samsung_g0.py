@@ -9,6 +9,7 @@ The operational KDD localhost:8765 is not stopped or changed.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -93,6 +94,50 @@ def copy_public(src, dst):
     dst.chmod(0o600)
 
 
+def copy_public_selection(live, stage):
+    """Extract only the current scanner's public candidate fields, not the report."""
+    src = live / 'ultima_rilevazione.json'
+    if not src.exists():
+        return False
+    if src.is_symlink() or not src.is_file() or src.stat().st_size > 3_000_000:
+        raise Stop('rilevazione KDD non conforme')
+    try:
+        original = json.loads(src.read_text(encoding='utf-8'))
+    except (ValueError, OSError, UnicodeError):
+        raise Stop('rilevazione KDD non leggibile') from None
+    if not isinstance(original, dict):
+        raise Stop('rilevazione KDD non valida')
+    result = {
+        'rilevazione_utc': str(original.get('rilevazione_utc') or '')[:40],
+        'schede_v02': [],
+    }
+    cards = original.get('schede_v02')
+    if isinstance(cards, list):
+        for card in cards[:12]:
+            if not isinstance(card, dict):
+                continue
+            public = {
+                key: str(card.get(key) or '')[:300]
+                for key in ('token', 'coppia_analisi', 'categoria',
+                            'esito', 'perche_selezionato')
+            }
+            options = card.get('alternative')
+            public['alternative'] = []
+            if isinstance(options, list):
+                for option in options[:12]:
+                    if isinstance(option, dict):
+                        public['alternative'].append({
+                            'pair': str(option.get('pair') or '')[:90],
+                            'pair_key': str(option.get('pair_key') or '')[:55],
+                        })
+            result['schede_v02'].append(public)
+    # Only these keys leave the parent process. No portfolio, balances, or T0.
+    target = stage / 'ultima_rilevazione.json'
+    target.write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
+    target.chmod(0o600)
+    return True
+
+
 def prepare(live, mirror, stage):
     if not live.is_dir() or live.is_symlink():
         raise Stop('cartella KDD operativa non trovata')
@@ -123,7 +168,8 @@ def prepare(live, mirror, stage):
         destination.write_bytes(read_approved_blob(mirror,name,blob))
         destination.chmod(0o600)
     for f in assets:copy_public(f,stage/'vendor'/f.name)
-    # No README, JSON, account data or portfolio is needed for public routes.
+    copy_public_selection(live, stage)
+    # The only JSON is a tiny allowlisted PUBLIC shortlist for display.
     return originals
 
 
