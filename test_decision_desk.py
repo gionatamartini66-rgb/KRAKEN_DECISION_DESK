@@ -2518,6 +2518,8 @@ class AnyKrakenSpotTests(unittest.TestCase):
         self.assertIn("Visualizzate le prime 90; affina la ricerca.", page)
         self.assertIn("ADA/USDT",page)
         self.assertIn("DOT/GBP",page)
+        self.assertIn("BTC/EUR (Kraken XBT/EUR)",page)
+        self.assertIn("il cruscotto KDD e il pulsante Aggiorna",page)
 
     def test_existing_kdd_shortlist_leads_spot_exploration(self):
         catalog = serve.spot_catalog(self.fake)
@@ -2527,6 +2529,8 @@ class AnyKrakenSpotTests(unittest.TestCase):
                 {"token": "ADA", "coppia_analisi": "ADA/USDT",
                  "categoria": "consolidamento", "esito": "RIESAME MIRATO",
                  "perche_selezionato": "Controllare la chiusura oraria",
+                 "sintesi": "Le chiusure sono ancora senza conferma.",
+                 "evidenze": ["Volumi in aumento"], "criticita": ["Spread da verificare"],
                  "alternative": [{"pair": "ADA/USDT", "pair_key": "ADAUSDT"}]},
                 {"token": "DOT", "coppia_analisi": "DOT/GBP",
                  "categoria": "tentativo di ripartenza", "esito": "DA VERIFICARE",
@@ -2538,7 +2542,13 @@ class AnyKrakenSpotTests(unittest.TestCase):
                         page.index("Esplora qualsiasi altra coppia"))
         self.assertIn('href="/grafico/spot?pair=ADAUSDT&amp;tf=4h"', page)
         self.assertIn('href="/analisi/spot?pair=DOTGBP"', page)
+        self.assertIn("Motivo della selezione:", page)
         self.assertIn("Controllare la chiusura oraria", page)
+        self.assertIn("Le chiusure sono ancora senza conferma.", page)
+        self.assertIn("Elementi osservati:"," ".join(page.split("<")))
+        self.assertIn("Volumi in aumento", page)
+        self.assertIn("Criticità:", page)
+        self.assertIn("Spread da verificare", page)
         self.assertIn("Rilevazione recente", page)
         self.assertIn('const found = needle ? all.filter(', page)
         self.assertIn('}) : [];', page)
@@ -2554,6 +2564,8 @@ class AnyKrakenSpotTests(unittest.TestCase):
         }
         page = serve.spot_selector(catalog, snapshot=snapshot, now=self.now)
         self.assertIn("RILEVAZIONE DA AGGIORNARE", page)
+        self.assertIn("Segnalazioni precedenti: dati da aggiornare", page)
+        self.assertIn("Apri KDD completo e aggiorna", page)
         self.assertIn('href="/analisi/spot?pair=ADAUSDT"', page)
 
     def test_kdd_shortlist_rejects_forged_pair_token_and_escapes_text(self):
@@ -2586,6 +2598,14 @@ class AnyKrakenSpotTests(unittest.TestCase):
         self.assertIn("Nessun caso", page)
         self.assertIn("Catalogo:", page)
         self.assertNotIn("Da esaminare: selezione KDD", page)
+
+    def test_exchange_pair_alias_retains_original_rest_identity(self):
+        catalog = serve.spot_catalog(self.fake)
+        self.assertEqual(serve.spot_friendly_label(catalog["XXBTZEUR"]["pair"]),
+                         "BTC/EUR (Kraken XBT/EUR)")
+        self.assertIn("BTC/EUR (Kraken XBT/EUR)",
+                      serve.spot_selector(catalog, snapshot={}, now=self.now))
+        self.assertEqual(serve.spot_lookup("XXBTZEUR", catalog)["pair_key"], "XXBTZEUR")
 
     def test_invalid_frame_prevents_even_catalog_call(self):
         with self.assertRaises(ValueError):
