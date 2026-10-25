@@ -84,7 +84,7 @@ jobs:
                   driver.find_element(By.CSS_SELECTOR,"button[formaction='/grafico/spot']").click()
                   WebDriverWait(driver,15).until(lambda x: "Grafico XBT/EUR" in x.find_element(By.TAG_NAME,"h1").text)
                   assert "pair=XXBTZEUR" in driver.page_source
-                  WebDriverWait(driver,20).until(lambda x: "Grafico generato:" in x.find_element(By.ID,"msg").text)
+                  WebDriverWait(driver,20).until(lambda x: "Grafico generato:" in x.find_element(By.ID,"graph-status").text)
                   print("CHROME_BROWSER_CHART_PASS",driver.find_element(By.TAG_NAME,"h1").text,flush=True)
                   driver.get(base+"/mercati/spot")
                   Select(driver.find_element(By.ID,"pair")).select_by_value("ADAUSDT")
