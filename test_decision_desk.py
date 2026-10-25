@@ -2423,6 +2423,18 @@ class AnyKrakenSpotTests(unittest.TestCase):
         self.assertNotIn("__COMPARE_URL__", page)
         self.assertIn("precision:5,minMove:0.00001", page)
 
+    def test_graph_quotes_apply_to_levels_confluence_and_ohlcv_not_only_title(self):
+        page = serve.load_spot_chart("ADAUSDT", "4h",
+                                     public_kraken=self.fake, now=self.now)
+        self.assertIn('const quote="USDT";', page)
+        self.assertIn("['Livello','Prezzo '+quote,'Origine']", page)
+        self.assertNotIn("Prezzo EUR", page)
+        self.assertIn("stats.textContent=time+' UTC · O '+priceText.format(row.open)",page)
+        self.assertIn("'+quote+' · Vol '",page)
+        self.assertIn("priceText.format(Math.min(",page)
+        self.assertNotIn("maximumFractionDigits:8",page)
+        self.assertNotIn("maximumFractionDigits:6});\n  const supports",page)
+
     def test_tiny_chart_prices_keep_nonzero_axis_and_ema_values(self):
         seconds = 14400
         start = int(self.now.timestamp() // seconds) * seconds - 81*seconds
