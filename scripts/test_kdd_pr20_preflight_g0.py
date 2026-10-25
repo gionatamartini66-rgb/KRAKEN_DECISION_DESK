@@ -179,7 +179,7 @@ class G0PreflightTests(unittest.TestCase):
         calls=[]
         def fake_run(*args, **kwargs):
             calls.append(kwargs['env'])
-            return mock.Mock(stdout='',stderr='Ran 157 tests in 0.1s\\n\\nOK\\n',returncode=0)
+            return mock.Mock(stdout='',stderr='Ran 157 tests in 0.1s\n\nOK\n',returncode=0)
         with mock.patch.object(p.subprocess, 'run', side_effect=fake_run), \
              mock.patch.dict('os.environ',{'PYTHONPATH':'/tmp/other', 'PYTHONHOME':'/tmp/external'},clear=False), \
              contextlib.redirect_stdout(io.StringIO()):
