@@ -349,8 +349,9 @@ def page_from_data(x):
     technical_json = json.dumps(technical_from_candles(
         x["candles"], interval_seconds=interval),
                                 separators=(",",":"), allow_nan=False)
-    pair = html.escape(x["pair"], quote=True)
-    token = x.get("token")
+    # Friendly labels must never overwrite the exact pair identity from Kraken.
+    pair = html.escape(x.get("display_pair", x["pair"]), quote=True)
+    token = x.get("display_token", x.get("token"))
     if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", token):
         raise ValueError("Token grafico non valido")
     token_js = json.dumps(token, ensure_ascii=True)
