@@ -337,6 +337,17 @@ def checked_spot_ohlc(raw, meta):
     return raw
 
 
+def spot_request_pair(path, query):
+    """Return None only for the selector route; reject missing/duplicate pairs."""
+    if path == "/mercati/spot":
+        return None
+    values = urllib.parse.parse_qs(query, keep_blank_values=True).get("pair", [])
+    if (path not in ("/grafico/spot", "/analisi/spot") or len(values) != 1
+            or not SPOT_KEY_RE.fullmatch(values[0])):
+        raise ValueError("Coppia non specificata o identificativo non valido")
+    return values[0]
+
+
 def spot_selector(catalog):
     """Lista navigabile delle coppie senza default e senza lettura portafoglio."""
     options = "".join(
@@ -357,6 +368,10 @@ p{line-height:1.5}</style></head><body>
 <p>Catalogo pubblico AssetPairs online. La negoziabilita per il conto italiano
 non e verificata. Nessuna coppia preselezionata; nessun ordine.</p>
 <form method="get" action="/analisi/spot">
+<label for="filtro">Cerca coppia per token, valuta o codice Kraken</label>
+<input type="search" id="filtro" aria-controls="pair" autocomplete="off"
+placeholder="Es. BTC, ADA, USDT, GBP">
+<p id="risultati" role="status" aria-live="polite"></p>
 <label for="pair">Coppia Kraken (base/quote)</label>
 <select name="pair" id="pair" required><option value="">— Seleziona una coppia —</option>
 __OPTIONS__</select>
@@ -365,6 +380,29 @@ __OPTIONS__</select>
 <button type="submit" formaction="/grafico/spot">Apri grafico della coppia</button>
 </form><p>Confronto: quattro richieste OHLC pubbliche; grafico: una.
 Solo candele chiuse, niente valori inventati.</p>
+<script>
+(() => {
+  const search = document.getElementById('filtro');
+  const select = document.getElementById('pair');
+  const counter = document.getElementById('risultati');
+  const all = Array.from(select.options).slice(1).map(o => [o.value, o.textContent]);
+  function rebuild() {
+    const needle = search.value.trim().toLocaleUpperCase('it-IT');
+    const found = needle ? all.filter(([k,t]) => 
+      (k + ' ' + t).toLocaleUpperCase('it-IT').includes(needle)) : all;
+    // Cap options shown simultaneously on mobile, NOT the underlying catalog.
+    const maxVisible = 90;
+    const choices = found.slice(0,maxVisible).map(([k,t]) => new Option(t,k));
+    const placeholder = new Option('— Seleziona una coppia —', '');
+    select.replaceChildren(placeholder,...choices);
+    select.value = '';
+    counter.textContent = found.length + ' coppie trovate su ' + all.length +
+      (found.length > maxVisible ? '. Visualizzate le prime 90; affina la ricerca.' : '.');
+  }
+  search.addEventListener('input',rebuild);
+  rebuild();
+})();
+</script>
 </body></html>""".replace("__OPTIONS__", options))
 
 
@@ -440,16 +478,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         url = urllib.parse.urlsplit(self.path)
         if url.path in ("/mercati/spot", "/grafico/spot", "/analisi/spot"):
-            query = urllib.parse.parse_qs(url.query)
+            query = urllib.parse.parse_qs(url.query, keep_blank_values=True)
             try:
-                values = query.get("pair", [])
-                if url.path == "/mercati/spot" or not values:
+                pair_key = spot_request_pair(url.path, url.query)
+                if pair_key is None:
                     self.send_html(200, spot_selector(spot_catalog()))
                     return
-                if len(values) != 1:
-                    self.send_html(400, "<h1>Identita coppia non valida</h1>")
-                    return
-                pair_key = values[0]
                 if url.path == "/grafico/spot":
                     tf = query.get("tf", ["4h"])
                     if len(tf) != 1 or tf[0] not in grafico_4h.TIMEFRAMES:
