@@ -40,8 +40,8 @@ class G0PreflightTests(unittest.TestCase):
         (self.live/'migrazione_attesa.json').write_text('SECRET_MIG_TEST_ONLY')
 
     def test_source_pin_values(self):
-        self.assertEqual(p.PIN,'1628b14ff490948b31d6b49870ad77f138014806')
-        self.assertEqual(p.FILES['serve.py'],'d02b931fd8f99af22429b3e65e1c622eb3cea22e')
+        self.assertEqual(p.PIN,'8948faffe097bdfcbd1f4cbdd12fc6e9849448b9')
+        self.assertEqual(p.FILES['serve.py'],'c09fd8acb4ff95a44497d55c4c935be04578a8d1')
 
     def test_local_input_validates(self):
         p.validate_local(self.live)
@@ -147,14 +147,14 @@ class G0PreflightTests(unittest.TestCase):
                 p.staging_budget(self.live,self.mirror)
 
     def test_test_runner_rejects_skips(self):
-        out='Ran 157 tests in 1.0s\n\nOK (skipped=2)\n'
+        out='Ran 158 tests in 1.0s\n\nOK (skipped=2)\n'
         with mock.patch.object(p.subprocess,'run',return_value=mock.Mock(stdout='',stderr=out,returncode=0)), \
              contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(p.Stop,'skipped'):
                 p.execute_tests(self.live)
 
-    def test_test_runner_accepts_157_without_skips(self):
-        out='Ran 157 tests in 1.0s\n\nOK\n'
+    def test_test_runner_accepts_158_without_skips(self):
+        out='Ran 158 tests in 1.0s\n\nOK\n'
         buf=io.StringIO()
         with mock.patch.object(p.subprocess,'run',return_value=mock.Mock(stdout='',stderr=out,returncode=0)), \
              contextlib.redirect_stdout(buf):
@@ -179,7 +179,7 @@ class G0PreflightTests(unittest.TestCase):
         calls=[]
         def fake_run(*args, **kwargs):
             calls.append(kwargs['env'])
-            return mock.Mock(stdout='',stderr='Ran 157 tests in 0.1s\n\nOK\n',returncode=0)
+            return mock.Mock(stdout='',stderr='Ran 158 tests in 0.1s\n\nOK\n',returncode=0)
         with mock.patch.object(p.subprocess, 'run', side_effect=fake_run), \
              mock.patch.dict('os.environ',{'PYTHONPATH':'/tmp/other', 'PYTHONHOME':'/tmp/external'},clear=False), \
              contextlib.redirect_stdout(io.StringIO()):
