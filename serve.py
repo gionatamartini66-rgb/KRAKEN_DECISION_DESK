@@ -4,6 +4,7 @@ import datetime as dt
 import hmac
 import html
 import json
+import math
 import re
 import secrets
 import threading
@@ -176,7 +177,12 @@ def render_sui_comparison(report, *, pair_key=None):
     def esc(value):
         return html.escape(str(value), quote=True)
     def price(value):
-        return f"{value:.5f}" if isinstance(value, (int, float)) else "—"
+        # A fixed five decimal places could print a genuine, very small price
+        # as 0.00000. Use significant figures for arbitrary Kraken pairs.
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value)):
+            return "—"
+        return f"{value:.10g}"
     pair = report["coppia"]
     base, quote = pair.split("/", 1)
     if pair_key is not None and not re.fullmatch(r"[A-Za-z0-9_.-]{2,48}", pair_key):
