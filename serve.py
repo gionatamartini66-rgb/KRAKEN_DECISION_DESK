@@ -185,6 +185,8 @@ def render_sui_comparison(report, *, pair_key=None):
         return f"{value:.10g}"
     pair = report["coppia"]
     base, quote = pair.split("/", 1)
+    pair_label = spot_friendly_label(pair) if pair_key is not None else pair
+    volume_base = {"XBT": "BTC", "XDG": "DOGE"}.get(base, base)
     if pair_key is not None and not re.fullmatch(r"[A-Za-z0-9_.-]{2,48}", pair_key):
         raise ValueError("Chiave Kraken non valida")
     graph_root = ("/grafico/spot?pair=" + urllib.parse.quote(pair_key, safe="") +
@@ -218,7 +220,7 @@ def render_sui_comparison(report, *, pair_key=None):
             f'<p><strong>{esc(labels[item["orientamento"]])}</strong></p>'
             f'<p>Close: <b>{price(item["close"])} {esc(quote)}</b> · '
             f'EMA20: {price(item["ema20"])} {esc(quote)} · EMA50: {price(item["ema50"])} {esc(quote)}</p>'
-            f'<p>Volume ultima candela: {esc(volume_text)} {esc(base)}; '
+            f'<p>Volume ultima candela: {esc(volume_text)} {esc(volume_base)}; '
             f'rapporto: {esc(vol_text)}</p>'
             f'<p>S/R euristici più vicini: supporto {price(item["supporto_vicino"])} {esc(quote)}; '
             f'resistenza {price(item["resistenza_vicina"])} {esc(quote)}</p>'
@@ -271,7 +273,7 @@ la fonte e l'ora riportate sulla sua pagina, che possono differire.</p>
         .replace("__PICTURE__", esc(picture))
         .replace("__WARNING__", esc(report["avvertenza"]))
         .replace("__OBSERVED__", esc(report["rilevazione_confronto_utc"]))
-        .replace("__PAIR__", esc(pair))
+        .replace("__PAIR__", esc(pair_label))
         .replace("__GRAPH_URL__", esc(graph_root + "4h"))
         .replace("__CARDS__", "".join(rows)))
 
@@ -565,6 +567,11 @@ def load_spot_chart(pair_key, timeframe, *, public_kraken=None, now=None):
         series = grafico_4h.data_from_kraken_ohlc(
             checked_spot_ohlc(raw, meta), timeframe, now=now,
             pair=meta["pair"], token=meta["base"], pair_key=pair_key)
+        if meta["base"] in ("XBT", "XDG"):
+            shown = {"XBT": "BTC", "XDG": "DOGE"}[meta["base"]]
+            series["display_pair"] = shown + "/" + meta["quote"]
+            series["display_token"] = shown
+            series["source"] += " · Kraken usa " + meta["base"] + " per " + shown
         return grafico_4h.page_from_data(series)
     except (ValueError, TypeError, KeyError, IndexError) as exc:
         raise KrakenMarketDataUnavailable("OHLC o grafico pubblico non verificabile") from exc
