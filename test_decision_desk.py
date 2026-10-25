@@ -2421,7 +2421,7 @@ class AnyKrakenSpotTests(unittest.TestCase):
         self.assertIn('href="/analisi/spot?pair=ADAUSDT"', page)
         self.assertNotIn('href="/analisi/sui-mtf"', page)
         self.assertNotIn("__COMPARE_URL__", page)
-        self.assertIn("precision:5,minMove:1e-05", page)
+        self.assertIn("precision:5,minMove:0.00001", page)
 
     def test_tiny_chart_prices_keep_nonzero_axis_and_ema_values(self):
         seconds = 14400
