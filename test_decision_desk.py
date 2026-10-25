@@ -2533,10 +2533,76 @@ class AnyKrakenSpotTests(unittest.TestCase):
                                   public_kraken=double, now=self.now)
 
     def test_none_catalog_is_fail_closed(self):
-        with self.assertRaises(ValueError):
+        with self.assertRaises(serve.KrakenMarketDataUnavailable):
             serve.spot_catalog(lambda endpoint: {})
-        with self.assertRaises(ValueError):
+        with self.assertRaises(serve.KrakenMarketDataUnavailable):
             serve.spot_catalog(lambda endpoint: [])
+
+    def test_invalid_ohlc_is_source_error_not_invalid_selection(self):
+        def corrupted(endpoint, **params):
+            if endpoint == "AssetPairs":
+                return self.pairs
+            return {"ADAUSDT": [], "last": 0}
+        with self.assertRaises(serve.KrakenMarketDataUnavailable):
+            serve.load_spot_chart("ADAUSDT", "4h",
+                                  public_kraken=corrupted, now=self.now)
+        with self.assertRaises(ValueError):
+            serve.load_spot_chart("NOT_A_PAIR", "4h",
+                                  public_kraken=corrupted, now=self.now)
+
+    def test_local_http_routes_distinguish_400_invalid_pair_from_503_upstream(self):
+        """Real KDD HTTP Handler with synthetic exchange only; no phone/files."""
+        import threading
+        import urllib.request
+        import urllib.error
+        from http.server import ThreadingHTTPServer
+        def fake_provider(endpoint, **params):
+            if endpoint == "AssetPairs":
+                return self.pairs
+            if endpoint == "OHLC":
+                # Upstream data failure after valid catalog lookup.
+                return {"ADAUSDT": [], "last": 0}
+            raise AssertionError("Private or unexpected API call")
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        server = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+        server.daemon_threads = True
+        with mock.patch.object(serve, "PORT", server.server_address[1]), \\
+             mock.patch.object(serve.desk, "kraken", side_effect=fake_provider):
+            worker = threading.Thread(target=server.serve_forever,
+                                      daemon=True)
+            worker.start()
+            try:
+                base = "http://127.0.0.1:" + str(server.server_address[1])
+                for route, status in (
+                    ("/mercati/spot", 200),
+                    ("/grafico/spot", 400),
+                    ("/grafico/spot?pair=BADPAIR", 400),
+                    ("/grafico/spot?pair=ADAUSDT&tf=4h", 503),
+                    ("/analisi/spot?pair=ADAUSDT", 200)):
+                    with self.subTest(route=route):
+                        try:
+                            with opener.open(base + route, timeout=5) as response:
+                                actual = response.status
+                                page = response.read().decode("utf-8")
+                        except urllib.error.HTTPError as error:
+                            actual = error.code
+                            page = error.read().decode("utf-8")
+                        self.assertEqual(actual, status)
+                        if route.startswith("/analisi/spot"):
+                            self.assertIn("PARZIALE", page)
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=3)
+
+    def test_catalog_provider_outage_is_unavailable_not_bad_user_query(self):
+        def unavailable(endpoint, **params):
+            if endpoint == "AssetPairs":
+                return {}
+            raise AssertionError("Should not call OHLC")
+        with self.assertRaises(serve.KrakenMarketDataUnavailable):
+            serve.load_spot_chart("ADAUSDT", "4h", public_kraken=unavailable,
+                                  now=self.now)
 
     def test_legacy_sui_url_retained_but_no_longer_on_home(self):
         page=serve.with_controls("<h2>1 · Decisioni e posizioni</h2>")
