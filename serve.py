@@ -500,7 +500,7 @@ p{line-height:1.5}</style></head><body>
 <p><a href="http://127.0.0.1:8765/">← KDD completo (porta 8765)</a></p>
 <h1>Mercati Kraken Spot</h1>
 <p class="context"><b>Questa è la sezione di consultazione, non il KDD completo.</b>
-Per aggiornare i prezzi del portafoglio e le segnalazioni, usa
+Per aggiornare i prezzi, le posizioni e le segnalazioni, usa
 <a href="http://127.0.0.1:8765/">il cruscotto KDD e il pulsante Aggiorna</a>.
 Qui i grafici interrogano Kraken quando li apri; il catalogo non rinnova lo scanner.</p>
 <p>BTC è chiamato XBT da Kraken: BTC/USDC e XBT/USDC sono la stessa coppia.
