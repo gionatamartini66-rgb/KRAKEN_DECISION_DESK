@@ -29,11 +29,11 @@ import tempfile
 
 REPO = "gionatamartini66-rgb/KRAKEN_DECISION_DESK"
 BRANCH = "experiments/kdd-any-spot-g2-20261024"
-PIN = "dec929efaf5b837ef50754ed8d9dbea429d2eb7e"
+PIN = "678ff3321998a961a87aa910e84112e0ef5a5938"
 FILES = {
-    "grafico_4h.py": "27075efaa458acb55e6b4cae9d127c74320278c1",
+    "grafico_4h.py": "bc5dffa8cb2773a80532a0fc4683c87c67968752",
     "serve.py": "2f8c83248bfa3310daafab644cf40356c806df8e",
-    "test_decision_desk.py": "4aec9735f83c9a2e070e38742da3ed68c99739bf",
+    "test_decision_desk.py": "2786df4f3d78ebd2739573a7c80e8d778375e6d9",
 }
 REQUIRED = ("config.json", "portafoglio.json")
 ASSETS = ("lightweight-charts-5.2.1.js", "LIGHTWEIGHT_CHARTS_LICENSE.txt",
