@@ -2879,7 +2879,7 @@ class AnyKrakenSpotTests(unittest.TestCase):
         self.assertIn("Ultima candela CHIUSA:",current)
         old=g.page_from_data(frame,now=self.now+dt.timedelta(days=5))
         self.assertIn("GRAFICO STORICO / SCADUTO",old)
-        self.assertNotIn("DATI RECENTI VERIFICATI",old)
+        self.assertIn('class="warning" role="status">GRAFICO STORICO / SCADUTO',old)
         bad=dict(frame,observed_utc="bad")
         self.assertIn("DATI INCOMPLETI O NON VERIFICABILI",
                       g.page_from_data(bad,now=self.now))
@@ -3002,8 +3002,9 @@ class AnyKrakenSpotTests(unittest.TestCase):
                     with self.assertRaises((ValueError,TypeError,KeyError)):
                         g.summarize_timeframe(bad,now=self.now)
                     page=g.page_from_data(bad,now=self.now)
-                    self.assertNotIn("DATI RECENTI VERIFICATI",page)
-                    self.assertIn("DATI INCOMPLETI O NON VERIFICABILI",page)
+                    self.assertIn(
+                        'class="warning" role="status">DATI INCOMPLETI O NON VERIFICABILI',
+                        page)
                 stale=g.page_from_data(
                     data,now=self.now+dt.timedelta(days=5))
                 self.assertIn("GRAFICO STORICO / SCADUTO",stale)
