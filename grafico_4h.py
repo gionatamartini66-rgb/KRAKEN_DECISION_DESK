@@ -772,7 +772,16 @@ try {
   }
   levelToggle('#show-pivots',pivotEntries,false);
   const quote=__QUOTE_JS__;
-  const priceText=new Intl.NumberFormat('it-IT',{maximumFractionDigits:__PRECISION__});
+  // Keep original numeric OHLC/EMA/pivot/SR and the <=12dp chart scale.
+  // Only textual labels of nonzero derived sub-tick prices need a fallback.
+  const basePriceText=new Intl.NumberFormat('it-IT',{maximumFractionDigits:__PRECISION__});
+  const priceText={format(value){
+    if(value===0) return '0'; // genuine zero, including negative zero
+    const formatted=basePriceText.format(value);
+    // Intl can render nonzero positive or negative micro-levels as 0/-0.
+    return Number.isFinite(value) && /^[-−]?0(?:[.,]0+)?$/.test(formatted)
+      ? value.toExponential(15) : formatted;
+  }};
   const supports=tech.structure.supports.length;
   const resistances=tech.structure.resistances.length;
   document.querySelector('#tech-summary').textContent=

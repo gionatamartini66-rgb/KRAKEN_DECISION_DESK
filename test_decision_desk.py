@@ -3056,4 +3056,194 @@ console.log('BROWSER_CLOCK_PASS');
         self.assertNotIn("location.reload",snippet.group(0))
 
 
+    def _r3_pivot_frame(self, timeframe, pair):
+        """Actual complete UTC previous day; no synthetic pivot formula."""
+        seconds={"15m":900,"1H":3600,"4H":14400,"1D":86400}[timeframe]
+        count=200 if timeframe=="15m" else 80
+        end=int(self.now.timestamp()//seconds)*seconds
+        start=end-count*seconds
+        token=pair.split("/")[0]
+        return {"pair":pair,"pair_key":pair.replace("/",""),"token":token,
+                "timeframe":timeframe,"interval_seconds":seconds,
+                "observed_utc":self.now.isoformat(),
+                "closed_at_utc":dt.datetime.fromtimestamp(
+                    end,dt.timezone.utc).isoformat(),
+                "candles":[{"time":start+i*seconds,
+                            "open":1e-8,"high":2.49997e-8,
+                            "low":1e-8,"close":1e-8,"volume":1e-9}
+                           for i in range(count)]}
+
+    def _r3_render_actual_javascript(self, page):
+        """Run the exact generated browser script with a minimal DOM stub."""
+        import subprocess,shutil
+        node=shutil.which("node")
+        if not node:
+            self.skipTest("Node missing: R3 JavaScript not executed")
+        script_src=page.split('<script>\\n(function(){',1)[1].split('</script>',1)[0]
+        harness=r"""
+const elements={};
+function el(tag){
+  return {tag:tag||'',textContent:'',children:[],checked:true,disabled:false,
+    hidden:false,parentElement:{title:''},clientWidth:700,clientHeight:420,
+    style:{},className:'',classList:{add(){}},
+    addEventListener(){},appendChild(c){this.children.push(c);return c;}};
+}
+const node=id=>elements[id]??(elements[id]=el(id));
+global.document={
+  getElementById:node, querySelector:node, createElement:el,
+  addEventListener(){}
+};
+global.window={addEventListener(){}};
+global.requestAnimationFrame=fn=>fn();
+global.setInterval=()=>0;
+global.ResizeObserver=class{observe(){}};
+const chartSeries=()=>({
+  setData(){},applyOptions(){},
+  createPriceLine(){return {applyOptions(){}};},
+  removePriceLine(){},priceToCoordinate(){return 100;}
+});
+const makeChart=()=>({
+  addSeries:()=>chartSeries(),
+  timeScale:()=>({
+    fitContent(){},subscribeVisibleLogicalRangeChange(){},
+    setVisibleLogicalRange(){}
+  }),
+  applyOptions(){},subscribeCrosshairMove(){}
+});
+global.LightweightCharts={createChart:()=>makeChart(),
+  CandlestickSeries:{},HistogramSeries:{},LineSeries:{}};
+window.LightweightCharts=global.LightweightCharts;
+"""
+        final=r"""
+function walk(root,out=[]){
+  for(const c of root.children){
+    if(c.tag==='tr')out.push(c.children.map(x=>x.textContent));
+    walk(c,out);
+  }
+  return out;
+}
+const report={
+  graph:node('graph-status').textContent,
+  summary:node('#tech-summary').textContent,
+  near:node('nearby-summary').textContent,
+  stats:node('candle-stats').textContent,
+  table:walk(node('levels-list'))
+};
+if(!report.graph.includes('Grafico generato'))
+  throw Error('Full generated JS failed: '+report.graph);
+console.log(JSON.stringify(report));
+"""
+        run=subprocess.run([node,"-e",harness+"\\n(function(){"+script_src+
+                                    "\\n"+final],
+                           capture_output=True,text=True,timeout=12)
+        self.assertEqual(run.returncode,0,run.stderr[:2500])
+        return json.loads(run.stdout.strip().splitlines()[-1])
+
+    def test_r3_rt03_real_pivot_positive_subtick_all_timeframes_quotes(self):
+        """Real formulas, generated JS and rendered pivot tables for 4 timeframes."""
+        import re,subprocess,shutil
+        node=shutil.which("node")
+        if not node: self.skipTest("Node missing")
+        targets=(("15m","ADA/USDT"),("1H","DOT/GBP"),
+                 ("4H","ETH/USD"),("1D","SUI/EUR"))
+        for tf,pair in targets:
+            with self.subTest(timeframe=tf,pair=pair):
+                frame=self._r3_pivot_frame(tf,pair)
+                original=json.dumps(frame["candles"],sort_keys=True)
+                pivot=g.daily_pivots(frame["candles"],frame["interval_seconds"])
+                self.assertIsNotNone(pivot,"Fixture must contain full previous UTC day")
+                s2=pivot["S2"]
+                self.assertGreater(s2,0)
+                self.assertLess(s2,1e-11)
+                html=g.page_from_data(frame,now=self.now)
+                self.assertEqual(json.dumps(frame["candles"],sort_keys=True),original)
+                self.assertIn('precision:11,minMove:0.00000000001',html)
+                self.assertIn('const quote='+json.dumps(pair.split("/")[1])+';',html)
+                self.assertIn('"S2":',html)
+                report=self._r3_render_actual_javascript(html)
+                table={row[0]:row[1] for row in report["table"]
+                       if len(row)==3 and row[0] in ("S2","P","EMA20","EMA50")}
+                self.assertIn("S2",table)
+                self.assertRegex(table["S2"],r'[1-9]')
+                self.assertIn("e-",table["S2"])
+                self.assertNotIn(table["S2"],("0","-0","−0"))
+                self.assertIn("EMA20",report["summary"])
+                self.assertIn("Pivot del",report["summary"])
+                self.assertIn(" C ",report["stats"])
+                self.assertNotIn("NaN",report["stats"])
+                self.assertIn(pair.split("/")[1],report["stats"])
+                # Compare direct locale baseline to actual sub-tick fallback.
+                js=re.search(
+                    r'  const basePriceText=.*?(?=\n  const supports=)',html,re.S)
+                self.assertIsNotNone(js)
+                values=[0,s2,-s2,1.23456789,2.5e-8,1e-15,-1e-15]
+                program=js.group(0)+"\\nconsole.log(JSON.stringify(" + (
+                    json.dumps(values)+".map(v=>priceText.format(v))));")
+                out=subprocess.run([node,"-e",program],
+                                   capture_output=True,text=True,timeout=10)
+                self.assertEqual(out.returncode,0,out.stderr)
+                rendered=json.loads(out.stdout)
+                self.assertEqual(rendered[0],"0")
+                self.assertNotIn(rendered[1],("0","-0","−0"))
+                self.assertNotIn(rendered[2],("0","-0","−0"))
+                self.assertTrue(rendered[2].startswith("-"))
+                self.assertIn("1,",rendered[3])
+                self.assertNotEqual(rendered[4],"0")
+                self.assertNotEqual(rendered[5],"0")
+                self.assertTrue(rendered[6].startswith("-"))
+
+    def test_r3_rt03_actual_html_derivative_zero_negative_and_confluence(self):
+        """Run every text path: EMA summary, S/R, pivot table and confluence."""
+        frame=self._r3_pivot_frame("4H","DOT/GBP")
+        technical=g.technical_from_candles(frame["candles"],
+                                            interval_seconds=14400)
+        positive=technical["pivots"]["S2"]
+        self.assertGreater(positive,0)
+        negative=-positive
+        modified={
+            "ema20":[{"time":frame["candles"][-1]["time"],"value":positive}],
+            "ema50":[{"time":frame["candles"][-1]["time"],"value":negative}],
+            "pivots":dict(technical["pivots"],S2=positive,S3=negative),
+            "structure":{
+                "supports":[{"price":positive,"touches":2,"last_swing_time":0}],
+                "resistances":[{"price":negative,"touches":2,"last_swing_time":0}]
+            }
+        }
+        with mock.patch.object(g,"technical_from_candles",return_value=modified):
+            html=g.page_from_data(frame,now=self.now)
+        self.assertIn('"value":',html)
+        self.assertIn('"S2":',html)
+        self.assertIn('"S3":',html)
+        report=self._r3_render_actual_javascript(html)
+        self.assertNotIn("EMA20: 0",report["summary"])
+        self.assertNotIn("EMA50: -0",report["summary"])
+        self.assertIn("e-",report["summary"])
+        self.assertIn("e-",report["near"])
+        self.assertIn("GBP",report["near"])
+        tab={row[0]:row[1] for row in report["table"]
+             if len(row)==3}
+        for key in ("EMA20","EMA50","S2","S3"):
+            self.assertIn(key,tab)
+            self.assertNotIn(tab[key],("0","-0","−0"))
+            self.assertIn("e-",tab[key])
+        self.assertTrue(any(row[1].startswith("-") and "e-" in row[1]
+                            for row in report["table"] if len(row)==3))
+        # The fallback must not turn genuine exact zero into scientific text.
+        # Normal OHLC candles continue using the same shared formatter.
+        self.assertIn(" O 0,00000001",report["stats"])
+
+    def test_r3_rt03_regression_ema_and_true_original_ohlc_guard(self):
+        frame=self._r2_frame()
+        self.assertIn('"ema20":',g.page_from_data(frame,now=self.now))
+        self.assertIn('"ema50":',g.page_from_data(frame,now=self.now))
+        wrong=self._r2_frame()
+        wrong["candles"][0].update(open=1e-12,high=2e-12,low=1e-12,close=1.49e-12)
+        with self.assertRaisesRegex(ValueError,"distinti non rappresentabili"):
+            g.page_from_data(wrong,now=self.now)
+        old=self._r2_frame()
+        old["observed_utc"]="2020-01-01T00:00:00+00:00"
+        self.assertIn("DATI INCOMPLETI O NON VERIFICABILI",
+                      g.page_from_data(old,now=self.now))
+
+
 if __name__=='__main__': unittest.main(verbosity=2)

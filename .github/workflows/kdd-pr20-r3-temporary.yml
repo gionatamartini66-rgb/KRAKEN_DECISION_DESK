@@ -1,0 +1,56 @@
+name: KDD PR20 R3 temporary formatter regression
+on:
+  push:
+    branches:
+      - experiments/kdd-any-spot-g2-20261024
+jobs:
+  offline-r3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Baseline immutable R2 actual pivot and original Intl formatter - expected negative
+        run: |
+          python - <<'PY'
+          import datetime as dt,importlib.util,subprocess,tempfile,re
+          from pathlib import Path
+          baseline="371291e605a2dc05880ad12277a312b47efeaf83"
+          with tempfile.TemporaryDirectory(prefix="kdd-pr20-r2-") as temp:
+              path=Path(temp)/"grafico_r2.py"
+              path.write_bytes(subprocess.check_output(["git","show",baseline+":grafico_4h.py"]))
+              spec=importlib.util.spec_from_file_location("grafico_r2",path)
+              module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+              now=dt.datetime(2026,10,24,20,42,tzinfo=dt.timezone.utc)
+              seconds=14400
+              end=int(now.timestamp()//seconds)*seconds
+              bars=[dict(time=end-80*seconds+i*seconds,open=1e-8,
+                         high=2.49997e-8,low=1e-8,close=1e-8,volume=1e-9)
+                    for i in range(80)]
+              frame=dict(pair="ETH/USD",token="ETH",pair_key="ETHUSD",
+                         timeframe="4H",interval_seconds=seconds,
+                         observed_utc=now.isoformat(),
+                         closed_at_utc=dt.datetime.fromtimestamp(end,dt.timezone.utc).isoformat(),
+                         candles=bars)
+              pivot=module.daily_pivots(bars,interval_seconds=seconds)["S2"]
+              assert pivot > 0 and pivot < 1e-11,repr(pivot)
+              html=module.page_from_data(frame,now=now)
+              line=re.search(r"const priceText=new Intl.NumberFormat\('it-IT',\{maximumFractionDigits:(\d+)\}\);",html)
+              assert line, "R2 baseline formatter not found"
+              code="const priceText=new Intl.NumberFormat('it-IT',{maximumFractionDigits:"+line.group(1)+"});console.log(priceText.format("+repr(pivot)+"))"
+              rendered=subprocess.check_output(["node","-e",code],text=True).strip()
+              assert rendered=="0", "Expected R2 fake zero, got "+repr(rendered)
+              print("R2_NEGATIVE_REPRODUCED: S2="+repr(pivot)+" positive, rendered="+repr(rendered)+" ("+line.group(1)+" dp)")
+          PY
+      - name: Python compile unchanged modules and new tests
+        run: python -m py_compile grafico_4h.py serve.py test_decision_desk.py scripts/kdd_pr20_preflight_g0_20261025.py scripts/test_kdd_pr20_preflight_g0.py scripts/kdd_pr20_preview_samsung_g0.py scripts/test_kdd_pr20_preview_g0.py
+      - name: Complete regression including R3 real JavaScript DOM tests
+        run: python -m unittest -q test_decision_desk
+      - name: RT01 / preflight and preview tests unchanged
+        run: python -m unittest -q scripts.test_kdd_pr20_preflight_g0 scripts.test_kdd_pr20_preview_g0
