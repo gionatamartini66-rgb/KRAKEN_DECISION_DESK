@@ -41,8 +41,8 @@ class G0PreflightTests(unittest.TestCase):
         (self.live/'migrazione_attesa.json').write_text('SECRET_MIG_TEST_ONLY')
 
     def test_source_pin_values(self):
-        self.assertEqual(p.PIN,'de53603b3ee9f25d162e23aa6e8e92297b0f95c2')
-        self.assertEqual(p.FILES['serve.py'],'de54233f6f1ac3a4853ee46818767666909592ab')
+        self.assertEqual(p.PIN,'1bd6e09178f09723f05a9ad5db14aeefc60ec520')
+        self.assertEqual(p.FILES['serve.py'],'2f8c83248bfa3310daafab644cf40356c806df8e')
 
     def test_local_input_validates(self):
         p.validate_local(self.live)
