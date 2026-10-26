@@ -21,10 +21,10 @@ import sys
 import tempfile
 
 REPO = 'gionatamartini66-rgb/KRAKEN_DECISION_DESK'
-PIN = '1bd6e09178f09723f05a9ad5db14aeefc60ec520'
+PIN = 'dec929efaf5b837ef50754ed8d9dbea429d2eb7e'
 APPROVED = {
     'serve.py': '2f8c83248bfa3310daafab644cf40356c806df8e',
-    'grafico_4h.py': '62dfd0cfaa5c4f9eaa4fefb9a6a381441b7d2a1c',
+    'grafico_4h.py': '27075efaa458acb55e6b4cae9d127c74320278c1',
 }
 ASSETS = ('lightweight-charts-5.2.1.js', 'LIGHTWEIGHT_CHARTS_LICENSE.txt',
           'LIGHTWEIGHT_CHARTS_NOTICE.txt')
