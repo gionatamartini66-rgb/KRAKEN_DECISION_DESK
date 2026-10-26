@@ -1,0 +1,63 @@
+name: KDD PR20 R2 temporary offline regressions
+on:
+  push:
+    branches:
+      - experiments/kdd-any-spot-g2-20261024
+jobs:
+  r2-offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compile existing and R2 code
+        run: python -m py_compile grafico_4h.py serve.py test_decision_desk.py scripts/kdd_pr20_preflight_g0_20261025.py scripts/test_kdd_pr20_preflight_g0.py scripts/kdd_pr20_preview_samsung_g0.py scripts/test_kdd_pr20_preview_g0.py
+      - name: Mandatory negative controls against immutable R1
+        run: |
+          python - <<'PY'
+          import datetime as dt
+          import importlib.util
+          import subprocess
+          import tempfile
+          from pathlib import Path
+          BASE="5fc30a49683e0c04af50b4682c907c41af23297e"
+          with tempfile.TemporaryDirectory(prefix="kdd-r1-rt-") as tmp:
+              filename=Path(tmp)/"r1_grafico.py"
+              filename.write_bytes(subprocess.check_output(["git","show",BASE+":grafico_4h.py"]))
+              spec=importlib.util.spec_from_file_location("r1_grafico",filename)
+              old=importlib.util.module_from_spec(spec);spec.loader.exec_module(old)
+              now=dt.datetime(2026,10,24,20,42,tzinfo=dt.timezone.utc)
+              sec=14400;end=int(now.timestamp()//sec)*sec;start=end-80*sec
+              candles=[dict(time=start+i*sec,open=1e-8,high=1e-8+2e-12,
+                            low=1e-8-2e-12,close=1e-8+(i%2)*1e-12,volume=1)
+                       for i in range(80)]
+              frame=dict(pair="ADA/USDT",token="ADA",pair_key="ADAUSDT",
+                         timeframe="4H",interval_seconds=sec,observed_utc=now.isoformat(),
+                         closed_at_utc=dt.datetime.fromtimestamp(end,dt.timezone.utc).isoformat(),
+                         candles=candles)
+              try:
+                  old.page_from_data(frame,now=now)
+              except ValueError as e:
+                  assert "Prezzi distinti non rappresentabili" in str(e),str(e)
+              else:
+                  raise AssertionError("RT03 R1 false rejection NOT reproduced")
+              print("RT03 R1 NEGATIVE REPRODUCED: representable OHLC rejected for EMA sub-tick")
+              normal=[dict(c,open=1.,high=1.1,low=.9,close=1.) for c in candles]
+              bad=dict(frame,candles=normal,observed_utc="2020-01-01T00:00:00+00:00",
+                       closed_at_utc="2020-01-01T00:00:00+00:00")
+              page=old.page_from_data(bad,now=now)
+              assert "DATI RECENTI VERIFICATI" in page
+              assert "visibilitychange" not in page
+              print("RT05 R1 NEGATIVE REPRODUCED: contradictory old timestamps called RECENT; no active-tab aging")
+          
+          PY
+      - name: Full preexisting plus R2 suite
+        run: python -m unittest -q test_decision_desk
+      - name: RT01/preflight and UI/preview unchanged synthetic suites
+        run: python -m unittest -q scripts.test_kdd_pr20_preflight_g0 scripts.test_kdd_pr20_preview_g0

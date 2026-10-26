@@ -839,6 +839,8 @@ class DeskTests(unittest.TestCase):
                     "volume":500.0 if k==64 else 250.0})
             frames[label] = {"timeframe":label,"interval_seconds":seconds,
                 "observed_utc":now.isoformat(timespec="seconds"),
+                "closed_at_utc":dt.datetime.fromtimestamp(
+                    expected_end,dt.timezone.utc).isoformat(timespec="seconds"),
                 "source":"Kraken Spot test fixture",
                 "candles":bars}
         return frames
@@ -865,6 +867,10 @@ class DeskTests(unittest.TestCase):
         now=dt.datetime(2026,10,21,7,42,tzinfo=dt.timezone.utc)
         data=self._mtf_fixture(now)
         data["4H"]["candles"]=data["4H"]["candles"][:-1]
+        # The missing last bar is a coherent old dataset, not contradictory metadata.
+        data["4H"]["closed_at_utc"]=dt.datetime.fromtimestamp(
+            data["4H"]["candles"][-1]["time"]+14400,
+            dt.timezone.utc).isoformat(timespec="seconds")
         stale=g.compare_timeframes(data,now=now)
         self.assertEqual(stale["stato"],"PARZIALE")
         self.assertEqual(stale["quadro"],"CONFRONTO_INCOMPLETO")
@@ -2864,7 +2870,8 @@ class AnyKrakenSpotTests(unittest.TestCase):
         frame={"pair":"ADA/USDT","token":"ADA","pair_key":"ADAUSDT",
                "timeframe":"4H","interval_seconds":sec,
                "observed_utc":self.now.isoformat(),
-               "closed_at_utc":self.now.isoformat(),
+               "closed_at_utc":dt.datetime.fromtimestamp(
+                   start+80*sec,dt.timezone.utc).isoformat(),
                "candles":[{"time":start+i*sec,"open":1.,"high":1.1,
                            "low":.9,"close":1.,"volume":1.} for i in range(80)]}
         current=g.page_from_data(frame,now=self.now)
@@ -2893,6 +2900,157 @@ class AnyKrakenSpotTests(unittest.TestCase):
                 self.assertNotIn("porta 8765",view)
                 self.assertNotIn("non il KDD completo",view)
         self.assertIn("negoziabilità per il conto italiano",view)
+
+
+    def _r2_frame(self, *, frame="4H", candles=80):
+        seconds={"15m":900,"1H":3600,"4H":14400,"1D":86400}[frame]
+        close_end=int(self.now.timestamp()//seconds)*seconds
+        start=close_end-candles*seconds
+        series=[{"time":start+i*seconds, "open":1e-8, "high":1e-8+2e-12,
+                 "low":1e-8-2e-12,
+                 "close":1e-8+(i%2)*1e-12, "volume":1e-9}
+                for i in range(candles)]
+        return {"pair":"ADA/USDT","pair_key":"ADAUSDT","token":"ADA",
+                "timeframe":frame,"interval_seconds":seconds,
+                "observed_utc":self.now.isoformat(),
+                "closed_at_utc":dt.datetime.fromtimestamp(
+                    close_end,dt.timezone.utc).isoformat(),
+                "candles":series}
+
+    def test_r2_rt03_ema20_50_subtick_does_not_reject_ohlc(self):
+        frame=self._r2_frame()
+        points20=g.ema_points(frame["candles"],20)
+        points50=g.ema_points(frame["candles"],50)
+        self.assertTrue(points20 and points50)
+        # Red Team R1 counterexample: distinct EMA20 values at <12th decimal.
+        self.assertTrue(any(
+            a["value"]!=b["value"] and
+            f'{a["value"]:.12f}'==f'{b["value"]:.12f}'
+            for a,b in zip(points20,points20[1:])))
+        snapshot=json.dumps(frame["candles"],sort_keys=True)
+        page=g.page_from_data(frame,now=self.now)
+        self.assertIn('precision:12,minMove:0.000000000001',page)
+        self.assertIn('"ema20":',page)
+        self.assertIn('"ema50":',page)
+        self.assertEqual(json.dumps(frame["candles"],sort_keys=True),snapshot)
+
+    def test_r2_rt03_derived_levels_subtick_not_a_rejection(self):
+        frame=self._r2_frame()
+        real=g.technical_from_candles(frame["candles"],interval_seconds=14400)
+        self.assertTrue(real["ema50"])
+        # Deliberately inject valid tiny calculated variations in all families:
+        # they are derived values, not original exchange prices.
+        derived=dict(real)
+        derived["pivots"]={
+            "reference_day_utc":"2026-10-23","P":1e-8,
+            "S1":1.0000500e-8,"S2":1.0000504e-8,"S3":1.0000510e-8,
+            "R1":1.0000500e-8,"R2":1.0000504e-8,"R3":1.0000510e-8}
+        derived["structure"]={
+            "supports":[{"price":1.0000500e-8,"touches":2,"last_swing_time":0},
+                        {"price":1.0000504e-8,"touches":2,"last_swing_time":0}],
+            "resistances":[{"price":1.0000510e-8,"touches":2,"last_swing_time":0},
+                           {"price":1.0000514e-8,"touches":2,"last_swing_time":0}]}
+        with mock.patch.object(g,"technical_from_candles",return_value=derived):
+            page=g.page_from_data(frame,now=self.now)
+        self.assertIn('"pivots":',page)
+        self.assertIn('"supports":',page)
+        self.assertIn('"resistances":',page)
+        self.assertIn('"price":1.0000504e-08',page)
+        self.assertIn("12 decimali",page)
+
+    def test_r2_rt03_true_ohlc_collision_rejected_cross_candle_and_intra(self):
+        frame=self._r2_frame()
+        frame["candles"][1]["close"]=1.000049e-8
+        # Original alternating series should remain distinguishable at 12dp;
+        # the new close has a distinct source value but collides after rounding.
+        with self.assertRaisesRegex(ValueError,"distinti non rappresentabili"):
+            g.page_from_data(frame,now=self.now)
+        frame=self._r2_frame()
+        frame["candles"][0].update(open=1e-12,low=1e-12,
+                                    close=1.49e-12,high=2e-12)
+        with self.assertRaisesRegex(ValueError,"distinti non rappresentabili"):
+            g.page_from_data(frame,now=self.now)
+
+    def test_r2_rt05_temporal_integrity_all_frames(self):
+        for frame in ("15m","1H","4H","1D"):
+            with self.subTest(frame=frame):
+                data=self._r2_frame(frame=frame)
+                self.assertEqual(g.summarize_timeframe(data,now=self.now)["stato"],
+                                 "AGGIORNATO")
+                self.assertIn("DATI RECENTI VERIFICATI",g.page_from_data(
+                    data,now=self.now))
+                wrongs=[]
+                wrongs.append(dict(data,observed_utc="2020-01-01T00:00:00+00:00"))
+                wrongs.append(dict(data,observed_utc="not-a-date"))
+                wrongs.append(dict(data,observed_utc="2026-10-30T00:00:00+00:00"))
+                wrongs.append(dict(data,closed_at_utc="not-a-date"))
+                wrongs.append(dict(data,closed_at_utc=data["observed_utc"]))
+                wrongs.append(dict(data,closed_at_utc="2026-10-30T00:00:00+00:00"))
+                wrongs.append(dict(data,closed_at_utc="2020-01-01T00:00:00+00:00"))
+                wrongs.append(dict(data,observed_utc="2026-10-24T20:00:00"))
+                wrongs.append(dict(data,interval_seconds=5))
+                wrongs.append(dict(data,candles=data["candles"][:-1]))
+                future=dict(data)
+                future["candles"]=list(data["candles"])
+                future["candles"][-1]=dict(data["candles"][-1],
+                                          time=data["candles"][-1]["time"]+
+                                               data["interval_seconds"])
+                wrongs.append(future)
+                for bad in wrongs:
+                    with self.assertRaises((ValueError,TypeError,KeyError)):
+                        g.summarize_timeframe(bad,now=self.now)
+                    page=g.page_from_data(bad,now=self.now)
+                    self.assertNotIn("DATI RECENTI VERIFICATI",page)
+                    self.assertIn("DATI INCOMPLETI O NON VERIFICABILI",page)
+                stale=g.page_from_data(
+                    data,now=self.now+dt.timedelta(days=5))
+                self.assertIn("GRAFICO STORICO / SCADUTO",stale)
+
+    def test_r2_rt05_actual_browser_clock_and_visibility_transition(self):
+        import re, shutil, subprocess
+        node=shutil.which("node")
+        if not node:
+            self.skipTest("Node unavailable: browser freshness JavaScript not executed")
+        frame=self._r2_frame()
+        page=g.page_from_data(frame,now=self.now)
+        snippet=re.search(
+            r'const freshnessValid=.*?(?=\ntry \{)',page,re.S)
+        self.assertIsNotNone(snippet)
+        clock_ms=int(self.now.timestamp()*1000)
+        # Execute the REAL generated JS with a simulated DOM, time jump and
+        # visibility/focus hooks. No network, no reload or candle alteration.
+        script="""
+const vm=require('node:vm');
+let clock=__CLOCK__;
+const indicator={textContent:'',className:''};
+const events={};const intervals=[];
+const context={
+  document:{getElementById:()=>indicator,addEventListener:(n,fn)=>{events[n]=fn}},
+  window:{addEventListener:(n,fn)=>{events[n]=fn}},
+  setInterval:(fn,ms)=>intervals.push([fn,ms]),
+  Date:{now:()=>clock},Math,Number,
+};
+vm.runInNewContext(__SNIPPET__,context);
+if(!indicator.textContent.includes('DATI RECENTI VERIFICATI'))
+  throw Error('initial not fresh: '+indicator.textContent);
+if(intervals.length!==1||intervals[0][1]>15000)throw Error('no timed clock');
+if(!events.visibilitychange||!events.focus)throw Error('no focus events');
+clock += 6*86400000;
+events.visibilitychange();
+if(!indicator.textContent.includes('GRAFICO STORICO / SCADUTO'))
+  throw Error('not stale on visibility: '+indicator.textContent);
+clock += 86400000;
+events.focus();
+if(!indicator.textContent.includes('SCADUTO')) throw Error('focus lost');
+console.log('BROWSER_CLOCK_PASS');
+""".replace("__CLOCK__",str(clock_ms)).replace(
+            "__SNIPPET__",json.dumps(snippet.group(0)))
+        run=subprocess.run([node,"-e",script],capture_output=True,
+                           text=True,timeout=10)
+        self.assertEqual(run.returncode,0,run.stderr)
+        self.assertIn("BROWSER_CLOCK_PASS",run.stdout)
+        self.assertNotIn("fetch(",snippet.group(0))
+        self.assertNotIn("location.reload",snippet.group(0))
 
 
 if __name__=='__main__': unittest.main(verbosity=2)

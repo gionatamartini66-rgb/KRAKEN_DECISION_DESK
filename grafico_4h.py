@@ -224,6 +224,51 @@ def technical_from_candles(candles, interval_seconds=14400):
     }
 
 
+def temporal_consistency(data, *, now):
+    """Validate reported observation, completed candle and timeframe together.
+
+    Returns comparable timestamps in seconds; an inconsistent source is
+    rejected even if its last candle happens to look recent.
+    """
+    if now.tzinfo is None:
+        raise ValueError("Orario UTC di confronto non valido")
+    intervals = {"15m": 900, "1H": 3600, "4H": 14400, "1D": 86400}
+    seconds = intervals.get(data.get("timeframe"))
+    if seconds is None or data.get("interval_seconds", seconds) != seconds:
+        raise ValueError("Durata candele incoerente")
+    candles = data["candles"]
+    if not candles:
+        raise ValueError("Candele mancanti")
+    last_start = candles[-1]["time"]
+    if type(last_start) is not int or last_start % seconds:
+        raise ValueError("Orario ultima candela non allineato")
+    close_end = last_start + seconds
+
+    def parse_utc(name):
+        value = data[name]
+        if not isinstance(value, str):
+            raise ValueError("Timestamp " + name + " non valido")
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("Timestamp " + name + " privo di fuso")
+        return parsed.timestamp()
+
+    observed = parse_utc("observed_utc")
+    closed = parse_utc("closed_at_utc")
+    t = now.timestamp()
+    # Rounding/clock tolerance only (2s), not an extra candle of leeway.
+    if (abs(closed - close_end) > 2
+            or close_end > t + 2
+            or closed > t + 2
+            or observed > t + 2
+            or observed < close_end - 2
+            or closed > observed + 2):
+        raise ValueError("Metadati temporali discordanti, futuri o non verificabili")
+    expected_end = int((t - 120) // seconds) * seconds
+    return {"observed": observed, "closed": closed, "seconds": seconds,
+            "fresh": close_end >= expected_end}
+
+
 def summarize_timeframe(data, now=None):
     """Describe price/EMA and completed-volume observations, never a trade signal.
 
@@ -232,26 +277,17 @@ def summarize_timeframe(data, now=None):
     Never replace a missing/stale frame with another timeframe.
     """
     now = now or dt.datetime.now(dt.timezone.utc)
-    if now.tzinfo is None:
-        raise ValueError("Orario UTC di confronto non valido")
     frame = data.get("timeframe")
-    intervals = {"15m": 900, "1H": 3600, "4H": 14400, "1D": 86400}
-    if frame not in intervals:
-        raise ValueError("Timeframe sconosciuto")
-    seconds = intervals[frame]
-    if data.get("interval_seconds", seconds) != seconds:
-        raise ValueError("Durata candele incoerente")
     records = data.get("candles", [])
+    if frame not in ("15m", "1H", "4H", "1D"):
+        raise ValueError("Timeframe sconosciuto")
     if len(records) < 50:
         return {"timeframe": frame, "stato": "STORICO_INSUFFICIENTE",
                 "motivo": "Servono almeno 50 candele chiuse per confrontare EMA20 ed EMA50"}
-    last = records[-1]
-    close_end = last["time"] + seconds
-    expected_end = int((now.timestamp() - 120) // seconds) * seconds
-    observed = dt.datetime.fromisoformat(data["observed_utc"].replace("Z", "+00:00"))
-    if observed.tzinfo is None or observed.timestamp() > now.timestamp() + 120:
-        raise ValueError("Data rilevazione non valida o futura")
-    fresh = close_end >= expected_end and close_end <= now.timestamp() + 2
+    timing = temporal_consistency(data, now=now)
+    seconds = timing["seconds"]
+    close_end = records[-1]["time"] + seconds
+    fresh = timing["fresh"]
     indicator20 = ema_points(records, 20)[-1]["value"]
     indicator50 = ema_points(records, 50)[-1]["value"]
     price = last["close"]
@@ -364,9 +400,10 @@ def page_from_data(x, *, now=None, home_url="/"):
         # Explicitly decline to misrepresent smaller quotes as zero
         # with the 12dp precision currently supported by this view.
         raise ValueError("Prezzo sotto la precisione supportata dal grafico")
-    # Verify the REAL displayed series and indicator levels, not just the minimum.
-    # Never increase the 12dp ceiling silently: reject pairs whose distinct
-    # observed/calculated prices cannot be displayed without collisions.
+    # Original OHLC must be injective at display precision. EMA, pivots and
+    # structural levels retain their original numeric values, but legitimate
+    # sub-tick variation in calculated series is normal and NOT a reason to
+    # reject representable exchange candles.
     prices = [r[k] for r in x["candles"] for k in ("open", "high", "low", "close")]
     prices.extend(p["value"] for name in ("ema20", "ema50")
                   for p in technical[name])
@@ -378,20 +415,12 @@ def page_from_data(x, *, now=None, home_url="/"):
     if not all(isinstance(v, (float, int)) and not isinstance(v, bool)
                and math.isfinite(v) for v in prices):
         raise ValueError("Prezzi e livelli non verificabili")
-    # A candle's OHLC must remain distinguishable *within that candle*;
-    # also preserve distinct values along each price/indicator series. Separate
-    # line families may legitimately converge on one displayed market tick.
+    # Distinct ORIGINAL prices, both through time and within each candle.
+    # Do not enforce artificial sub-tick injectivity on calculated indicators.
     groups = [[r[k] for r in x["candles"]] for k in
               ("open", "high", "low", "close")]
     groups += [[r[k] for k in ("open", "high", "low", "close")]
                for r in x["candles"]]
-    groups += [[p["value"] for p in technical[name]]
-               for name in ("ema20", "ema50")]
-    if technical["pivots"]:
-        groups.append([v for k, v in technical["pivots"].items()
-                       if k != "reference_day_utc"])
-    for side in ("supports", "resistances"):
-        groups.append([item["price"] for item in technical["structure"][side]])
     decimal_places = max(5, min(12, math.ceil(-math.log10(smallest)) + 3))
     for candidate in range(decimal_places, 13):
         collision = False
@@ -413,11 +442,15 @@ def page_from_data(x, *, now=None, home_url="/"):
         raise ValueError("Prezzi distinti non rappresentabili entro 12 decimali")
     min_move = 10 ** (-decimal_places)
     now = now or dt.datetime.now(dt.timezone.utc)
+    timing = None
     try:
         freshness = summarize_timeframe(x, now=now)
         fresh_state = freshness["stato"]
+        if fresh_state in ("AGGIORNATO", "SCADUTO"):
+            timing = temporal_consistency(x, now=now)
     except (ValueError, TypeError, KeyError, IndexError, ZeroDivisionError, OverflowError):
         fresh_state = "NON_VERIFICABILE"
+    temporal_valid = timing is not None
     if fresh_state == "AGGIORNATO":
         freshness_text = "DATI RECENTI VERIFICATI: ultima candela chiusa disponibile."
     elif fresh_state == "SCADUTO":
@@ -499,7 +532,8 @@ footer{font-size:.83rem;color:#b3c1d8;line-height:1.5;margin:14px 0 26px}
 <div id="graph-status" role="status">Preparazione grafico…</div>
 <p id="market-freshness" class="__FRESH_CLASS__" role="status">__FRESHNESS__</p>
 <p class="muted">Ultima candela CHIUSA: __CLOSED__. Rilevazione: __OBSERVED__.
-Stato determinato all'apertura; il grafico non fornisce quotazioni in tempo reale.</p>
+La freschezza si rivaluta nella scheda senza richiedere nuove candele.
+La rilevazione originale non cambia; il grafico non fornisce quotazioni in tempo reale.</p>
 <nav class="buttons" aria-label="Timeframe grafico">
 __TIMEFRAME_BUTTONS__
 </nav>
@@ -549,6 +583,9 @@ Pivot P/S1–S3/R1–R3: formule classiche sul giorno UTC precedente, solo se
 numero delle linee per leggibilità, mentre la tabella conserva i valori
 completi. Le vicinanze fra indicatori non costituiscono conferme indipendenti:
 sono una descrizione geometrica; nessun segnale BUY/SELL.
+Prezzi OHLC originali rappresentabili senza collisioni; EMA e livelli
+conservano il valore numerico di calcolo, ma possono sovrapporsi alla
+risoluzione massima della scala (12 decimali).
 Pattern e altri timeframe NON sono ancora implementati.</p>
 </section>
 <footer><a href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer">
@@ -565,6 +602,36 @@ const timeframeLabel = '__TF__';
 const tech = __TECHNICAL__;
 const msg=document.getElementById('graph-status');
 const stats=document.getElementById('candle-stats');
+// Only the age indicator changes; the original Kraken candle array never does.
+const freshnessValid=__FRESH_VALID__;
+const lastClosedMs=__LAST_CLOSED_MS__;
+const observedMs=__OBSERVED_MS__;
+const intervalMs=__INTERVAL_MS__;
+function freshnessAt(nowMs){
+  if(!freshnessValid || !Number.isFinite(nowMs) ||
+     nowMs < lastClosedMs-2000 || nowMs < observedMs-2000)
+    return 'NON_VERIFICABILE';
+  const expected=Math.floor((nowMs-120000)/intervalMs)*intervalMs;
+  return lastClosedMs >= expected ? 'AGGIORNATO' : 'SCADUTO';
+}
+function updateFreshness(){
+  const state=freshnessAt(Date.now());
+  const el=document.getElementById('market-freshness');
+  if(state==='AGGIORNATO'){
+    el.textContent='DATI RECENTI VERIFICATI: ultima candela chiusa disponibile.';
+    el.className='current';
+  }else if(state==='SCADUTO'){
+    el.textContent='GRAFICO STORICO / SCADUTO: non descrive il mercato corrente.';
+    el.className='warning';
+  }else{
+    el.textContent='DATI INCOMPLETI O NON VERIFICABILI: nessuna lettura corrente.';
+    el.className='warning';
+  }
+}
+updateFreshness();
+setInterval(updateFreshness,15000);
+document.addEventListener('visibilitychange',updateFreshness);
+window.addEventListener('focus',updateFreshness);
 try {
   if (!window.LightweightCharts ||
       !LightweightCharts.createChart ||
@@ -857,6 +924,12 @@ try {
                 .replace("cinque decimali", "__DECIMALS__ decimali")
                 .replace("5 decimali", "__DECIMALS__ decimali"))
     return (template.replace("__BARS__", candle_json)
+             .replace("__FRESH_VALID__", "true" if temporal_valid else "false")
+             .replace("__LAST_CLOSED_MS__",
+                      str(x["candles"][-1]["time"] * 1000 + interval * 1000))
+             .replace("__OBSERVED_MS__",
+                      str(round(timing["observed"] * 1000)) if temporal_valid else "0")
+             .replace("__INTERVAL_MS__", str(interval * 1000))
              .replace("__HOME_URL__", html.escape(home_url, quote=True))
              .replace("__FRESHNESS__", freshness_text)
              .replace("__FRESH_CLASS__", "current" if fresh_state == "AGGIORNATO" else "warning")
