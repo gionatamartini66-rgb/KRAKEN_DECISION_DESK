@@ -1264,7 +1264,11 @@ class DeskTests(unittest.TestCase):
         new['token']='HBAR';new['coppia']='HBAR/USD';new['azione']='Monitoraggio HBAR'
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
-            with unittest.mock.patch.object(vp,'PLANS',root/'plans'), \
+            # Synthetic 18/10 plans must not age out of Kraken's 720-bar window
+            # as real calendar days pass. Keep the production expiry logic intact.
+            with unittest.mock.patch.object(vp.desk,'NOW',
+                    return_value=dt.datetime(2026,10,18,8,40,tzinfo=dt.timezone.utc)), \
+                 unittest.mock.patch.object(vp,'PLANS',root/'plans'), \
                  unittest.mock.patch.object(vp,'LOG',root/'observations.jsonl'), \
                  unittest.mock.patch.object(pg,'load',return_value=new), \
                  unittest.mock.patch.object(vp.desk,'save') as store, \

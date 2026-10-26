@@ -11,11 +11,65 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
       - name: Compile approved Python only
         run: python -m py_compile serve.py grafico_4h.py test_decision_desk.py scripts/kdd_pr20_preflight_g0_20261025.py scripts/test_kdd_pr20_preflight_g0.py scripts/kdd_pr20_preview_samsung_g0.py scripts/test_kdd_pr20_preview_g0.py
+      - name: R0 counterexamples on immutable 9c9e454 (expected negative)
+        run: |
+          python - <<'PY'
+          import importlib.util, tempfile, subprocess, json, datetime as dt
+          from pathlib import Path
+          sha='9c9e4548f9477f9cebb1c85aab49ca12b9b6dc87'
+          with tempfile.TemporaryDirectory(prefix='kdd-r0-negative-') as td:
+              root=Path(td)
+              files=['grafico_4h.py','serve.py','scripts/kdd_pr20_preflight_g0_20261025.py']
+              loaded={}
+              for i,path in enumerate(files):
+                  target=root/('r0_'+str(i)+'.py')
+                  target.write_bytes(subprocess.check_output(['git','show',sha+':'+path]))
+                  spec=importlib.util.spec_from_file_location('r0_'+str(i),target)
+                  mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
+                  loaded[path]=mod
+              g0=loaded['grafico_4h.py']; s0=loaded['serve.py']
+              pf0=loaded['scripts/kdd_pr20_preflight_g0_20261025.py']
+              live=root/'live';live.mkdir()
+              for n in ('decision_desk.py','serve.py','grafico_4h.py','test_decision_desk.py'):
+                  (live/n).write_text('SYNTHETIC = True\n')
+              (live/'config.json').write_text('{}')
+              (live/'portafoglio.json').write_text('{}')
+              (live/'README.md').write_text('<!-- CHECKPOINT_SORGENTI_SHA256: '+'0'*64+' -->\n')
+              (live/'vendor').mkdir()
+              for n in pf0.ASSETS:(live/'vendor'/n).write_text('synthetic')
+              pf0.validate_local(live) # falsely succeeds with an invalid live marker
+              print('RT01 BEFORE FAIL: false 64-zero live checkpoint accepted')
+              shown=subprocess.check_output(['node','-e',"console.log(new Intl.NumberFormat('it-IT',{maximumFractionDigits:6}).format(1e-9))"],text=True).strip()
+              assert shown=='0',repr(shown)
+              print('RT02 BEFORE FAIL: positive 1e-9 volume printed 0 by actual JS Intl')
+              sec=14400;now=dt.datetime.now(dt.timezone.utc)
+              base=int(now.timestamp()//sec)*sec-80*sec
+              candles=[dict(time=base+i*sec,open=1.49e-12,high=2e-12,
+                            low=1e-12,close=1.49e-12,volume=1) for i in range(80)]
+              frame=dict(pair='MICRO/USD',token='MICRO',pair_key='MICROUSD',
+                         timeframe='4H',interval_seconds=sec,observed_utc=now.isoformat(),
+                         closed_at_utc=now.isoformat(),candles=candles)
+              oldpage=g0.page_from_data(frame)
+              assert 'precision:12,minMove:0.000000000001' in oldpage
+              assert f"{1e-12:.12f}"==f"{1.49e-12:.12f}"
+              print('RT03 BEFORE FAIL: distinct prices collapse to same 12dp')
+              catalog=dict(AAAUSD=dict(wsname='AAA/USD',status='online',altname='BBBUSD'),
+                           BBBUSD=dict(wsname='BBB/USD',status='online'))
+              assert len(s0.spot_catalog(lambda ep:catalog))==2
+              print('RT04 BEFORE FAIL: alias key collides with another market REST key (synthetic)')
+              assert 'GRAFICO STORICO / SCADUTO' not in oldpage
+              print('RT05 BEFORE FAIL: single chart has no freshness classification')
+              selector=s0.spot_selector(s0.spot_catalog(lambda ep:catalog),snapshot={})
+              assert 'non il KDD completo' in selector
+              print('UI BEFORE FAIL: integrated selector still describes preview')
+          PY
       - name: Canonical suite (private-phone checks may SKIP)
         run: python -m unittest -q test_decision_desk
       - name: Private preflight and preview synthetic suites
