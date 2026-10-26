@@ -3079,7 +3079,7 @@ console.log('BROWSER_CLOCK_PASS');
         node=shutil.which("node")
         if not node:
             self.skipTest("Node missing: R3 JavaScript not executed")
-        script_src=page.split('<script>\\n(function(){',1)[1].split('</script>',1)[0]
+        script_src=page.split('<script>\n(function(){',1)[1].split('</script>',1)[0]
         harness=r"""
 const elements={};
 function el(tag){
@@ -3133,8 +3133,8 @@ if(!report.graph.includes('Grafico generato'))
   throw Error('Full generated JS failed: '+report.graph);
 console.log(JSON.stringify(report));
 """
-        run=subprocess.run([node,"-e",harness+"\\n(function(){"+script_src+
-                                    "\\n"+final],
+        run=subprocess.run([node,"-e",harness+"\n(function(){"+script_src+
+                                    "\n"+final],
                            capture_output=True,text=True,timeout=12)
         self.assertEqual(run.returncode,0,run.stderr[:2500])
         return json.loads(run.stdout.strip().splitlines()[-1])
@@ -3177,7 +3177,7 @@ console.log(JSON.stringify(report));
                     r'  const basePriceText=.*?(?=\n  const supports=)',html,re.S)
                 self.assertIsNotNone(js)
                 values=[0,s2,-s2,1.23456789,2.5e-8,1e-15,-1e-15]
-                program=js.group(0)+"\\nconsole.log(JSON.stringify(" + (
+                program=js.group(0)+"\nconsole.log(JSON.stringify(" + (
                     json.dumps(values)+".map(v=>priceText.format(v))));")
                 out=subprocess.run([node,"-e",program],
                                    capture_output=True,text=True,timeout=10)
