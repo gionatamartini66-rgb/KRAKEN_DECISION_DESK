@@ -2787,4 +2787,108 @@ class AnyKrakenSpotTests(unittest.TestCase):
         self.assertEqual(report["coppia"],"DOT/GBP")
 
 
+    def test_rt02_actual_javascript_volume_formatter_preserves_small_positive(self):
+        """Execute the function extracted from the generated chart, not source grep."""
+        import re, shutil, subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node JS runtime missing; formatter execution not verified")
+        sec = 14400
+        start = int(self.now.timestamp() // sec) * sec - 80*sec
+        frame = {"pair":"ADA/USDT", "token":"ADA", "pair_key":"ADAUSDT",
+                 "timeframe":"4H", "interval_seconds":sec,
+                 "observed_utc":self.now.isoformat(),
+                 "closed_at_utc":self.now.isoformat(),
+                 "candles":[{"time":start+i*sec,"open":1., "high":1.1,
+                            "low":.9,"close":1., "volume":1e-9} for i in range(80)]}
+        page = g.page_from_data(frame, now=self.now)
+        fn = re.search(r'  function formatVolume\(value\)\{.*?\n  \}', page, re.S)
+        self.assertIsNotNone(fn)
+        run = subprocess.run([node, "-e", fn.group(0)+
+            "\nconsole.log(JSON.stringify([0,1e-9,1e-15,1.23456789,123456].map(formatVolume)))"],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        shown = json.loads(run.stdout)
+        self.assertEqual(shown[0], "0")
+        self.assertTrue(all(v not in ("0","0,0","-0") for v in shown[1:3]))
+        self.assertIn("1", shown[3])
+        self.assertIn("123", shown[4])
+        self.assertIn("Vol '+formatVolume(row.volume)+' '+\"ADA\"", page)
+        self.assertIn('"volume":1e-09', page)
+
+    def test_rt03_rejects_prices_colliding_at_12dp_inside_same_candle(self):
+        sec=14400
+        start=int(self.now.timestamp() // sec)*sec-80*sec
+        frame={"pair":"MICRO/USD","token":"MICRO","pair_key":"MICROUSD",
+               "timeframe":"4H","interval_seconds":sec,
+               "observed_utc":self.now.isoformat(),
+               "closed_at_utc":self.now.isoformat(),
+               "candles":[{"time":start+i*sec,"open":1.49e-12,
+                           "high":2e-12,"low":1e-12,"close":1.49e-12,
+                           "volume":1} for i in range(80)]}
+        self.assertEqual(f"{1.0e-12:.12f}", f"{1.49e-12:.12f}")
+        with self.assertRaisesRegex(ValueError, "distinti non rappresentabili"):
+            g.page_from_data(frame, now=self.now)
+        # One actual twelfth-decimal tick DOES remain representable.
+        for row in frame["candles"]:
+            row.update(open=2e-12, high=3e-12, low=1e-12, close=2e-12)
+        self.assertIn("precision:12,minMove:0.000000000001",
+                      g.page_from_data(frame,now=self.now))
+
+    def test_rt04_alias_rest_collision_fails_closed_before_ohlc(self):
+        pairs={"AAAUSD":{"wsname":"AAA/USD","status":"online","altname":"BBBUSD"},
+               "BBBUSD":{"wsname":"BBB/USD","status":"online"}}
+        calls=[]
+        def fake(endpoint, **kwargs):
+            calls.append(endpoint)
+            if endpoint=="AssetPairs": return pairs
+            raise AssertionError("Ambiguous market must not request OHLC")
+        with self.assertRaisesRegex(serve.KrakenMarketDataUnavailable, "ambigua"):
+            serve.load_spot_chart("AAAUSD","4h",public_kraken=fake,now=self.now)
+        self.assertEqual(calls, ["AssetPairs"])
+        # Even a non-online key must not borrow an online pair's alias.
+        pairs["BBBUSD"]["status"]="cancel_only"
+        with self.assertRaisesRegex(serve.KrakenMarketDataUnavailable, "ambigua"):
+            serve.spot_catalog(fake)
+        # Two unique names with a valid declared alias remain supported.
+        pairs["AAAUSD"]["altname"]="AAAALT"
+        self.assertEqual(serve.spot_catalog(fake)["AAAUSD"]["altname"],"AAAALT")
+
+    def test_rt05_single_chart_marks_fresh_stale_and_nonverifiable(self):
+        sec=14400
+        start=int(self.now.timestamp() // sec)*sec-80*sec
+        frame={"pair":"ADA/USDT","token":"ADA","pair_key":"ADAUSDT",
+               "timeframe":"4H","interval_seconds":sec,
+               "observed_utc":self.now.isoformat(),
+               "closed_at_utc":self.now.isoformat(),
+               "candles":[{"time":start+i*sec,"open":1.,"high":1.1,
+                           "low":.9,"close":1.,"volume":1.} for i in range(80)]}
+        current=g.page_from_data(frame,now=self.now)
+        self.assertIn("DATI RECENTI VERIFICATI",current)
+        self.assertIn("Ultima candela CHIUSA:",current)
+        old=g.page_from_data(frame,now=self.now+dt.timedelta(days=5))
+        self.assertIn("GRAFICO STORICO / SCADUTO",old)
+        self.assertNotIn("DATI RECENTI VERIFICATI",old)
+        bad=dict(frame,observed_utc="bad")
+        self.assertIn("DATI INCOMPLETI O NON VERIFICABILI",
+                      g.page_from_data(bad,now=self.now))
+        limited=dict(frame,candles=frame["candles"][:35])
+        self.assertIn("DATI INCOMPLETI O NON VERIFICABILI",
+                      g.page_from_data(limited,now=self.now))
+
+    def test_rt_ui_integrated_links_and_preview_remain_separate(self):
+        catalog=serve.spot_catalog(self.fake)
+        for preview in (False,True):
+            view=serve.spot_selector(catalog, snapshot={}, now=self.now,preview=preview)
+            if preview:
+                self.assertIn("preview pubblica isolata",view)
+                self.assertIn('href="http://127.0.0.1:8765/"',view)
+            else:
+                self.assertIn("KDD patrimoniale originale",view)
+                self.assertIn('href="/"',view)
+                self.assertNotIn("porta 8765",view)
+                self.assertNotIn("non il KDD completo",view)
+        self.assertIn("negoziabilità per il conto italiano",view)
+
+
 if __name__=='__main__': unittest.main(verbosity=2)

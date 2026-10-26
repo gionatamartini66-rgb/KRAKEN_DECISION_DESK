@@ -328,8 +328,8 @@ def page_from_dossier(path: Path):
     return page_from_data(data_from_dossier(path))
 
 
-def page_from_data(x):
-    """Real 15m/1H/4H/1D candles, one renderer for all timeframes."""
+def page_from_data(x, *, now=None, home_url="/"):
+    """Real 15m/1H/4H/1D candles; fail closed on unrepresentable price ticks."""
     frame = x.get("timeframe", "4H")
     interval = x.get("interval_seconds", 14400)
     if frame not in ("15m", "1H", "4H", "1D"):
@@ -346,9 +346,8 @@ def page_from_data(x):
         '>' + html.escape(label) + '</a>'
         for frame_key, (_, label) in TIMEFRAMES.items())
     candle_json = json.dumps(x["candles"], separators=(",",":"), allow_nan=False)
-    technical_json = json.dumps(technical_from_candles(
-        x["candles"], interval_seconds=interval),
-                                separators=(",",":"), allow_nan=False)
+    technical = technical_from_candles(x["candles"], interval_seconds=interval)
+    technical_json = json.dumps(technical, separators=(",",":"), allow_nan=False)
     # Friendly labels must never overwrite the exact pair identity from Kraken.
     pair = html.escape(x.get("display_pair", x["pair"]), quote=True)
     token = x.get("display_token", x.get("token"))
@@ -365,12 +364,73 @@ def page_from_data(x):
         # Explicitly decline to misrepresent smaller quotes as zero
         # with the 12dp precision currently supported by this view.
         raise ValueError("Prezzo sotto la precisione supportata dal grafico")
+    # Verify the REAL displayed series and indicator levels, not just the minimum.
+    # Never increase the 12dp ceiling silently: reject pairs whose distinct
+    # observed/calculated prices cannot be displayed without collisions.
+    prices = [r[k] for r in x["candles"] for k in ("open", "high", "low", "close")]
+    prices.extend(p["value"] for name in ("ema20", "ema50")
+                  for p in technical[name])
+    if technical["pivots"]:
+        prices.extend(value for key, value in technical["pivots"].items()
+                      if key != "reference_day_utc")
+    for side in ("supports", "resistances"):
+        prices.extend(item["price"] for item in technical["structure"][side])
+    if not all(isinstance(v, (float, int)) and not isinstance(v, bool)
+               and math.isfinite(v) for v in prices):
+        raise ValueError("Prezzi e livelli non verificabili")
+    # A candle's OHLC must remain distinguishable *within that candle*;
+    # also preserve distinct values along each price/indicator series. Separate
+    # line families may legitimately converge on one displayed market tick.
+    groups = [[r[k] for r in x["candles"]] for k in
+              ("open", "high", "low", "close")]
+    groups += [[r[k] for k in ("open", "high", "low", "close")]
+               for r in x["candles"]]
+    groups += [[p["value"] for p in technical[name]]
+               for name in ("ema20", "ema50")]
+    if technical["pivots"]:
+        groups.append([v for k, v in technical["pivots"].items()
+                       if k != "reference_day_utc"])
+    for side in ("supports", "resistances"):
+        groups.append([item["price"] for item in technical["structure"][side]])
     decimal_places = max(5, min(12, math.ceil(-math.log10(smallest)) + 3))
+    for candidate in range(decimal_places, 13):
+        collision = False
+        for group in groups:
+            represented = {}
+            for value in group:
+                key_text = f"{value:.{candidate}f}"
+                if (value > 0 and float(key_text) == 0
+                        or key_text in represented and represented[key_text] != value):
+                    collision = True
+                    break
+                represented[key_text] = value
+            if collision:
+                break
+        if not collision:
+            decimal_places = candidate
+            break
+    else:
+        raise ValueError("Prezzi distinti non rappresentabili entro 12 decimali")
     min_move = 10 ** (-decimal_places)
+    now = now or dt.datetime.now(dt.timezone.utc)
+    try:
+        freshness = summarize_timeframe(x, now=now)
+        fresh_state = freshness["stato"]
+    except (ValueError, TypeError, KeyError, IndexError, ZeroDivisionError, OverflowError):
+        fresh_state = "NON_VERIFICABILE"
+    if fresh_state == "AGGIORNATO":
+        freshness_text = "DATI RECENTI VERIFICATI: ultima candela chiusa disponibile."
+    elif fresh_state == "SCADUTO":
+        freshness_text = "GRAFICO STORICO / SCADUTO: non descrive il mercato corrente."
+    else:
+        freshness_text = "DATI INCOMPLETI O NON VERIFICABILI: nessuna lettura corrente."
+    if not isinstance(home_url, str) or home_url not in ("/", "http://127.0.0.1:8765/"):
+        raise ValueError("Destinazione navigazione non consentita")
     comparison_url = ("/analisi/spot?pair=" + urllib.parse.quote(key, safe="")
                       if key else "/analisi/sui-mtf")
     observed = html.escape(x["observed_utc"], quote=True)
     closed = html.escape(x["closed_at_utc"], quote=True)
+    freshness_text = html.escape(freshness_text, quote=True)
     notice = ("TradingView Lightweight Charts™. "
               "Copyright (с) 2025 TradingView, Inc.")
     template = """<!doctype html>
@@ -423,6 +483,9 @@ button:focus-visible,a:focus-visible{outline:3px solid #a2e2ff}
 .stats{font-variant-numeric:tabular-nums;min-height:42px}
 #graph-status{font-weight:600;color:#85e6bc;min-height:24px}
 #graph-status.error{color:#ff969d}
+#market-freshness{font-weight:700;line-height:1.45}
+#market-freshness.current{color:#85e6bc}
+#market-freshness.warning{color:#ffd48a}
 footer{font-size:.83rem;color:#b3c1d8;line-height:1.5;margin:14px 0 26px}
 </style>
 </head>
@@ -430,10 +493,13 @@ footer{font-size:.83rem;color:#b3c1d8;line-height:1.5;margin:14px 0 26px}
 <header>
 <div><h1>📈 KDD · Grafico SUI/EUR · __TF__</h1>
 <small>Kraken Spot · candele CHIUSE · orari UTC · nessun ordine</small></div>
-<a href="/">← Torna al cruscotto</a>
+<a href="__HOME_URL__">← Torna al cruscotto</a>
 </header>
 <section class="panel">
 <div id="graph-status" role="status">Preparazione grafico…</div>
+<p id="market-freshness" class="__FRESH_CLASS__" role="status">__FRESHNESS__</p>
+<p class="muted">Ultima candela CHIUSA: __CLOSED__. Rilevazione: __OBSERVED__.
+Stato determinato all'apertura; il grafico non fornisce quotazioni in tempo reale.</p>
 <nav class="buttons" aria-label="Timeframe grafico">
 __TIMEFRAME_BUTTONS__
 </nav>
@@ -752,12 +818,17 @@ try {
   sync(chart,volumeChart);sync(volumeChart,chart);
   // Timeframe buttons navigate to independent Kraken OHLC series.
   // Pan and zoom remain native gestures of the chart.
+  function formatVolume(value){
+    if(value === 0) return '0';
+    const result=new Intl.NumberFormat('it-IT',{maximumSignificantDigits:12}).format(value);
+    // Preserve a small positive value even on runtimes with coarse ICU output.
+    return result === '0' && value > 0 ? value.toExponential(8) : result;
+  }
   function show(row){
-    const fmtVolume=new Intl.NumberFormat('it-IT',{maximumFractionDigits:6});
     const time=new Date(row.time*1000).toLocaleString('it-IT',{timeZone:'UTC'});
     stats.textContent=time+' UTC · O '+priceText.format(row.open)+' · H '+priceText.format(row.high)+
      ' · L '+priceText.format(row.low)+' · C '+priceText.format(row.close)+
-     ' '+quote+' · Vol '+fmtVolume.format(row.volume)+' '+__TOKEN_JS__;
+     ' '+quote+' · Vol '+formatVolume(row.volume)+' '+__TOKEN_JS__;
   }
   show(rows[rows.length-1]);
   const byTime=new Map(rows.map(v=>[v.time,v]));
@@ -786,6 +857,9 @@ try {
                 .replace("cinque decimali", "__DECIMALS__ decimali")
                 .replace("5 decimali", "__DECIMALS__ decimali"))
     return (template.replace("__BARS__", candle_json)
+             .replace("__HOME_URL__", html.escape(home_url, quote=True))
+             .replace("__FRESHNESS__", freshness_text)
+             .replace("__FRESH_CLASS__", "current" if fresh_state == "AGGIORNATO" else "warning")
             .replace("__TECHNICAL__", technical_json)
             .replace("__OBSERVED__", observed).replace("__CLOSED__", closed)
             .replace("__NOTICE__", html.escape(notice))

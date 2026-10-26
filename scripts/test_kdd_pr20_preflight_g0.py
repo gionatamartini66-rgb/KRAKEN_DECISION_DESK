@@ -30,7 +30,8 @@ class G0PreflightTests(unittest.TestCase):
             (self.live/f).write_text('# synthetic only\n')
         (self.live/'config.json').write_text('{"synthetic":true}')
         (self.live/'portafoglio.json').write_text(json.dumps({'t0_id':'T0_2026-10-19_0800_KRAKEN_PRO'}))
-        (self.live/'README.md').write_text('<!-- CHECKPOINT_SORGENTI_SHA256: '+'0'*64+' -->\n')
+        (self.live/'README.md').write_text(
+            '<!-- CHECKPOINT_SORGENTI_SHA256: '+p.source_fingerprint(self.live)+' -->\n')
         (self.live/'vendor').mkdir()
         for f in p.ASSETS:
             (self.live/'vendor'/f).write_text('synthetic')
@@ -211,6 +212,50 @@ class G0PreflightTests(unittest.TestCase):
              mock.patch('pathlib.Path.home',return_value=self.root), \
              contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(p.Stop,'live source/README/fixture changed'):
+                p.preflight(self.mirror,self.live)
+
+    def test_rt01_live_zero_marker_stops_before_any_staging_or_tests(self):
+        # Original Red Team counterexample: syntactically valid but false SHA.
+        (self.live/'README.md').write_text(
+            '<!-- CHECKPOINT_SORGENTI_SHA256: '+'0'*64+' -->\n')
+        with mock.patch.object(p, 'validate_git_mirror'), \
+             mock.patch.object(p, 'fetch_pinned') as fetch, \
+             mock.patch.object(p, 'stage_private') as stage, \
+             mock.patch.object(p, 'execute_tests') as tests, \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(p.Stop, 'LIVE source checkpoint MISMATCH'):
+                p.preflight(self.mirror, self.live)
+        fetch.assert_not_called()
+        stage.assert_not_called()
+        tests.assert_not_called()
+        self.assertIn('0'*64, (self.live/'README.md').read_text())
+
+    def test_rt01_staging_checkpoint_is_independently_verified(self):
+        with tempfile.TemporaryDirectory() as td:
+            stage = Path(td)
+            with mock.patch.object(p, 'get_blob', return_value=b'# approved source\n'), \
+                 mock.patch.dict('os.environ', {p.TRUST_PROOF:'b'*24}, clear=True):
+                p.stage_private(self.live, stage, self.mirror)
+            p.verify_source_checkpoint(self.live, label='LIVE')
+            p.verify_source_checkpoint(stage, label='STAGING')
+            (stage/'README.md').write_text(
+                '<!-- CHECKPOINT_SORGENTI_SHA256: '+'0'*64+' -->\n')
+            with self.assertRaisesRegex(p.Stop, 'STAGING source checkpoint MISMATCH'):
+                p.verify_source_checkpoint(stage, label='STAGING')
+            p.verify_source_checkpoint(self.live, label='LIVE')
+
+    def test_rt01_monitors_vendor_assets_as_well_as_original_t0(self):
+        asset = self.live/'vendor'/p.ASSETS[0]
+        def alter(_stage):
+            asset.write_text('synthetic vendor corruption')
+        with mock.patch.object(p, 'validate_git_mirror'), \
+             mock.patch.object(p, 'fetch_pinned'), \
+             mock.patch.object(p, 'execute_tests', side_effect=alter), \
+             mock.patch.object(p, 'stage_private'), \
+             mock.patch.dict('os.environ', {p.TRUST_PROOF:'a'*24},clear=True), \
+             mock.patch('pathlib.Path.home', return_value=self.root), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(p.Stop, 'live source/README/fixture changed'):
                 p.preflight(self.mirror,self.live)
 
 if __name__=='__main__':

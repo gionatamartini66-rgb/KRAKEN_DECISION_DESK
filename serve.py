@@ -172,7 +172,7 @@ def load_sui_comparison(public_kraken=None, now=None):
     return grafico_4h.compare_timeframes(frames, now=now)
 
 
-def render_sui_comparison(report, *, pair_key=None):
+def render_sui_comparison(report, *, pair_key=None, home_url="/"):
     """Escaped server-side HTML. No JavaScript or private assets."""
     def esc(value):
         return html.escape(str(value), quote=True)
@@ -240,6 +240,8 @@ def render_sui_comparison(report, *, pair_key=None):
     }
     picture = quadro_labels[report["quadro"]]
     # Static read-only HTML; values are local market observations, not trades.
+    if home_url not in ("/", "http://127.0.0.1:8765/"):
+        raise ValueError("Destinazione non valida")
     return ("""<!doctype html><html lang="it"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>KDD | Confronto __PAIR__ multitimeframe</title>
@@ -252,7 +254,7 @@ border-radius:12px;margin:12px 0;padding:14px}
 .status{color:#85e6bc}.warning{color:#ffd48a}
 .note{color:#b3c1d8;font-size:.92rem}
 strong{color:#dce9ff}</style></head><body>
-<p><a href="/">← Cruscotto</a> · <a href="/mercati/spot">Seleziona coppia</a> · <a href="__GRAPH_URL__">Grafico 4H</a></p>
+<p><a href="__HOME_URL__">← Cruscotto</a> · <a href="/mercati/spot">Seleziona coppia</a> · <a href="__GRAPH_URL__">Grafico 4H</a></p>
 <h1>🔎 KDD · Confronto __PAIR__</h1>
 <p>15m · 1H · 4H · 1D — candele Kraken Spot CHIUSE</p>
 <section class="top"><h2>Quadro descrittivo: __STATE__</h2>
@@ -267,8 +269,9 @@ Nessuna operazione, nessun segnale BUY/SELL.</p>
 <p class="note">Il confronto interroga Kraken Spot pubblico per tutti e quattro
 gli intervalli a ogni apertura. Il grafico è una vista separata: controlla
 la fonte e l'ora riportate sulla sua pagina, che possono differire.</p>
-<p><a href="/">← Torna al cruscotto</a></p>
+<p><a href="__HOME_URL__">← Torna al cruscotto</a></p>
 </body></html>"""
+        .replace("__HOME_URL__", esc(home_url))
         .replace("__STATE__", esc(report["stato"]))
         .replace("__PICTURE__", esc(picture))
         .replace("__WARNING__", esc(report["avvertenza"]))
@@ -313,6 +316,19 @@ def spot_catalog(public_kraken=None):
                     "altname": altname, "eligibilita_conto": "NON_VERIFICATA"}
     if not out:
         raise KrakenMarketDataUnavailable("Nessuna coppia online verificabile")
+    # A REST response alias must resolve to exactly one market in the
+    # *whole* catalog, including non-online REST keys. A synthetic collision
+    # must never let candles of B be labelled with A's selected pair.
+    owner = {}
+    for key, meta in out.items():
+        for symbol in (key, meta["altname"]):
+            if symbol is None:
+                continue
+            if symbol in raw and symbol != key:
+                raise KrakenMarketDataUnavailable("Identità Kraken REST/alias ambigua")
+            previous = owner.setdefault(symbol, key)
+            if previous != key:
+                raise KrakenMarketDataUnavailable("Identità Kraken alias ambigua")
     return out
 
 
@@ -415,10 +431,11 @@ def spot_observed_candidates(catalog, snapshot):
     return found
 
 
-def spot_priority_panel(catalog, snapshot, *, now=None):
+def spot_priority_panel(catalog, snapshot, *, now=None, preview=False):
     """Shortlist from last completed KDD scan, with observation date and direct links."""
     esc = lambda value: html.escape(str(value), quote=True)
     rows = spot_observed_candidates(catalog, snapshot)
+    home = "http://127.0.0.1:8765/" if preview else "/"
     date = snapshot.get("rilevazione_utc") if isinstance(snapshot, dict) else None
     now = now or dt.datetime.now(dt.timezone.utc)
     stale = True
@@ -438,8 +455,8 @@ def spot_priority_panel(catalog, snapshot, *, now=None):
         date_info = "Rilevazione KDD non disponibile"
     if not rows:
         return ('<section class="priority"><h2>Segnalazioni già individuate da KDD</h2>'
-                '<p>Nessun caso dell’ultima analisi disponibile in questa anteprima. '
-                'Il cruscotto completo conserva posizioni, segnalazioni e piani; '
+                '<p>Nessun caso nell’ultima selezione KDD disponibile qui. '
+                'Posizioni, segnalazioni e piani restano nel cruscotto originale; '
                 'il catalogo sotto resta esplorabile.</p></section>')
     cards = []
     for c in rows:
@@ -459,7 +476,7 @@ def spot_priority_panel(catalog, snapshot, *, now=None):
     heading = ("Segnalazioni precedenti: dati da aggiornare" if stale
                else "Da esaminare: selezione KDD")
     link = ('<p class="warning">Queste segnalazioni sono vecchie. '
-            '<a href="http://127.0.0.1:8765/">Apri KDD completo e aggiorna</a>. '
+            '<a href="' + html.escape(home, quote=True) + '">Apri KDD completo e aggiorna</a>. '
             'I grafici si aggiornano quando li apri, ma non aggiornano lo scanner.</p>'
             if stale else "")
     return ('<section class="priority"><h2>' + heading + '</h2>'
@@ -469,14 +486,19 @@ def spot_priority_panel(catalog, snapshot, *, now=None):
             + link + "".join(cards) + '</section>')
 
 
-def spot_selector(catalog, snapshot=None, *, now=None):
+def spot_selector(catalog, snapshot=None, *, now=None, preview=None):
     """Casi già selezionati da KDD, poi ricerca completa di qualunque coppia."""
     if snapshot is None:
         try:
             snapshot = desk.load("ultima_rilevazione.json", {})
         except (OSError, ValueError, TypeError):
             snapshot = {}
-    priority = spot_priority_panel(catalog, snapshot, now=now)
+    if preview is None:
+        preview = PORT != 8765
+    priority = spot_priority_panel(catalog, snapshot, now=now, preview=preview)
+    home = "http://127.0.0.1:8765/" if preview else "/"
+    intro = ("Questa è una preview pubblica isolata, senza posizioni, piani o aggiornamento."
+             if preview else "Questa sezione appartiene al KDD patrimoniale originale.")
     options = "".join(
         '<option value="' + html.escape(p["pair_key"], quote=True) + '">' +
         html.escape(spot_friendly_label(p["pair"])) + ' · ' + html.escape(p["pair_key"]) + '</option>'
@@ -497,11 +519,11 @@ form{background:#18263c;padding:16px;border-radius:12px}
 select,input,button{font:inherit;padding:10px;margin:10px 0;width:100%}
 button{background:#80cbff;border:0;border-radius:9px;color:#06162b;font-weight:bold}
 p{line-height:1.5}</style></head><body>
-<p><a href="http://127.0.0.1:8765/">← KDD completo (porta 8765)</a></p>
+<p><a href="__HOME_URL__">← Torna al cruscotto KDD</a></p>
 <h1>Mercati Kraken Spot</h1>
-<p class="context"><b>Questa è la sezione di consultazione, non il KDD completo.</b>
-Per aggiornare i prezzi, le posizioni e le segnalazioni, usa
-<a href="http://127.0.0.1:8765/">il cruscotto KDD e il pulsante Aggiorna</a>.
+<p class="context"><b>__INTRO__</b>
+Per aggiornare prezzi, posizioni e segnalazioni, usa
+<a href="__HOME_URL__">il cruscotto KDD e il pulsante Aggiorna</a>.
 Qui i grafici interrogano Kraken quando li apri; il catalogo non rinnova lo scanner.</p>
 <p>BTC è chiamato XBT da Kraken: BTC/USDC e XBT/USDC sono la stessa coppia.
 Catalogo pubblico AssetPairs online; la negoziabilità per il conto italiano
@@ -552,7 +574,9 @@ Solo candele chiuse, niente valori inventati.</p>
   rebuild();
 })();
 </script>
-</body></html>""".replace("__OPTIONS__", options).replace("__PRIORITY__", priority))
+</body></html>""".replace("__OPTIONS__", options).replace("__PRIORITY__", priority)
+            .replace("__HOME_URL__", html.escape(home, quote=True))
+            .replace("__INTRO__", html.escape(intro, quote=True)))
 
 
 def load_spot_chart(pair_key, timeframe, *, public_kraken=None, now=None):
@@ -572,7 +596,8 @@ def load_spot_chart(pair_key, timeframe, *, public_kraken=None, now=None):
             series["display_pair"] = shown + "/" + meta["quote"]
             series["display_token"] = shown
             series["source"] += " · Kraken usa " + meta["base"] + " per " + shown
-        return grafico_4h.page_from_data(series)
+        home = "http://127.0.0.1:8765/" if PORT != 8765 else "/"
+        return grafico_4h.page_from_data(series, now=now, home_url=home)
     except (ValueError, TypeError, KeyError, IndexError) as exc:
         raise KrakenMarketDataUnavailable("OHLC o grafico pubblico non verificabile") from exc
 
@@ -650,7 +675,9 @@ class Handler(BaseHTTPRequestHandler):
                     page = load_spot_chart(pair_key, tf[0])
                 else:
                     summary = load_spot_comparison(pair_key)
-                    page = render_sui_comparison(summary, pair_key=pair_key)
+                    home = "http://127.0.0.1:8765/" if PORT != 8765 else "/"
+                    page = render_sui_comparison(summary, pair_key=pair_key,
+                                                 home_url=home)
                 self.send_html(200, page)
             except ValueError:
                 self.send_html(400, "<h1>Coppia Kraken non valida o non online</h1>")

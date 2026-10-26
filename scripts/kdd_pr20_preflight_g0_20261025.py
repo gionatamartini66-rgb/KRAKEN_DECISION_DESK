@@ -93,6 +93,21 @@ def source_fingerprint(root):
     return h.hexdigest()
 
 
+def verify_source_checkpoint(root, *, label):
+    """Authenticate the existing marker against the existing file bytes.
+
+    This is a consistency check, NOT a cryptographic attestation of authorship.
+    Never synthesize a live checkpoint or derive a historical T0 proof here.
+    """
+    text = (root / "README.md").read_text(encoding="utf-8")
+    markers = READ_TAG.findall(text)
+    if len(markers) != 1:
+        raise Stop(label + " README checkpoint marker missing or duplicated")
+    actual = "<!-- CHECKPOINT_SORGENTI_SHA256: " + source_fingerprint(root) + " -->"
+    if markers[0] != actual:
+        raise Stop(label + " source checkpoint MISMATCH; originals unchanged")
+
+
 def git(repo, *args, timeout=60):
     return run(["git", "-C", str(repo), *args], timeout=timeout)
 
@@ -166,8 +181,8 @@ def validate_local(live):
     for name in ASSETS:
         private_file(live / "vendor" / name)
     # Do not inspect or print account contents here.
-    if len(READ_TAG.findall((live / "README.md").read_text(encoding="utf-8"))) != 1:
-        raise Stop("live README has no unique checkpoint marker")
+    # Crucial: validate LIVE before deriving the distinct staged checkpoint.
+    verify_source_checkpoint(live, label="LIVE")
 
 
 def has_independent_proof():
@@ -239,6 +254,7 @@ def stage_private(live, stage, mirror):
                            source_fingerprint(stage) + " -->", original)
     (stage / "README.md").write_text(aligned, encoding="utf-8")
     (stage / "README.md").chmod(0o600)
+    verify_source_checkpoint(stage, label="STAGING")
     # A run must never start when a required historical T0 proof is absent.
     if not has_independent_proof():
         raise Stop("historical independent T0 attestation missing; no tests run")
@@ -308,6 +324,7 @@ def preflight(mirror, live):
     # Snapshot limited to existing executable+config/README files. No values printed.
     targets = [p for p in live.glob("*.py") if p.is_file()]
     targets += [live / n for n in ("README.md", "config.json", "portafoglio.json")]
+    targets += [live / "vendor" / n for n in ASSETS]
     targets.append(original_t0_path(live))
     before = {str(p):sha(p) for p in targets}
     try:

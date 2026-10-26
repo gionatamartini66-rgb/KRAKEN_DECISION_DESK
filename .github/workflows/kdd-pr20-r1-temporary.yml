@@ -1,0 +1,22 @@
+name: KDD PR20 R1 isolated regression temporary
+on:
+  push:
+    branches:
+      - experiments/kdd-any-spot-g2-20261024
+jobs:
+  offline-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compile approved Python only
+        run: python -m py_compile serve.py grafico_4h.py test_decision_desk.py scripts/kdd_pr20_preflight_g0_20261025.py scripts/test_kdd_pr20_preflight_g0.py scripts/kdd_pr20_preview_samsung_g0.py scripts/test_kdd_pr20_preview_g0.py
+      - name: Canonical suite (private-phone checks may SKIP)
+        run: python -m unittest -q test_decision_desk
+      - name: Private preflight and preview synthetic suites
+        run: python -m unittest -q scripts.test_kdd_pr20_preflight_g0 scripts.test_kdd_pr20_preview_g0
