@@ -287,6 +287,7 @@ def summarize_timeframe(data, now=None):
     timing = temporal_consistency(data, now=now)
     seconds = timing["seconds"]
     close_end = records[-1]["time"] + seconds
+    last = records[-1]
     fresh = timing["fresh"]
     indicator20 = ema_points(records, 20)[-1]["value"]
     indicator50 = ema_points(records, 50)[-1]["value"]

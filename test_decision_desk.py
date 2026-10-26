@@ -2923,10 +2923,12 @@ class AnyKrakenSpotTests(unittest.TestCase):
         points50=g.ema_points(frame["candles"],50)
         self.assertTrue(points20 and points50)
         # Red Team R1 counterexample: distinct EMA20 values at <12th decimal.
-        self.assertTrue(any(
-            a["value"]!=b["value"] and
-            f'{a["value"]:.12f}'==f'{b["value"]:.12f}'
-            for a,b in zip(points20,points20[1:])))
+        # Collisions may occur on alternate EMA samples, not necessarily
+        # on adjacent points of an oscillating sequence.
+        buckets={}
+        for point in points20:
+            buckets.setdefault(f'{point["value"]:.12f}',set()).add(point["value"])
+        self.assertTrue(any(len(values)>1 for values in buckets.values()))
         snapshot=json.dumps(frame["candles"],sort_keys=True)
         page=g.page_from_data(frame,now=self.now)
         self.assertIn('precision:12,minMove:0.000000000001',page)
