@@ -3246,4 +3246,67 @@ console.log(JSON.stringify(report));
                       g.page_from_data(old,now=self.now))
 
 
+    def test_r4_confluence_real_dom_negative_and_opposite_signs(self):
+        """Counterexample must run actual generated HTML/JS, not a copied formula."""
+        from unittest import mock
+        frame=self._r3_pivot_frame("4H","DOT/GBP")
+        stamp=frame["candles"][-1]["time"]
+        technical={
+            "ema20":[{"time":stamp,"value":1e-8}],
+            "ema50":[{"time":stamp,"value":-1.5e-8}],
+            "structure":{
+                "supports":[{"price":-4e-8,"touches":2,"last_swing_time":0}],
+                "resistances":[]},
+            "pivots":{
+                "reference_day_utc":"2026-10-26","P":2.25e-8,
+                "S1":-3e-8,"S2":-5e-8,"S3":-7e-8,
+                "R1":6e-8,"R2":8e-8,"R3":1e-7}
+        }
+        with mock.patch.object(g,"technical_from_candles",return_value=technical):
+            page=g.page_from_data(frame,now=self.now)
+        report=self._r3_render_actual_javascript(page)
+        self.assertIn("Nessuna vicinanza multi-fonte entro 0,5%",report["near"],
+                      "False grouping of negative or cross-sign levels")
+        # The rejected levels remain visible with their exact signed values
+        # in the independent levels table; only confluence grouping changes.
+        rows={row[0]:row[1] for row in report["table"] if len(row)==3}
+        for name in ("EMA50","S1","S2","S3"):
+            self.assertIn(name,rows)
+            self.assertTrue(rows[name].startswith("-"),(name,rows[name]))
+        self.assertIn("EMA20",rows)
+
+    def test_r4_confluence_real_dom_positive_threshold_and_overflow(self):
+        """Positive near/far and huge values must use the full browser DOM path."""
+        from unittest import mock
+        frame=self._r3_pivot_frame("4H","ADA/USDT")
+        stamp=frame["candles"][-1]["time"]
+
+        def check(pivot_price,ema_price):
+            technical={
+                "ema20":[{"time":stamp,"value":ema_price}],
+                "ema50":[],
+                "structure":{"supports":[],"resistances":[]},
+                "pivots":{
+                    "reference_day_utc":"2026-10-26","P":pivot_price,
+                    "S1":-10.0,"S2":-20.0,"S3":-30.0,
+                    "R1":40.0,"R2":80.0,"R3":160.0}
+            }
+            with mock.patch.object(g,"technical_from_candles",return_value=technical):
+                page=g.page_from_data(frame,now=self.now)
+            return self._r3_render_actual_javascript(page)
+
+        close=check(1.0049e-8,1e-8)
+        self.assertIn("Vicinanze entro 0,5% (solo descrittive):",close["near"])
+        self.assertIn("EMA20",close["near"])
+        self.assertIn("P Pivot",close["near"])
+        far=check(1.0051e-8,1e-8)
+        self.assertIn("Nessuna vicinanza multi-fonte",far["near"],
+                      "A spread above 0.5% must be rejected")
+        # Old code computes 0.5*(1e308+1.25e308)==Infinity and reports a
+        # false 0% difference. A ratio avoids the overflowing sum.
+        huge_far=check(1.25e308,1e308)
+        self.assertIn("Nessuna vicinanza multi-fonte",huge_far["near"])
+
+
+
 if __name__=='__main__': unittest.main(verbosity=2)
