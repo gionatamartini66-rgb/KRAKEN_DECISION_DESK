@@ -1,0 +1,32 @@
+name: KDD PR20 Red Team bridge confluence regression
+on:
+  push:
+    branches: [experiments/kdd-any-spot-g2-20261024]
+permissions:
+  contents: read
+jobs:
+  offline-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Tool versions
+        run: |
+          python --version
+          node --version
+      - name: Red Team 100/100.4/100.8 full generated DOM
+        run: |
+          python -B -m unittest -v \
+            test_decision_desk.AnyKrakenSpotTests.test_r5_redteam_bridged_cross_family_survives_same_family \
+            test_decision_desk.AnyKrakenSpotTests.test_r5_overlapping_cross_family_windows_do_not_merge_extrema
+      - name: Canonical test suite
+        run: python -B -m unittest -v test_decision_desk
+      - name: Public preflight and preview suites
+        run: |
+          python -B scripts/test_kdd_pr20_preflight_g0.py
+          python -B scripts/test_kdd_pr20_preview_g0.py
+      - name: Source compile
+        run: python -B -m py_compile grafico_4h.py serve.py test_decision_desk.py
