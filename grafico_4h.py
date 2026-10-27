@@ -851,19 +851,23 @@ try {
   }))).filter(item=>Number.isFinite(item.price) && item.price>0)
      .sort((a,b)=>a.price-b.price);
   const maxConfluenceRatio=(1+0.005/2)/(1-0.005/2);
-  const groups=[];
-  let group=[];
-  for(const item of near){
-    if(group.length===0 ||
-        item.price/group[0].price<=maxConfluenceRatio){
-      group.push(item);
-    }else{
-      groups.push(group);group=[item];
-    }
+  // Finestrelle sovrapposte: una coppia fra famiglie differenti entro soglia
+  // non deve sparire per l'inserimento di livelli della stessa famiglia.
+  // Ogni finestra mostrata rispetta la soglia tra il minimo e il massimo.
+  // Scarta solo finestre già contenute in una finestra valida precedente.
+  const windows=[];
+  for(let first=0;first<near.length-1;first++){
+    let end=first+1;
+    while(end<near.length &&
+          near[end].price/near[first].price<=maxConfluenceRatio) end++;
+    const items=near.slice(first,end);
+    if(items.length<2 || new Set(items.map(x=>x.family)).size<2)
+      continue;
+    if(windows.length && windows[windows.length-1].end>=end-1)
+      continue;
+    windows.push({end:end-1,items});
   }
-  if(group.length)groups.push(group);
-  const confluences=groups.filter(items=>items.length>=2 &&
-    new Set(items.map(x=>x.family)).size>=2);
+  const confluences=windows.map(window=>window.items);
   confluences.sort((a,b)=>Math.abs(a[0].price-lastClose)-
                          Math.abs(b[0].price-lastClose));
   const strip=document.getElementById('nearby-summary');
