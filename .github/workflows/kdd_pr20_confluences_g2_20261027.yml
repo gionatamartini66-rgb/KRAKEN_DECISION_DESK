@@ -29,5 +29,24 @@ jobs:
         run: |
           python -B scripts/test_kdd_pr20_preflight_g0.py
           python -B scripts/test_kdd_pr20_preview_g0.py
+      - name: Baseline R3 must fail these exact DOM regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin 4c969cd13da00a6585db13638cda44ce77324c17
+          git show 4c969cd13da00a6585db13638cda44ce77324c17:grafico_4h.py > grafico_4h.py
+          trap 'git checkout -- grafico_4h.py' EXIT
+          set +e
+          python -B -m unittest -v \
+            test_decision_desk.AnyKrakenSpotTests.test_r4_confluence_real_dom_negative_and_opposite_signs \
+            test_decision_desk.AnyKrakenSpotTests.test_r4_confluence_real_dom_positive_threshold_and_overflow \
+            > /tmp/kdd-red-baseline.log 2>&1
+          result=$?
+          set -e
+          cat /tmp/kdd-red-baseline.log
+          if [ "$result" -eq 0 ]; then echo "STOP: R3 baseline unexpectedly passed"; exit 1; fi
+          grep -Fq "False grouping of negative or cross-sign levels" /tmp/kdd-red-baseline.log
+          grep -Fq "Ran 2 tests" /tmp/kdd-red-baseline.log
+          echo "BASELINE_RED_REPRODUCED"
       - name: Source compile
         run: python -B -m py_compile grafico_4h.py serve.py test_decision_desk.py
