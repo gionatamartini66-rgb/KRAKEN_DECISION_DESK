@@ -843,14 +843,31 @@ try {
   // Confluenza = sola vicinanza numerica; non predice rimbalzi.
   // Per lo Spot sono raggruppabili solo prezzi positivi e finiti.
   // Livelli derivati <=0 restano nella tabella, non nel riepilogo.
-  // Distanza massima: 0,5% del punto medio fra gli estremi del gruppo.
-  // Il rapporto fra prezzi evita overflow per livelli molto grandi
-  // e conserva i prezzi minimi, senza arrotondamenti artificiali.
+  // Soglia inclusiva ESATTA: 2*(hi-lo)/(hi+lo) <= 0,005
+  // equivale a 399*hi <= 401*lo per prezzi positivi.
+  // I prodotti sono confrontati come interi binari esatti delle double
+  // ricevute: niente errori al limite, overflow o underflow numerico.
+  const ratioBits=new DataView(new ArrayBuffer(8));
+  function binaryPositive(value){
+    ratioBits.setFloat64(0,value,false);
+    const raw=ratioBits.getBigUint64(0,false);
+    const exp=Number((raw>>52n)&2047n);
+    const fraction=raw&((1n<<52n)-1n);
+    return {mantissa:fraction+(exp?(1n<<52n):0n),
+      shift:exp?exp-1075:-1074};
+  }
+  function withinHalfPercent(lo,hi){
+    if(!(lo>0 && hi>=lo && Number.isFinite(lo) &&
+         Number.isFinite(hi)))return false;
+    const left=binaryPositive(lo),right=binaryPositive(hi);
+    const base=Math.min(left.shift,right.shift);
+    return 399n*(right.mantissa<<BigInt(right.shift-base)) <=
+           401n*(left.mantissa<<BigInt(left.shift-base));
+  }
   const near=categories.flatMap(cat=>cat.items.map(item=>({
     ...item,family:cat.family
   }))).filter(item=>Number.isFinite(item.price) && item.price>0)
      .sort((a,b)=>a.price-b.price);
-  const maxConfluenceRatio=(1+0.005/2)/(1-0.005/2);
   // Finestrelle sovrapposte: una coppia fra famiglie differenti entro soglia
   // non deve sparire per l'inserimento di livelli della stessa famiglia.
   // Ogni finestra mostrata rispetta la soglia tra il minimo e il massimo.
@@ -859,7 +876,7 @@ try {
   for(let first=0;first<near.length-1;first++){
     let end=first+1;
     while(end<near.length &&
-          near[end].price/near[first].price<=maxConfluenceRatio) end++;
+          withinHalfPercent(near[first].price,near[end].price)) end++;
     const items=near.slice(first,end);
     if(items.length<2 || new Set(items.map(x=>x.family)).size<2)
       continue;
@@ -876,8 +893,12 @@ try {
       priceText.format(Math.min(...items.map(x=>x.price)))+'–'+
       priceText.format(Math.max(...items.map(x=>x.price)))+' '+quote+' ('+
       items.map(x=>x.label+' '+x.family).join(', ')+')');
+    const coverage=confluences.length>shown.length
+      ?' Mostrate '+shown.length+' di '+confluences.length+
+        ' finestre; le altre non sono elencate.'
+      :'';
     strip.textContent='Vicinanze entro 0,5% (solo descrittive): '+
-      shown.join(' · ')+'. Nessuna conferma di tenuta o breakout.';
+      shown.join(' · ')+'.'+coverage+' Nessuna conferma di tenuta o breakout.';
   }else{
     strip.textContent='Nessuna vicinanza multi-fonte entro 0,5% '+
       'fra i livelli osservati. Non equivale a mancanza di opportunità.';
