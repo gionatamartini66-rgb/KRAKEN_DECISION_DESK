@@ -840,16 +840,22 @@ try {
     }
     panel.appendChild(block);
   }
-  // Confluenza = vicinanza numerica, NON maggior probabilità di rimbalzo.
-  // Il gruppo deve stare per intero entro 0,5% del valore mediano.
+  // Confluenza = sola vicinanza numerica; non predice rimbalzi.
+  // Per lo Spot sono raggruppabili solo prezzi positivi e finiti.
+  // Livelli derivati <=0 restano nella tabella, non nel riepilogo.
+  // Distanza massima: 0,5% del punto medio fra gli estremi del gruppo.
+  // Il rapporto fra prezzi evita overflow per livelli molto grandi
+  // e conserva i prezzi minimi, senza arrotondamenti artificiali.
   const near=categories.flatMap(cat=>cat.items.map(item=>({
     ...item,family:cat.family
-  }))).sort((a,b)=>a.price-b.price);
+  }))).filter(item=>Number.isFinite(item.price) && item.price>0)
+     .sort((a,b)=>a.price-b.price);
+  const maxConfluenceRatio=(1+0.005/2)/(1-0.005/2);
   const groups=[];
   let group=[];
   for(const item of near){
-    if(group.length===0 || (item.price-group[0].price)/
-        (0.5*(item.price+group[0].price))<=0.005){
+    if(group.length===0 ||
+        item.price/group[0].price<=maxConfluenceRatio){
       group.push(item);
     }else{
       groups.push(group);group=[item];
