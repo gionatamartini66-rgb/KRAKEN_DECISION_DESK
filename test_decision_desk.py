@@ -666,7 +666,9 @@ class DeskTests(unittest.TestCase):
         self.assertIn("tech.structure.supports.slice(0,2)",page)
         self.assertIn("tech.structure.resistances.slice(0,2)",page)
         self.assertIn("pivotNames.map(",page)
-        self.assertIn("0.005",page)
+        self.assertIn("function withinHalfPercent(lo,hi)",page)
+        self.assertIn("399n*(right.mantissa",page)
+        self.assertIn("401n*(left.mantissa",page)
         self.assertIn("Nessuna conferma di tenuta o breakout",page)
         self.assertNotIn("readonly.json",page)
 
@@ -839,6 +841,8 @@ class DeskTests(unittest.TestCase):
                     "volume":500.0 if k==64 else 250.0})
             frames[label] = {"timeframe":label,"interval_seconds":seconds,
                 "observed_utc":now.isoformat(timespec="seconds"),
+                "closed_at_utc":dt.datetime.fromtimestamp(
+                    expected_end,dt.timezone.utc).isoformat(timespec="seconds"),
                 "source":"Kraken Spot test fixture",
                 "candles":bars}
         return frames
@@ -865,6 +869,10 @@ class DeskTests(unittest.TestCase):
         now=dt.datetime(2026,10,21,7,42,tzinfo=dt.timezone.utc)
         data=self._mtf_fixture(now)
         data["4H"]["candles"]=data["4H"]["candles"][:-1]
+        # The missing last bar is a coherent old dataset, not contradictory metadata.
+        data["4H"]["closed_at_utc"]=dt.datetime.fromtimestamp(
+            data["4H"]["candles"][-1]["time"]+14400,
+            dt.timezone.utc).isoformat(timespec="seconds")
         stale=g.compare_timeframes(data,now=now)
         self.assertEqual(stale["stato"],"PARZIALE")
         self.assertEqual(stale["quadro"],"CONFRONTO_INCOMPLETO")
@@ -937,7 +945,8 @@ class DeskTests(unittest.TestCase):
         self.assertNotIn("readonly.json",page)
         self.assertNotIn("necessario per il 4H",page)
         dashboard=serve.with_controls("<html><h2>1 · Decisioni e posizioni</h2></html>")
-        self.assertIn("href='/analisi/sui-mtf'",dashboard)
+        self.assertIn("href='/mercati/spot'",dashboard)
+        self.assertNotIn("href='/analisi/sui-mtf'",dashboard)
 
     def test_mtf_live_4h_missing_close_marks_stale_without_fallback(self):
         import serve
@@ -1004,8 +1013,9 @@ class DeskTests(unittest.TestCase):
 
     def test_graph_is_linked_from_live_mobile_dashboard_not_promised_full(self):
         html=serve.with_controls("<html><h2>1 · Decisioni e posizioni</h2></html>")
-        self.assertIn('href=\'/grafico/sui-4h\'',html)
-        self.assertIn("Grafico SUI/EUR · 15m / 1H / 4H / 1D",html)
+        self.assertIn('href=\'/mercati/spot\'',html)
+        self.assertNotIn('href=\'/grafico/sui-4h\'',html)
+        self.assertIn("Seleziona coppia Kraken Spot · grafici 15m / 1H / 4H / 1D",html)
         self.assertNotIn("EMA 20",html)
 
     def test_4h_closed_candles_without_last_in_progress(self):
@@ -1262,7 +1272,11 @@ class DeskTests(unittest.TestCase):
         new['token']='HBAR';new['coppia']='HBAR/USD';new['azione']='Monitoraggio HBAR'
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
-            with unittest.mock.patch.object(vp,'PLANS',root/'plans'), \
+            # Synthetic 18/10 plans must not age out of Kraken's 720-bar window
+            # as real calendar days pass. Keep the production expiry logic intact.
+            with unittest.mock.patch.object(vp.desk,'NOW',
+                    return_value=dt.datetime(2026,10,18,8,40,tzinfo=dt.timezone.utc)), \
+                 unittest.mock.patch.object(vp,'PLANS',root/'plans'), \
                  unittest.mock.patch.object(vp,'LOG',root/'observations.jsonl'), \
                  unittest.mock.patch.object(pg,'load',return_value=new), \
                  unittest.mock.patch.object(vp.desk,'save') as store, \
@@ -2344,5 +2358,1049 @@ class DeskTests(unittest.TestCase):
                               {'posizioni':[{'token':'BTC','quantita':None,'costo_medio_eur':None}]},{},{},[])
         self.assertEqual(report['posizioni'],[])
         self.assertEqual(report['totale_stimato_eur'],0)
+
+# Copertura G2: coppie arbitrarie senza preferenza SUI/EUR.
+import grafico_4h as g
+from unittest import mock
+
+class AnyKrakenSpotTests(unittest.TestCase):
+    def setUp(self):
+        self.now = dt.datetime(2026, 10, 24, 20, 42, tzinfo=dt.timezone.utc)
+        self.pairs = {
+            "ADAUSDT": {"wsname": "ADA/USDT", "status": "online"},
+            "XXBTZEUR": {"wsname": "XBT/EUR", "status": "online"},
+            "SUIPERP": {"wsname": "SUI/EUR", "status": "cancel_only"},
+            "ETHUSD.d": {"wsname": "ETH/USD", "status": "online"},
+            "BAD": {"wsname": "<svg/onload=alert(1)>/EUR", "status": "online"},
+            "DOTGBP": {"wsname": "DOT/GBP", "status": "online"},
+        }
+        self.calls = []
+
+    def fake(self, endpoint, **params):
+        self.calls.append((endpoint, dict(params)))
+        if endpoint == "AssetPairs":
+            self.assertFalse(params)
+            return self.pairs
+        self.assertEqual(endpoint, "OHLC")
+        self.assertIn(params["pair"], ("ADAUSDT", "DOTGBP", "XXBTZEUR"))
+        interval = params["interval"] * 60
+        current = (int(self.now.timestamp()) // interval) * interval
+        raw = []
+        for i in range(81):
+            close = 1 + .005*i
+            raw.append([current - (80-i)*interval, str(close),
+                        str(close+.015), str(close-.015), str(close),
+                        "0", "125", 1])
+        return {params["pair"]: raw, "last": current}
+
+    def test_market_catalog_includes_non_eur_and_does_not_force_sui(self):
+        catalog = serve.spot_catalog(self.fake)
+        self.assertEqual(set(catalog), {"ADAUSDT", "XXBTZEUR", "DOTGBP"})
+        self.assertEqual(catalog["ADAUSDT"]["quote"], "USDT")
+        self.assertEqual(catalog["DOTGBP"]["quote"], "GBP")
+        self.assertEqual(catalog["ADAUSDT"]["eligibilita_conto"], "NON_VERIFICATA")
+        page = serve.spot_selector(catalog)
+        self.assertIn("ADA/USDT", page)
+        self.assertIn("DOT/GBP", page)
+        self.assertIn('value=""', page)
+        self.assertNotIn('value="SUIEUR"', page)
+        self.assertNotIn("<svg", page)
+        self.assertNotIn("portafoglio", page.lower())
+
+    def test_invalid_nononline_and_injection_pair_are_refused_before_ohlc(self):
+        for key in ("SUIEUR", "SUIPERP", "BAD", "../api", "", "<svg>"):
+            with self.subTest(key=key):
+                self.calls.clear()
+                with self.assertRaises(ValueError):
+                    serve.load_spot_chart(key, "4h", public_kraken=self.fake,
+                                          now=self.now)
+                self.assertEqual([ep for ep,_ in self.calls], ["AssetPairs"])
+
+    def test_chart_for_ada_usdt_not_eur_or_sui(self):
+        html = serve.load_spot_chart("ADAUSDT", "4h", public_kraken=self.fake,
+                                     now=self.now)
+        self.assertIn("Grafico ADA/USDT · 4H", html)
+        self.assertIn("Volumi scambiati (ADA)", html)
+        self.assertIn("pair=ADAUSDT&amp;tf=15m", html)
+        self.assertIn("pair=ADAUSDT&amp;tf=1d", html)
+        self.assertNotIn("Grafico SUI/EUR", html)
+        self.assertNotIn(" SUI';", html)
+        self.assertEqual(self.calls[1], ("OHLC", {"pair":"ADAUSDT","interval":240}))
+
+    def test_chart_comparison_link_uses_selected_market_not_sui(self):
+        page = serve.load_spot_chart("ADAUSDT", "4h",
+                                     public_kraken=self.fake, now=self.now)
+        self.assertIn('href="/analisi/spot?pair=ADAUSDT"', page)
+        self.assertNotIn('href="/analisi/sui-mtf"', page)
+        self.assertNotIn("__COMPARE_URL__", page)
+        self.assertIn("precision:5,minMove:0.00001", page)
+
+    def test_graph_quotes_apply_to_levels_confluence_and_ohlcv_not_only_title(self):
+        page = serve.load_spot_chart("ADAUSDT", "4h",
+                                     public_kraken=self.fake, now=self.now)
+        self.assertIn('const quote="USDT";', page)
+        self.assertIn("['Livello','Prezzo '+quote,'Origine']", page)
+        self.assertNotIn("Prezzo EUR", page)
+        self.assertIn("stats.textContent=time+' UTC · O '+priceText.format(row.open)",page)
+        self.assertIn("'+quote+' · Vol '",page)
+        self.assertIn("priceText.format(Math.min(",page)
+        self.assertNotIn("maximumFractionDigits:8",page)
+        self.assertNotIn("maximumFractionDigits:6});\n  const supports",page)
+
+    def test_tiny_chart_prices_keep_nonzero_axis_and_ema_values(self):
+        seconds = 14400
+        start = int(self.now.timestamp() // seconds) * seconds - 81*seconds
+        bars=[]
+        for i in range(80):
+            p=1.1e-9 * (1+i/1000)
+            bars.append({"time":start+i*seconds,"open":p,
+                "high":p*1.01,"low":p*0.99,"close":p,"volume":10.0})
+        frame={"pair":"SHIB/USD","token":"SHIB","pair_key":"SHIBUSD",
+            "timeframe":"4H","interval_seconds":seconds,
+            "observed_utc":self.now.isoformat(),
+            "closed_at_utc":self.now.isoformat(),"candles":bars}
+        self.assertGreater(g.ema_points(bars,20)[-1]["value"],0)
+        self.assertGreater(g.ema_points(bars,50)[-1]["value"],0)
+        page=g.page_from_data(frame)
+        self.assertIn("precision:12,minMove:0.000000000001",page)
+        self.assertIn('href="/analisi/spot?pair=SHIBUSD"',page)
+        self.assertNotIn("precision:5,minMove:0.00001",page)
+        self.assertNotIn('"value":0.0}',page)
+        self.assertIn("12 decimali",page)
+
+    def test_unrepresentable_chart_price_fails_explicitly(self):
+        seconds=14400
+        frame={"pair":"MICRO/USD","token":"MICRO","pair_key":"MICROUSD",
+            "timeframe":"4H","interval_seconds":seconds,
+            "observed_utc":self.now.isoformat(),
+            "closed_at_utc":self.now.isoformat(),
+            "candles":[{"time":i*seconds,"open":1e-14,"high":1.1e-14,
+                       "low":0.9e-14,"close":1e-14,"volume":10}
+                       for i in range(80)]}
+        with self.assertRaisesRegex(ValueError,"precisione supportata"):
+            g.page_from_data(frame)
+
+    def test_four_independent_closed_public_frames_keep_pair_and_quote(self):
+        report = serve.load_spot_comparison("ADAUSDT", public_kraken=self.fake,
+                                            now=self.now)
+        self.assertEqual(report["coppia"], "ADA/USDT")
+        self.assertEqual(report["stato"], "COMPLETO")
+        self.assertEqual([ep for ep,_ in self.calls],
+                         ["AssetPairs","OHLC","OHLC","OHLC","OHLC"])
+        self.assertEqual([args["interval"] for ep,args in self.calls[1:]],
+                         [15,60,240,1440])
+        self.assertTrue(all(args["pair"]=="ADAUSDT" for _,args in self.calls[1:]))
+        page = serve.render_sui_comparison(report, pair_key="ADAUSDT")
+        self.assertIn("Confronto ADA/USDT",page)
+        self.assertIn(" USDT",page)
+        self.assertIn(" ADA",page)
+        self.assertIn("pair=ADAUSDT&amp;tf=4h",page)
+        self.assertNotIn("Confronto SUI/EUR",page)
+
+    def test_incomplete_ohlc_is_not_silently_filled(self):
+        def missing(endpoint, **kwargs):
+            if endpoint=="OHLC" and kwargs["interval"]==60:
+                raise ConnectionError("public OHLC unavailable")
+            return self.fake(endpoint,**kwargs)
+        report=serve.load_spot_comparison("ADAUSDT",public_kraken=missing,
+                                          now=self.now)
+        self.assertEqual(report["stato"],"PARZIALE")
+        self.assertEqual(report["quadro"],"CONFRONTO_INCOMPLETO")
+        self.assertEqual(report["timeframe"][1]["stato"],"NON_DISPONIBILE")
+
+    def test_missing_blank_or_repeated_pair_id_is_rejected(self):
+        for path in ("/grafico/spot", "/analisi/spot"):
+            for query in ("", "pair=", "pair=A&pair=B", "pair=../../", "pair=bad%00"):
+                with self.subTest(path=path, query=query):
+                    with self.assertRaises(ValueError):
+                        serve.spot_request_pair(path, query)
+            self.assertEqual(serve.spot_request_pair(path, "pair=XXBTZEUR"),
+                             "XXBTZEUR")
+        self.assertIsNone(serve.spot_request_pair("/mercati/spot", ""))
+
+    def test_mobile_search_operates_on_full_catalog_without_default_selection(self):
+        page = serve.spot_selector(serve.spot_catalog(self.fake))
+        self.assertIn('type="search" id="filtro"', page)
+        self.assertIn('name="pair" id="pair" required', page)
+        self.assertIn("all.filter(", page)
+        self.assertIn("search.addEventListener('input',rebuild)", page)
+        self.assertIn("select.value = ''", page)
+        self.assertIn("replaceAll('BTC','XBT')", page)
+        self.assertIn("replaceAll('DOGE','XDG')", page)
+        self.assertIn("Visualizzate le prime 90; affina la ricerca.", page)
+        self.assertIn("ADA/USDT",page)
+        self.assertIn("DOT/GBP",page)
+        self.assertIn("BTC/EUR (Kraken XBT/EUR)",page)
+        self.assertIn("il cruscotto KDD e il pulsante Aggiorna",page)
+
+    def test_existing_kdd_shortlist_leads_spot_exploration(self):
+        catalog = serve.spot_catalog(self.fake)
+        snapshot = {
+            "rilevazione_utc": self.now.isoformat(),
+            "schede_v02": [
+                {"token": "ADA", "coppia_analisi": "ADA/USDT",
+                 "categoria": "consolidamento", "esito": "RIESAME MIRATO",
+                 "perche_selezionato": "Controllare la chiusura oraria",
+                 "sintesi": "Le chiusure sono ancora senza conferma.",
+                 "evidenze": ["Volumi in aumento"], "criticita": ["Spread da verificare"],
+                 "alternative": [{"pair": "ADA/USDT", "pair_key": "ADAUSDT"}]},
+                {"token": "DOT", "coppia_analisi": "DOT/GBP",
+                 "categoria": "tentativo di ripartenza", "esito": "DA VERIFICARE",
+                 "alternative": [{"pair": "DOT/GBP", "pair_key": "DOTGBP"}]},
+            ],
+        }
+        page = serve.spot_selector(catalog, snapshot=snapshot, now=self.now)
+        self.assertLess(page.index("Da esaminare: selezione KDD"),
+                        page.index("Esplora qualsiasi altra coppia"))
+        self.assertIn('href="/grafico/spot?pair=ADAUSDT&amp;tf=4h"', page)
+        self.assertIn('href="/analisi/spot?pair=DOTGBP"', page)
+        self.assertIn("Motivo della selezione:", page)
+        self.assertIn("Controllare la chiusura oraria", page)
+        self.assertIn("Le chiusure sono ancora senza conferma.", page)
+        self.assertIn("Elementi osservati:"," ".join(page.split("<")))
+        self.assertIn("Volumi in aumento", page)
+        self.assertIn("Criticità:", page)
+        self.assertIn("Spread da verificare", page)
+        self.assertIn("Rilevazione recente", page)
+        self.assertIn('const found = needle ? all.filter(', page)
+        self.assertIn('}) : [];', page)
+        self.assertNotIn("Visualizzate le prime 90; affina la ricerca.' : all", page)
+
+    def test_stale_kdd_shortlist_is_visible_but_identified_as_stale(self):
+        catalog = serve.spot_catalog(self.fake)
+        snapshot = {
+            "rilevazione_utc": (self.now - dt.timedelta(hours=4)).isoformat(),
+            "schede_v02": [{"token": "ADA", "coppia_analisi": "ADA/USDT",
+                            "esito": "RIESAME MIRATO",
+                            "alternative": [{"pair": "ADA/USDT", "pair_key": "ADAUSDT"}]}],
+        }
+        page = serve.spot_selector(catalog, snapshot=snapshot, now=self.now)
+        self.assertIn("RILEVAZIONE DA AGGIORNARE", page)
+        self.assertIn("Segnalazioni precedenti: dati da aggiornare", page)
+        self.assertIn("Apri KDD completo e aggiorna", page)
+        self.assertIn('href="/analisi/spot?pair=ADAUSDT"', page)
+
+    def test_kdd_shortlist_rejects_forged_pair_token_and_escapes_text(self):
+        catalog = serve.spot_catalog(self.fake)
+        snapshot = {
+            "rilevazione_utc": self.now.isoformat(),
+            "schede_v02": [
+                {"token": "BTC", "coppia_analisi": "ADA/USDT",
+                 "alternative": [{"pair": "ADA/USDT", "pair_key": "ADAUSDT"}]},
+                {"token": "ADA", "coppia_analisi": "ADA/USDT",
+                 "esito": "<svg onload=alert(1)>",
+                 "perche_selezionato": "<script>bad()</script>",
+                 "alternative": [{"pair": "ADA/USDT", "pair_key": "ADAUSDT"}]},
+                {"token": "ADA", "coppia_analisi": "DOT/GBP",
+                 "alternative": [{"pair": "DOT/GBP", "pair_key": "DOTGBP"}]},
+            ],
+        }
+        rows = serve.spot_observed_candidates(catalog, snapshot)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["pair_key"], "ADAUSDT")
+        page = serve.spot_selector(catalog, snapshot=snapshot, now=self.now)
+        self.assertIn("&lt;svg", page)
+        self.assertNotIn("<svg", page)
+        self.assertNotIn("<script>bad()", page)
+        self.assertIn("&lt;script&gt;", page)
+
+    def test_no_candidate_scan_does_not_invent_cryptocurrencies(self):
+        catalog = serve.spot_catalog(self.fake)
+        page = serve.spot_selector(catalog, snapshot={}, now=self.now)
+        self.assertIn("Nessun caso", page)
+        self.assertIn("Catalogo:", page)
+        self.assertNotIn("Da esaminare: selezione KDD", page)
+
+    def test_exchange_pair_alias_retains_original_rest_identity(self):
+        catalog = serve.spot_catalog(self.fake)
+        self.assertEqual(serve.spot_friendly_label(catalog["XXBTZEUR"]["pair"]),
+                         "BTC/EUR (Kraken XBT/EUR)")
+        self.assertIn("BTC/EUR (Kraken XBT/EUR)",
+                      serve.spot_selector(catalog, snapshot={}, now=self.now))
+        self.assertEqual(serve.spot_lookup("XXBTZEUR", catalog)["pair_key"], "XXBTZEUR")
+
+    def test_invalid_frame_prevents_even_catalog_call(self):
+        with self.assertRaises(ValueError):
+            serve.load_spot_chart("ADAUSDT","invalid",public_kraken=self.fake)
+        self.assertEqual(self.calls,[])
+
+    def test_ohlc_mismatched_response_symbol_is_rejected_before_render(self):
+        """A valid candle array from ANOTHER token may not inherit selected label."""
+        calls = []
+        def swapped(endpoint, **params):
+            if endpoint == "AssetPairs":
+                return self.pairs
+            calls.append(params["interval"])
+            raw = self.fake(endpoint, **params)
+            return {"UNRELATEDBTCUSD": raw[params["pair"]],
+                    "last": raw["last"]}
+        with self.assertRaises(serve.KrakenPairMismatch):
+            serve.load_spot_chart("ADAUSDT", "4h",
+                                  public_kraken=swapped, now=self.now)
+        self.assertEqual(calls, [240])
+        calls.clear()
+        result = serve.load_spot_comparison(
+            "ADAUSDT", public_kraken=swapped, now=self.now)
+        self.assertEqual(calls, [15, 60, 240, 1440])
+        self.assertEqual(result["stato"], "PARZIALE")
+        self.assertEqual(result["quadro"], "CONFRONTO_INCOMPLETO")
+        self.assertTrue(all(f["stato"] == "NON_DISPONIBILE"
+                            for f in result["timeframe"]))
+
+    def test_ohlc_alias_return_name_allowed_only_if_declared_by_kraken(self):
+        pairs = dict(self.pairs)
+        pairs["XXBTZEUR"] = dict(pairs["XXBTZEUR"], altname="XBTEUR")
+        def alias(endpoint, **params):
+            if endpoint == "AssetPairs":
+                return pairs
+            raw = self.fake(endpoint, **params)
+            assert params["pair"] == "XXBTZEUR"
+            return {"XBTEUR": raw["XXBTZEUR"], "last": raw["last"]}
+        graph = serve.load_spot_chart(
+            "XXBTZEUR", "4h", public_kraken=alias, now=self.now)
+        self.assertIn("Grafico BTC/EUR", graph)
+        self.assertIn("Volumi scambiati (BTC)", graph)
+        self.assertIn("Kraken usa XBT per BTC", graph)
+        self.assertNotIn("Grafico SUI/EUR", graph)
+        compare = serve.load_spot_comparison("XXBTZEUR",
+                                             public_kraken=alias, now=self.now)
+        self.assertEqual(compare["coppia"], "XBT/EUR")  # original Kraken identity
+        view = serve.render_sui_comparison(compare, pair_key="XXBTZEUR")
+        self.assertIn("Confronto BTC/EUR (Kraken XBT/EUR)", view)
+        self.assertIn("Volume ultima candela:", view)
+        self.assertIn(" BTC;", view)
+
+    def test_micro_volume_remains_nonzero_in_quote_aware_comparison(self):
+        report = serve.load_spot_comparison(
+            "ADAUSDT", public_kraken=self.fake, now=self.now)
+        self.assertEqual(report["stato"], "COMPLETO")
+        report["timeframe"][0]["volume"] = 1e-9
+        report["timeframe"][1]["volume"] = 0.0
+        report["timeframe"][2]["volume"] = 1.234567891
+        page = serve.render_sui_comparison(report, pair_key="ADAUSDT")
+        self.assertIn("Volume ultima candela: 1e-09 ADA", page)
+        self.assertIn("Volume ultima candela: 0 ADA", page)
+        self.assertIn("Volume ultima candela: 1.234567891 ADA", page)
+        self.assertNotIn("Volume ultima candela: 0.0000 ADA", page)
+        self.assertIn("controlla", page)
+        self.assertNotIn("4H separato conserva il", page)
+
+    def test_tiny_crypto_quote_displays_significant_price_not_fake_zero(self):
+        report = serve.load_spot_comparison(
+            "ADAUSDT", public_kraken=self.fake, now=self.now)
+        self.assertEqual(report["stato"], "COMPLETO")
+        first = report["timeframe"][0]
+        first["close"] = 0.000000001234567
+        first["ema20"] = 0.000000000987654
+        first["ema50"] = 0.000000000876543
+        page = serve.render_sui_comparison(report, pair_key="ADAUSDT")
+        self.assertIn("1.234567e-09 USDT", page)
+        self.assertIn("9.87654e-10 USDT", page)
+        self.assertNotIn("0.00000 USDT", page)
+
+    def test_ohlc_response_two_symbols_fail_closed_even_if_one_matches(self):
+        def double(endpoint, **params):
+            if endpoint == "AssetPairs":
+                return self.pairs
+            raw = self.fake(endpoint, **params)
+            raw["EXTRAUSD"] = raw[params["pair"]]
+            return raw
+        with self.assertRaises(serve.KrakenPairMismatch):
+            serve.load_spot_chart("ADAUSDT", "4h",
+                                  public_kraken=double, now=self.now)
+
+    def test_none_catalog_is_fail_closed(self):
+        with self.assertRaises(serve.KrakenMarketDataUnavailable):
+            serve.spot_catalog(lambda endpoint: {})
+        with self.assertRaises(serve.KrakenMarketDataUnavailable):
+            serve.spot_catalog(lambda endpoint: [])
+
+    def test_invalid_ohlc_is_source_error_not_invalid_selection(self):
+        def corrupted(endpoint, **params):
+            if endpoint == "AssetPairs":
+                return self.pairs
+            return {"ADAUSDT": [], "last": 0}
+        with self.assertRaises(serve.KrakenMarketDataUnavailable):
+            serve.load_spot_chart("ADAUSDT", "4h",
+                                  public_kraken=corrupted, now=self.now)
+        with self.assertRaises(ValueError):
+            serve.load_spot_chart("NOT_A_PAIR", "4h",
+                                  public_kraken=corrupted, now=self.now)
+
+    def test_local_http_routes_distinguish_400_invalid_pair_from_503_upstream(self):
+        """Real KDD HTTP Handler with synthetic exchange only; no phone/files."""
+        import threading
+        import urllib.request
+        import urllib.error
+        from http.server import ThreadingHTTPServer
+        def fake_provider(endpoint, **params):
+            if endpoint == "AssetPairs":
+                return self.pairs
+            if endpoint == "OHLC":
+                # Upstream data failure after valid catalog lookup.
+                return {"ADAUSDT": [], "last": 0}
+            raise AssertionError("Private or unexpected API call")
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        server = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+        server.daemon_threads = True
+        with (mock.patch.object(serve, "PORT", server.server_address[1]),
+              mock.patch.object(serve.desk, "kraken", side_effect=fake_provider)):
+            worker = threading.Thread(target=server.serve_forever,
+                                      daemon=True)
+            worker.start()
+            try:
+                base = "http://127.0.0.1:" + str(server.server_address[1])
+                for route, status in (
+                    ("/mercati/spot", 200),
+                    ("/grafico/spot", 400),
+                    ("/grafico/spot?pair=BADPAIR", 400),
+                    ("/grafico/spot?pair=ADAUSDT&tf=4h", 503),
+                    ("/analisi/spot?pair=ADAUSDT", 200)):
+                    with self.subTest(route=route):
+                        try:
+                            with opener.open(base + route, timeout=5) as response:
+                                actual = response.status
+                                page = response.read().decode("utf-8")
+                        except urllib.error.HTTPError as error:
+                            actual = error.code
+                            page = error.read().decode("utf-8")
+                        self.assertEqual(actual, status)
+                        if route.startswith("/analisi/spot"):
+                            self.assertIn("PARZIALE", page)
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=3)
+
+    def test_catalog_provider_outage_is_unavailable_not_bad_user_query(self):
+        def unavailable(endpoint, **params):
+            if endpoint == "AssetPairs":
+                return {}
+            raise AssertionError("Should not call OHLC")
+        with self.assertRaises(serve.KrakenMarketDataUnavailable):
+            serve.load_spot_chart("ADAUSDT", "4h", public_kraken=unavailable,
+                                  now=self.now)
+
+    def test_legacy_sui_url_retained_but_no_longer_on_home(self):
+        page=serve.with_controls("<h2>1 · Decisioni e posizioni</h2>")
+        self.assertIn('href=\'/mercati/spot\'',page)
+        self.assertNotIn('href=\'/grafico/sui-4h\'',page)
+        self.assertNotIn('href=\'/analisi/sui-mtf\'',page)
+        self.assertTrue(callable(serve.load_sui_chart))
+        self.assertTrue(callable(serve.load_sui_comparison))
+
+    def test_user_selected_pair_not_derived_from_portfolio(self):
+        with mock.patch.object(serve.desk, "load",
+                               side_effect=AssertionError("no private local files")):
+            catalog=serve.spot_catalog(self.fake)
+            report=serve.load_spot_comparison("DOTGBP",public_kraken=self.fake,
+                                              now=self.now)
+        self.assertIn("DOTGBP",catalog)
+        self.assertEqual(report["coppia"],"DOT/GBP")
+
+
+    def test_rt02_actual_javascript_volume_formatter_preserves_small_positive(self):
+        """Execute the function extracted from the generated chart, not source grep."""
+        import re, shutil, subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node JS runtime missing; formatter execution not verified")
+        sec = 14400
+        start = int(self.now.timestamp() // sec) * sec - 80*sec
+        frame = {"pair":"ADA/USDT", "token":"ADA", "pair_key":"ADAUSDT",
+                 "timeframe":"4H", "interval_seconds":sec,
+                 "observed_utc":self.now.isoformat(),
+                 "closed_at_utc":self.now.isoformat(),
+                 "candles":[{"time":start+i*sec,"open":1., "high":1.1,
+                            "low":.9,"close":1., "volume":1e-9} for i in range(80)]}
+        page = g.page_from_data(frame, now=self.now)
+        fn = re.search(r'  function formatVolume\(value\)\{.*?\n  \}', page, re.S)
+        self.assertIsNotNone(fn)
+        run = subprocess.run([node, "-e", fn.group(0)+
+            "\nconsole.log(JSON.stringify([0,1e-9,1e-15,1.23456789,123456].map(formatVolume)))"],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        shown = json.loads(run.stdout)
+        self.assertEqual(shown[0], "0")
+        self.assertTrue(all(v not in ("0","0,0","-0") for v in shown[1:3]))
+        self.assertIn("1", shown[3])
+        self.assertIn("123", shown[4])
+        self.assertIn("Vol '+formatVolume(row.volume)+' '+\"ADA\"", page)
+        self.assertIn('"volume":1e-09', page)
+
+    def test_rt03_rejects_prices_colliding_at_12dp_inside_same_candle(self):
+        sec=14400
+        start=int(self.now.timestamp() // sec)*sec-80*sec
+        frame={"pair":"MICRO/USD","token":"MICRO","pair_key":"MICROUSD",
+               "timeframe":"4H","interval_seconds":sec,
+               "observed_utc":self.now.isoformat(),
+               "closed_at_utc":self.now.isoformat(),
+               "candles":[{"time":start+i*sec,"open":1.49e-12,
+                           "high":2e-12,"low":1e-12,"close":1.49e-12,
+                           "volume":1} for i in range(80)]}
+        self.assertEqual(f"{1.0e-12:.12f}", f"{1.49e-12:.12f}")
+        with self.assertRaisesRegex(ValueError, "distinti non rappresentabili"):
+            g.page_from_data(frame, now=self.now)
+        # One actual twelfth-decimal tick DOES remain representable.
+        for row in frame["candles"]:
+            row.update(open=2e-12, high=3e-12, low=1e-12, close=2e-12)
+        self.assertIn("precision:12,minMove:0.000000000001",
+                      g.page_from_data(frame,now=self.now))
+
+    def test_rt04_alias_rest_collision_fails_closed_before_ohlc(self):
+        pairs={"AAAUSD":{"wsname":"AAA/USD","status":"online","altname":"BBBUSD"},
+               "BBBUSD":{"wsname":"BBB/USD","status":"online"}}
+        calls=[]
+        def fake(endpoint, **kwargs):
+            calls.append(endpoint)
+            if endpoint=="AssetPairs": return pairs
+            raise AssertionError("Ambiguous market must not request OHLC")
+        with self.assertRaisesRegex(serve.KrakenMarketDataUnavailable, "ambigua"):
+            serve.load_spot_chart("AAAUSD","4h",public_kraken=fake,now=self.now)
+        self.assertEqual(calls, ["AssetPairs"])
+        # Even a non-online key must not borrow an online pair's alias.
+        pairs["BBBUSD"]["status"]="cancel_only"
+        with self.assertRaisesRegex(serve.KrakenMarketDataUnavailable, "ambigua"):
+            serve.spot_catalog(fake)
+        # Two unique names with a valid declared alias remain supported.
+        pairs["AAAUSD"]["altname"]="AAAALT"
+        self.assertEqual(serve.spot_catalog(fake)["AAAUSD"]["altname"],"AAAALT")
+
+    def test_rt05_single_chart_marks_fresh_stale_and_nonverifiable(self):
+        sec=14400
+        start=int(self.now.timestamp() // sec)*sec-80*sec
+        frame={"pair":"ADA/USDT","token":"ADA","pair_key":"ADAUSDT",
+               "timeframe":"4H","interval_seconds":sec,
+               "observed_utc":self.now.isoformat(),
+               "closed_at_utc":dt.datetime.fromtimestamp(
+                   start+80*sec,dt.timezone.utc).isoformat(),
+               "candles":[{"time":start+i*sec,"open":1.,"high":1.1,
+                           "low":.9,"close":1.,"volume":1.} for i in range(80)]}
+        current=g.page_from_data(frame,now=self.now)
+        self.assertIn("DATI RECENTI VERIFICATI",current)
+        self.assertIn("Ultima candela CHIUSA:",current)
+        old=g.page_from_data(frame,now=self.now+dt.timedelta(days=5))
+        self.assertIn("GRAFICO STORICO / SCADUTO",old)
+        self.assertIn('class="warning" role="status">GRAFICO STORICO / SCADUTO',old)
+        bad=dict(frame,observed_utc="bad")
+        self.assertIn("DATI INCOMPLETI O NON VERIFICABILI",
+                      g.page_from_data(bad,now=self.now))
+        limited=dict(frame,candles=frame["candles"][:35])
+        self.assertIn("DATI INCOMPLETI O NON VERIFICABILI",
+                      g.page_from_data(limited,now=self.now))
+
+    def test_rt_ui_integrated_links_and_preview_remain_separate(self):
+        catalog=serve.spot_catalog(self.fake)
+        for preview in (False,True):
+            view=serve.spot_selector(catalog, snapshot={}, now=self.now,preview=preview)
+            if preview:
+                self.assertIn("preview pubblica isolata",view)
+                self.assertIn('href="http://127.0.0.1:8765/"',view)
+            else:
+                self.assertIn("KDD patrimoniale originale",view)
+                self.assertIn('href="/"',view)
+                self.assertNotIn("porta 8765",view)
+                self.assertNotIn("non il KDD completo",view)
+        self.assertIn("negoziabilità per il conto italiano",view)
+
+
+    def _r2_frame(self, *, frame="4H", candles=80):
+        seconds={"15m":900,"1H":3600,"4H":14400,"1D":86400}[frame]
+        close_end=int(self.now.timestamp()//seconds)*seconds
+        start=close_end-candles*seconds
+        series=[{"time":start+i*seconds, "open":1e-8, "high":1e-8+2e-12,
+                 "low":1e-8-2e-12,
+                 "close":1e-8+(i%2)*1e-12, "volume":1e-9}
+                for i in range(candles)]
+        return {"pair":"ADA/USDT","pair_key":"ADAUSDT","token":"ADA",
+                "timeframe":frame,"interval_seconds":seconds,
+                "observed_utc":self.now.isoformat(),
+                "closed_at_utc":dt.datetime.fromtimestamp(
+                    close_end,dt.timezone.utc).isoformat(),
+                "candles":series}
+
+    def test_r2_rt03_ema20_50_subtick_does_not_reject_ohlc(self):
+        frame=self._r2_frame()
+        points20=g.ema_points(frame["candles"],20)
+        points50=g.ema_points(frame["candles"],50)
+        self.assertTrue(points20 and points50)
+        # Red Team R1 counterexample: distinct EMA20 values at <12th decimal.
+        # Collisions may occur on alternate EMA samples, not necessarily
+        # on adjacent points of an oscillating sequence.
+        buckets={}
+        for point in points20:
+            buckets.setdefault(f'{point["value"]:.12f}',set()).add(point["value"])
+        self.assertTrue(any(len(values)>1 for values in buckets.values()))
+        snapshot=json.dumps(frame["candles"],sort_keys=True)
+        page=g.page_from_data(frame,now=self.now)
+        self.assertIn('precision:12,minMove:0.000000000001',page)
+        self.assertIn('"ema20":',page)
+        self.assertIn('"ema50":',page)
+        self.assertEqual(json.dumps(frame["candles"],sort_keys=True),snapshot)
+
+    def test_r2_rt03_derived_levels_subtick_not_a_rejection(self):
+        frame=self._r2_frame()
+        real=g.technical_from_candles(frame["candles"],interval_seconds=14400)
+        self.assertTrue(real["ema50"])
+        # Deliberately inject valid tiny calculated variations in all families:
+        # they are derived values, not original exchange prices.
+        derived=dict(real)
+        derived["pivots"]={
+            "reference_day_utc":"2026-10-23","P":1e-8,
+            "S1":1.0000500e-8,"S2":1.0000504e-8,"S3":1.0000510e-8,
+            "R1":1.0000500e-8,"R2":1.0000504e-8,"R3":1.0000510e-8}
+        derived["structure"]={
+            "supports":[{"price":1.0000500e-8,"touches":2,"last_swing_time":0},
+                        {"price":1.0000504e-8,"touches":2,"last_swing_time":0}],
+            "resistances":[{"price":1.0000510e-8,"touches":2,"last_swing_time":0},
+                           {"price":1.0000514e-8,"touches":2,"last_swing_time":0}]}
+        with mock.patch.object(g,"technical_from_candles",return_value=derived):
+            page=g.page_from_data(frame,now=self.now)
+        self.assertIn('"pivots":',page)
+        self.assertIn('"supports":',page)
+        self.assertIn('"resistances":',page)
+        self.assertIn('"price":1.0000504e-08',page)
+        self.assertIn("12 decimali",page)
+
+    def test_r2_rt03_true_ohlc_collision_rejected_cross_candle_and_intra(self):
+        frame=self._r2_frame()
+        frame["candles"][1]["close"]=1.000049e-8
+        # Original alternating series should remain distinguishable at 12dp;
+        # the new close has a distinct source value but collides after rounding.
+        with self.assertRaisesRegex(ValueError,"distinti non rappresentabili"):
+            g.page_from_data(frame,now=self.now)
+        frame=self._r2_frame()
+        frame["candles"][0].update(open=1e-12,low=1e-12,
+                                    close=1.49e-12,high=2e-12)
+        with self.assertRaisesRegex(ValueError,"distinti non rappresentabili"):
+            g.page_from_data(frame,now=self.now)
+
+    def test_r2_rt05_temporal_integrity_all_frames(self):
+        for frame in ("15m","1H","4H","1D"):
+            with self.subTest(frame=frame):
+                data=self._r2_frame(frame=frame)
+                self.assertEqual(g.summarize_timeframe(data,now=self.now)["stato"],
+                                 "AGGIORNATO")
+                self.assertIn("DATI RECENTI VERIFICATI",g.page_from_data(
+                    data,now=self.now))
+                wrongs=[]
+                wrongs.append(dict(data,observed_utc="2020-01-01T00:00:00+00:00"))
+                wrongs.append(dict(data,observed_utc="not-a-date"))
+                wrongs.append(dict(data,observed_utc="2026-10-30T00:00:00+00:00"))
+                wrongs.append(dict(data,closed_at_utc="not-a-date"))
+                wrongs.append(dict(data,closed_at_utc=data["observed_utc"]))
+                wrongs.append(dict(data,closed_at_utc="2026-10-30T00:00:00+00:00"))
+                wrongs.append(dict(data,closed_at_utc="2020-01-01T00:00:00+00:00"))
+                wrongs.append(dict(data,observed_utc="2026-10-24T20:00:00"))
+                wrongs.append(dict(data,interval_seconds=5))
+                wrongs.append(dict(data,candles=data["candles"][:-1]))
+                future=dict(data)
+                future["candles"]=list(data["candles"])
+                future["candles"][-1]=dict(data["candles"][-1],
+                                          time=data["candles"][-1]["time"]+
+                                               data["interval_seconds"])
+                wrongs.append(future)
+                for bad in wrongs:
+                    with self.assertRaises((ValueError,TypeError,KeyError)):
+                        g.summarize_timeframe(bad,now=self.now)
+                    page=g.page_from_data(bad,now=self.now)
+                    self.assertIn(
+                        'class="warning" role="status">DATI INCOMPLETI O NON VERIFICABILI',
+                        page)
+                stale=g.page_from_data(
+                    data,now=self.now+dt.timedelta(days=5))
+                self.assertIn("GRAFICO STORICO / SCADUTO",stale)
+
+    def test_r2_rt05_actual_browser_clock_and_visibility_transition(self):
+        import re, shutil, subprocess
+        node=shutil.which("node")
+        if not node:
+            self.skipTest("Node unavailable: browser freshness JavaScript not executed")
+        frame=self._r2_frame()
+        page=g.page_from_data(frame,now=self.now)
+        snippet=re.search(
+            r'const freshnessValid=.*?(?=\ntry \{)',page,re.S)
+        self.assertIsNotNone(snippet)
+        clock_ms=int(self.now.timestamp()*1000)
+        # Execute the REAL generated JS with a simulated DOM, time jump and
+        # visibility/focus hooks. No network, no reload or candle alteration.
+        script="""
+const vm=require('node:vm');
+let clock=__CLOCK__;
+const indicator={textContent:'',className:''};
+const events={};const intervals=[];
+const context={
+  document:{getElementById:()=>indicator,addEventListener:(n,fn)=>{events[n]=fn}},
+  window:{addEventListener:(n,fn)=>{events[n]=fn}},
+  setInterval:(fn,ms)=>intervals.push([fn,ms]),
+  Date:{now:()=>clock},Math,Number,
+};
+vm.runInNewContext(__SNIPPET__,context);
+if(!indicator.textContent.includes('DATI RECENTI VERIFICATI'))
+  throw Error('initial not fresh: '+indicator.textContent);
+if(intervals.length!==1||intervals[0][1]>15000)throw Error('no timed clock');
+if(!events.visibilitychange||!events.focus)throw Error('no focus events');
+clock += 6*86400000;
+events.visibilitychange();
+if(!indicator.textContent.includes('GRAFICO STORICO / SCADUTO'))
+  throw Error('not stale on visibility: '+indicator.textContent);
+clock += 86400000;
+events.focus();
+if(!indicator.textContent.includes('SCADUTO')) throw Error('focus lost');
+console.log('BROWSER_CLOCK_PASS');
+""".replace("__CLOCK__",str(clock_ms)).replace(
+            "__SNIPPET__",json.dumps(snippet.group(0)))
+        run=subprocess.run([node,"-e",script],capture_output=True,
+                           text=True,timeout=10)
+        self.assertEqual(run.returncode,0,run.stderr)
+        self.assertIn("BROWSER_CLOCK_PASS",run.stdout)
+        self.assertNotIn("fetch(",snippet.group(0))
+        self.assertNotIn("location.reload",snippet.group(0))
+
+
+    def _r3_pivot_frame(self, timeframe, pair):
+        """Actual complete UTC previous day; no synthetic pivot formula."""
+        seconds={"15m":900,"1H":3600,"4H":14400,"1D":86400}[timeframe]
+        count=200 if timeframe=="15m" else 80
+        end=int(self.now.timestamp()//seconds)*seconds
+        start=end-count*seconds
+        token=pair.split("/")[0]
+        return {"pair":pair,"pair_key":pair.replace("/",""),"token":token,
+                "timeframe":timeframe,"interval_seconds":seconds,
+                "observed_utc":self.now.isoformat(),
+                "closed_at_utc":dt.datetime.fromtimestamp(
+                    end,dt.timezone.utc).isoformat(),
+                "candles":[{"time":start+i*seconds,
+                            "open":1e-8,"high":2.49997e-8,
+                            "low":1e-8,"close":1e-8,"volume":1e-9}
+                           for i in range(count)]}
+
+    def _r3_render_actual_javascript(self, page):
+        """Run the exact generated browser script with a minimal DOM stub."""
+        import subprocess,shutil
+        node=shutil.which("node")
+        if not node:
+            self.skipTest("Node missing: R3 JavaScript not executed")
+        script_src=page.split('<script>\n(function(){',1)[1].split('</script>',1)[0]
+        harness=r"""
+const elements={};
+function el(tag){
+  return {tag:tag||'',textContent:'',children:[],checked:true,disabled:false,
+    hidden:false,parentElement:{title:''},clientWidth:700,clientHeight:420,
+    style:{},className:'',classList:{add(){}},
+    addEventListener(){},appendChild(c){this.children.push(c);return c;}};
+}
+const node=id=>elements[id]??(elements[id]=el(id));
+global.document={
+  getElementById:node, querySelector:node, createElement:el,
+  addEventListener(){}
+};
+global.window={addEventListener(){}};
+global.requestAnimationFrame=fn=>fn();
+global.setInterval=()=>0;
+global.ResizeObserver=class{observe(){}};
+const chartSeries=()=>({
+  setData(){},applyOptions(){},
+  createPriceLine(){return {applyOptions(){}};},
+  removePriceLine(){},priceToCoordinate(){return 100;}
+});
+const makeChart=()=>({
+  addSeries:()=>chartSeries(),
+  timeScale:()=>({
+    fitContent(){},subscribeVisibleLogicalRangeChange(){},
+    setVisibleLogicalRange(){}
+  }),
+  applyOptions(){},subscribeCrosshairMove(){}
+});
+global.LightweightCharts={createChart:()=>makeChart(),
+  CandlestickSeries:{},HistogramSeries:{},LineSeries:{}};
+window.LightweightCharts=global.LightweightCharts;
+"""
+        final=r"""
+function walk(root,out=[]){
+  for(const c of root.children){
+    if(c.tag==='tr')out.push(c.children.map(x=>x.textContent));
+    walk(c,out);
+  }
+  return out;
+}
+const report={
+  graph:node('graph-status').textContent,
+  summary:node('#tech-summary').textContent,
+  near:node('nearby-summary').textContent,
+  stats:node('candle-stats').textContent,
+  table:walk(node('levels-list'))
+};
+if(!report.graph.includes('Grafico generato'))
+  throw Error('Full generated JS failed: '+report.graph);
+console.log(JSON.stringify(report));
+"""
+        run=subprocess.run([node,"-e",harness+"\n(function(){"+script_src+
+                                    "\n"+final],
+                           capture_output=True,text=True,timeout=12)
+        self.assertEqual(run.returncode,0,run.stderr[:2500])
+        return json.loads(run.stdout.strip().splitlines()[-1])
+
+    def test_r3_rt03_real_pivot_positive_subtick_all_timeframes_quotes(self):
+        """Real formulas, generated JS and rendered pivot tables for 4 timeframes."""
+        import re,subprocess,shutil
+        node=shutil.which("node")
+        if not node: self.skipTest("Node missing")
+        targets=(("15m","ADA/USDT"),("1H","DOT/GBP"),
+                 ("4H","ETH/USD"),("1D","SUI/EUR"))
+        for tf,pair in targets:
+            with self.subTest(timeframe=tf,pair=pair):
+                frame=self._r3_pivot_frame(tf,pair)
+                original=json.dumps(frame["candles"],sort_keys=True)
+                pivot=g.daily_pivots(frame["candles"],frame["interval_seconds"])
+                self.assertIsNotNone(pivot,"Fixture must contain full previous UTC day")
+                s2=pivot["S2"]
+                self.assertGreater(s2,0)
+                self.assertLess(s2,1e-11)
+                html=g.page_from_data(frame,now=self.now)
+                self.assertEqual(json.dumps(frame["candles"],sort_keys=True),original)
+                self.assertIn('precision:11,minMove:0.00000000001',html)
+                self.assertIn('const quote='+json.dumps(pair.split("/")[1])+';',html)
+                self.assertIn('"S2":',html)
+                report=self._r3_render_actual_javascript(html)
+                table={row[0]:row[1] for row in report["table"]
+                       if len(row)==3 and row[0] in ("S2","P","EMA20","EMA50")}
+                self.assertIn("S2",table)
+                self.assertRegex(table["S2"],r'[1-9]')
+                self.assertIn("e-",table["S2"])
+                self.assertNotIn(table["S2"],("0","-0","−0"))
+                self.assertIn("EMA20",report["summary"])
+                self.assertIn("Pivot del",report["summary"])
+                self.assertIn(" C ",report["stats"])
+                self.assertNotIn("NaN",report["stats"])
+                self.assertIn(pair.split("/")[1],report["stats"])
+                # Compare direct locale baseline to actual sub-tick fallback.
+                js=re.search(
+                    r'  const basePriceText=.*?(?=\n  const supports=)',html,re.S)
+                self.assertIsNotNone(js)
+                values=[0,s2,-s2,1.23456789,2.5e-8,1e-15,-1e-15]
+                program=js.group(0)+"\nconsole.log(JSON.stringify(" + (
+                    json.dumps(values)+".map(v=>priceText.format(v))));")
+                out=subprocess.run([node,"-e",program],
+                                   capture_output=True,text=True,timeout=10)
+                self.assertEqual(out.returncode,0,out.stderr)
+                rendered=json.loads(out.stdout)
+                self.assertEqual(rendered[0],"0")
+                self.assertNotIn(rendered[1],("0","-0","−0"))
+                self.assertNotIn(rendered[2],("0","-0","−0"))
+                self.assertTrue(rendered[2].startswith("-"))
+                self.assertIn("1,",rendered[3])
+                self.assertNotEqual(rendered[4],"0")
+                self.assertNotEqual(rendered[5],"0")
+                self.assertTrue(rendered[6].startswith("-"))
+
+    def test_r3_rt03_actual_html_derivative_zero_negative_and_confluence(self):
+        """Run every text path: EMA summary, S/R, pivot table and confluence."""
+        frame=self._r3_pivot_frame("4H","DOT/GBP")
+        technical=g.technical_from_candles(frame["candles"],
+                                            interval_seconds=14400)
+        positive=technical["pivots"]["S2"]
+        self.assertGreater(positive,0)
+        negative=-positive
+        modified={
+            "ema20":[{"time":frame["candles"][-1]["time"],"value":positive}],
+            "ema50":[{"time":frame["candles"][-1]["time"],"value":negative}],
+            "pivots":dict(technical["pivots"],S2=positive,S3=negative),
+            "structure":{
+                "supports":[{"price":positive,"touches":2,"last_swing_time":0}],
+                "resistances":[{"price":negative,"touches":2,"last_swing_time":0}]
+            }
+        }
+        with mock.patch.object(g,"technical_from_candles",return_value=modified):
+            html=g.page_from_data(frame,now=self.now)
+        self.assertIn('"value":',html)
+        self.assertIn('"S2":',html)
+        self.assertIn('"S3":',html)
+        report=self._r3_render_actual_javascript(html)
+        self.assertNotIn("EMA20: 0",report["summary"])
+        self.assertNotIn("EMA50: -0",report["summary"])
+        self.assertIn("e-",report["summary"])
+        self.assertIn("e-",report["near"])
+        self.assertIn("GBP",report["near"])
+        tab={row[0]:row[1] for row in report["table"]
+             if len(row)==3}
+        for key in ("EMA20","EMA50","S2","S3"):
+            self.assertIn(key,tab)
+            self.assertNotIn(tab[key],("0","-0","−0"))
+            self.assertIn("e-",tab[key])
+        self.assertTrue(any(row[1].startswith("-") and "e-" in row[1]
+                            for row in report["table"] if len(row)==3))
+        # The fallback must not turn genuine exact zero into scientific text.
+        # Normal OHLC candles continue using the same shared formatter.
+        self.assertIn(" O 0,00000001",report["stats"])
+
+    def test_r3_rt03_regression_ema_and_true_original_ohlc_guard(self):
+        frame=self._r2_frame()
+        self.assertIn('"ema20":',g.page_from_data(frame,now=self.now))
+        self.assertIn('"ema50":',g.page_from_data(frame,now=self.now))
+        wrong=self._r2_frame()
+        wrong["candles"][0].update(open=1e-12,high=2e-12,low=1e-12,close=1.49e-12)
+        with self.assertRaisesRegex(ValueError,"distinti non rappresentabili"):
+            g.page_from_data(wrong,now=self.now)
+        old=self._r2_frame()
+        old["observed_utc"]="2020-01-01T00:00:00+00:00"
+        self.assertIn("DATI INCOMPLETI O NON VERIFICABILI",
+                      g.page_from_data(old,now=self.now))
+
+
+    def test_r4_confluence_real_dom_negative_and_opposite_signs(self):
+        """Counterexample must run actual generated HTML/JS, not a copied formula."""
+        from unittest import mock
+        frame=self._r3_pivot_frame("4H","DOT/GBP")
+        stamp=frame["candles"][-1]["time"]
+        technical={
+            "ema20":[{"time":stamp,"value":1e-8}],
+            "ema50":[{"time":stamp,"value":-1.5e-8}],
+            "structure":{
+                "supports":[{"price":-4e-8,"touches":2,"last_swing_time":0}],
+                "resistances":[]},
+            "pivots":{
+                "reference_day_utc":"2026-10-26","P":2.25e-8,
+                "S1":-3e-8,"S2":-5e-8,"S3":-7e-8,
+                "R1":6e-8,"R2":8e-8,"R3":1e-7}
+        }
+        with mock.patch.object(g,"technical_from_candles",return_value=technical):
+            page=g.page_from_data(frame,now=self.now)
+        report=self._r3_render_actual_javascript(page)
+        self.assertIn("Nessuna vicinanza multi-fonte entro 0,5%",report["near"],
+                      "False grouping of negative or cross-sign levels")
+        # The rejected levels remain visible with their exact signed values
+        # in the independent levels table; only confluence grouping changes.
+        rows={row[0]:row[1] for row in report["table"] if len(row)==3}
+        for name in ("EMA50","S1","S2","S3"):
+            self.assertIn(name,rows)
+            self.assertTrue(rows[name].startswith("-"),(name,rows[name]))
+        self.assertIn("EMA20",rows)
+
+    def test_r4_confluence_real_dom_positive_threshold_and_overflow(self):
+        """Positive near/far and huge values must use the full browser DOM path."""
+        from unittest import mock
+        frame=self._r3_pivot_frame("4H","ADA/USDT")
+        stamp=frame["candles"][-1]["time"]
+
+        def check(pivot_price,ema_price):
+            technical={
+                "ema20":[{"time":stamp,"value":ema_price}],
+                "ema50":[],
+                "structure":{"supports":[],"resistances":[]},
+                "pivots":{
+                    "reference_day_utc":"2026-10-26","P":pivot_price,
+                    "S1":-10.0,"S2":-20.0,"S3":-30.0,
+                    "R1":40.0,"R2":80.0,"R3":160.0}
+            }
+            with mock.patch.object(g,"technical_from_candles",return_value=technical):
+                page=g.page_from_data(frame,now=self.now)
+            return self._r3_render_actual_javascript(page)
+
+        close=check(1.0049e-8,1e-8)
+        self.assertIn("Vicinanze entro 0,5% (solo descrittive):",close["near"])
+        self.assertIn("EMA20",close["near"])
+        self.assertIn("P Pivot",close["near"])
+        far=check(1.0051e-8,1e-8)
+        self.assertIn("Nessuna vicinanza multi-fonte",far["near"],
+                      "A spread above 0.5% must be rejected")
+        # Old code computes 0.5*(1e308+1.25e308)==Infinity and reports a
+        # false 0% difference. A ratio avoids the overflowing sum.
+        huge_far=check(1.25e308,1e308)
+        self.assertIn("Nessuna vicinanza multi-fonte",huge_far["near"])
+
+
+
+    def _r5_confluence_full_dom(self, ema20, ema50, pivot_p):
+        """Full generated graph JavaScript with independent selected technical levels."""
+        from unittest import mock
+        frame=self._r3_pivot_frame("4H","ADA/USDT")
+        stamp=frame["candles"][-1]["time"]
+        technical={
+            "ema20":([] if ema20 is None else [{"time":stamp,"value":ema20}]),
+            "ema50":([] if ema50 is None else [{"time":stamp,"value":ema50}]),
+            "structure":{"supports":[],"resistances":[]},
+            "pivots":{
+                "reference_day_utc":"2026-10-26",
+                "P":pivot_p,"S1":10.0,"S2":20.0,"S3":30.0,
+                "R1":110.0,"R2":120.0,"R3":130.0}
+        }
+        with mock.patch.object(g,"technical_from_candles",return_value=technical):
+            html=g.page_from_data(frame,now=self.now)
+        return self._r3_render_actual_javascript(html)
+
+    def test_r5_redteam_bridged_cross_family_survives_same_family(self):
+        """Red Team 6447216348: 100/100.4/100.8 must expose EMA50/P."""
+        extended=self._r5_confluence_full_dom(100.0,100.4,100.8)
+        text=extended["near"]
+        self.assertIn("Vicinanze entro 0,5% (solo descrittive):",text)
+        self.assertIn("EMA50 EMA",text)
+        self.assertIn("P Pivot",text)
+        self.assertNotIn("Nessuna vicinanza multi-fonte",text)
+        rows={row[0]:row[1] for row in extended["table"] if len(row)==3}
+        for level in ("EMA20","EMA50","P"):
+            self.assertIn(level,rows)
+
+    def test_r5_overlapping_cross_family_windows_do_not_merge_extrema(self):
+        """The distinct admissible windows 100-100.3 and 100.3-100.6 must survive."""
+        reported=self._r5_confluence_full_dom(100.0,100.6,100.3)["near"]
+        self.assertIn("EMA20 EMA",reported)
+        self.assertIn("EMA50 EMA",reported)
+        # The Pivot must be used in both valid descriptions; 100->100.6
+        # is outside 0.5% and must never be shown as a single group.
+        self.assertEqual(reported.count("P Pivot"),2,reported)
+        for chunk in reported.split(" · "):
+            if "EMA20 EMA" in chunk:
+                self.assertNotIn("EMA50 EMA",chunk)
+
+
+    def test_r6_rt2_inclusive_exact_point_five_percent_in_generated_dom(self):
+        """RT2: inclusive 0.5% must admit 99.75/100.25 and 399/401."""
+        import math
+        for low,high in ((99.75,100.25),(399.0,401.0)):
+            with self.subTest(low=low,high=high):
+                shown=self._r5_confluence_full_dom(low,None,high)["near"]
+                self.assertIn("Vicinanze entro 0,5% (solo descrittive):",shown)
+                self.assertIn("EMA20 EMA",shown)
+                self.assertIn("P Pivot",shown)
+                beyond=self._r5_confluence_full_dom(
+                    low,None,math.nextafter(high,math.inf))["near"]
+                self.assertIn("Nessuna vicinanza multi-fonte entro 0,5%",beyond)
+
+    def test_r6_rt2_inclusive_subnormal_point_five_percent_in_generated_dom(self):
+        """No overflow/underflow tolerance: preserve exact subnormal 399/401 ratio."""
+        import math
+        ulp=math.ulp(0.0)
+        low=399*ulp
+        high=401*ulp
+        self.assertGreater(low,0)
+        at=self._r5_confluence_full_dom(low,None,high)["near"]
+        self.assertIn("Vicinanze entro 0,5%",at)
+        beyond=self._r5_confluence_full_dom(low,None,high+ulp)["near"]
+        self.assertIn("Nessuna vicinanza multi-fonte",beyond)
+
+    def test_r6_rt2_more_than_two_confluences_are_explicitly_disclosed(self):
+        """Two displayed windows cannot imply only two valid windows exist."""
+        from unittest import mock
+        frame=self._r3_pivot_frame("4H","ADA/USDT")
+        stamp=frame["candles"][-1]["time"]
+        technical={
+            "ema20":[{"time":stamp,"value":100.0}],
+            "ema50":[{"time":stamp,"value":200.0}],
+            "structure":{
+                "supports":[{"price":300.0,"touches":2,"last_swing_time":0}],
+                "resistances":[]},
+            "pivots":{
+                "reference_day_utc":"2026-10-26",
+                "P":100.2,"S1":200.2,"S2":10.0,"S3":20.0,
+                "R1":300.2,"R2":400.0,"R3":500.0}
+        }
+        with mock.patch.object(g,"technical_from_candles",return_value=technical):
+            page=g.page_from_data(frame,now=self.now)
+        near=self._r3_render_actual_javascript(page)["near"]
+        self.assertIn("Vicinanze entro 0,5% (solo descrittive):",near)
+        self.assertIn("Mostrate 2 di 3",near)
+        self.assertNotIn("300–300,2",near)
+
 
 if __name__=='__main__': unittest.main(verbosity=2)
