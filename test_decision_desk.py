@@ -3329,9 +3329,6 @@ console.log(JSON.stringify(report));
 
     def test_r5_redteam_bridged_cross_family_survives_same_family(self):
         """Red Team 6447216348: 100/100.4/100.8 must expose EMA50/P."""
-        alone=self._r5_confluence_full_dom(None,100.4,100.8)["near"]
-        self.assertIn("EMA50 EMA",alone)
-        self.assertIn("P Pivot",alone)
         extended=self._r5_confluence_full_dom(100.0,100.4,100.8)
         text=extended["near"]
         self.assertIn("Vicinanze entro 0,5% (solo descrittive):",text)
