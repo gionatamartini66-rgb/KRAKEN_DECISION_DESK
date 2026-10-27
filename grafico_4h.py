@@ -10,12 +10,22 @@ import datetime as dt
 import html
 import json
 import math
+import re
+import urllib.parse
 import statistics
 from pathlib import Path
 
 TOKEN = "SUI"
 TF = "4H"
 CANDLES_MAX = 200
+
+
+def market_round(value):
+    """Preserve sub-micro market levels; legacy 8dp for ordinary prices."""
+    if value != 0 and abs(value) < 1e-6:
+        return float(f"{value:.12g}")
+    return round(value, 8)
+
 TIMEFRAMES = {"15m": (15, "15m"), "1h": (60, "1H"),
               "4h": (240, "4H"), "1d": (1440, "1D")}
 
@@ -59,10 +69,14 @@ def data_from_dossier(path: Path):
         "candles":ordered,
     }
 
-def data_from_kraken_ohlc(result, timeframe, now=None):
+def data_from_kraken_ohlc(result, timeframe, now=None, *, pair='SUI/EUR', token='SUI', pair_key=None):
     """Real consecutive Kraken Spot OHLC candles, discarding final uncommitted bar."""
     if timeframe not in TIMEFRAMES:
         raise ValueError("Timeframe non consentito")
+    if (not isinstance(pair, str) or
+            re.fullmatch(r"[A-Za-z0-9._-]{1,40}/[A-Za-z0-9._-]{1,40}", pair) is None or
+            not isinstance(token, str) or token != pair.split("/", 1)[0]):
+        raise ValueError("Identità coppia Kraken non valida")
     minutes, label = TIMEFRAMES[timeframe]
     seconds = minutes * 60
     now = now or dt.datetime.now(dt.timezone.utc)
@@ -94,7 +108,7 @@ def data_from_kraken_ohlc(result, timeframe, now=None):
     if len(closed) < 30:
         raise ValueError("Storico di candele chiuse insufficiente")
     return {"observed_utc": now.isoformat(timespec="seconds"),
-            "pair": "SUI/EUR", "token": TOKEN, "timeframe": label,
+            "pair": pair, "token": token, "pair_key": pair_key, "timeframe": label,
             "closed_at_utc": dt.datetime.fromtimestamp(
                 closed[-1]["time"] + seconds, dt.timezone.utc
             ).isoformat(timespec="seconds"),
@@ -112,10 +126,10 @@ def ema_points(candles, period):
     alpha = 2.0 / (period + 1)
     values = [row["close"] for row in candles]
     ema = sum(values[:period]) / period
-    points = [{"time": candles[period - 1]["time"], "value": round(ema, 8)}]
+    points = [{"time": candles[period - 1]["time"], "value": market_round(ema)}]
     for i in range(period, len(candles)):
         ema += alpha * (values[i] - ema)
-        points.append({"time": candles[i]["time"], "value": round(ema, 8)})
+        points.append({"time": candles[i]["time"], "value": market_round(ema)})
     return points
 
 
@@ -143,13 +157,13 @@ def daily_pivots(candles, interval_seconds=14400):
     p = (high + low + close) / 3.0
     spread = high - low
     return {"reference_day_utc": prev_day.isoformat(),
-            "P": round(p, 8),
-            "R1": round(2 * p - low, 8),
-            "S1": round(2 * p - high, 8),
-            "R2": round(p + spread, 8),
-            "S2": round(p - spread, 8),
-            "R3": round(high + 2 * (p - low), 8),
-            "S3": round(low - 2 * (high - p), 8)}
+            "P": market_round(p),
+            "R1": market_round(2 * p - low),
+            "S1": market_round(2 * p - high),
+            "R2": market_round(p + spread),
+            "S2": market_round(p - spread),
+            "R3": market_round(high + 2 * (p - low)),
+            "S3": market_round(low - 2 * (high - p))}
 
 
 def structural_levels(candles, tolerance=0.009):
@@ -194,7 +208,7 @@ def structural_levels(candles, tolerance=0.009):
             candidates.append((level, len(cl), max(x[0] for x in cl)))
         # Prossimità al prezzo corrente, a parità tocchi/recenza.
         candidates.sort(key=lambda z: (abs(z[0] - last), -z[1], -z[2]))
-        return [{"price": round(p, 8), "touches": n,
+        return [{"price": market_round(p), "touches": n,
                  "last_swing_time": candles[i]["time"]}
                 for p, n, i in candidates[:3]]
     return {"supports": group(pivots("low"), True),
@@ -210,6 +224,51 @@ def technical_from_candles(candles, interval_seconds=14400):
     }
 
 
+def temporal_consistency(data, *, now):
+    """Validate reported observation, completed candle and timeframe together.
+
+    Returns comparable timestamps in seconds; an inconsistent source is
+    rejected even if its last candle happens to look recent.
+    """
+    if now.tzinfo is None:
+        raise ValueError("Orario UTC di confronto non valido")
+    intervals = {"15m": 900, "1H": 3600, "4H": 14400, "1D": 86400}
+    seconds = intervals.get(data.get("timeframe"))
+    if seconds is None or data.get("interval_seconds", seconds) != seconds:
+        raise ValueError("Durata candele incoerente")
+    candles = data["candles"]
+    if not candles:
+        raise ValueError("Candele mancanti")
+    last_start = candles[-1]["time"]
+    if type(last_start) is not int or last_start % seconds:
+        raise ValueError("Orario ultima candela non allineato")
+    close_end = last_start + seconds
+
+    def parse_utc(name):
+        value = data[name]
+        if not isinstance(value, str):
+            raise ValueError("Timestamp " + name + " non valido")
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("Timestamp " + name + " privo di fuso")
+        return parsed.timestamp()
+
+    observed = parse_utc("observed_utc")
+    closed = parse_utc("closed_at_utc")
+    t = now.timestamp()
+    # Rounding/clock tolerance only (2s), not an extra candle of leeway.
+    if (abs(closed - close_end) > 2
+            or close_end > t + 2
+            or closed > t + 2
+            or observed > t + 2
+            or observed < close_end - 2
+            or closed > observed + 2):
+        raise ValueError("Metadati temporali discordanti, futuri o non verificabili")
+    expected_end = int((t - 120) // seconds) * seconds
+    return {"observed": observed, "closed": closed, "seconds": seconds,
+            "fresh": close_end >= expected_end}
+
+
 def summarize_timeframe(data, now=None):
     """Describe price/EMA and completed-volume observations, never a trade signal.
 
@@ -218,26 +277,18 @@ def summarize_timeframe(data, now=None):
     Never replace a missing/stale frame with another timeframe.
     """
     now = now or dt.datetime.now(dt.timezone.utc)
-    if now.tzinfo is None:
-        raise ValueError("Orario UTC di confronto non valido")
     frame = data.get("timeframe")
-    intervals = {"15m": 900, "1H": 3600, "4H": 14400, "1D": 86400}
-    if frame not in intervals:
-        raise ValueError("Timeframe sconosciuto")
-    seconds = intervals[frame]
-    if data.get("interval_seconds", seconds) != seconds:
-        raise ValueError("Durata candele incoerente")
     records = data.get("candles", [])
+    if frame not in ("15m", "1H", "4H", "1D"):
+        raise ValueError("Timeframe sconosciuto")
     if len(records) < 50:
         return {"timeframe": frame, "stato": "STORICO_INSUFFICIENTE",
                 "motivo": "Servono almeno 50 candele chiuse per confrontare EMA20 ed EMA50"}
+    timing = temporal_consistency(data, now=now)
+    seconds = timing["seconds"]
+    close_end = records[-1]["time"] + seconds
     last = records[-1]
-    close_end = last["time"] + seconds
-    expected_end = int((now.timestamp() - 120) // seconds) * seconds
-    observed = dt.datetime.fromisoformat(data["observed_utc"].replace("Z", "+00:00"))
-    if observed.tzinfo is None or observed.timestamp() > now.timestamp() + 120:
-        raise ValueError("Data rilevazione non valida o futura")
-    fresh = close_end >= expected_end and close_end <= now.timestamp() + 2
+    fresh = timing["fresh"]
     indicator20 = ema_points(records, 20)[-1]["value"]
     indicator50 = ema_points(records, 50)[-1]["value"]
     price = last["close"]
@@ -272,7 +323,7 @@ def summarize_timeframe(data, now=None):
     }
 
 
-def compare_timeframes(frames, now=None):
+def compare_timeframes(frames, now=None, *, pair='SUI/EUR'):
     """Compare four independently acquired frames without implying an order."""
     now = now or dt.datetime.now(dt.timezone.utc)
     labels = ("15m", "1H", "4H", "1D")
@@ -302,7 +353,7 @@ def compare_timeframes(frames, now=None):
             picture = "ALLINEAMENTO_RIBASSISTA_DESCRITTIVO"
         else:
             picture = "CONFIGURAZIONE_MISTA"
-    return {"coppia": "SUI/EUR", "rilevazione_confronto_utc": now.isoformat(
+    return {"coppia": pair, "rilevazione_confronto_utc": now.isoformat(
                 timespec="seconds"), "stato": "COMPLETO" if complete else "PARZIALE",
             "quadro": picture, "timeframe": details,
             "avvertenza": ("Ultime chiusure a orari differenti: confrontare la posizione "
@@ -314,25 +365,106 @@ def page_from_dossier(path: Path):
     return page_from_data(data_from_dossier(path))
 
 
-def page_from_data(x):
-    """Real 15m/1H/4H/1D candles, one renderer for all timeframes."""
+def page_from_data(x, *, now=None, home_url="/"):
+    """Real 15m/1H/4H/1D candles; fail closed on unrepresentable price ticks."""
     frame = x.get("timeframe", "4H")
     interval = x.get("interval_seconds", 14400)
     if frame not in ("15m", "1H", "4H", "1D"):
         raise ValueError("Timeframe non valido")
     active = {"15m": "15m", "1H": "1h", "4H": "4h", "1D": "1d"}[frame]
+    key = x.get("pair_key")
+    if key is not None and not re.fullmatch(r"[A-Za-z0-9_.-]{2,48}", key):
+        raise ValueError("Chiave Kraken non valida")
+    path = ("/grafico/spot?pair=" + urllib.parse.quote(key, safe="") + "&tf="
+            if key else "/grafico/sui-4h?tf=")
     links = " ".join(
-        '<a class="tf-link" href="/grafico/sui-4h?tf=' + key +
-        '"' + (' aria-current="page"' if key == active else "") +
+        '<a class="tf-link" href="' + html.escape(path + frame_key, quote=True) +
+        '"' + (' aria-current="page"' if frame_key == active else "") +
         '>' + html.escape(label) + '</a>'
-        for key, (_, label) in TIMEFRAMES.items())
+        for frame_key, (_, label) in TIMEFRAMES.items())
     candle_json = json.dumps(x["candles"], separators=(",",":"), allow_nan=False)
-    technical_json = json.dumps(technical_from_candles(
-        x["candles"], interval_seconds=interval),
-                                separators=(",",":"), allow_nan=False)
-    pair = html.escape(x["pair"], quote=True)
+    technical = technical_from_candles(x["candles"], interval_seconds=interval)
+    technical_json = json.dumps(technical, separators=(",",":"), allow_nan=False)
+    # Friendly labels must never overwrite the exact pair identity from Kraken.
+    pair = html.escape(x.get("display_pair", x["pair"]), quote=True)
+    token = x.get("display_token", x.get("token"))
+    if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", token):
+        raise ValueError("Token grafico non valido")
+    token_js = json.dumps(token, ensure_ascii=True)
+    quote_js = json.dumps(x["pair"].split("/", 1)[1], ensure_ascii=True)
+    positive_lows = [r["low"] for r in x["candles"]]
+    if (not positive_lows or not all(isinstance(v, (int, float)) and
+            math.isfinite(v) and v > 0 for v in positive_lows)):
+        raise ValueError("Prezzo minimo OHLC non valido")
+    smallest = min(positive_lows)
+    if smallest < 1e-12:
+        # Explicitly decline to misrepresent smaller quotes as zero
+        # with the 12dp precision currently supported by this view.
+        raise ValueError("Prezzo sotto la precisione supportata dal grafico")
+    # Original OHLC must be injective at display precision. EMA, pivots and
+    # structural levels retain their original numeric values, but legitimate
+    # sub-tick variation in calculated series is normal and NOT a reason to
+    # reject representable exchange candles.
+    prices = [r[k] for r in x["candles"] for k in ("open", "high", "low", "close")]
+    prices.extend(p["value"] for name in ("ema20", "ema50")
+                  for p in technical[name])
+    if technical["pivots"]:
+        prices.extend(value for key, value in technical["pivots"].items()
+                      if key != "reference_day_utc")
+    for side in ("supports", "resistances"):
+        prices.extend(item["price"] for item in technical["structure"][side])
+    if not all(isinstance(v, (float, int)) and not isinstance(v, bool)
+               and math.isfinite(v) for v in prices):
+        raise ValueError("Prezzi e livelli non verificabili")
+    # Distinct ORIGINAL prices, both through time and within each candle.
+    # Do not enforce artificial sub-tick injectivity on calculated indicators.
+    groups = [[r[k] for r in x["candles"]] for k in
+              ("open", "high", "low", "close")]
+    groups += [[r[k] for k in ("open", "high", "low", "close")]
+               for r in x["candles"]]
+    decimal_places = max(5, min(12, math.ceil(-math.log10(smallest)) + 3))
+    for candidate in range(decimal_places, 13):
+        collision = False
+        for group in groups:
+            represented = {}
+            for value in group:
+                key_text = f"{value:.{candidate}f}"
+                if (value > 0 and float(key_text) == 0
+                        or key_text in represented and represented[key_text] != value):
+                    collision = True
+                    break
+                represented[key_text] = value
+            if collision:
+                break
+        if not collision:
+            decimal_places = candidate
+            break
+    else:
+        raise ValueError("Prezzi distinti non rappresentabili entro 12 decimali")
+    min_move = 10 ** (-decimal_places)
+    now = now or dt.datetime.now(dt.timezone.utc)
+    timing = None
+    try:
+        freshness = summarize_timeframe(x, now=now)
+        fresh_state = freshness["stato"]
+        if fresh_state in ("AGGIORNATO", "SCADUTO"):
+            timing = temporal_consistency(x, now=now)
+    except (ValueError, TypeError, KeyError, IndexError, ZeroDivisionError, OverflowError):
+        fresh_state = "NON_VERIFICABILE"
+    temporal_valid = timing is not None
+    if fresh_state == "AGGIORNATO":
+        freshness_text = "DATI RECENTI VERIFICATI: ultima candela chiusa disponibile."
+    elif fresh_state == "SCADUTO":
+        freshness_text = "GRAFICO STORICO / SCADUTO: non descrive il mercato corrente."
+    else:
+        freshness_text = "DATI INCOMPLETI O NON VERIFICABILI: nessuna lettura corrente."
+    if not isinstance(home_url, str) or home_url not in ("/", "http://127.0.0.1:8765/"):
+        raise ValueError("Destinazione navigazione non consentita")
+    comparison_url = ("/analisi/spot?pair=" + urllib.parse.quote(key, safe="")
+                      if key else "/analisi/sui-mtf")
     observed = html.escape(x["observed_utc"], quote=True)
     closed = html.escape(x["closed_at_utc"], quote=True)
+    freshness_text = html.escape(freshness_text, quote=True)
     notice = ("TradingView Lightweight Charts™. "
               "Copyright (с) 2025 TradingView, Inc.")
     template = """<!doctype html>
@@ -385,6 +517,9 @@ button:focus-visible,a:focus-visible{outline:3px solid #a2e2ff}
 .stats{font-variant-numeric:tabular-nums;min-height:42px}
 #graph-status{font-weight:600;color:#85e6bc;min-height:24px}
 #graph-status.error{color:#ff969d}
+#market-freshness{font-weight:700;line-height:1.45}
+#market-freshness.current{color:#85e6bc}
+#market-freshness.warning{color:#ffd48a}
 footer{font-size:.83rem;color:#b3c1d8;line-height:1.5;margin:14px 0 26px}
 </style>
 </head>
@@ -392,15 +527,19 @@ footer{font-size:.83rem;color:#b3c1d8;line-height:1.5;margin:14px 0 26px}
 <header>
 <div><h1>📈 KDD · Grafico SUI/EUR · __TF__</h1>
 <small>Kraken Spot · candele CHIUSE · orari UTC · nessun ordine</small></div>
-<a href="/">← Torna al cruscotto</a>
+<a href="__HOME_URL__">← Torna al cruscotto</a>
 </header>
 <section class="panel">
 <div id="graph-status" role="status">Preparazione grafico…</div>
+<p id="market-freshness" class="__FRESH_CLASS__" role="status">__FRESHNESS__</p>
+<p class="muted">Ultima candela CHIUSA: __CLOSED__. Rilevazione: __OBSERVED__.
+La freschezza si rivaluta nella scheda senza richiedere nuove candele.
+La rilevazione originale non cambia; il grafico non fornisce quotazioni in tempo reale.</p>
 <nav class="buttons" aria-label="Timeframe grafico">
 __TIMEFRAME_BUTTONS__
 </nav>
 <p class="muted">Seleziona l'intervallo reale delle candele. Zoom e scorrimento col dito.</p>
-<p><a href="/analisi/sui-mtf" style="font-weight:700">🔎 Confronta 15m · 1H · 4H · 1D</a></p>
+<p><a href="__COMPARE_URL__" style="font-weight:700">🔎 Confronta 15m · 1H · 4H · 1D</a></p>
 <div class="legend" aria-label="Livelli e indicatori">
 <label><input type="checkbox" id="show-ema20" checked> EMA20 (oro)</label>
 <label><input type="checkbox" id="show-ema50" checked> EMA50 (azzurro)</label>
@@ -445,6 +584,9 @@ Pivot P/S1–S3/R1–R3: formule classiche sul giorno UTC precedente, solo se
 numero delle linee per leggibilità, mentre la tabella conserva i valori
 completi. Le vicinanze fra indicatori non costituiscono conferme indipendenti:
 sono una descrizione geometrica; nessun segnale BUY/SELL.
+Prezzi OHLC originali rappresentabili senza collisioni; EMA e livelli
+conservano il valore numerico di calcolo, ma possono sovrapporsi alla
+risoluzione massima della scala (12 decimali).
 Pattern e altri timeframe NON sono ancora implementati.</p>
 </section>
 <footer><a href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer">
@@ -461,6 +603,36 @@ const timeframeLabel = '__TF__';
 const tech = __TECHNICAL__;
 const msg=document.getElementById('graph-status');
 const stats=document.getElementById('candle-stats');
+// Only the age indicator changes; the original Kraken candle array never does.
+const freshnessValid=__FRESH_VALID__;
+const lastClosedMs=__LAST_CLOSED_MS__;
+const observedMs=__OBSERVED_MS__;
+const intervalMs=__INTERVAL_MS__;
+function freshnessAt(nowMs){
+  if(!freshnessValid || !Number.isFinite(nowMs) ||
+     nowMs < lastClosedMs-2000 || nowMs < observedMs-2000)
+    return 'NON_VERIFICABILE';
+  const expected=Math.floor((nowMs-120000)/intervalMs)*intervalMs;
+  return lastClosedMs >= expected ? 'AGGIORNATO' : 'SCADUTO';
+}
+function updateFreshness(){
+  const state=freshnessAt(Date.now());
+  const el=document.getElementById('market-freshness');
+  if(state==='AGGIORNATO'){
+    el.textContent='DATI RECENTI VERIFICATI: ultima candela chiusa disponibile.';
+    el.className='current';
+  }else if(state==='SCADUTO'){
+    el.textContent='GRAFICO STORICO / SCADUTO: non descrive il mercato corrente.';
+    el.className='warning';
+  }else{
+    el.textContent='DATI INCOMPLETI O NON VERIFICABILI: nessuna lettura corrente.';
+    el.className='warning';
+  }
+}
+updateFreshness();
+setInterval(updateFreshness,15000);
+document.addEventListener('visibilitychange',updateFreshness);
+window.addEventListener('focus',updateFreshness);
 try {
   if (!window.LightweightCharts ||
       !LightweightCharts.createChart ||
@@ -481,7 +653,7 @@ try {
   const candleSeries=chart.addSeries(LightweightCharts.CandlestickSeries,{
     upColor:'#23bb91',downColor:'#ee6b77',borderVisible:false,
     wickUpColor:'#23bb91',wickDownColor:'#ee6b77',priceLineVisible:false,
-    priceFormat:{type:'price',precision:5,minMove:0.00001},
+    priceFormat:{type:'price',precision:__PRECISION__,minMove:__MIN_MOVE__},
     lastValueVisible:true});
   candleSeries.setData(rows.map(v=>({
     time:v.time,open:v.open,high:v.high,low:v.low,close:v.close})));
@@ -490,7 +662,7 @@ try {
   function addEma(points,color,selector,legendSelector){
     const series=chart.addSeries(LightweightCharts.LineSeries,{
       color:color,lineWidth:2,priceLineVisible:false,lastValueVisible:false,
-      priceFormat:{type:'price',precision:5,minMove:0.00001},
+      priceFormat:{type:'price',precision:__PRECISION__,minMove:__MIN_MOVE__},
       crosshairMarkerVisible:false,title:''});
     series.setData(points);
     const control=document.querySelector(selector);
@@ -599,22 +771,32 @@ try {
     }
   }
   levelToggle('#show-pivots',pivotEntries,false);
-  const eur = new Intl.NumberFormat('it-IT',{maximumFractionDigits:6});
+  const quote=__QUOTE_JS__;
+  // Keep original numeric OHLC/EMA/pivot/SR and the <=12dp chart scale.
+  // Only textual labels of nonzero derived sub-tick prices need a fallback.
+  const basePriceText=new Intl.NumberFormat('it-IT',{maximumFractionDigits:__PRECISION__});
+  const priceText={format(value){
+    if(value===0) return '0'; // genuine zero, including negative zero
+    const formatted=basePriceText.format(value);
+    // Intl can render nonzero positive or negative micro-levels as 0/-0.
+    return Number.isFinite(value) && /^[-−]?0(?:[.,]0+)?$/.test(formatted)
+      ? value.toExponential(15) : formatted;
+  }};
   const supports=tech.structure.supports.length;
   const resistances=tech.structure.resistances.length;
   document.querySelector('#tech-summary').textContent=
-    'Ultima EMA20: '+eur.format(tech.ema20[tech.ema20.length-1].value)+
-    (tech.ema50.length?' · EMA50: '+eur.format(tech.ema50[tech.ema50.length-1].value):
+    'Ultima EMA20: '+priceText.format(tech.ema20[tech.ema20.length-1].value)+
+    (tech.ema50.length?' · EMA50: '+priceText.format(tech.ema50[tech.ema50.length-1].value):
       ' · EMA50: storico insufficiente')+
     ' · S/R confermati: '+supports+' supporti, '+resistances+' resistenze'+
     ' (almeno due swing per livello).'+
     (tech.pivots?' Pivot del '+tech.pivots.reference_day_utc+
-       ' UTC: P '+eur.format(tech.pivots.P)+'.':
+       ' UTC: P '+priceText.format(tech.pivots.P)+'.':
        ' Pivot giornalieri: dati completi giorno precedente insufficienti.');
 
-  const exact=new Intl.NumberFormat('it-IT',{maximumFractionDigits:8});
+  // All indicators, levels and OHLC use the selected quote precision.
   const categories=[
-    {name:'Medie esponenziali (chiusure 4H)',family:'EMA',items:[
+    {name:'Medie esponenziali (chiusure '+timeframeLabel+')',family:'EMA',items:[
       {label:'EMA20',price:tech.ema20[tech.ema20.length-1].value,note:'20 chiusure'},
       ...(tech.ema50.length ? [{label:'EMA50',
         price:tech.ema50[tech.ema50.length-1].value,note:'50 chiusure'}] : [])]},
@@ -641,14 +823,14 @@ try {
     }else{
       const table=document.createElement('table');
       const header=document.createElement('tr');
-      ['Livello','Prezzo EUR','Origine'].forEach(name=>{
+      ['Livello','Prezzo '+quote,'Origine'].forEach(name=>{
         const th=document.createElement('th');
         th.textContent=name;header.appendChild(th);
       });
       table.appendChild(header);
       for(const item of section.items){
         const tr=document.createElement('tr');
-        [item.label,exact.format(item.price),item.note].forEach(value=>{
+        [item.label,priceText.format(item.price),item.note].forEach(value=>{
           const td=document.createElement('td');
           td.textContent=value;tr.appendChild(td);
         });
@@ -658,34 +840,65 @@ try {
     }
     panel.appendChild(block);
   }
-  // Confluenza = vicinanza numerica, NON maggior probabilità di rimbalzo.
-  // Il gruppo deve stare per intero entro 0,5% del valore mediano.
+  // Confluenza = sola vicinanza numerica; non predice rimbalzi.
+  // Per lo Spot sono raggruppabili solo prezzi positivi e finiti.
+  // Livelli derivati <=0 restano nella tabella, non nel riepilogo.
+  // Soglia inclusiva ESATTA: 2*(hi-lo)/(hi+lo) <= 0,005
+  // equivale a 399*hi <= 401*lo per prezzi positivi.
+  // I prodotti sono confrontati come interi binari esatti delle double
+  // ricevute: niente errori al limite, overflow o underflow numerico.
+  const ratioBits=new DataView(new ArrayBuffer(8));
+  function binaryPositive(value){
+    ratioBits.setFloat64(0,value,false);
+    const raw=ratioBits.getBigUint64(0,false);
+    const exp=Number((raw>>52n)&2047n);
+    const fraction=raw&((1n<<52n)-1n);
+    return {mantissa:fraction+(exp?(1n<<52n):0n),
+      shift:exp?exp-1075:-1074};
+  }
+  function withinHalfPercent(lo,hi){
+    if(!(lo>0 && hi>=lo && Number.isFinite(lo) &&
+         Number.isFinite(hi)))return false;
+    const left=binaryPositive(lo),right=binaryPositive(hi);
+    const base=Math.min(left.shift,right.shift);
+    return 399n*(right.mantissa<<BigInt(right.shift-base)) <=
+           401n*(left.mantissa<<BigInt(left.shift-base));
+  }
   const near=categories.flatMap(cat=>cat.items.map(item=>({
     ...item,family:cat.family
-  }))).sort((a,b)=>a.price-b.price);
-  const groups=[];
-  let group=[];
-  for(const item of near){
-    if(group.length===0 || (item.price-group[0].price)/
-        (0.5*(item.price+group[0].price))<=0.005){
-      group.push(item);
-    }else{
-      groups.push(group);group=[item];
-    }
+  }))).filter(item=>Number.isFinite(item.price) && item.price>0)
+     .sort((a,b)=>a.price-b.price);
+  // Finestrelle sovrapposte: una coppia fra famiglie differenti entro soglia
+  // non deve sparire per l'inserimento di livelli della stessa famiglia.
+  // Ogni finestra mostrata rispetta la soglia tra il minimo e il massimo.
+  // Scarta solo finestre già contenute in una finestra valida precedente.
+  const windows=[];
+  for(let first=0;first<near.length-1;first++){
+    let end=first+1;
+    while(end<near.length &&
+          withinHalfPercent(near[first].price,near[end].price)) end++;
+    const items=near.slice(first,end);
+    if(items.length<2 || new Set(items.map(x=>x.family)).size<2)
+      continue;
+    if(windows.length && windows[windows.length-1].end>=end-1)
+      continue;
+    windows.push({end:end-1,items});
   }
-  if(group.length)groups.push(group);
-  const confluences=groups.filter(items=>items.length>=2 &&
-    new Set(items.map(x=>x.family)).size>=2);
+  const confluences=windows.map(window=>window.items);
   confluences.sort((a,b)=>Math.abs(a[0].price-lastClose)-
                          Math.abs(b[0].price-lastClose));
   const strip=document.getElementById('nearby-summary');
   if(confluences.length){
     const shown=confluences.slice(0,2).map(items=>
-      exact.format(Math.min(...items.map(x=>x.price)))+'–'+
-      exact.format(Math.max(...items.map(x=>x.price)))+' € ('+
+      priceText.format(Math.min(...items.map(x=>x.price)))+'–'+
+      priceText.format(Math.max(...items.map(x=>x.price)))+' '+quote+' ('+
       items.map(x=>x.label+' '+x.family).join(', ')+')');
+    const coverage=confluences.length>shown.length
+      ?' Mostrate '+shown.length+' di '+confluences.length+
+        ' finestre; le altre non sono elencate.'
+      :'';
     strip.textContent='Vicinanze entro 0,5% (solo descrittive): '+
-      shown.join(' · ')+'. Nessuna conferma di tenuta o breakout.';
+      shown.join(' · ')+'.'+coverage+' Nessuna conferma di tenuta o breakout.';
   }else{
     strip.textContent='Nessuna vicinanza multi-fonte entro 0,5% '+
       'fra i livelli osservati. Non equivale a mancanza di opportunità.';
@@ -713,12 +926,17 @@ try {
   sync(chart,volumeChart);sync(volumeChart,chart);
   // Timeframe buttons navigate to independent Kraken OHLC series.
   // Pan and zoom remain native gestures of the chart.
+  function formatVolume(value){
+    if(value === 0) return '0';
+    const result=new Intl.NumberFormat('it-IT',{maximumSignificantDigits:12}).format(value);
+    // Preserve a small positive value even on runtimes with coarse ICU output.
+    return result === '0' && value > 0 ? value.toExponential(8) : result;
+  }
   function show(row){
-    const fmt=new Intl.NumberFormat('it-IT',{maximumFractionDigits:6});
     const time=new Date(row.time*1000).toLocaleString('it-IT',{timeZone:'UTC'});
-    stats.textContent=time+' UTC · O '+fmt.format(row.open)+' · H '+fmt.format(row.high)+
-     ' · L '+fmt.format(row.low)+' · C '+fmt.format(row.close)+
-     ' · Vol '+fmt.format(row.volume)+' SUI';
+    stats.textContent=time+' UTC · O '+priceText.format(row.open)+' · H '+priceText.format(row.high)+
+     ' · L '+priceText.format(row.low)+' · C '+priceText.format(row.close)+
+     ' '+quote+' · Vol '+formatVolume(row.volume)+' '+__TOKEN_JS__;
   }
   show(rows[rows.length-1]);
   const byTime=new Map(rows.map(v=>[v.time,v]));
@@ -741,10 +959,31 @@ try {
 </script>
 </body>
 </html>"""
+    template = (template.replace("SUI/EUR", "__PAIR__")
+                .replace("(SUI)", "(__TOKEN__)")
+                .replace("/analisi/sui-mtf", "__COMPARE_URL__")
+                .replace("cinque decimali", "__DECIMALS__ decimali")
+                .replace("5 decimali", "__DECIMALS__ decimali"))
     return (template.replace("__BARS__", candle_json)
+             .replace("__FRESH_VALID__", "true" if temporal_valid else "false")
+             .replace("__LAST_CLOSED_MS__",
+                      str(x["candles"][-1]["time"] * 1000 + interval * 1000))
+             .replace("__OBSERVED_MS__",
+                      str(round(timing["observed"] * 1000)) if temporal_valid else "0")
+             .replace("__INTERVAL_MS__", str(interval * 1000))
+             .replace("__HOME_URL__", html.escape(home_url, quote=True))
+             .replace("__FRESHNESS__", freshness_text)
+             .replace("__FRESH_CLASS__", "current" if fresh_state == "AGGIORNATO" else "warning")
             .replace("__TECHNICAL__", technical_json)
             .replace("__OBSERVED__", observed).replace("__CLOSED__", closed)
             .replace("__NOTICE__", html.escape(notice))
             .replace("__TIMEFRAME_BUTTONS__", links)
             .replace("__TF__", html.escape(frame))
+            .replace("__PAIR__", pair).replace("__TOKEN__", html.escape(token))
+            .replace("__TOKEN_JS__", token_js)
+            .replace("__QUOTE_JS__", quote_js)
+            .replace("__COMPARE_URL__", html.escape(comparison_url, quote=True))
+            .replace("__PRECISION__", str(decimal_places))
+            .replace("__MIN_MOVE__", f"{min_move:.{decimal_places}f}")
+            .replace("__DECIMALS__", str(decimal_places))
             .replace("__SOURCE__", html.escape(x.get("source", "Dossier Kraken KDD"))))
