@@ -666,7 +666,9 @@ class DeskTests(unittest.TestCase):
         self.assertIn("tech.structure.supports.slice(0,2)",page)
         self.assertIn("tech.structure.resistances.slice(0,2)",page)
         self.assertIn("pivotNames.map(",page)
-        self.assertIn("0.005",page)
+        self.assertIn("function withinHalfPercent(lo,hi)",page)
+        self.assertIn("399n*(right.mantissa",page)
+        self.assertIn("401n*(left.mantissa",page)
         self.assertIn("Nessuna conferma di tenuta o breakout",page)
         self.assertNotIn("readonly.json",page)
 
