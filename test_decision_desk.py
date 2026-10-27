@@ -3309,4 +3309,50 @@ console.log(JSON.stringify(report));
 
 
 
+    def _r5_confluence_full_dom(self, ema20, ema50, pivot_p):
+        """Full generated graph JavaScript with independent selected technical levels."""
+        from unittest import mock
+        frame=self._r3_pivot_frame("4H","ADA/USDT")
+        stamp=frame["candles"][-1]["time"]
+        technical={
+            "ema20":([] if ema20 is None else [{"time":stamp,"value":ema20}]),
+            "ema50":([] if ema50 is None else [{"time":stamp,"value":ema50}]),
+            "structure":{"supports":[],"resistances":[]},
+            "pivots":{
+                "reference_day_utc":"2026-10-26",
+                "P":pivot_p,"S1":10.0,"S2":20.0,"S3":30.0,
+                "R1":110.0,"R2":120.0,"R3":130.0}
+        }
+        with mock.patch.object(g,"technical_from_candles",return_value=technical):
+            html=g.page_from_data(frame,now=self.now)
+        return self._r3_render_actual_javascript(html)
+
+    def test_r5_redteam_bridged_cross_family_survives_same_family(self):
+        """Red Team 6447216348: 100/100.4/100.8 must expose EMA50/P."""
+        alone=self._r5_confluence_full_dom(None,100.4,100.8)["near"]
+        self.assertIn("EMA50 EMA",alone)
+        self.assertIn("P Pivot",alone)
+        extended=self._r5_confluence_full_dom(100.0,100.4,100.8)
+        text=extended["near"]
+        self.assertIn("Vicinanze entro 0,5% (solo descrittive):",text)
+        self.assertIn("EMA50 EMA",text)
+        self.assertIn("P Pivot",text)
+        self.assertNotIn("Nessuna vicinanza multi-fonte",text)
+        rows={row[0]:row[1] for row in extended["table"] if len(row)==3}
+        for level in ("EMA20","EMA50","P"):
+            self.assertIn(level,rows)
+
+    def test_r5_overlapping_cross_family_windows_do_not_merge_extrema(self):
+        """The distinct admissible windows 100-100.3 and 100.3-100.6 must survive."""
+        reported=self._r5_confluence_full_dom(100.0,100.6,100.3)["near"]
+        self.assertIn("EMA20 EMA",reported)
+        self.assertIn("EMA50 EMA",reported)
+        # The Pivot must be used in both valid descriptions; 100->100.6
+        # is outside 0.5% and must never be shown as a single group.
+        self.assertEqual(reported.count("P Pivot"),2,reported)
+        for chunk in reported.split(" · "):
+            if "EMA20 EMA" in chunk:
+                self.assertNotIn("EMA50 EMA",chunk)
+
+
 if __name__=='__main__': unittest.main(verbosity=2)
