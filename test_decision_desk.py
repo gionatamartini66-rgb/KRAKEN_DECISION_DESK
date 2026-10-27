@@ -3352,4 +3352,53 @@ console.log(JSON.stringify(report));
                 self.assertNotIn("EMA50 EMA",chunk)
 
 
+    def test_r6_rt2_inclusive_exact_point_five_percent_in_generated_dom(self):
+        """RT2: inclusive 0.5% must admit 99.75/100.25 and 399/401."""
+        import math
+        for low,high in ((99.75,100.25),(399.0,401.0)):
+            with self.subTest(low=low,high=high):
+                shown=self._r5_confluence_full_dom(low,None,high)["near"]
+                self.assertIn("Vicinanze entro 0,5% (solo descrittive):",shown)
+                self.assertIn("EMA20 EMA",shown)
+                self.assertIn("P Pivot",shown)
+                beyond=self._r5_confluence_full_dom(
+                    low,None,math.nextafter(high,math.inf))["near"]
+                self.assertIn("Nessuna vicinanza multi-fonte entro 0,5%",beyond)
+
+    def test_r6_rt2_inclusive_subnormal_point_five_percent_in_generated_dom(self):
+        """No overflow/underflow tolerance: preserve exact subnormal 399/401 ratio."""
+        import math
+        ulp=math.ulp(0.0)
+        low=399*ulp
+        high=401*ulp
+        self.assertGreater(low,0)
+        at=self._r5_confluence_full_dom(low,None,high)["near"]
+        self.assertIn("Vicinanze entro 0,5%",at)
+        beyond=self._r5_confluence_full_dom(low,None,high+ulp)["near"]
+        self.assertIn("Nessuna vicinanza multi-fonte",beyond)
+
+    def test_r6_rt2_more_than_two_confluences_are_explicitly_disclosed(self):
+        """Two displayed windows cannot imply only two valid windows exist."""
+        from unittest import mock
+        frame=self._r3_pivot_frame("4H","ADA/USDT")
+        stamp=frame["candles"][-1]["time"]
+        technical={
+            "ema20":[{"time":stamp,"value":100.0}],
+            "ema50":[{"time":stamp,"value":200.0}],
+            "structure":{
+                "supports":[{"price":300.0,"touches":2,"last_swing_time":0}],
+                "resistances":[]},
+            "pivots":{
+                "reference_day_utc":"2026-10-26",
+                "P":100.2,"S1":200.2,"S2":10.0,"S3":20.0,
+                "R1":300.2,"R2":400.0,"R3":500.0}
+        }
+        with mock.patch.object(g,"technical_from_candles",return_value=technical):
+            page=g.page_from_data(frame,now=self.now)
+        near=self._r3_render_actual_javascript(page)["near"]
+        self.assertIn("Vicinanze entro 0,5% (solo descrittive):",near)
+        self.assertIn("Mostrate 2 di 3",near)
+        self.assertNotIn("300–300,2",near)
+
+
 if __name__=='__main__': unittest.main(verbosity=2)
