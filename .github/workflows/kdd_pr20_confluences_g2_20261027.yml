@@ -21,8 +21,8 @@ jobs:
       - name: Confluence real generated DOM tests
         run: |
           python -B -m unittest -v \
-            test_decision_desk.DeskTests.test_r4_confluence_real_dom_negative_and_opposite_signs \
-            test_decision_desk.DeskTests.test_r4_confluence_real_dom_positive_threshold_and_overflow
+            test_decision_desk.AnyKrakenSpotTests.test_r4_confluence_real_dom_negative_and_opposite_signs \
+            test_decision_desk.AnyKrakenSpotTests.test_r4_confluence_real_dom_positive_threshold_and_overflow
       - name: Canonical test suite (two private Samsung checks may skip)
         run: python -B -m unittest -v test_decision_desk
       - name: G0 preflight and preview synthetic suites
