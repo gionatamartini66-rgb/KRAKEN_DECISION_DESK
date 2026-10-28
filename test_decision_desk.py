@@ -3451,4 +3451,190 @@ console.log(JSON.stringify(report));
         self.assertNotIn("300–300,2",near)
 
 
+
+class PatrimonioD1D2Tests(unittest.TestCase):
+    """KDD-PR21 D1/D2: only synthetic holdings/prices; never read real wallet."""
+    def setUp(self):
+        self.now=dt.datetime(2026,10,28,11,0,tzinfo=dt.timezone.utc)
+        self.market={"prezzo_eur":100.0,"var_oggi_utc_pct":None,
+                     "volume_24h_eur_stimato":1000,"spread_pct":0.1}
+        self.source={"rilevazione_utc":self.now.isoformat(),
+                     "markets":{"BTC":dict(self.market),"SOL":dict(self.market,prezzo_eur=25)},
+                     "trends":{},"feed":[],"problemi_feed":[]}
+
+    def report(self,positions,markets=None,decisions=None):
+        data=dict(self.source)
+        if markets is not None: data["markets"]=markets
+        return d.build_report(data,{"posizioni":positions},{},{},decisions or [])
+
+    def test_d1_five_contract_states_and_html(self):
+        samples=[
+          ([{"token":"BTC","quantita":"2"},{"token":"SOL","quantita":"4"}],
+           "COMPLETO",300.0,2,0,"300,00 €"),
+          ([{"token":"BTC","quantita":"2"},{"token":"ETH","quantita":"3"}],
+           "PARZIALE",200.0,1,1,"200,00 € (incompleto)"),
+          ([{"token":"ETH","quantita":"3"}],
+           "NON_DISPONIBILE",None,0,1,"non disponibile (incompleto)"),
+          ([{"token":"BTC","quantita":"0"}],
+           "COMPLETO",0.0,1,0,"0,00 €"),
+          ([], "NESSUNA_POSIZIONE_REGISTRATA",None,0,0,
+           "non disponibile")]
+        for positions,state,expected,ok,bad,caption in samples:
+            with self.subTest(state=state):
+                report=self.report(positions)
+                self.assertEqual(report["stato_totale"],state)
+                self.assertEqual(report["totale_stimato_eur"],expected)
+                self.assertEqual(report["posizioni_valorizzate"],ok)
+                self.assertEqual(report["posizioni_incomplete"],bad)
+                self.assertEqual(report["posizioni_registrate"],len(positions))
+                self.assertEqual(report["totale_parziale"],state in
+                                 ("PARZIALE","NON_DISPONIBILE"))
+                self.assertIn("Valore posizioni inserite: "+caption,d.render(report))
+                self.assertNotIn("Valore posizioni inserite: nan",d.render(report))
+                json.dumps(report,allow_nan=False)
+        self.assertTrue(self.report([{"token":"BTC","quantita":"0"}])["zero_reale"])
+        self.assertFalse(self.report([])["zero_reale"])
+
+    def test_d1_old_report_render_preserves_unavailable_semantics(self):
+        case=self.report([{"token":"BTC","quantita":"2"}])
+        old=dict(case,totale_stimato_eur=0,totale_parziale=True)
+        for key in ("stato_totale","posizioni_valorizzate","posizioni_incomplete",
+                    "posizioni_registrate","zero_reale"):
+            old.pop(key,None)
+        old["posizioni"]=[{"token":"BTC","quantita":None,
+                           "errore":"Quantità non nota",
+                           "decisione":"NESSUNA DECISIONE REGISTRATA"}]
+        self.assertIn("non disponibile (incompleto)",d.render(old))
+        self.assertNotIn("Valore posizioni inserite: 0,00 €",d.render(old))
+
+    def test_d2_malformed_quantities_keep_identity_and_do_not_fake_zero(self):
+        for raw in (None,"MISSING","","NaN","Infinity","-Infinity",
+                    -2,True,False,float("nan"),float("inf"),
+                    1e308,"1e400","1e-400",[],{}):
+            with self.subTest(value=str(raw)):
+                case=self.report([{"token":"BTC","quantita":raw,
+                                   "costo_medio_eur":10}])
+                p=case["posizioni"][0]
+                self.assertEqual(p["token"],"BTC")
+                self.assertIn("errore",p)
+                self.assertNotIn("valore_eur",p)
+                self.assertNotIn("pl_non_realizzato_eur",p)
+                self.assertIsNone(case["totale_stimato_eur"])
+                self.assertEqual(case["stato_totale"],"NON_DISPONIBILE")
+                json.dumps(case,allow_nan=False)
+                shown=d.render(case)
+                self.assertIn("BTC",shown)
+                self.assertIn("Valore posizioni inserite: non disponibile",shown)
+                self.assertNotIn("P/L indicativo: ",shown)
+
+    def test_d2_zero_and_valid_quantity_yield_genuine_zero_and_pl(self):
+        z=self.report([{"token":"BTC","quantita":0,"costo_medio_eur":12}])
+        self.assertEqual(z["posizioni"][0]["valore_eur"],0)
+        self.assertEqual(z["posizioni"][0]["pl_non_realizzato_eur"],0)
+        self.assertTrue(z["zero_reale"])
+        p=self.report([{"token":"BTC","quantita":"2.5","costo_medio_eur":"75"}])
+        self.assertEqual(p["posizioni"][0]["valore_eur"],250)
+        self.assertEqual(p["posizioni"][0]["pl_non_realizzato_eur"],62.5)
+        self.assertFalse(p["zero_reale"])
+
+    def test_d2_invalid_token_and_duplicate_do_not_get_wrong_decision(self):
+        now=self.now.isoformat()
+        decisions=[{"token":"BTC","scelta":"TENERE","motivo":"BTC TEST",
+                    "creata_utc":now,
+                    "scade_utc":"2030-10-29T11:00:00+00:00"}]
+        for bad in (None,27,"","   ","<script>alert(1)</script>",
+                    "A/B","BTC EVIL",True):
+            with self.subTest(token=repr(bad)):
+                report=self.report([{"token":bad,"quantita":1}],decisions=decisions)
+                self.assertEqual(len(report["posizioni"]),1)
+                self.assertIn("errore",report["posizioni"][0])
+                self.assertNotIn("valore_eur",report["posizioni"][0])
+                self.assertNotIn("BTC TEST",report["posizioni"][0]["decisione"])
+                self.assertEqual(report["posizioni_incomplete"],1)
+                page=d.render(report)
+                self.assertNotIn("<script>alert(1)</script>",page)
+                json.dumps(report,allow_nan=False)
+        duplicated=self.report([{"token":"BTC","quantita":2},
+                                {"token":"btc","quantita":3}],decisions=decisions)
+        self.assertEqual(len(duplicated["posizioni"]),2)
+        self.assertEqual(duplicated["posizioni_valorizzate"],0)
+        self.assertEqual(duplicated["posizioni_incomplete"],2)
+        self.assertIsNone(duplicated["totale_stimato_eur"])
+        self.assertTrue(all("errore" in h and "valore_eur" not in h
+                            and "BTC TEST" not in h["decisione"]
+                            for h in duplicated["posizioni"]))
+        self.assertIn("duplic",d.render(duplicated).lower())
+
+    def test_d2_invalid_cost_basis_keeps_value_but_no_pl(self):
+        for basis in ("MISSING","","NaN","Infinity",-1,True,1e309,{}):
+            with self.subTest(basis=repr(basis)):
+                report=self.report([{"token":"BTC","quantita":2,
+                                     "costo_medio_eur":basis}])
+                p=report["posizioni"][0]
+                self.assertEqual(p["valore_eur"],200)
+                self.assertIsNone(p["pl_non_realizzato_eur"])
+                self.assertIn("costo",d.render(report).lower())
+                self.assertIn("verific",d.render(report).lower())
+                json.dumps(report,allow_nan=False)
+
+    def test_d2_bad_market_prices_and_overflow_not_a_value(self):
+        for price in (0,-1,float("nan"),float("inf"),"NaN","oops",1e308):
+            with self.subTest(price=repr(price)):
+                markets={"BTC":dict(self.market,prezzo_eur=price)}
+                report=self.report([{"token":"BTC","quantita":"2"}],markets=markets)
+                self.assertIsNone(report["totale_stimato_eur"])
+                self.assertIn("errore",report["posizioni"][0])
+                json.dumps(report,allow_nan=False)
+        tiny=self.report([{"token":"BTC","quantita":"1e-200"}],
+                         markets={"BTC":dict(self.market,prezzo_eur=1e-200)})
+        self.assertIsNone(tiny["totale_stimato_eur"])
+        json.dumps(tiny,allow_nan=False)
+
+    def test_d2_duplicate_unknown_token_keeps_all_rows(self):
+        case=self.report([{"token":None,"quantita":None},
+                          {"token":None,"quantita":"MISSING"},
+                          {"token":"SOL","quantita":"3"}])
+        self.assertEqual(len(case["posizioni"]),3)
+        self.assertEqual(case["posizioni_valorizzate"],1)
+        self.assertEqual(case["posizioni_incomplete"],2)
+        self.assertEqual(case["totale_stimato_eur"],75)
+        json.dumps(case,allow_nan=False)
+
+    def test_d2_malformed_decision_records_do_not_bind_wrong_asset(self):
+        now=self.now.isoformat()
+        entries=[{"token":None,"creata_utc":now},
+                 {"token":27,"creata_utc":now},
+                 {"token":"BTC","creata_utc":now,
+                  "scelta":"ATTESA","motivo":"BTC_ONLY",
+                  "scade_utc":"2030-10-29T11:00:00+00:00"}]
+        good=self.report([{"token":"BTC","quantita":"1"}],decisions=entries)
+        self.assertIn("BTC_ONLY",good["posizioni"][0]["decisione"])
+        bad=self.report([{"token":"ETH","quantita":"1"}],decisions=entries)
+        self.assertNotIn("BTC_ONLY",bad["posizioni"][0]["decisione"])
+
+    def test_d2_strict_report_file_and_html_consumers(self):
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            original_load=d.load
+            def local_load(name,default=None):
+                if name=="portafoglio.json":
+                    return {"posizioni":[{"token":"BTC","quantita":"MISSING"}]}
+                return default
+            with unittest.mock.patch.object(d,"DIR",root),\
+                 unittest.mock.patch.object(d,"load",side_effect=local_load),\
+                 unittest.mock.patch.object(d,"load_decisions",return_value=[]),\
+                 unittest.mock.patch.object(d.piano_gpt,"load",return_value=None),\
+                 unittest.mock.patch("verifica_piani.archivia_piano",return_value=None):
+                d.output(self.source)
+            raw=(root/"ultimo_report.json").read_text()
+            obj=json.loads(raw,parse_constant=lambda x:(_ for _ in ()).throw(
+                ValueError("Nonfinite JSON constant: "+x)))
+            self.assertIsNone(obj["totale_stimato_eur"])
+            self.assertEqual(obj["stato_totale"],"NON_DISPONIBILE")
+            html=(root/"cruscotto.html").read_text()
+            self.assertIn("Valore posizioni inserite: non disponibile",html)
+            self.assertNotIn("Valore posizioni inserite: 0,00 €",html)
+
+
 if __name__=='__main__': unittest.main(verbosity=2)
