@@ -2356,8 +2356,56 @@ class DeskTests(unittest.TestCase):
         rows=d.market_pairs_and_ticker(self.pairs,self.t)
         report=d.build_report({'rilevazione_utc':d.NOW().isoformat(),'markets':rows,'trends':{},'feed':[], 'problemi_feed':[]},
                               {'posizioni':[{'token':'BTC','quantita':None,'costo_medio_eur':None}]},{},{},[])
-        self.assertEqual(report['posizioni'],[])
+        self.assertEqual(len(report['posizioni']),1)
+        self.assertEqual(report['posizioni'][0]['token'],'BTC')
+        self.assertIsNone(report['posizioni'][0]['quantita'])
         self.assertEqual(report['totale_stimato_eur'],0)
+        self.assertTrue(report['totale_parziale'])
+        self.assertEqual(report['posizioni_non_aggiornate'],1)
+        page=d.render(report)
+        self.assertIn('Quantità: non nota',page)
+        self.assertIn('Valore posizioni inserite: non disponibile (incompleto)',page)
+        self.assertNotIn('Valore posizioni inserite: 0,00 €',page)
+
+    def test_rt_i01_mixed_incomplete_positions_visible_without_fictitious_value(self):
+        rows=d.market_pairs_and_ticker(self.pairs,self.t)
+        data={'rilevazione_utc':d.NOW().isoformat(),'markets':rows,'trends':{},
+              'feed':[],'problemi_feed':[]}
+        portfolio={'posizioni':[
+            {'token':'BTC','quantita':2,'costo_medio_eur':None},
+            {'token':'SOL','quantita':None,'costo_medio_eur':None},
+            {'token':'ETH','quantita':3,'costo_medio_eur':None}]}
+        report=d.build_report(data,portfolio,{}, {}, [])
+        self.assertEqual([x['token'] for x in report['posizioni']],['BTC','SOL','ETH'])
+        self.assertEqual(report['posizioni'][0]['valore_eur'],90000)
+        self.assertEqual(report['totale_stimato_eur'],90000)
+        self.assertTrue(report['totale_parziale'])
+        self.assertEqual(report['posizioni_non_aggiornate'],1)
+        self.assertNotIn('valore_eur',report['posizioni'][1])
+        self.assertNotIn('valore_eur',report['posizioni'][2])
+        self.assertEqual(report['posizioni'][2]['quantita'],3)
+        page=d.render(report)
+        self.assertIn('<h3>SOL</h3><p>Quantità: non nota</p>',page)
+        self.assertIn('<h3>ETH</h3><p>Quantità: 3</p>',page)
+        self.assertIn('Valore posizioni inserite: 90 000,00 € (incompleto)',page)
+        self.assertNotIn('P/L indicativo:',page)
+
+    def test_rt_i01_only_unquoted_quantity_is_not_zero_total(self):
+        data={'rilevazione_utc':d.NOW().isoformat(),'markets':{},'trends':{},
+              'feed':[],'problemi_feed':[]}
+        report=d.build_report(data,{'posizioni':[{'token':'ETH','quantita':3}]},{},{},[])
+        page=d.render(report)
+        self.assertIn('<h3>ETH</h3><p>Quantità: 3</p>',page)
+        self.assertIn('Valore posizioni inserite: non disponibile (incompleto)',page)
+
+    def test_rt_i01_known_zero_is_different_from_missing_quantity(self):
+        rows=d.market_pairs_and_ticker(self.pairs,self.t)
+        data={'rilevazione_utc':d.NOW().isoformat(),'markets':rows,'trends':{},
+              'feed':[],'problemi_feed':[]}
+        report=d.build_report(data,{'posizioni':[{'token':'BTC','quantita':0}]},{},{},[])
+        self.assertFalse(report['totale_parziale'])
+        self.assertEqual(report['posizioni'][0]['valore_eur'],0)
+        self.assertIn('Valore posizioni inserite: 0,00 €',d.render(report))
 
 # Copertura G2: coppie arbitrarie senza preferenza SUI/EUR.
 import grafico_4h as g
