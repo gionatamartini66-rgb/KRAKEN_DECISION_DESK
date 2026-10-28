@@ -289,7 +289,11 @@ def build_report(data, portfolio, conf, ctx, decisions):
     holdings = []
     for h in portfolio.get('posizioni', []):
         symbol = h.get('token', '').upper(); quantity = h.get('quantita', None)
-        if quantity is None: continue
+        if quantity is None:
+            holdings.append({'token': symbol, 'quantita': None,
+                             'errore': 'Quantità non nota: nessun saldo o valore stimato.',
+                             'decisione': decision_state(symbol, decisions, now)})
+            continue
         row = pairs.get(symbol)
         if row is None:
             holdings.append({'token': symbol, 'quantita': quantity, 'errore': 'Nessuna quotazione spot EUR disponibile: nessuna stima inventata.',
@@ -364,7 +368,9 @@ def render(report):
     holdings = ''
     for h in report['posizioni']:
         if 'errore' in h:
-            holdings += f"<article><h3>{esc(h['token'])}</h3><p>{esc(h['errore'])}</p><p>{esc(h['decisione'])}</p></article>"
+            quantity_info = 'non nota' if h.get('quantita') is None else esc(h['quantita'])
+            holdings += (f"<article><h3>{esc(h['token'])}</h3><p>Quantità: {quantity_info}</p>"
+                         f"<p>{esc(h['errore'])}</p><p>{esc(h['decisione'])}</p></article>")
         else:
             trend = h.get('tendenza') or {}
             delta7 = fmt(trend.get('var_7g_pct')) + '%' if 'errore' not in trend else 'n.d.'
@@ -611,7 +617,9 @@ def render(report):
     feed = ''.join(f"<li><strong>{esc(x['fonte'])}:</strong> <a href='{esc(x['link'])}' target='_blank' rel='noopener'>{esc(x['titolo'])}</a> <small>{esc(x['data'])}</small></li>" for x in report['feed'])
     feed += ''.join(f'<li class="urgente">Fonte non disponibile: {esc(x)}</li>' for x in report['problemi_feed'])
     warnings = ''.join(f'<li>{esc(x)}</li>' for x in report['avvertenze'])
-    total = (f"{fmt(report['totale_stimato_eur'])} €" if report['posizioni'] else 'non disponibile') + (' (incompleto)' if report['totale_parziale'] else '')
+    # Una posizione incompleta non dimostra un totale pari a zero.
+    has_valued_position = any('valore_eur' in h for h in report['posizioni'])
+    total = (f"{fmt(report['totale_stimato_eur'])} €" if has_valued_position else 'non disponibile') + (' (incompleto)' if report['totale_parziale'] else '')
     # La data in un file statico resta identica; l'età deve essere calcolata
     # dal browser a ogni apertura, ritorno in primo piano e durante la lettura.
     freschezza_live = '''<p id="data-freschezza" data-rilevazione="__RILEVAZIONE__" role="status">Verifica dell'età dei dati in corso; in assenza di JavaScript considerali da aggiornare.</p>
