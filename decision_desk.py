@@ -620,7 +620,8 @@ def render(report):
     feed = ''.join(f"<li><strong>{esc(x['fonte'])}:</strong> <a href='{esc(x['link'])}' target='_blank' rel='noopener'>{esc(x['titolo'])}</a> <small>{esc(x['data'])}</small></li>" for x in report['feed'])
     feed += ''.join(f'<li class="urgente">Fonte non disponibile: {esc(x)}</li>' for x in report['problemi_feed'])
     warnings = ''.join(f'<li>{esc(x)}</li>' for x in report['avvertenze'])
-    total = (f"{fmt(report['totale_stimato_eur'])} €" if report['posizioni'] else 'non disponibile') + (' (incompleto)' if report['totale_parziale'] else '')
+    # Una scheda incompleta non prova che il patrimonio sia pari a zero.
+    total = (f"{fmt(report['totale_stimato_eur'])} €" if any('valore_eur' in h for h in report['posizioni']) else 'non disponibile') + (' (incompleto)' if report['totale_parziale'] else '')
     # La data in un file statico resta identica; l'età deve essere calcolata
     # dal browser a ogni apertura, ritorno in primo piano e durante la lettura.
     freschezza_live = '''<p id="data-freschezza" data-rilevazione="__RILEVAZIONE__" role="status">Verifica dell'età dei dati in corso; in assenza di JavaScript considerali da aggiornare.</p>
