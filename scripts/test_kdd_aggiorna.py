@@ -40,6 +40,18 @@ class UpdateTests(unittest.TestCase):
                 p.write_text('# file ' + name + '\n')
         for directory in (self.root, self.live):
             (directory / 'test_decision_desk.py').write_text(TEST_BODY)
+            for name in kdd.PACKET_FILES:
+                origin = Path(__file__).resolve().parents[1] / name
+                if name.endswith('test_kdd_portfolio_4tf.py'):
+                    # The updater's synthetic source tree intentionally uses
+                    # placeholder application code. Its staging test verifies
+                    # packaging only; real E2E runs separately on true KDD.
+                    (directory / name).write_text(
+                        'import unittest\nclass PackageProbe(unittest.TestCase):\n'
+                        '  def test_technical_module_staged(self):\n'
+                        '    self.assertTrue(__import__("pathlib").Path("patrimonio_4tf.py").is_file())\n')
+                else:
+                    (directory / name).write_bytes(origin.read_bytes())
         (self.live / 'config.json').write_text('{}\n')
         sha = kdd.fingerprint(self.live)
         self.old_readme = 'MANUALE LOCALE: DATO PRIVATO\n<!-- CHECKPOINT_SORGENTI_SHA256: ' + sha + ' -->\n'

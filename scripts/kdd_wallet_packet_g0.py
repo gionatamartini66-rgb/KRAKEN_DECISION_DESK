@@ -8,6 +8,8 @@ This is an opt-in, app-private packet generator; it never publishes or synchroni
 from __future__ import annotations
 
 import argparse
+import hashlib
+import math
 import datetime as dt
 from decimal import Decimal, InvalidOperation
 import json
@@ -99,36 +101,161 @@ def source_status(timestamp: dt.datetime, current: dt.datetime, *, max_age_min=3
             "eta_minuti": age}
 
 
+def portfolio_identity(portfolio: dict) -> str | None:
+    """Canonical local JSON content hash, not origin authentication."""
+    try:
+        b=json.dumps(portfolio,sort_keys=True,separators=(',', ':'),
+                     ensure_ascii=False,allow_nan=False).encode('utf-8')
+    except (TypeError,ValueError,OverflowError):
+        return None
+    return hashlib.sha256(b).hexdigest()
+
+
+def four_tf_evidence(portfolio, report, dossier, expected_market):
+    """Verify exact D1/D2 wallet/snapshot identity before using 4TF evidence.
+
+    Legacy dossiers remain readable but explicitly lack four-TF evidence.
+    """
+    four=dossier.get('patrimonio_4tf')
+    if not isinstance(four,dict):
+        return None
+    identifier=portfolio_identity(portfolio)
+    if (not identifier or four.get('portafoglio_sha256')!=identifier
+            or dossier.get('fotografia_portafoglio_sha256')!=identifier
+            or report.get('fotografia_portafoglio_sha256')!=identifier):
+        raise PacketError('Fotografia patrimoniale 4TF discordante')
+    if (four.get('rilevazione_kraken_utc')!=expected_market
+            or dossier.get('kraken_istantanea_utc')!=expected_market):
+        raise PacketError('Rilevazione delle serie 4TF discordante')
+    rows=four.get('posizioni')
+    if not isinstance(rows,list) or len(rows)!=len(portfolio.get('posizioni',[])):
+        raise PacketError('Copertura delle posizioni 4TF incompleta o manomessa')
+    for index,entry in enumerate(rows):
+        if not isinstance(entry,dict) or entry.get('indice')!=index:
+            raise PacketError('Indice della posizione 4TF incoerente')
+        actual=portfolio['posizioni'][index]
+        symbol=actual.get('token') if isinstance(actual,dict) else None
+        if isinstance(symbol,str):
+            symbol=symbol.strip().upper()
+        if entry.get('identita_valida') and entry.get('token')!=symbol:
+            raise PacketError('Identita della posizione 4TF incoerente')
+    return rows
+
+
+def technical_in_packet(row, now):
+    """Evidence belongs to the declared Kraken pair, with closed OHLC rows."""
+    if not isinstance(row,dict):
+        raise PacketError('Posizione tecnica non strutturata')
+    pair=row.get('coppia');pair_key=row.get('pair_key')
+    entries=row.get('timeframe')
+    if not isinstance(entries,dict):
+        raise PacketError('Timeframe patrimoniali non strutturati')
+    result={'stato':row.get('stato','PARZIALE'), 'coppia':pair,
+            'pair_key':pair_key, 'asset_base':row.get('asset_base'),
+            'valuta_quotazione':row.get('valuta_quotazione'),
+            'eleggibilita_conto':'NON_VERIFICATA', 'timeframe':{}}
+    for label,seconds in (('15m',900),('1H',3600),('4H',14400),('1D',86400)):
+        frame=entries.get(label)
+        if not isinstance(frame,dict) or frame.get('timeframe')!=label:
+            raise PacketError('Timeframe non corrispondente: '+label)
+        status=frame.get('stato')
+        if status not in ('AGGIORNATO','SCADUTO','STORICO_INSUFFICIENTE',
+                          'NON_DISPONIBILE','NON_VALIDO','RINVIATO_BUDGET'):
+            raise PacketError('Stato tecnico sconosciuto: '+label)
+        if status not in ('AGGIORNATO','SCADUTO'):
+            result['timeframe'][label]={'stato':status,'motivo':str(frame.get('motivo') or '')[:180]}
+            continue
+        if (frame.get('coppia')!=pair or frame.get('pair_key')!=pair_key
+                or frame.get('valuta_quotazione')!=row.get('valuta_quotazione')
+                or frame.get('asset_base')!=row.get('asset_base')
+                or not pair or not pair_key):
+            raise PacketError('Coppia 4TF discordante: '+label)
+        raw=frame.get('serie_ohlcv_chiuse')
+        if not isinstance(raw,list) or not 50<=len(raw)<=200:
+            raise PacketError('Campione tecnico non valido: '+label)
+        last_time=None
+        for c in raw:
+            if not isinstance(c,dict) or type(c.get('time')) is not int:
+                raise PacketError('Timestamp OHLC non valido: '+label)
+            ts=c['time']
+            if ts%seconds or (last_time is not None and ts-last_time!=seconds):
+                raise PacketError('Lacuna o sovrapposizione OHLC: '+label)
+            last_time=ts
+            vals=[c.get(n) for n in ('open','high','low','close','volume')]
+            if (any(type(v) not in (float,int) or not math.isfinite(v) for v in vals)
+                    or not (0<vals[2]<=min(vals[0],vals[3])<=max(vals[0],vals[3])<=vals[1]
+                            and vals[4]>=0)):
+                raise PacketError('Candela non valida: '+label)
+        closed=when(frame.get('chiusura_utc'),'ultimo close '+label)
+        observation=when(frame.get('rilevazione_utc'),'osservazione '+label)
+        if (closed.timestamp()!=last_time+seconds or observation<closed
+                or frame.get('ultima_candela_ohlcv_chiusa')!=raw[-1]
+                or observation>now+dt.timedelta(seconds=2)
+                or closed>now+dt.timedelta(seconds=2)):
+
+            raise PacketError('Candele o timestamp incoerenti: '+label)
+        # Source verdict was written at dossier generation. Re-evaluate when
+        # composing the GPT packet, including a previously "AGGIORNATO" candle.
+        expected_end=int((now.timestamp()-120)//seconds)*seconds
+        status='AGGIORNATO' if last_time+seconds>=expected_end else 'SCADUTO'
+        result['timeframe'][label]={
+            'stato':status, 'chiusura_utc':frame['chiusura_utc'],
+            'rilevazione_utc':frame['rilevazione_utc'],
+            'candele_chiuse':len(raw), 'serie_ohlcv_chiuse':raw,
+            'close':amount(frame.get('close'),'close'),
+            'ema20':amount(frame.get('ema20'),'EMA20'),
+            'ema50':amount(frame.get('ema50'),'EMA50'),
+            'volume':amount(frame.get('volume'),'volume'),
+            'pivot_giornaliero':frame.get('pivot_giornaliero'),
+            'livelli_strutturali':frame.get('livelli_strutturali'),
+            'fonte':str(frame.get('fonte') or '')[:130],
+            'limite':'Solo candele chiuse Kraken Spot; non prezzo eseguibile'}
+    return result
+
+
 def brief_positions(portfolio: dict, report: dict, snapshot: dict, dossier: dict,
-                    dossier_fresh: bool) -> list[dict]:
+                    dossier_fresh: bool, four_rows=None, now=None) -> list[dict]:
     all_positions = portfolio.get("posizioni")
     reported = report.get("posizioni")
     if not isinstance(all_positions, list) or not isinstance(reported, list):
         raise PacketError("Posizioni non leggibili")
-    by_report = {}
-    for row in reported:
-        if not isinstance(row, dict):
-            raise PacketError("Riga report non valida")
-        token = safe_symbol(row.get("token"))
-        if token in by_report:
-            raise PacketError("Posizione duplicata nel report")
-        by_report[token] = row
-    selected = []
-    seen = set()
+    if len(reported) != len(all_positions):
+        raise PacketError("Numero posizioni tra report e portafoglio diverso")
+    names=[]
     for row in all_positions:
-        if not isinstance(row, dict):
-            raise PacketError("Riga portafoglio non valida")
-        token = safe_symbol(row.get("token"))
-        if token in seen:
-            raise PacketError("Posizione duplicata nel portafoglio")
-        seen.add(token)
+        raw=row.get('token') if isinstance(row,dict) else None
+        try:
+            names.append(safe_symbol(raw))
+        except PacketError:
+            names.append(None)
+    duplicates={token for token in names if token is not None and names.count(token)>1}
+    selected = []
+    for index, row in enumerate(all_positions):
+        token=names[index]
+        matched=reported[index]
+        if not isinstance(matched,dict):
+            raise PacketError("Riga report non valida")
+        # Invalid, duplicate or unstructured identities remain visible by row
+        # index, with no attribution of assets, valuation or a decision.
+        if token is None or token in duplicates:
+            state=('IDENTITA_AMBIGUA' if token in duplicates else
+                   'IDENTITA_NON_VALIDA')
+            if four_rows is not None:
+                technical4=technical_in_packet(four_rows[index], now)
+            else:
+                technical4={'stato':'NON_DISPONIBILE',
+                            'motivo':'Dossier senza 4TF verificati'}
+            selected.append({'indice':index,'token':token,
+                             'stato_identita':state,'quantita_spot':None,
+                             'prezzo_eur':None,'valore_eur':None,
+                             'pl_indicativo_eur':None,'decisione_precedente':'',
+                             'analisi_4tf':technical4,
+                             'limite':'Identita non attribuibile: nessun valore o decisione riferiti alla riga'})
+            continue
+        if matched.get('token')!=token:
+            raise PacketError("Posizioni report/portafoglio non allineate")
         qty = amount(row.get("quantita"), "quantita")
-        matched = by_report.get(token)
-        if qty is not None and matched is None:
-            raise PacketError("Posizione mancante dal report")
-        # An original report with an unavailable EUR pair omits qty: keep token
-        # and original qty, but never invent a price or substitute another quote.
-        if qty is not None and matched and "quantita" in matched:
+        if qty is not None and "quantita" in matched:
             reported_qty = amount(matched["quantita"], "quantita report")
             if reported_qty is None or Decimal(qty) != Decimal(reported_qty):
                 raise PacketError("Quantita report/portafoglio diversa")
@@ -180,7 +307,10 @@ def brief_positions(portfolio: dict, report: dict, snapshot: dict, dossier: dict
                         if levels.get(volume) is not None:
                             summary[volume] = amount(levels[volume], volume)
                     chart_info["lettura_4h"] = summary
-        selected.append({"token": token, "quantita_spot": qty,
+        technical4 = ({'stato':'NON_DISPONIBILE','motivo':'Dossier senza 4TF verificati'}
+                      if four_rows is None else technical_in_packet(four_rows[index], now))
+        selected.append({"indice":index, "token": token, "stato_identita":"VALIDA", "quantita_spot": qty,
+                         "analisi_4tf": technical4,
                          "disponibile_spot": amount(row.get("disponibile_spot"), "disponibile_spot"),
                          "prezzo_eur": price, "valore_eur": val,
                          "pl_indicativo_eur": pnl, "variazione": technical,
@@ -188,8 +318,6 @@ def brief_positions(portfolio: dict, report: dict, snapshot: dict, dossier: dict
                          "decisione_precedente": str(matched.get("decisione", ""))[:240] if isinstance(matched, dict) else "",
                          "grafico_4h": chart_info,
                          "limite": "Nessun prezzo EUR provato" if price is None else "Prezzo indicativo non eseguibile"})
-    if set(by_report) - seen:
-        raise PacketError("Posizioni nel report ma non nel portafoglio")
     return selected
 
 
@@ -218,7 +346,7 @@ def public_shortlist(snapshot: dict) -> list[dict]:
 def cash_balances(portfolio: dict, report: dict) -> dict:
     raw = portfolio.get("liquidita_spot_api")
     report_cash = report.get("liquidita_spot_api")
-    if raw is None and report_cash is None:
+    if raw is None and report_cash in (None, {}):
         return {}
     if not isinstance(raw, dict) or not isinstance(report_cash, dict):
         raise PacketError("Liquidita incoerente")
@@ -260,7 +388,9 @@ def build(root: Path, now: dt.datetime | None = None) -> dict:
         status_saldo = {"stato": "ORIGINE_SCONOSCIUTA", "eta_minuti": None}
     if balance and balance > now + dt.timedelta(minutes=2):
         status_saldo = {"stato": "OROLOGIO_INCOERENTE", "eta_minuti": None}
-    positions = brief_positions(portfolio, report, snapshot, dossier, dossier_fresh)
+    four_rows = four_tf_evidence(portfolio, report, dossier, snapshot['rilevazione_utc'])
+    positions = brief_positions(portfolio, report, snapshot, dossier,
+                                dossier_fresh, four_rows=four_rows, now=now)
     cash = cash_balances(portfolio, report)
     incomplete = any(x["prezzo_eur"] is None for x in positions) or any(x["quantita_spot"] is None for x in positions)
     total = amount(report.get("totale_stimato_eur"), "totale_stimato_eur")
@@ -299,7 +429,7 @@ def build(root: Path, now: dt.datetime | None = None) -> dict:
                       "Prezzi indicativi; saldi e mercato hanno orari indipendenti.",
                       "P/L nullo non significa pareggio: costo storico non attestato.",
                       "Dati vecchi non sono dati attuali alla lettura GPT: rivaluta freschezza.",
-                      "Dossier 4H non disponibile per tutti gli asset; non attribuire una coppia ad altra."]}
+                      "La copertura 4TF e la disponibilita reale sono indicate per posizione; non attribuire dati ad altre coppie."]}
 
 
 def write_private(packet: dict, target: Path | None = None) -> None:

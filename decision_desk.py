@@ -915,7 +915,7 @@ def render(report):
 <h2>3 · Macroeconomia e geopolitica</h2><p>Un contesto non verificato è un'informazione mancante, non equivale a uno scenario neutrale o ribassista.</p>{context}
 <h2>4 · Fonti e limiti</h2><details><summary>Apri titoli di Fed, BCE e Consiglio UE</summary><p>Raccolta automatica di titoli, nessuna interpretazione causale.</p><ul>{feed or '<li>Nessun feed acquisito.</li>'}</ul></details><details><summary>Apri limiti tecnici e avvertenze</summary><ul>{warnings}</ul></details><p class="muted">Strumento sperimentale per supporto alle decisioni. Nessuna previsione o consulenza personalizzata automatica.</p></body></html>'''
 
-def prepara_dossier_aggiornamento(data):
+def prepara_dossier_aggiornamento(data, *, asset_pairs=None):
     """Produce un dossier sullo stesso snapshot Kraken. API pubbliche soltanto.
 
     Se una fonte secondaria fallisce non scambia dati vecchi per aggiornati:
@@ -927,7 +927,7 @@ def prepara_dossier_aggiornamento(data):
             'motivi_incompletezza':[]}
     try:
         import dossier_trade
-        dossier=dossier_trade.collect(source=data)
+        dossier=dossier_trade.collect(source=data, **({'asset_pairs': asset_pairs} if asset_pairs is not None else {}))
         if dossier['kraken_istantanea_utc']!=data['rilevazione_utc']:
             raise ValueError("Dossier riferito ad altro snapshot")
         rows=dossier.get('candidati',[])
@@ -952,6 +952,18 @@ def prepara_dossier_aggiornamento(data):
                 status['motivi_incompletezza'].append('Derivati BTC assenti: '+metric)
         market_complete = not status['motivi_incompletezza']
         quality = dossier.get('qualita_patrimonio') or {}
+        four = dossier.get('patrimonio_4tf') or {}
+        four_rows = four.get('posizioni') or []
+        status['copertura_patrimonio_4tf'] = {
+            'posizioni': len(four_rows),
+            'completate': sum(x.get('stato') == 'COMPLETO' for x in four_rows
+                             if isinstance(x, dict)),
+            'richieste_ohlc': four.get('richieste_ohlc'),
+            'budget_ohlc': four.get('budget_ohlc'),
+            'stato': ('COMPLETO' if four_rows and all(
+                isinstance(x, dict) and x.get('stato') == 'COMPLETO'
+                for x in four_rows) else 'PARZIALE')}
+
         status['stato_fonti_mercato'] = 'COMPLETO' if market_complete else 'PARZIALE'
         status['stato_patrimonio'] = quality.get('stato_totale', 'NON_VERIFICABILE')
         status['stato_quantita'] = quality.get('stato_quantita', 'NON_VERIFICABILE')
@@ -1230,7 +1242,7 @@ def refresh():
     check_out=verifica_piani.safe_check()
     print('Verifica vecchio piano:',check_out.get('stato'),
           '| nessun trade simulato come eseguito')
-    status_dossier=prepara_dossier_aggiornamento(data)
+    status_dossier=prepara_dossier_aggiornamento(data, asset_pairs=pairs)
     # Solo dopo che entrambe le valutazioni GPT sono state congelate:
     # verifica le chiusure future se i relativi orizzonti sono maturi.
     # Al massimo 4 richieste OHLC per refresh, zero prima della scadenza.

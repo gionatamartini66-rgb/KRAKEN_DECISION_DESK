@@ -24,16 +24,22 @@ PY_FILES = (
     'analisi_v02.py', 'binance_reference.py', 'costi_spot.py',
     'decision_desk.py', 'dossier_trade.py', 'flusso_spot.py',
     'grafico_4h.py', 'kdd_saldi.py', 'kraken_readonly.py',
+    'patrimonio_4tf.py',
     'mercati_spot.py', 'piano_gpt.py', 'ricerca_setup.py',
     'serve.py', 'studio_delta.py', 'test_decision_desk.py',
     'verifica_piani.py',
+)
+PACKET_FILES = (
+    'scripts/kdd_wallet_packet_g0.py',
+    'scripts/test_kdd_wallet_packet_g0.py',
+    'scripts/test_kdd_portfolio_4tf.py',
 )
 VENDOR_FILES = (
     'vendor/lightweight-charts-5.2.1.js',
     'vendor/LIGHTWEIGHT_CHARTS_LICENSE.txt',
     'vendor/LIGHTWEIGHT_CHARTS_NOTICE.txt',
 )
-FILES = PY_FILES + VENDOR_FILES
+FILES = PY_FILES + PACKET_FILES + VENDOR_FILES
 README = 'README.md'
 CHECKPOINT_RE = re.compile(r'(?m)^<!-- CHECKPOINT_SORGENTI_SHA256: [a-f0-9]{64} -->$')
 
@@ -155,6 +161,17 @@ def isolated_test(staging: Path) -> None:
     if proc.returncode:
         raise SafetyError('test KDD falliti: codice originale NON modificato')
     print('Test KDD: OK')
+    # The wallet packet is now part of the deployed application and must be
+    # tested in precisely the same preflight/postflight transaction.
+    packet_test = staging / 'scripts' / 'test_kdd_wallet_packet_g0.py'
+    if not packet_test.is_file() or not (staging / 'scripts/test_kdd_portfolio_4tf.py').is_file():
+        raise SafetyError('test del pacchetto e 4TF mancanti nello staging')
+    if packet_test.exists():
+        proc = command([sys.executable, '-B', '-m', 'unittest', 'discover',
+                        '-s', 'scripts', '-p', 'test_kdd_*.py', '-q'], cwd=staging)
+        if proc.returncode:
+            raise SafetyError('regressioni del pacchetto GPT non superate')
+        print('Test pacchetto GPT: OK')
 
 
 def service_alive() -> bool:
@@ -199,8 +216,10 @@ def apply(root: Path, live: Path, *, commit_sha: str, dry_run: bool) -> None:
             if src.is_symlink():
                 raise SafetyError('symlink Python nel programma live: intervento manuale richiesto')
             shutil.copy2(src, staging / src.name)
-        for name in PY_FILES:
-            shutil.copy2(root / name, staging / name)
+        for name in PY_FILES + PACKET_FILES:
+            dest = staging / name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(root / name, dest)
         # Alcuni test legacy verificano LO STATO LOCALE effettivo (piano GPT,
         # portafoglio e migrazione). Il clone GitHub non contiene questi file.
         # Sono copiati esclusivamente NEL TEMPORANEO LOCALE (0700), mai nello
@@ -257,6 +276,11 @@ def apply(root: Path, live: Path, *, commit_sha: str, dry_run: bool) -> None:
         try:
             for name in changed:
                 dest = live / name
+                if name.startswith('scripts/'):
+                    parent = live / 'scripts'
+                    if parent.is_symlink() or (parent.exists() and not parent.is_dir()):
+                        raise SafetyError('directory scripts non regolare')
+                    parent.mkdir(mode=0o700, exist_ok=True)
                 if dest.is_symlink():
                     raise SafetyError(f'symlink nei file live: {name}')
                 mode = (dest.stat().st_mode & 0o777) if dest.exists() else 0o600

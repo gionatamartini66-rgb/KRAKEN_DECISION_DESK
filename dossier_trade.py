@@ -185,7 +185,7 @@ def global_context():
             "aggiornato_sorgente_utc":d.get("updated_at"), "copertura":"Mercato crypto aggregato CoinGecko, non liquidità Kraken."}
 
 
-def collect(source=None):
+def collect(source=None, *, asset_pairs=None):
     """Prepara il dossier sullo snapshot appena acquisito, senza iniziare un'analisi GPT."""
     now=desk.NOW()
     if source is None:
@@ -260,11 +260,16 @@ def collect(source=None):
     qualita = desk.qualita_portafoglio(source, portafoglio)
     saldo = qualita["stato_saldo"]
     fonte = portafoglio.get("fonte_quantita") if isinstance(portafoglio, dict) else None
+    import patrimonio_4tf
+    analisi_patrimonio = patrimonio_4tf.collect(
+        portafoglio, source, asset_pairs=asset_pairs,
+        now=now, old_4h=quattro_ore)
     dossier={
-        "schema":2,"creato_utc":desk.NOW().isoformat(timespec="seconds"),
+        "schema":3,"creato_utc":desk.NOW().isoformat(timespec="seconds"),
         "kraken_istantanea_utc":source["rilevazione_utc"],"eta_kraken_minuti_al_dossier":round(age,2),
         "regime":{"trend_eur":source.get("trends",{}),"btc_spot_eur":source.get("markets",{}).get("BTC")},
         "candidati":candidates,"grafici_4h":quattro_ore,
+        "patrimonio_4tf":analisi_patrimonio,
         "ricerca_setup":source.get("ricerca_setup",{}),
         "fonti_esterne":external,
         "contesto_derivati_btc":derivatives,
@@ -280,7 +285,7 @@ def collect(source=None):
         "fotografia_portafoglio_sha256":qualita['fotografia_portafoglio_sha256'],
         "portafoglio_letto_utc":qualita['portafoglio_letto_utc'],
         "limite_fotografia":"Hash del JSON locale, non garanzia di provenienza o attualità.",
-        "limiti":["Campione dello scanner, non ricerca esaustiva di tutti i token.",
+        "limiti":["Scanner limitato ai candidati; patrimonio_4tf copre tutte le righe con stati espliciti.",
                   "Candele chiuse; supporti/resistenze solo estremi storici, non segnali validati.",
                   "OI/CVD Futures Kraken BTC non disponibili per ogni token e non aggregati globali.",
                   "Flusso buy/sell spot recente da Kraken Trades: al piu 1000 esecuzioni per coppia; NON CVD storico, heatmap o mercato aggregato. Copertura e lacune per token indicate.",
