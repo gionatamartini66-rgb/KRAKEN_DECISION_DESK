@@ -3830,6 +3830,22 @@ class DossierPatrimonialeG2Tests(unittest.TestCase):
             self.assertEqual(status["idoneita_analisi_patrimoniale"],"NON_IDONEA")
             self.assertNotEqual(status["stato"],"PRONTO_PER_ESAME_GPT")
 
+    def test_g2_invalid_nonlist_wallet_produces_explicit_report_without_fake_rows(self):
+        for positions in ({"BTC":"2"}, "BTC", 5):
+            with self.subTest(positions=repr(positions)):
+                dossier,status,report,page=self.exercise(positions,do_output=True)
+                self.assertFalse(dossier["portafoglio_noto"])
+                self.assertEqual(dossier["qualita_patrimonio"]["stato_quantita"],
+                                 "SCHEMA_NON_VALIDO")
+                self.assertEqual(status["idoneita_analisi_patrimoniale"],"NON_IDONEA")
+                self.assertEqual(report["stato_totale"],"SCHEMA_NON_VALIDO")
+                self.assertIsNone(report["totale_stimato_eur"])
+                self.assertIsNone(report["posizioni_registrate"])
+                self.assertEqual(report["posizioni"],[])
+                self.assertIn("Formato posizioni non valido",page)
+                self.assertIn("nessuna posizione o valore inventato",page)
+                json.dumps(report,allow_nan=False)
+
     def test_g2_matching_wallet_digest_does_not_freeze_balance_freshness(self):
         stamp=self.now.isoformat(timespec="seconds")
         wallet={"posizioni":[{"token":"BTC","quantita":"2"}],

@@ -596,7 +596,13 @@ def render(report):
             holdings += (f"<article><h3>{esc(h['token'])} <span>{fmt(h['valore_eur'])} €</span></h3>"
                          f"<p>Quantità {esc(h['quantita'])} · Prezzo {fmt(h['prezzo_eur'], 5)} € · 7g {delta7} · {unrealized}</p>"
                          f"{warning}<ul>{notes}</ul><p class='{badge(h['decisione'])}'>{esc(h['decisione'])}</p></article>")
-    if not holdings: holdings = "<article>Nessuna quantità inserita. Compila <code>portafoglio.json</code>; finché i trasferimenti sono in corso non stimiamo il saldo.</article>"
+    if not holdings:
+        if report.get('stato_totale') == 'SCHEMA_NON_VALIDO':
+            holdings = ("<article class='urgente'>Formato posizioni non valido: "
+                        "impossibile ricostruire le righe patrimoniali. "
+                        "Verificare il file originale; nessuna posizione o valore inventato.</article>")
+        else:
+            holdings = "<article>Nessuna quantità inserita. Compila <code>portafoglio.json</code>; finché i trasferimenti sono in corso non stimiamo il saldo.</article>"
     funds=report.get('liquidita_spot_api',{})
     available_html=''
     if funds:
@@ -866,6 +872,8 @@ def render(report):
         total += ' (incompleto)' if state != 'NON_RAPPRESENTABILE' else ' (somma fuori scala)'
     elif state == 'NESSUNA_POSIZIONE_REGISTRATA':
         total += ' (nessuna posizione registrata; conto non verificato)'
+    elif state == 'SCHEMA_NON_VALIDO':
+        total += ' (formato del portafoglio non valido)'
     # La data in un file statico resta identica; l'età deve essere calcolata
     # dal browser a ogni apertura, ritorno in primo piano e durante la lettura.
     freschezza_live = '''<p id="data-freschezza" data-rilevazione="__RILEVAZIONE__" role="status">Verifica dell'età dei dati in corso; in assenza di JavaScript considerali da aggiornare.</p>
@@ -1218,14 +1226,28 @@ def refresh():
 
 def output(data):
     # One actual in-memory wallet for report valuation and dossier provenance.
-    account_portfolio = load('portafoglio.json', {'posizioni': []}) or {'posizioni': []}
-    report = build_report(data, account_portfolio, load('config.json',{}),
+    account_portfolio = load('portafoglio.json', {'posizioni': []})
+    schema_ok = (isinstance(account_portfolio, dict)
+                 and isinstance(account_portfolio.get('posizioni'), list))
+    # The direct build_report contract still rejects malformed schema; output
+    # alone can publish an explicit error without replacing the real wallet.
+    valuation_portfolio = account_portfolio if schema_ok else {'posizioni': []}
+    report = build_report(data, valuation_portfolio, load('config.json',{}),
                           load('contesto.json',{}), load_decisions())
+    if not schema_ok:
+        report.update({'stato_totale': 'SCHEMA_NON_VALIDO',
+                       'totale_stimato_eur': None, 'zero_reale': False,
+                       'totale_parziale': True, 'posizioni_registrate': None,
+                       'posizioni_incomplete': None, 'posizioni_non_aggiornate': None,
+                       'errore_struttura_portafoglio':
+                       'Formato posizioni non valido: nessuna attribuzione patrimoniale.'})
     report['fotografia_portafoglio_sha256'] = fotografia_portafoglio_sha256(account_portfolio)
     report['portafoglio_letto_utc'] = NOW().isoformat(timespec='seconds')
-    report['portafoglio_fonte'] = account_portfolio.get('fonte_quantita')
+    report['portafoglio_fonte'] = (account_portfolio.get('fonte_quantita')
+                                   if isinstance(account_portfolio, dict) else None)
     report['binance_reference'] = data.get('binance_reference',{})
-    report['liquidita_spot_api'] = account_portfolio.get('liquidita_spot_api',{})
+    report['liquidita_spot_api'] = (account_portfolio.get('liquidita_spot_api',{})
+                                   if isinstance(account_portfolio, dict) else {})
     report['migrazione_attesa'] = load('migrazione_attesa.json',{})
     report['esperimento_delta'] = load('esperimenti_delta/stato_verifiche.json',{})
     linked_dossier=load('dossier_multifonte.json',{})
