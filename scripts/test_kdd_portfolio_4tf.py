@@ -281,6 +281,29 @@ class PortfolioFourTFTests(unittest.TestCase):
         with self.assertRaisesRegex(packet.PacketError,'Lacuna|sovrapposizione'):
             packet.build(self.root,now=self.now)
 
+    def test_13_invalid_quantity_remains_visible_with_no_fictitious_value(self):
+        source=self.source(['BTC'])
+        wallet={'posizioni':[{'token':'BTC','quantita':'NaN','costo_medio_eur':None}]}
+        four=wallet_tf.collect(wallet,source,asset_pairs=catalogue(['BTC']),
+                               fetch=self.net,now=self.now,pause=lambda _:None)
+        report=desk.build_report(source,wallet,{}, {},[])
+        report['fotografia_portafoglio_sha256']=four['portafoglio_sha256']
+        dossier_doc={'schema':3,'kraken_istantanea_utc':source['rilevazione_utc'],
+                     'fotografia_portafoglio_sha256':four['portafoglio_sha256'],
+                     'patrimonio_4tf':four}
+        for name,obj in [('portafoglio.json',wallet),('ultimo_report.json',report),
+                         ('dossier_multifonte.json',dossier_doc),
+                         ('ultima_rilevazione.json',source)]:
+            (self.root/name).write_text(json.dumps(obj))
+        result=packet.build(self.root,now=self.now)
+        self.assertEqual(len(result['patrimonio']['posizioni']),1)
+        row=result['patrimonio']['posizioni'][0]
+        self.assertEqual(row['stato_quantita'],'INVALIDA')
+        self.assertIsNone(row['quantita_spot'])
+        self.assertIsNone(row['valore_eur'])
+        self.assertEqual(row['analisi_4tf']['timeframe']['15m']['stato'],'AGGIORNATO')
+        self.assertIsNone(result['patrimonio']['totale_stimato_eur_senza_cash'])
+
     def test_08_real_zero_total_not_guessed_when_eur_missing(self):
         source=self.source(['ALT'])
         portfolio={'posizioni':positions(['ALT'])}

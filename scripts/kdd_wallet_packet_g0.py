@@ -246,7 +246,7 @@ def brief_positions(portfolio: dict, report: dict, snapshot: dict, dossier: dict
                 technical4={'stato':'NON_DISPONIBILE',
                             'motivo':'Dossier senza 4TF verificati'}
             selected.append({'indice':index,'token':token,
-                             'stato_identita':state,'quantita_spot':None,
+                             'stato_identita':state,'stato_quantita':'NON_ATTRIBUIBILE','quantita_spot':None,
                              'prezzo_eur':None,'valore_eur':None,
                              'pl_indicativo_eur':None,'decisione_precedente':'',
                              'analisi_4tf':technical4,
@@ -254,12 +254,21 @@ def brief_positions(portfolio: dict, report: dict, snapshot: dict, dossier: dict
             continue
         if matched.get('token')!=token:
             raise PacketError("Posizioni report/portafoglio non allineate")
-        qty = amount(row.get("quantita"), "quantita")
+        try:
+            qty = amount(row.get("quantita"), "quantita")
+            qty_state = 'VALIDA' if qty is not None else 'NON_NOTA'
+        except PacketError:
+            # Keep the wallet row. The D1/D2 report must NOT ascribe
+            # a numerical valuation to an invalid quantity.
+            qty, qty_state = None, 'INVALIDA'
+        if qty is None and (matched.get('valore_eur') is not None or
+                            matched.get('prezzo_eur') is not None):
+            raise PacketError('Quantita ignota/invalida ma report valorizzato')
         if qty is not None and "quantita" in matched:
             reported_qty = amount(matched["quantita"], "quantita report")
             if reported_qty is None or Decimal(qty) != Decimal(reported_qty):
                 raise PacketError("Quantita report/portafoglio diversa")
-        if matched and "errore" not in matched:
+        if matched and "errore" not in matched and qty is not None:
             price = amount(matched.get("prezzo_eur"), "prezzo_eur")
             val = amount(matched.get("valore_eur"), "valore_eur")
             pnl = amount(matched.get("pl_non_realizzato_eur"), "pl_indicativo", nonnegative=False)
@@ -309,7 +318,7 @@ def brief_positions(portfolio: dict, report: dict, snapshot: dict, dossier: dict
                     chart_info["lettura_4h"] = summary
         technical4 = ({'stato':'NON_DISPONIBILE','motivo':'Dossier senza 4TF verificati'}
                       if four_rows is None else technical_in_packet(four_rows[index], now))
-        selected.append({"indice":index, "token": token, "stato_identita":"VALIDA", "quantita_spot": qty,
+        selected.append({"indice":index, "token": token, "stato_identita":"VALIDA", "stato_quantita":qty_state, "quantita_spot": qty,
                          "analisi_4tf": technical4,
                          "disponibile_spot": amount(row.get("disponibile_spot"), "disponibile_spot"),
                          "prezzo_eur": price, "valore_eur": val,
