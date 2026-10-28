@@ -1,0 +1,21 @@
+name: KDD RT-I01 isolated G2 proof
+on:
+  push:
+    branches: [experiments/kdd-rt-i01-patrimonio-g2-20261028]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Python syntax
+        run: python -B -m py_compile decision_desk.py test_decision_desk.py serve.py grafico_4h.py
+      - name: Full canonical KDD regression suite including RT-I01
+        run: python -B -m unittest -v test_decision_desk
+      - name: Existing standalone updater suite
+        run: python -B scripts/test_kdd_aggiorna.py
