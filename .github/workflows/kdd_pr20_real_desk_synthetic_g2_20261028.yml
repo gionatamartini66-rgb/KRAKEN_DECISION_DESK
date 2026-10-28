@@ -58,7 +58,7 @@ jobs:
            "hash_piano":"0"*64,"coppia":"ABC/EUR",
            "creato_utc":"2026-10-16T10:00:00+00:00","tracking":"LACUNA"}]}
           actual_html=desk.render(report)
-          for marker in ("PRIMA LETTURA · PIANO GPT","Verifica successiva",
+          for marker in ("PRIMA LETTURA · PIANO GPT","Che cosa è successo dopo il piano?",
            "Archivio: 1 piani precedenti conservati","Decisioni e posizioni",
            "Quantità 0.002","Quantità 3.25",
            "Candidati da valutare","Simulazione: ricontrollare le chiusure."):
@@ -89,7 +89,7 @@ jobs:
             try:
              status,_,page=http("GET","/")
              assert status==200,status
-             for marker in ("PRIMA LETTURA · PIANO GPT","Verifica successiva",
+             for marker in ("PRIMA LETTURA · PIANO GPT","Che cosa è successo dopo il piano?",
                 "Archivio: 1 piani precedenti conservati",
                 "Quantità 0.002","Quantità 3.25",
                 "Case","href='/mercati/spot'","action='/aggiorna'"):
