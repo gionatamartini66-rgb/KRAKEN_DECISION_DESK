@@ -2367,6 +2367,8 @@ class DeskTests(unittest.TestCase):
         self.assertIn('Quantità: non disponibile',page)
         self.assertIn('Valore EUR non stimato',page)
         self.assertNotIn('Quantità 0',page)
+        self.assertIn('non disponibile (incompleto)',page)
+        self.assertNotIn('0,00 € (incompleto)',page)
 
     def test_rt_i01_mixed_known_unknown_and_unquoted_positions(self):
         now=d.NOW().isoformat()
@@ -2414,6 +2416,8 @@ class DeskTests(unittest.TestCase):
         self.assertNotIn('<IMG ',page)
         self.assertEqual(report['totale_stimato_eur'],0)
         self.assertTrue(report['totale_parziale'])
+        self.assertIn('non disponibile (incompleto)',page)
+        self.assertNotIn('0,00 € (incompleto)',page)
 
 # Copertura G2: coppie arbitrarie senza preferenza SUI/EUR.
 import grafico_4h as g
