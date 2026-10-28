@@ -3667,7 +3667,9 @@ class DossierPatrimonialeG2Tests(unittest.TestCase):
             "schede_v02":[{"token":"ICNT","categoria":"test","esito":"RIESAME",
                            "sintesi":"Fixture sintetica","coppia_analisi":"ICNT/EUR",
                            "alternative":[{"pair":"ICNT/EUR","pair_key":"ICNTEUR",
-                                           "prezzo_quote":1.0}],
+                                           "prezzo_quote":1.0,
+                                           "volume_eur_stimato":5000,
+                                           "spread_pct":0.2}],
                            "evidenze":[],"criticita":[],"costi_roundtrip":[]}]}
 
     def exercise(self, positions, *, source_label=None, acquired=None,
