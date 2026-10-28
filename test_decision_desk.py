@@ -1127,7 +1127,9 @@ class DeskTests(unittest.TestCase):
         report={'rilevazione_utc':snap}
         with unittest.mock.patch.object(d,'load', side_effect=lambda n,default=None:
                  s0 if n=='dossier_stato.json' else {'kraken_istantanea_utc':snap}):
-            self.assertEqual(d.stato_dossier_per_report(report)['stato'],'PRONTO_PER_ESAME_GPT')
+            # Legacy dossier matches market UTC but has no wallet provenance.
+            self.assertEqual(d.stato_dossier_per_report(report)['stato'],
+                             'PATRIMONIO_NON_VERIFICABILE')
         with unittest.mock.patch.object(d,'load', side_effect=lambda n,default=None:
                  s0 if n=='dossier_stato.json' else {'kraken_istantanea_utc':'2026-10-18T10:00:00+00:00'}):
             self.assertEqual(d.stato_dossier_per_report(report)['stato'],'NON_ALLINEATO')

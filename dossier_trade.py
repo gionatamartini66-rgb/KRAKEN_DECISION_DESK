@@ -254,11 +254,14 @@ def collect(source=None):
     try: external["coingecko_global"]=global_context()
     except Exception as exc: external["coingecko_global"]={"errore":type(exc).__name__+": "+str(exc)[:80]}
     derivatives=derivatives_context(now.timestamp())
-    # Lettura unica del portafoglio per la sola metadata di provenienza.
-    portafoglio = desk.load('portafoglio.json', {}) or {}
-    saldo = desk.stato_saldo(portafoglio, source.get('saldo_refresh'), now=now)
+    # Same D1/D2 validation as dashboard, applied to this actual wallet read.
+    # A market snapshot time is not proof of wallet identity or freshness.
+    portafoglio = desk.load('portafoglio.json', {})
+    qualita = desk.qualita_portafoglio(source, portafoglio)
+    saldo = qualita["stato_saldo"]
+    fonte = portafoglio.get("fonte_quantita") if isinstance(portafoglio, dict) else None
     dossier={
-        "schema":1,"creato_utc":desk.NOW().isoformat(timespec="seconds"),
+        "schema":2,"creato_utc":desk.NOW().isoformat(timespec="seconds"),
         "kraken_istantanea_utc":source["rilevazione_utc"],"eta_kraken_minuti_al_dossier":round(age,2),
         "regime":{"trend_eur":source.get("trends",{}),"btc_spot_eur":source.get("markets",{}).get("BTC")},
         "candidati":candidates,"grafici_4h":quattro_ore,
@@ -266,13 +269,17 @@ def collect(source=None):
         "fonti_esterne":external,
         "contesto_derivati_btc":derivatives,
         "contesto_macro_news":"Ricerca GPT separata: non inferire macro dai soli RSS",
-        "portafoglio_quantita_fonte":portafoglio.get("fonte_quantita"),
+        "portafoglio_quantita_fonte":fonte,
         "portafoglio_aggiornato_da_api_private":saldo['portafoglio_aggiornato_da_api_private'],
         "stato_saldo":saldo,
         "orari_fonti":source.get('orari_fonti', {}),
-        "portafoglio_noto":all(x.get("quantita") is not None
-                                for x in portafoglio.get("posizioni",[]))
-                             and bool(portafoglio.get("posizioni",[])),
+        # Legacy: means all recorded identities and quantities valid, NOT
+        # complete EUR valuation, current Kraken balance, or a verified wallet.
+        "portafoglio_noto":qualita['portafoglio_noto'],
+        "qualita_patrimonio":qualita,
+        "fotografia_portafoglio_sha256":qualita['fotografia_portafoglio_sha256'],
+        "portafoglio_letto_utc":qualita['portafoglio_letto_utc'],
+        "limite_fotografia":"Hash del JSON locale, non garanzia di provenienza o attualità.",
         "limiti":["Campione dello scanner, non ricerca esaustiva di tutti i token.",
                   "Candele chiuse; supporti/resistenze solo estremi storici, non segnali validati.",
                   "OI/CVD Futures Kraken BTC non disponibili per ogni token e non aggregati globali.",
@@ -280,6 +287,9 @@ def collect(source=None):
                   "Origine, acquisizione e tentativo di aggiornamento saldo in stato_saldo; un dato precedente o fallito non vale come saldo attuale. Disponibilità spot, prezzo di carico e costi da verificare prima di dimensionare operazioni.",
                   "Nessun ordine o controllo privato della negoziabilità SEE."]
     }
+    # JSON interoperability: no NaN/Infinity, even when an upstream source is
+    # malformed. Do not silently turn impossible values into financial zeros.
+    json.dumps(dossier, allow_nan=False)
     desk.save("dossier_multifonte.json",dossier)
     return dossier
 
