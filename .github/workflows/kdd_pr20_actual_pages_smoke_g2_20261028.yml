@@ -1,0 +1,96 @@
+name: KDD unified real page generation isolated smoke
+on:
+  push:
+    branches: [experiments/kdd-pr20-main-integration-g2-20261027]
+permissions:
+  contents: read
+jobs:
+  actual-pages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Real generated pages via localhost with synthetic Kraken responses
+        run: |
+          python -B - <<'PY'
+          import datetime as dt, html, http.client, json, pathlib, shutil, tempfile, threading
+          from unittest import mock
+          from http.server import ThreadingHTTPServer
+          import decision_desk as desk
+          import serve
+          from test_decision_desk import AnyKrakenSpotTests
+          fixture=AnyKrakenSpotTests("test_market_catalog_includes_non_eur_and_does_not_force_sui")
+          fixture.setUp()
+          fixture.now=dt.datetime.now(dt.timezone.utc)
+          source_vendor=desk.DIR/"vendor"/"lightweight-charts-5.2.1.js"
+          assert source_vendor.is_file(),"Canonical JS vendor unavailable"
+          original_dir=desk.DIR
+          with tempfile.TemporaryDirectory(prefix="kdd-unified-pages-") as folder:
+              desk.DIR=pathlib.Path(folder)
+              (desk.DIR/"vendor").mkdir()
+              shutil.copy2(source_vendor,desk.DIR/"vendor"/"lightweight-charts-5.2.1.js")
+              (desk.DIR/"cruscotto.html").write_text(
+                  "<html><body><h2>1 · Decisioni e posizioni</h2>"
+                  "<p>PATRIMONIO_FITTIZIO</p><p>PIANO_FITTIZIO</p>"
+                  "<p>ARCHIVIO_FITTIZIO</p></body></html>",encoding="utf-8")
+              snapshot={"rilevazione_utc":fixture.now.isoformat(),
+                "schede_v02":[{"token":"ADA","coppia_analisi":"ADA/USDT",
+                  "esito":"RIESAME MIRATO","categoria":"consolidamento",
+                  "perche_selezionato":"Dato sintetico di collaudo",
+                  "alternative":[{"pair":"ADA/USDT","pair_key":"ADAUSDT"}]}]}
+              (desk.DIR/"ultima_rilevazione.json").write_text(json.dumps(snapshot),encoding="utf-8")
+              def request(path):
+                  conn=http.client.HTTPConnection("127.0.0.1",8765,timeout=12)
+                  conn.request("GET",path,headers={"Host":"127.0.0.1:8765"})
+                  resp=conn.getresponse()
+                  data=resp.read()
+                  status=resp.status
+                  conn.close()
+                  return status,data
+              with mock.patch.object(desk,"kraken",side_effect=fixture.fake):
+                  server=ThreadingHTTPServer(("127.0.0.1",8765),serve.Handler)
+                  th=threading.Thread(target=server.serve_forever,daemon=True)
+                  th.start()
+                  try:
+                      status,raw=request("/")
+                      page=raw.decode()
+                      assert status==200
+                      for term in ("PATRIMONIO_FITTIZIO","PIANO_FITTIZIO","ARCHIVIO_FITTIZIO",
+                                   "href='/mercati/spot'","action='/aggiorna'"):
+                          assert term in page,("HOME",term)
+                      status,raw=request("/mercati/spot")
+                      selector=raw.decode()
+                      assert status==200,(status,selector[:110])
+                      for term in ("Questa sezione appartiene al KDD patrimoniale originale.",
+                                   "Dato sintetico di collaudo",
+                                   'href="/grafico/spot?pair=ADAUSDT&amp;tf=4h"',
+                                   'href="/analisi/spot?pair=ADAUSDT"',
+                                   'href="/"',"ADA/USDT"):
+                          assert term in selector,("SELECTOR",term)
+                      status,raw=request("/grafico/spot?pair=ADAUSDT&tf=4h")
+                      chart=raw.decode()
+                      assert status==200,(status,chart[:200])
+                      for term in ("Grafico ADA/USDT · 4H","EMA20","EMA50",
+                                   "Volumi scambiati (ADA)",
+                                   'href="/analisi/spot?pair=ADAUSDT"',
+                                   'pair=ADAUSDT&amp;tf=15m','pair=ADAUSDT&amp;tf=1d'):
+                          assert term in chart,("CHART",term)
+                      status,raw=request("/analisi/spot?pair=ADAUSDT")
+                      comparison=raw.decode()
+                      assert status==200,(status,comparison[:200])
+                      for term in ("Confronto ADA/USDT","15m","1H","4H","1D",
+                                   "pair=ADAUSDT&amp;tf=4h"):
+                          assert term in comparison,("COMPARE",term)
+                      status,raw=request("/asset/lightweight-charts.js")
+                      assert status==200 and len(raw)>100000,("VENDOR",status,len(raw))
+                      assert request("/grafico/spot?pair=ADAUSDT&tf=notatf")[0]==400
+                      assert request("/grafico/spot?pair=NOEXIST&tf=4h")[0]==400
+                      print("KDD_UNIFIED_ACTUAL_PAGES: PASS; home + selector + real generated chart + real generated 4TF comparison + vendor + invalid URLs")
+                      print("NETWORK: only localhost; public Kraken replies are synthetic; no account refresh")
+                  finally:
+                      server.shutdown();server.server_close();th.join(timeout=5)
+                      desk.DIR=original_dir
+          PY
