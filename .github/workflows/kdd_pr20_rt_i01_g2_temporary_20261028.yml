@@ -35,7 +35,7 @@ jobs:
           snapshot={'rilevazione_utc':ts,'markets':{'BTC':market('BTC',100.0)},
                     'trends':{},'feed':[],'problemi_feed':[],
                     'schede_v02':[{'token':'ADA','coppia_analisi':'ADA/USDT',
-                        'categoria':'fittizio','esito':'RIESAME',
+                        'categoria':'fittizio','esito':'RIESAME','sintesi':'Caso sintetico',
                         'alternative':[{'pair':'ADA/USDT','pair_key':'ADAUSDT'}]}]}
           portfolio={'posizioni':[{'token':'BTC','quantita':2,'costo_medio_eur':None},
                                   {'token':'SOL','quantita':None,'costo_medio_eur':None},
