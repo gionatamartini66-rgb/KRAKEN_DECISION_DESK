@@ -2359,7 +2359,12 @@ class DeskTests(unittest.TestCase):
         self.assertEqual(len(report['posizioni']),1)
         self.assertEqual(report['posizioni'][0]['token'],'BTC')
         self.assertIsNone(report['posizioni'][0]['quantita'])
-        self.assertEqual(report['totale_stimato_eur'],0)
+        # D1: previously this assertion expected a fake numeric zero.
+        # Unknown quantity requires null, explicit state and counted gap.
+        self.assertIsNone(report['totale_stimato_eur'])
+        self.assertEqual(report['stato_totale'],'NON_DISPONIBILE')
+        self.assertEqual(report['posizioni_valorizzate'],0)
+        self.assertEqual(report['posizioni_incomplete'],1)
         self.assertTrue(report['totale_parziale'])
         self.assertEqual(report['posizioni_non_aggiornate'],1)
         page=d.render(report)
