@@ -538,7 +538,15 @@ def qualita_portafoglio(data, portfolio):
     if not isinstance(positions, list):
         fields['anomalie_posizioni'] = [{'motivo': 'posizioni non in forma di lista'}]
         return fields
-    report = build_report(data, portfolio, {}, {}, [])
+    # A dossier can be built from a source that contains no EUR market
+    # rows. That means valuation unavailable, never zero or invented prices.
+    valuation_source = dict(data)
+    valuation_source.setdefault('rilevazione_utc', read_at)
+    valuation_source.setdefault('markets', {})
+    valuation_source.setdefault('trends', {})
+    valuation_source.setdefault('feed', [])
+    valuation_source.setdefault('problemi_feed', [])
+    report = build_report(valuation_source, portfolio, {}, {}, [])
     holdings = report['posizioni']
     valid = sum(1 for h in holdings
                 if h.get('identita_valida')
