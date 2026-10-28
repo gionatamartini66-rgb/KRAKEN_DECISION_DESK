@@ -2356,8 +2356,64 @@ class DeskTests(unittest.TestCase):
         rows=d.market_pairs_and_ticker(self.pairs,self.t)
         report=d.build_report({'rilevazione_utc':d.NOW().isoformat(),'markets':rows,'trends':{},'feed':[], 'problemi_feed':[]},
                               {'posizioni':[{'token':'BTC','quantita':None,'costo_medio_eur':None}]},{},{},[])
-        self.assertEqual(report['posizioni'],[])
+        self.assertEqual(len(report['posizioni']),1)
+        self.assertEqual(report['posizioni'][0]['token'],'BTC')
+        self.assertIsNone(report['posizioni'][0]['quantita'])
+        self.assertNotIn('valore_eur',report['posizioni'][0])
         self.assertEqual(report['totale_stimato_eur'],0)
+        self.assertTrue(report['totale_parziale'])
+        self.assertEqual(report['posizioni_non_aggiornate'],1)
+        page=d.render(report)
+        self.assertIn('Quantità: non disponibile',page)
+        self.assertIn('Valore EUR non stimato',page)
+        self.assertNotIn('Quantità 0',page)
+
+    def test_rt_i01_mixed_known_unknown_and_unquoted_positions(self):
+        now=d.NOW().isoformat()
+        rows={
+            'BTC': {'token':'BTC','prezzo_eur':100.0,
+                    'var_oggi_utc_pct':None,'volume_24h_eur_stimato':1000.,
+                    'spread_pct':0.1}}
+        data={'rilevazione_utc':now,'markets':rows,'trends':{},
+              'feed':[],'problemi_feed':[]}
+        portfolio={'posizioni':[
+            {'token':'BTC','quantita':2,'costo_medio_eur':None},
+            {'token':'SOL','quantita':None,'costo_medio_eur':None},
+            {'token':'ETH','quantita':3,'costo_medio_eur':None}]}
+        report=d.build_report(data,portfolio,{}, {}, [])
+        self.assertEqual([h['token'] for h in report['posizioni']],['BTC','SOL','ETH'])
+        self.assertEqual(report['totale_stimato_eur'],200.0)
+        self.assertTrue(report['totale_parziale'])
+        self.assertEqual(report['posizioni_non_aggiornate'],1)
+        self.assertEqual(report['posizioni'][1]['quantita'],None)
+        self.assertEqual(report['posizioni'][2]['quantita'],3)
+        self.assertNotIn('valore_eur',report['posizioni'][1])
+        self.assertNotIn('valore_eur',report['posizioni'][2])
+        page=d.render(report)
+        self.assertIn('BTC',page)
+        self.assertIn('SOL',page)
+        self.assertIn('ETH',page)
+        self.assertIn('Quantità: non disponibile',page)
+        self.assertIn('Quantità: 3',page)
+        self.assertIn('Valore EUR non stimato',page)
+        self.assertIn('200,00',page)
+        self.assertIn('(incompleto)',page)
+        self.assertNotIn('P/L indicativo',page)
+
+    def test_rt_i01_unknown_is_not_zero_and_unpriced_html_escapes(self):
+        data={'rilevazione_utc':d.NOW().isoformat(),'markets':{},'trends':{},
+              'feed':[],'problemi_feed':[]}
+        portfolio={'posizioni':[
+            {'token':'<img src=x onerror=1>','quantita':9},
+            {'token':'UNKNOWN','quantita':None}]}
+        report=d.build_report(data,portfolio,{}, {}, [])
+        page=d.render(report)
+        self.assertIn('Quantità: 9',page)
+        self.assertIn('Quantità: non disponibile',page)
+        self.assertIn('&lt;IMG SRC=X ONERROR=1&gt;',page)
+        self.assertNotIn('<IMG ',page)
+        self.assertEqual(report['totale_stimato_eur'],0)
+        self.assertTrue(report['totale_parziale'])
 
 # Copertura G2: coppie arbitrarie senza preferenza SUI/EUR.
 import grafico_4h as g
