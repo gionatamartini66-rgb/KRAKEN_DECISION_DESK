@@ -3655,4 +3655,183 @@ class PatrimonioD1D2Tests(unittest.TestCase):
             self.assertNotIn("Valore posizioni inserite: 0,00 €",html)
 
 
+
+class DossierPatrimonialeG2Tests(unittest.TestCase):
+    """KDD PR21 dossier: original collect/status/output on isolated synthetic files."""
+    def setUp(self):
+        self.now=dt.datetime(2026,10,28,16,0,tzinfo=dt.timezone.utc)
+        self.market={"BTC":{"prezzo_eur":100.0,"var_oggi_utc_pct":None,
+                             "volume_24h_eur_stimato":1000,"spread_pct":0.2}}
+        self.source={"rilevazione_utc":self.now.isoformat(timespec="seconds"),
+            "markets":self.market,"trends":{},"feed":[],"problemi_feed":[],
+            "schede_v02":[{"token":"ICNT","categoria":"test","esito":"RIESAME",
+                           "sintesi":"Fixture sintetica","coppia_analisi":"ICNT/EUR",
+                           "alternative":[{"pair":"ICNT/EUR","pair_key":"ICNTEUR",
+                                           "prezzo_quote":1.0}],
+                           "evidenze":[],"criticita":[],"costi_roundtrip":[]}]}
+
+    def exercise(self, positions, *, source_label=None, acquired=None,
+                 after_collect=None, do_output=True):
+        import dossier_trade as mod
+        import verifica_piani as vp
+        with tempfile.TemporaryDirectory() as folder:
+            path=pathlib.Path(folder)
+            portfolio={"posizioni":positions}
+            if source_label is not None:
+                portfolio["fonte_quantita"]=source_label
+            if acquired is not None:
+                portfolio["data_ora_saldo_privato_utc"]=acquired
+            (path/"portafoglio.json").write_text(json.dumps(portfolio,allow_nan=True))
+            with unittest.mock.patch.object(d,"DIR",path),\
+                 unittest.mock.patch.object(d,"NOW",return_value=self.now),\
+                 unittest.mock.patch.object(mod,"recupera_4h",return_value={}),\
+                 unittest.mock.patch.object(mod,"global_context",return_value={}),\
+                 unittest.mock.patch.object(mod,"derivatives_context",return_value={
+                     "open-interest":{},"cvd":{}}),\
+                 unittest.mock.patch.object(mod,"summarize_candles",return_value={
+                     "ultima_chiusura_utc":self.now.isoformat()}),\
+                 unittest.mock.patch.object(mod,"token_fundamentals",return_value={
+                     "id":"impossible-cloud-network-token"}),\
+                 unittest.mock.patch.object(mod.flusso_spot,"fetch",return_value={
+                     "stato":"COMPLETO_4H"}),\
+                 unittest.mock.patch.object(d,"kraken",return_value={"ICNTEUR":[[1]]}),\
+                 unittest.mock.patch.object(mod.time,"sleep"),\
+                 unittest.mock.patch.object(d.piano_gpt,"load",return_value=None),\
+                 unittest.mock.patch.object(vp,"archivia_piano",return_value=None):
+                dossier=mod.collect(source=self.source)
+                status=d.prepara_dossier_aggiornamento(self.source)
+                if after_collect is not None:
+                    portfolio=after_collect
+                    (path/"portafoglio.json").write_text(json.dumps(portfolio,allow_nan=True))
+                if do_output:
+                    d.output(self.source)
+                    report=d.load("ultimo_report.json")
+                    page=(path/"cruscotto.html").read_text()
+                else:
+                    report=None;page=""
+                # Verify actual JSON from disk, not merely Python return values.
+                stored_dossier=d.load("dossier_multifonte.json")
+                stored_status=d.load("dossier_stato.json")
+                return stored_dossier,stored_status,report,page
+
+    def test_g2_red_original_counterexample_three_saved_files(self):
+        dossier,status,report,page=self.exercise(
+            [{"token":"BTC","quantita":"MISSING"}])
+        self.assertFalse(dossier["portafoglio_noto"])
+        self.assertEqual(dossier["qualita_patrimonio"]["stato_totale"],"NON_DISPONIBILE")
+        self.assertEqual(dossier["qualita_patrimonio"]["posizioni_valorizzate"],0)
+        self.assertEqual(dossier["qualita_patrimonio"]["posizioni_incomplete"],1)
+        self.assertEqual(status["stato_fonti_mercato"],"COMPLETO")
+        self.assertEqual(status["stato"],"PRONTO_PER_ESAME_MERCATO")
+        self.assertEqual(status["idoneita_analisi_patrimoniale"],"NON_IDONEA")
+        self.assertEqual(report["stato_totale"],"NON_DISPONIBILE")
+        self.assertIsNone(report["totale_stimato_eur"])
+        self.assertEqual(report["dossier_stato"]["idoneita_analisi_patrimoniale"],"NON_IDONEA")
+        self.assertIn("Patrimonio",page)
+
+    def test_g2_market_fully_usable_while_holdings_invalid(self):
+        for entries in ([{"token":"BTC","quantita":None}],
+                        [{"token":"BTC","quantita":"NaN"}],
+                        [{"token":"BTC","quantita":"Infinity"}],
+                        [{"token":"BTC","quantita":-1}],
+                        [{"token":"BTC","quantita":True}],
+                        [{"token":"BTC","quantita":""}],
+                        [{"token":"BTC","quantita":2},{"token":"btc","quantita":3}],
+                        [{"token":None,"quantita":2}],
+                        [{"token":37,"quantita":2}],
+                        [{"token":"<script>","quantita":2}],
+                        [{"token":"BTC","quantita":"MISSING"},{"token":"SOL","quantita":2}]):
+            with self.subTest(entries=repr(entries)):
+                dossier,status,report,page=self.exercise(entries)
+                self.assertEqual(status["stato"],"PRONTO_PER_ESAME_MERCATO")
+                self.assertEqual(status["stato_fonti_mercato"],"COMPLETO")
+                self.assertEqual(status["idoneita_analisi_patrimoniale"],"NON_IDONEA")
+                self.assertFalse(dossier["portafoglio_noto"])
+                self.assertEqual(report["dossier_stato"]["idoneita_analisi_patrimoniale"],
+                                 "NON_IDONEA")
+                self.assertNotIn("<script>",page)
+                json.dumps(dossier,allow_nan=False)
+
+    def test_g2_positive_quantity_not_enough_for_eur_value_or_freshness(self):
+        for entries in ([{"token":"BTC","quantita":"2"}],
+                        [{"token":"BTC","quantita":"0"}],
+                        [{"token":"BTC","quantita":"2"},{"token":"SOL","quantita":"3"}],
+                        []):
+            with self.subTest(entries=repr(entries)):
+                dossier,status,report,page=self.exercise(entries)
+                self.assertEqual(status["stato"],"PRONTO_PER_ESAME_MERCATO")
+                self.assertEqual(status["idoneita_analisi_patrimoniale"],"NON_IDONEA")
+                self.assertEqual(dossier["portafoglio_noto"],bool(entries))
+                self.assertFalse(dossier["qualita_patrimonio"]["saldo_recente_verificato"])
+                if entries==[{"token":"BTC","quantita":"0"}]:
+                    self.assertTrue(dossier["qualita_patrimonio"]["zero_reale"])
+                if not entries:
+                    self.assertEqual(dossier["qualita_patrimonio"]["stato_totale"],
+                                     "NESSUNA_POSIZIONE_REGISTRATA")
+
+    def test_g2_valid_recent_balanceex_is_eligible_but_not_order(self):
+        stamp=self.now.isoformat(timespec="seconds")
+        dossier,status,report,page=self.exercise(
+            [{"token":"BTC","quantita":"2"}],
+            source_label="Kraken BalanceEx API privata SOLA LETTURA, "+stamp,
+            acquired=stamp)
+        self.assertTrue(dossier["portafoglio_noto"])
+        self.assertTrue(dossier["qualita_patrimonio"]["saldo_recente_verificato"])
+        self.assertEqual(status["stato"],"PRONTO_PER_ESAME_GPT")
+        self.assertEqual(status["idoneita_analisi_patrimoniale"],"IDONEA")
+        self.assertEqual(report["totale_stimato_eur"],200)
+        self.assertIn("fotografia_portafoglio_sha256",report["dossier_stato"])
+        self.assertNotIn("ordine eseguito",page.lower())
+
+    def test_g2_different_portfolio_between_collect_and_output_blocks_readiness(self):
+        original=[{"token":"BTC","quantita":"2"}]
+        updated={"posizioni":[{"token":"BTC","quantita":"3"}]}
+        stamp=self.now.isoformat(timespec="seconds")
+        dossier,status,report,page=self.exercise(
+            original,source_label="Kraken BalanceEx API privata SOLA LETTURA, "+stamp,
+            acquired=stamp,after_collect=updated)
+        self.assertEqual(status["stato"],"PRONTO_PER_ESAME_GPT")
+        self.assertNotEqual(dossier["fotografia_portafoglio_sha256"],
+                            report["fotografia_portafoglio_sha256"])
+        self.assertEqual(report["dossier_stato"]["stato"],"NON_ALLINEATO_PATRIMONIO")
+        self.assertEqual(report["dossier_stato"]["idoneita_analisi_patrimoniale"],"NON_IDONEA")
+        self.assertIn("diversa",page.lower())
+
+    def test_g2_invalid_schema_dossier_reports_instead_of_exception(self):
+        for positions in ([None],["MISSING"],{"BTC":"2"},"BTC",5):
+            with self.subTest(type=repr(positions)):
+                dossier,status,_,_=self.exercise(positions,do_output=False)
+                self.assertFalse(dossier["portafoglio_noto"])
+                self.assertIn(dossier["qualita_patrimonio"]["stato_quantita"],
+                              ("SCHEMA_NON_VALIDO","INCOMPLETO"))
+                self.assertEqual(status["stato"],"PRONTO_PER_ESAME_MERCATO")
+                self.assertEqual(status["idoneita_analisi_patrimoniale"],"NON_IDONEA")
+                json.dumps(dossier,allow_nan=False)
+
+    def test_g2_old_dossier_cannot_claim_patrimony_from_timestamp_alone(self):
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            (root/"dossier_stato.json").write_text(json.dumps({
+                "stato":"PRONTO_PER_ESAME_GPT",
+                "rilevazione_kraken_utc":self.source["rilevazione_utc"]}))
+            (root/"dossier_multifonte.json").write_text(json.dumps({
+                "schema":1,"kraken_istantanea_utc":self.source["rilevazione_utc"],
+                "portafoglio_noto":True}))
+            with unittest.mock.patch.object(d,"DIR",root):
+                status=d.stato_dossier_per_report(self.source,
+                   portfolio={"posizioni":[{"token":"BTC","quantita":"2"}]})
+            self.assertEqual(status["idoneita_analisi_patrimoniale"],"NON_IDONEA")
+            self.assertNotEqual(status["stato"],"PRONTO_PER_ESAME_GPT")
+
+    def test_g2_missing_price_keeps_quantities_known_but_value_partial(self):
+        dossier,status,report,_=self.exercise([
+            {"token":"BTC","quantita":"2"},{"token":"SOL","quantita":"4"}])
+        self.assertTrue(dossier["portafoglio_noto"])
+        self.assertEqual(dossier["qualita_patrimonio"]["stato_totale"],"PARZIALE")
+        self.assertEqual(dossier["qualita_patrimonio"]["posizioni_valorizzate"],1)
+        self.assertEqual(report["stato_totale"],"PARZIALE")
+        self.assertEqual(status["idoneita_analisi_patrimoniale"],"NON_IDONEA")
+
+
 if __name__=='__main__': unittest.main(verbosity=2)
