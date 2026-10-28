@@ -2,6 +2,8 @@
 
 ## [APRIRE LA ROADMAP UNICA — STATO CORRENTE, FUNZIONI E PROSSIMO LAVORO](ROADMAP_KDD.md)
 
+**Nuova Supervisione:** [MANDATO INTEGRALE DI SUBENTRO — obbligo di lettura fino a EOF](SUBENTRO_SUPERVISIONE_APICALE.md). Va acquisito integralmente prima di usare la ROADMAP e i sorgenti; la sentinella di EOF è nell'ultima riga del documento.
+
 **Ingresso immediato al progetto:** la ROADMAP indica cosa è già integrato, cosa è ancora sperimentale e cosa resta da realizzare. [Mandato originale e cronologia completa](#mandato-operativo-congelato--investimenti-e-trading-17102026) sono conservati integralmente qui sotto. [Autorità e limiti](GOVERNO_KDD.md). Il codice in una PR non è il codice installato sul Samsung.
 
 ---
