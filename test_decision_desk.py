@@ -3830,6 +3830,34 @@ class DossierPatrimonialeG2Tests(unittest.TestCase):
             self.assertEqual(status["idoneita_analisi_patrimoniale"],"NON_IDONEA")
             self.assertNotEqual(status["stato"],"PRONTO_PER_ESAME_GPT")
 
+    def test_g2_matching_wallet_digest_does_not_freeze_balance_freshness(self):
+        stamp=self.now.isoformat(timespec="seconds")
+        wallet={"posizioni":[{"token":"BTC","quantita":"2"}],
+                "fonte_quantita":"Kraken BalanceEx API privata SOLA LETTURA, "+stamp,
+                "data_ora_saldo_privato_utc":stamp}
+        digest=d.fotografia_portafoglio_sha256(wallet)
+        with tempfile.TemporaryDirectory() as folder:
+            root=pathlib.Path(folder)
+            (root/"dossier_multifonte.json").write_text(json.dumps({
+                "schema":2,"kraken_istantanea_utc":stamp,
+                "fotografia_portafoglio_sha256":digest}))
+            (root/"dossier_stato.json").write_text(json.dumps({
+                "stato":"PRONTO_PER_ESAME_GPT",
+                "stato_fonti_mercato":"COMPLETO",
+                "idoneita_analisi_patrimoniale":"IDONEA",
+                "rilevazione_kraken_utc":stamp,
+                "fotografia_portafoglio_sha256":digest}))
+            with unittest.mock.patch.object(d,"DIR",root):
+                with unittest.mock.patch.object(d,"NOW",return_value=self.now):
+                    ready=d.stato_dossier_per_report(self.source,portfolio=wallet)
+                with unittest.mock.patch.object(d,"NOW",
+                      return_value=self.now+dt.timedelta(minutes=35)):
+                    late=d.stato_dossier_per_report(self.source,portfolio=wallet)
+            self.assertEqual(ready["stato"],"PRONTO_PER_ESAME_GPT")
+            self.assertEqual(late["stato"],"PRONTO_PER_ESAME_MERCATO")
+            self.assertEqual(late["idoneita_analisi_patrimoniale"],"NON_IDONEA")
+            self.assertIn("non più recente"," ".join(late["motivi_patrimoniali"]))
+
     def test_g2_missing_price_keeps_quantities_known_but_value_partial(self):
         dossier,status,report,_=self.exercise([
             {"token":"BTC","quantita":"2"},{"token":"SOL","quantita":"4"}])

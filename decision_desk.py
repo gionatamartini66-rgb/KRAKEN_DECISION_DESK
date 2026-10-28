@@ -991,6 +991,19 @@ def stato_dossier_per_report(data, portfolio=None):
     recorded = dossier.get('fotografia_portafoglio_sha256')
     status_id = status.get('fotografia_portafoglio_sha256')
     if recorded and status_id and current and recorded == status_id == current:
+        # Freshness is time-dependent: a matched SHA never freezes balance age.
+        if status.get('idoneita_analisi_patrimoniale') == 'IDONEA':
+            fresh_now = stato_saldo(portfolio, data.get('saldo_refresh'), now=NOW())
+            if fresh_now['freschezza_saldo'] != 'RECENTE':
+                downgraded = dict(status)
+                downgraded['stato'] = ('PRONTO_PER_ESAME_MERCATO'
+                                       if status.get('stato_fonti_mercato') == 'COMPLETO'
+                                       else 'PARZIALE')
+                downgraded['idoneita_analisi_patrimoniale'] = 'NON_IDONEA'
+                downgraded['motivi_patrimoniali'] = (
+                    list(status.get('motivi_patrimoniali') or []) +
+                    ['Saldo non più recente alla composizione del report'])
+                return downgraded
         return status
     if recorded and status_id and current and (recorded != current or status_id != recorded):
         problem = 'Fotografia del patrimonio diversa fra dossier e report'
