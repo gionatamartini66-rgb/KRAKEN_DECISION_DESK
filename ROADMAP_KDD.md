@@ -1,5 +1,7 @@
 # KDD — ROADMAP CANONICA / BUSSOLA DI BORDO (28 OTTOBRE 2026)
 
+**Per chi subentra come Supervisione apicale:** acquisire integralmente [il mandato di subentro](SUBENTRO_SUPERVISIONE_APICALE.md), verificandone EOF e riferimenti. Questo mandato organizza l'ingresso; **questa ROADMAP resta l'unica bussola operativa** e il README conserva il mandato originario dell'autore.
+
 **Unica rotta operativa.** Il [README integrale](README.md) conserva il mandato originale e la cronologia; [GOVERNO_KDD.md](GOVERNO_KDD.md) stabilisce autorità e limiti. Qui si indicano **stato, dipendenze, primo passo e criteri di chiusura**. Il codice su GitHub non dimostra da solo l'installazione sul Samsung.
 
 **Regola per ogni operatore: aggiornare PER SOSTITUZIONE.** Quando un passo si completa, fallisce o cambia, **sovrascrivere o cassare qui le istruzioni operative superate** e aggiornare il primo passo. Non aggiungere diari, appendici cumulative, ulteriori roadmap o mandati concorrenti. Conservare invece **prove e decisioni storiche** nel README, nei rapporti originari e nella cronologia Git: non distruggere la storia per ripulire la bussola. Nessun documento costituisce GO implicito a codice, merge, deploy, dati privati o trading.
