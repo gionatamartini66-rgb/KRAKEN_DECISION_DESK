@@ -289,7 +289,13 @@ def build_report(data, portfolio, conf, ctx, decisions):
     holdings = []
     for h in portfolio.get('posizioni', []):
         symbol = h.get('token', '').upper(); quantity = h.get('quantita', None)
-        if quantity is None: continue
+        if quantity is None:
+            # Non eliminare la posizione: identita e decisione restano visibili,
+            # ma valore e disponibilita non possono essere stimati.
+            holdings.append({'token': symbol, 'quantita': None,
+                             'errore': 'Quantità non disponibile: posizione da verificare, valore non stimato.',
+                             'decisione': decision_state(symbol, decisions, now)})
+            continue
         row = pairs.get(symbol)
         if row is None:
             holdings.append({'token': symbol, 'quantita': quantity, 'errore': 'Nessuna quotazione spot EUR disponibile: nessuna stima inventata.',
@@ -364,7 +370,10 @@ def render(report):
     holdings = ''
     for h in report['posizioni']:
         if 'errore' in h:
-            holdings += f"<article><h3>{esc(h['token'])}</h3><p>{esc(h['errore'])}</p><p>{esc(h['decisione'])}</p></article>"
+            qty = 'non disponibile' if h.get('quantita') is None else esc(h['quantita'])
+            holdings += (f"<article><h3>{esc(h['token'])}</h3>"
+                         f"<p>Quantità: {qty} · Valore EUR non stimato</p>"
+                         f"<p>{esc(h['errore'])}</p><p>{esc(h['decisione'])}</p></article>")
         else:
             trend = h.get('tendenza') or {}
             delta7 = fmt(trend.get('var_7g_pct')) + '%' if 'errore' not in trend else 'n.d.'
