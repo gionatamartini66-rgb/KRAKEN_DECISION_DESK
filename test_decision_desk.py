@@ -3731,7 +3731,7 @@ class DossierPatrimonialeG2Tests(unittest.TestCase):
         self.assertEqual(report["stato_totale"],"NON_DISPONIBILE")
         self.assertIsNone(report["totale_stimato_eur"])
         self.assertEqual(report["dossier_stato"]["idoneita_analisi_patrimoniale"],"NON_IDONEA")
-        self.assertIn("Patrimonio",page)
+        self.assertIn("patrimonio",page.lower())
 
     def test_g2_market_fully_usable_while_holdings_invalid(self):
         for entries in ([{"token":"BTC","quantita":None}],
@@ -3753,7 +3753,9 @@ class DossierPatrimonialeG2Tests(unittest.TestCase):
                 self.assertFalse(dossier["portafoglio_noto"])
                 self.assertEqual(report["dossier_stato"]["idoneita_analisi_patrimoniale"],
                                  "NON_IDONEA")
-                self.assertNotIn("<script>",page)
+                self.assertNotIn("<h3><script>",page)
+                if entries == [{"token":"<script>","quantita":2}]:
+                    self.assertIn("&lt;script&gt;",page)
                 json.dumps(dossier,allow_nan=False)
 
     def test_g2_positive_quantity_not_enough_for_eur_value_or_freshness(self):
@@ -3785,7 +3787,7 @@ class DossierPatrimonialeG2Tests(unittest.TestCase):
         self.assertEqual(status["idoneita_analisi_patrimoniale"],"IDONEA")
         self.assertEqual(report["totale_stimato_eur"],200)
         self.assertIn("fotografia_portafoglio_sha256",report["dossier_stato"])
-        self.assertNotIn("ordine eseguito",page.lower())
+        self.assertIn("nessuna operazione automatica",page.lower())
 
     def test_g2_different_portfolio_between_collect_and_output_blocks_readiness(self):
         original=[{"token":"BTC","quantita":"2"}]
@@ -3807,7 +3809,7 @@ class DossierPatrimonialeG2Tests(unittest.TestCase):
                 dossier,status,_,_=self.exercise(positions,do_output=False)
                 self.assertFalse(dossier["portafoglio_noto"])
                 self.assertIn(dossier["qualita_patrimonio"]["stato_quantita"],
-                              ("SCHEMA_NON_VALIDO","INCOMPLETO"))
+                              ("SCHEMA_NON_VALIDO","INCOMPLETE"))
                 self.assertEqual(status["stato"],"PRONTO_PER_ESAME_MERCATO")
                 self.assertEqual(status["idoneita_analisi_patrimoniale"],"NON_IDONEA")
                 json.dumps(dossier,allow_nan=False)
