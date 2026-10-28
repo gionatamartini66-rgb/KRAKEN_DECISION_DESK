@@ -73,7 +73,7 @@ jobs:
            shutil.copy2(src,desk.DIR/"vendor"/src.name)
            (desk.DIR/"cruscotto.html").write_text(actual_html,encoding="utf-8")
            (desk.DIR/"ultima_rilevazione.json").write_text(json.dumps(snapshot),encoding="utf-8")
-           def http(method,path,body=None,host="127.0.0.1:8765"):
+           def request_http(method,path,body=None,host="127.0.0.1:8765"):
             c=http.client.HTTPConnection("127.0.0.1",8765,timeout=12)
             headers={"Host":host}
             if body is not None: headers["Content-Type"]="application/x-www-form-urlencoded"
@@ -87,7 +87,7 @@ jobs:
             worker=threading.Thread(target=server.serve_forever,daemon=True)
             worker.start()
             try:
-             status,_,page=http("GET","/")
+             status,_,page=request_http("GET","/")
              assert status==200,status
              for marker in ("PRIMA LETTURA · PIANO GPT","Che cosa è successo dopo il piano?",
                 "Archivio: 1 piani precedenti conservati",
@@ -99,7 +99,7 @@ jobs:
              assert page.count("action='/aggiorna'")==1
              assert "Questa copia HTML è una fotografia" not in page
              print("REAL_KDD_HOME: PASS actual build_report -> render -> HTTP, fake wallet/plan/archive preserved")
-             status,_,selector=http("GET","/mercati/spot")
+             status,_,selector=request_http("GET","/mercati/spot")
              assert status==200,(status,selector[:90])
              for marker in ("Questa sezione appartiene al KDD patrimoniale originale.",
                  "Caso fittizio selezionato da KDD",
@@ -107,23 +107,23 @@ jobs:
                  'href="/analisi/spot?pair=ADAUSDT"',
                  'href="/"'):
               assert marker in selector,("SPOT_SELECTOR",marker)
-             status,_,chart=http("GET","/grafico/spot?pair=ADAUSDT&tf=4h")
+             status,_,chart=request_http("GET","/grafico/spot?pair=ADAUSDT&tf=4h")
              assert status==200,(status,chart[:120])
              for marker in ("Grafico ADA/USDT · 4H","Volumi scambiati (ADA)",
                 'href="/analisi/spot?pair=ADAUSDT"',
                 'pair=ADAUSDT&amp;tf=15m'):
               assert marker in chart,("ACTUAL_CHART",marker)
-             status,_,compare=http("GET","/analisi/spot?pair=ADAUSDT")
+             status,_,compare=request_http("GET","/analisi/spot?pair=ADAUSDT")
              assert status==200,(status,compare[:120])
              for marker in ("Confronto ADA/USDT","15m","1H","4H","1D",
                  "pair=ADAUSDT&amp;tf=4h"):
               assert marker in compare,("ACTUAL_COMPARISON",marker)
-             assert http("GET","/grafico/spot?pair=ADAUSDT&tf=invalid")[0]==400
-             assert http("GET","/",host="invalid.example")[0]==403
+             assert request_http("GET","/grafico/spot?pair=ADAUSDT&tf=invalid")[0]==400
+             assert request_http("GET","/",host="invalid.example")[0]==403
              with mock.patch.object(serve,"start_refresh",side_effect=AssertionError("REFRESH_FORBIDDEN")):
-              assert http("POST","/aggiorna",body="token=WRONG")[0]==403
+              assert request_http("POST","/aggiorna",body="token=WRONG")[0]==403
              with mock.patch.object(serve,"start_refresh",return_value=False) as guarded:
-              status,location,_=http("POST","/aggiorna",body="token="+serve.TOKEN)
+              status,location,_=request_http("POST","/aggiorna",body="token="+serve.TOKEN)
               assert status==303 and location=="/?esito=occupato",(status,location)
               guarded.assert_called_once()
              print("REAL_KDD_NAVIGATION: PASS shortlist -> actual chart -> actual 4TF comparison; return-home and POST guard; no Kraken network")
