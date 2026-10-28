@@ -999,9 +999,29 @@ def stato_dossier_per_report(data, portfolio=None):
     recorded = dossier.get('fotografia_portafoglio_sha256')
     status_id = status.get('fotografia_portafoglio_sha256')
     if recorded and status_id and current and recorded == status_id == current:
+        # A matching wallet hash does not extend the life of the market snapshot.
+        # Use the same 60-minute limit as dossier_trade.collect, at report time.
+        now = NOW()
+        try:
+            observed = dt.datetime.fromisoformat(snap.replace('Z', '+00:00'))
+            if observed.tzinfo is None:
+                raise ValueError('Market timestamp without timezone')
+            age = (now - observed.astimezone(dt.timezone.utc)).total_seconds()
+            market_recent = -120 <= age <= 3600
+        except (TypeError, ValueError, AttributeError, OverflowError):
+            market_recent = False
+        if status.get('idoneita_analisi_patrimoniale') == 'IDONEA' and not market_recent:
+            downgraded = dict(status)
+            downgraded['stato'] = 'PARZIALE'
+            downgraded['stato_fonti_mercato'] = 'SCADUTO'
+            downgraded['idoneita_analisi_patrimoniale'] = 'NON_IDONEA'
+            downgraded['motivi_incompletezza'] = (
+                list(status.get('motivi_incompletezza') or []) +
+                ['Rilevazione mercato scaduta o temporalmente incoerente alla composizione del report'])
+            return downgraded
         # Freshness is time-dependent: a matched SHA never freezes balance age.
         if status.get('idoneita_analisi_patrimoniale') == 'IDONEA':
-            fresh_now = stato_saldo(portfolio, data.get('saldo_refresh'), now=NOW())
+            fresh_now = stato_saldo(portfolio, data.get('saldo_refresh'), now=now)
             if fresh_now['freschezza_saldo'] != 'RECENTE':
                 downgraded = dict(status)
                 downgraded['stato'] = ('PRONTO_PER_ESAME_MERCATO'
