@@ -1,5 +1,11 @@
 # KRAKEN DECISION DESK — README CANONICO INTEGRATO
 
+## [APRIRE LA ROADMAP UNICA — STATO CORRENTE, FUNZIONI E PROSSIMO LAVORO](ROADMAP_KDD.md)
+
+**Ingresso immediato al progetto:** la ROADMAP indica cosa è già integrato, cosa è ancora sperimentale e cosa resta da realizzare. [Mandato originale e cronologia completa](#mandato-operativo-congelato--investimenti-e-trading-17102026) sono conservati integralmente qui sotto. [Autorità e limiti](GOVERNO_KDD.md). Il codice in una PR non è il codice installato sul Samsung.
+
+---
+
 **INGRESSO UNICO KDD — prodotto e fonti, 28/10/2026 (candidato PR #21, NON installato)**
 
 Questo repository e' l'unica fonte canonica per **mandato, codice e stato autorizzato**. Il `main` e' il prodotto approvato; la [PR #21](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/21), ora diretta a `main`, e' il **solo cantiere di integrazione** patrimonio + Kraken Spot, non ancora rilasciato. I rami storici conservano prove: non sono altri prodotti e non vanno copiati indiscriminatamente.
