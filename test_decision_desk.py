@@ -3532,6 +3532,19 @@ class PatrimonioD1D2Tests(unittest.TestCase):
                 self.assertIn("Valore posizioni inserite: non disponibile",shown)
                 self.assertNotIn("P/L indicativo: ",shown)
 
+    def test_d2_nonfinite_distinct_from_not_numeric(self):
+        for raw, expected in (("MISSING","NON_NUMERICO"),("","NON_NUMERICO"),
+                              ("NaN","NON_FINITO"),("Infinity","NON_FINITO"),
+                              ("-Infinity","NON_FINITO"),(float("nan"),"NON_FINITO"),
+                              (float("inf"),"NON_FINITO"),(-1,"NEGATIVO"),
+                              ("1e400","FUORI_SCALA")):
+            with self.subTest(raw=repr(raw)):
+                report=self.report([{"token":"BTC","quantita":raw}])
+                self.assertEqual(report["posizioni_valorizzate"],0)
+                self.assertIn(expected,report["posizioni"][0]["errore"])
+                self.assertIsNone(report["totale_stimato_eur"])
+                json.dumps(report,allow_nan=False)
+
     def test_d2_zero_and_valid_quantity_yield_genuine_zero_and_pl(self):
         z=self.report([{"token":"BTC","quantita":0,"costo_medio_eur":12}])
         self.assertEqual(z["posizioni"][0]["valore_eur"],0)

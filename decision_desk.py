@@ -114,8 +114,14 @@ def wallet_number(raw):
         return None, 'NON_NOTO'
     if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
         return None, 'NON_NUMERICO'
-    if isinstance(raw, str) and not _WALLET_NUMBER_RE.fullmatch(raw.strip()):
-        return None, 'NON_NUMERICO'
+    if isinstance(raw, str):
+        # These are valid spellings for Decimal/float non-finite numbers,
+        # but they are never valid holding quantities or cost bases.
+        if raw.strip().lower() in ('nan', '+nan', '-nan', 'inf', '+inf',
+                                   '-inf', 'infinity', '+infinity', '-infinity'):
+            return None, 'NON_FINITO'
+        if not _WALLET_NUMBER_RE.fullmatch(raw.strip()):
+            return None, 'NON_NUMERICO'
     try:
         number = Decimal(str(raw).strip())
         if not number.is_finite():
