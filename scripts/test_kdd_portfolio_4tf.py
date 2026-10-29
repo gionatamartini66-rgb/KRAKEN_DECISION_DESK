@@ -318,6 +318,59 @@ class PortfolioFourTFTests(unittest.TestCase):
         self.assertEqual(report['stato_totale'],'NON_DISPONIBILE')
 
 
+    def test_rt_finance_producer_to_packet_reconciles_real_d1_calculations(self):
+        """End-to-end original D1 calculation; no manually fabricated report."""
+        import copy
+        wallet={'posizioni':[{'token':'ADA','quantita':'0.1',
+                               'costo_medio_eur':'0.05'}]}
+        source=self.source(['ADA'])
+        source['markets']['ADA']['prezzo_eur']=0.2
+        report=desk.build_report(source,wallet,{}, {},[])
+        self.assertEqual(report['stato_totale'],'COMPLETO')
+        self.assertEqual(report['posizioni'][0]['valore_eur'],0.1*0.2)
+        self.assertEqual(report['posizioni'][0]['pl_non_realizzato_eur'],
+                         (0.2-0.05)*0.1)
+        four=wallet_tf.collect(wallet,source,asset_pairs=catalogue(['ADA']),
+            fetch=self.net,now=self.now,pause=lambda _:None)
+        report['fotografia_portafoglio_sha256']=four['portafoglio_sha256']
+        dossier_doc={'schema':3,'kraken_istantanea_utc':source['rilevazione_utc'],
+                     'fotografia_portafoglio_sha256':four['portafoglio_sha256'],
+                     'patrimonio_4tf':four}
+        def persist(rep):
+            for name,obj in [('portafoglio.json',wallet),('ultimo_report.json',rep),
+                             ('dossier_multifonte.json',dossier_doc),
+                             ('ultima_rilevazione.json',source)]:
+                (self.root/name).write_text(json.dumps(obj),encoding='utf-8')
+        persist(report)
+        valid=packet.build(self.root,now=self.now)
+        own=valid['patrimonio']['posizioni'][0]
+        self.assertEqual(float(own['valore_eur']),0.1*0.2)
+        self.assertEqual(float(own['pl_indicativo_eur']),(0.2-0.05)*0.1)
+        self.assertEqual(own['analisi_4tf']['stato'],'COMPLETO')
+        self.assertEqual(valid['patrimonio']['stato_totale'],'COMPLETO')
+        # Financially coherent forged row, but it contradicts the original
+        # public snapshot. All balances remain synthetic and local to CI.
+        forged=copy.deepcopy(report)
+        forged['posizioni'][0]['prezzo_eur']=0.3
+        forged['posizioni'][0]['valore_eur']=0.1*0.3
+        forged['posizioni'][0]['pl_non_realizzato_eur']=(0.3-0.05)*0.1
+        forged['totale_stimato_eur']=0.1*0.3
+        persist(forged)
+        with self.assertRaisesRegex(packet.PacketError,'Prezzo incoerente'):
+            packet.build(self.root,now=self.now)
+        # A correct snapshot/value with altered cost-based P/L is rejected.
+        forged=copy.deepcopy(report)
+        forged['posizioni'][0]['pl_non_realizzato_eur']=0.0
+        persist(forged)
+        with self.assertRaisesRegex(packet.PacketError,'P/L incoerente'):
+            packet.build(self.root,now=self.now)
+        persist(report)
+        aged=packet.build(self.root,now=self.now+dt.timedelta(minutes=30,milliseconds=150))
+        self.assertEqual(aged['mercato']['stato'],'DA_AGGIORNARE')
+        self.assertEqual(aged['patrimonio']['posizioni'][0]['analisi_4tf']['stato'],
+                         'PARZIALE')
+
+
 class SupervisioneRilievi4TFTests(PortfolioFourTFTests):
     """Original producer/consumer with synthetic Kraken OHLC; RED on pin e72f8ab."""
 
