@@ -338,16 +338,21 @@ def brief_positions(portfolio: dict, report: dict, snapshot: dict, dossier: dict
                     or (q > 0 and computed == 0)
                     or d1_float(val, "valore_eur") != computed):
                 raise PacketError("Valore incoerente con quantita e prezzo EUR")
-            # If the original market snapshot records a EUR quote, the
-            # reported unit price cannot silently replace it. The check is
-            # conditional for legacy snapshots without price evidence.
+            # FIN-RT-01: a valued report row requires a same-snapshot EUR
+            # source. Missing/legacy rows can still be represented UNVALUED.
             markets = snapshot.get("markets")
             market = markets.get(token) if isinstance(markets, dict) else None
-            if isinstance(market, dict) and "prezzo_eur" in market:
+            if not isinstance(market, dict) or "prezzo_eur" not in market:
+                raise PacketError("Quotazione EUR di mercato assente per posizione valorizzata")
+            try:
                 snap_price = amount(market["prezzo_eur"], "prezzo mercato")
-                if (snap_price is None or
-                        d1_float(snap_price, "prezzo mercato") != unit):
-                    raise PacketError("Prezzo incoerente con rilevazione mercato")
+                snap_unit = d1_float(snap_price, "prezzo mercato") if snap_price is not None else None
+            except PacketError:
+                raise PacketError("Quotazione EUR di mercato non valida per posizione valorizzata") from None
+            if snap_unit is None or snap_unit <= 0:
+                raise PacketError("Quotazione EUR di mercato non valida per posizione valorizzata")
+            if snap_unit != unit:
+                raise PacketError("Prezzo incoerente con rilevazione mercato")
             basis = row.get("costo_medio_eur")
             declared_cost = None
             if basis is not None:

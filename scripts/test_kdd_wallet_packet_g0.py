@@ -38,8 +38,8 @@ class WalletPacketG0Tests(unittest.TestCase):
             "segmenti_non_spot":{"BTC":["SHOULD_NOT_EXPORT_OTHER_WALLET"]}
         }
         self.snapshot={"rilevazione_utc":iso,
-                       "markets":{"ADA":{"pair":"ADA/EUR", "pair_key":"ADAEUR"},
-                                  "ETH":{"pair":"ETH/EUR", "pair_key":"XETHZEUR"}},
+                       "markets":{"ADA":{"pair":"ADA/EUR", "pair_key":"ADAEUR", "prezzo_eur":1.0},
+                                  "ETH":{"pair":"ETH/EUR", "pair_key":"XETHZEUR", "prezzo_eur":2000.0}},
                        "trends":{"ADA":{"var_7g_pct":12.3,"sopra_media20":True},
                                  "ETH":{"var_7g_pct":-4.25,"sopra_media20":False}},
                        "schede_v02":[{"token":"SOL","esito":"RIESAME MIRATO",
@@ -296,6 +296,7 @@ class WalletPacketG0Tests(unittest.TestCase):
         self.portfolio['posizioni'][0]['costo_medio_eur']='0.05'
         self.report['posizioni'][0]['quantita']='0.1'
         self.report['posizioni'][0]['prezzo_eur']=0.2
+        self.snapshot['markets']['ADA']['prezzo_eur']=0.2
         self.report['posizioni'][0]['valore_eur']=float(0.1*0.2)
         self.report['posizioni'][0]['pl_non_realizzato_eur']=float((0.2-0.05)*0.1)
         self.report['totale_stimato_eur']=float(self.report['posizioni'][0]['valore_eur']+2000)
