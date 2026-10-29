@@ -371,6 +371,29 @@ class PortfolioFourTFTests(unittest.TestCase):
                          'PARZIALE')
 
 
+    def test_rt4_pair01_opaque_key_contradicts_same_market_4tf_evidence(self):
+        wallet={'posizioni':positions(['BTC'])}
+        source=self.source(['BTC'])
+        source['markets']['BTC']['token']='BTC'
+        four=wallet_tf.collect(wallet,source,asset_pairs=catalogue(['BTC']),
+                               fetch=self.net,now=self.now,pause=lambda _:None)
+        report=desk.build_report(source,wallet,{}, {},[])
+        report['fotografia_portafoglio_sha256']=four['portafoglio_sha256']
+        dossier_raw={'schema':3,'kraken_istantanea_utc':source['rilevazione_utc'],
+                     'fotografia_portafoglio_sha256':four['portafoglio_sha256'],
+                     'patrimonio_4tf':four}
+        for name,obj in [('portafoglio.json',wallet),('ultimo_report.json',report),
+                         ('dossier_multifonte.json',dossier_raw),
+                         ('ultima_rilevazione.json',source)]:
+            (self.root/name).write_text(json.dumps(obj))
+        self.assertEqual(packet.build(self.root,now=self.now)['patrimonio']
+                         ['posizioni'][0]['analisi_4tf']['stato'],'COMPLETO')
+        source['markets']['BTC']['pair_key']='XETHZEUR'
+        (self.root/'ultima_rilevazione.json').write_text(json.dumps(source))
+        with self.assertRaisesRegex(packet.PacketError,'Kraken|Identita'):
+            packet.build(self.root,now=self.now)
+
+
 class SupervisioneRilievi4TFTests(PortfolioFourTFTests):
     """Original producer/consumer with synthetic Kraken OHLC; RED on pin e72f8ab."""
 

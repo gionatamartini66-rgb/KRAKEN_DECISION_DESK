@@ -433,4 +433,69 @@ class WalletPacketG0Tests(unittest.TestCase):
         self.assertIsNone(row['quantita_spot'])
         self.assertIsNone(row['valore_eur'])
 
+
+    def test_rt4_pair01_market_identity_mutations_fail_closed(self):
+        self.fin_rt01_btc()
+        self.snapshot['markets']['BTC']['token']='BTC'
+        variants=(
+            ('different_base', 'pair', 'ETH/EUR'),
+            ('wrong_quote_usd', 'pair', 'BTC/USD'),
+            ('wrong_quote_usdc', 'pair', 'ETH/USDC'),
+            ('null_pair', 'pair', None),
+            ('malformed_pair', 'pair', 'BTCEUR'),
+            ('wrong_token', 'token', 'ETH'),
+            ('null_token', 'token', None),
+            ('wrong_explicit_base', 'base', 'ETH'),
+            ('wrong_explicit_quote', 'quote', 'USD'),
+            ('wrong_explicit_asset_base', 'asset_base', 'ETH'),
+            ('wrong_explicit_quote_label', 'valuta_quotazione', 'USDC'),
+            ('null_pair_key', 'pair_key', None),
+            ('bad_pair_key', 'pair_key', 'ETH/EUR'),
+        )
+        for label,field,bad in variants:
+            with self.subTest(case=label):
+                good={'token':'BTC','pair':'XBT/EUR','pair_key':'XXBTZEUR',
+                      'prezzo_eur':100.0}
+                good[field]=bad
+                self.snapshot['markets']['BTC']=good
+                self.dump()
+                with self.assertRaisesRegex(p.PacketError, 'Identita|Coppia|Kraken'):
+                    self.pack()
+
+    def test_rt4_pair01_valued_legacy_missing_metadata_fails_closed(self):
+        self.fin_rt01_btc()
+        good={'token':'BTC','pair':'XBT/EUR','pair_key':'XXBTZEUR',
+              'prezzo_eur':100.0}
+        for field in ('token','pair','pair_key'):
+            with self.subTest(missing=field):
+                self.snapshot['markets']['BTC']={k:v for k,v in good.items() if k!=field}
+                self.dump()
+                with self.assertRaisesRegex(p.PacketError, 'Identita|Coppia|Kraken'):
+                    self.pack()
+
+    def test_rt4_pair01_alias_btc_and_doge_positive(self):
+        self.fin_rt01_btc()
+        self.snapshot['markets']['BTC'].update(token='BTC',pair='XBT/EUR')
+        self.dump()
+        self.assertEqual(float(self.pack()['patrimonio']['posizioni'][0]['valore_eur']),200)
+        self.snapshot['markets']['BTC']['token']='XBT'
+        self.dump()
+        self.assertEqual(float(self.pack()['patrimonio']['posizioni'][0]['valore_eur']),200)
+        self.portfolio['posizioni'][0]['token']='DOGE'
+        self.report['posizioni'][0]['token']='DOGE'
+        self.snapshot['markets']={'DOGE':{'token':'DOGE','pair':'XDG/EUR',
+                                           'pair_key':'XXDGZEUR','prezzo_eur':100.0}}
+        self.dump()
+        self.assertEqual(float(self.pack()['patrimonio']['posizioni'][0]['valore_eur']),200)
+
+    def test_rt4_pair01_opacity_duplicate_key_cross_asset_detectable(self):
+        self.fin_rt01_btc()
+        self.snapshot['markets']['BTC']['token']='BTC'
+        self.snapshot['markets']['BTC']['pair_key']='XETHZEUR'
+        self.snapshot['markets']['ETH']={'token':'ETH','pair':'ETH/EUR',
+                                         'pair_key':'XETHZEUR','prezzo_eur':100.0}
+        self.dump()
+        with self.assertRaisesRegex(p.PacketError,'Kraken|Identita'):
+            self.pack()
+
 if __name__=='__main__': unittest.main(verbosity=2)
