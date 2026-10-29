@@ -237,6 +237,8 @@ class PortfolioFourTFTests(unittest.TestCase):
         self.assertEqual(late['patrimonio']['posizioni'][0]['analisi_4tf']['timeframe']['15m']['stato'],
                          'SCADUTO')
         self.assertEqual(late['mercato']['stato'],'DA_AGGIORNARE')
+        self.assertEqual(late['patrimonio']['posizioni'][0]['analisi_4tf']['stato'],
+                         'PARZIALE'))
 
     def test_11_usd_only_position_reaches_packet_without_eur_total(self):
         source=self.source(['ALT']); wallet={'posizioni':positions(['ALT'])}
@@ -427,6 +429,35 @@ class SupervisioneRilievi4TFTests(PortfolioFourTFTests):
                 actual=packet.build(self.root,now=self.now)
                 self.assertTrue(all(row['stato_identita']=='IDENTITA_AMBIGUA'
                     and row['valore_eur'] is None for row in actual['patrimonio']['posizioni']))
+
+    def test_rt02_full_packet_rejects_single_derivative_mutations(self):
+        import copy
+        data=self.source(['BTC'])
+        wallet={'posizioni':positions(['BTC'])}
+        four=wallet_tf.collect(wallet,data,asset_pairs=catalogue(['BTC']),
+            fetch=self.net,now=self.now,pause=lambda _:None)
+        report=desk.build_report(data,wallet,{}, {},[])
+        report['fotografia_portafoglio_sha256']=four['portafoglio_sha256']
+        dossier_doc={'schema':3,'kraken_istantanea_utc':data['rilevazione_utc'],
+            'fotografia_portafoglio_sha256':four['portafoglio_sha256'],
+            'patrimonio_4tf':four}
+        for name,obj in [('portafoglio.json',wallet),('ultimo_report.json',report),
+                         ('dossier_multifonte.json',dossier_doc),
+                         ('ultima_rilevazione.json',data)]:
+            (self.root/name).write_text(json.dumps(obj))
+        control=packet.build(self.root,now=self.now)
+        self.assertEqual(control['patrimonio']['posizioni'][0]['analisi_4tf']['stato'],
+                         'COMPLETO')
+        for field in ('close','volume','ema20','ema50',
+                      'pivot_giornaliero','livelli_strutturali'):
+            with self.subTest(field=field):
+                modified=copy.deepcopy(dossier_doc)
+                frame=modified['patrimonio_4tf']['posizioni'][0]['timeframe']['15m']
+                frame[field]=({'falso':123} if field in (
+                    'pivot_giornaliero','livelli_strutturali') else 1234567.0)
+                (self.root/'dossier_multifonte.json').write_text(json.dumps(modified))
+                with self.assertRaises(packet.PacketError):
+                    packet.build(self.root,now=self.now)
 
 if __name__=='__main__':
     unittest.main()
