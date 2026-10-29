@@ -394,6 +394,61 @@ class PortfolioFourTFTests(unittest.TestCase):
             packet.build(self.root,now=self.now)
 
 
+    def test_rt4_pair01_real_market_producer_aliases_mixed_wallet_and_packet(self):
+        """Original EUR-only market producer, D1 valuation and full GPT consumer."""
+        pairs={
+            'XXBTZEUR':{'status':'online','wsname':'XBT/EUR'},
+            'XXDGZEUR':{'status':'online','wsname':'XDG/EUR'},
+            'XETHZEUR':{'status':'online','wsname':'ETH/EUR'},
+        }
+        def t(last):
+            return {'c':[str(last)],'o':str(last*0.95),
+                    'a':[str(last*1.001)],'b':[str(last*0.999)],
+                    'v':['0','120']}
+        tickers={'XXBTZEUR':t(100.0),'XXDGZEUR':t(1.5),
+                 'XETHZEUR':t(2000.0)}
+        markets=desk.market_pairs_and_ticker(pairs,tickers)
+        self.assertEqual(markets['BTC']['token'],'BTC')
+        self.assertEqual(markets['BTC']['pair'],'XBT/EUR')
+        self.assertEqual(markets['BTC']['pair_key'],'XXBTZEUR')
+        self.assertEqual(markets['DOGE']['token'],'DOGE')
+        self.assertEqual(markets['DOGE']['pair'],'XDG/EUR')
+        self.assertEqual(markets['DOGE']['pair_key'],'XXDGZEUR')
+        wallet={'posizioni':[{'token':'BTC','quantita':'2','costo_medio_eur':'80'},
+                              {'token':'DOGE','quantita':'3','costo_medio_eur':None},
+                              {'token':'NOEUR','quantita':None}]}
+        source={'rilevazione_utc':self.now.isoformat(timespec='seconds'),
+                'markets':markets,'trends':{},'schede_v02':[]}
+        report=desk.build_report(source,wallet,{}, {},[])
+        self.assertEqual(report['stato_totale'],'PARZIALE')
+        self.assertIsNone(report['posizioni'][2].get('valore_eur'))
+        dossier_doc={'kraken_istantanea_utc':source['rilevazione_utc'],
+                     'grafici_4h':{}}
+        def save():
+            for name,data in [('portafoglio.json',wallet),
+                              ('ultima_rilevazione.json',source),
+                              ('ultimo_report.json',report),
+                              ('dossier_multifonte.json',dossier_doc)]:
+                (self.root/name).write_text(json.dumps(data),encoding='utf-8')
+        save()
+        packet_doc=packet.build(self.root,now=self.now)
+        rows=packet_doc['patrimonio']['posizioni']
+        self.assertEqual([x['token'] for x in rows],['BTC','DOGE','NOEUR'])
+        self.assertEqual(float(rows[0]['valore_eur']),200)
+        self.assertEqual(float(rows[0]['pl_indicativo_eur']),40)
+        self.assertEqual(float(rows[1]['valore_eur']),4.5)
+        self.assertIsNone(rows[1]['pl_indicativo_eur'])
+        self.assertIsNone(rows[2]['valore_eur'])
+        self.assertIsNone(rows[2]['quantita_spot'])
+        self.assertEqual(packet_doc['patrimonio']['stato_totale'],'PARZIALE')
+        self.assertTrue(packet_doc['patrimonio']['totale_parziale'])
+        # Mutate ONE original market identity field, preserving all its prices.
+        source['markets']['BTC']['pair']='ETH/EUR'
+        save()
+        with self.assertRaisesRegex(packet.PacketError,'Coppia mercato EUR'):
+            packet.build(self.root,now=self.now)
+
+
 class SupervisioneRilievi4TFTests(PortfolioFourTFTests):
     """Original producer/consumer with synthetic Kraken OHLC; RED on pin e72f8ab."""
 
