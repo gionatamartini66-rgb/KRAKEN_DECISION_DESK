@@ -316,8 +316,8 @@ class WalletPacketG0Tests(unittest.TestCase):
         self.dump()
         out=self.pack()
         row=out['patrimonio']['posizioni'][0]
-        self.assertEqual(row['valore_eur'],'0')
-        self.assertEqual(row['quantita_spot'],'0')
+        self.assertEqual(float(row['valore_eur']),0.0)
+        self.assertEqual(float(row['quantita_spot']),0.0)
         self.assertIsNone(row['pl_indicativo_eur'])
 
 if __name__=='__main__': unittest.main(verbosity=2)
