@@ -225,6 +225,12 @@ class WalletPacketG0Tests(unittest.TestCase):
         env.pop('PYTHONPATH',None)
         direct=subprocess.run([sys.executable,'-B','scripts/kdd_wallet_packet_g0.py','--help'],
             cwd=root,env=env,text=True,capture_output=True,timeout=15)
+        # On isolated Linux without a PYTHONPATH/Termux prefix the original
+        # full file must demonstrate the documented missing-root import;
+        # the supported invocation is the module mode tested below.
+        if sys.platform.startswith('linux') and not os.environ.get('PREFIX'):
+            self.assertEqual(direct.returncode,1,direct.stderr)
+            self.assertIn("No module named 'grafico_4h'",direct.stderr)
         # Direct invocation intentionally diagnosed here, without claiming PASS.
         if direct.returncode:
             self.assertEqual(direct.returncode,1)
@@ -240,6 +246,8 @@ class WalletPacketG0Tests(unittest.TestCase):
                                   '--source-dir',str(self.root)],cwd=root,env=env,
                                   text=True,capture_output=True,timeout=20)
         self.assertEqual(executed.returncode,0,executed.stderr)
+        print('KDD_CLI_FULL: direct_rc=%s module_help_rc=%s synthetic_packet_rc=%s write_private=NO' %
+              (direct.returncode,module.returncode,executed.returncode))
         self.assertIn('output: NESSUNO',executed.stdout)
         self.assertEqual(before,{f.name:f.read_bytes() for f in self.root.iterdir() if f.is_file()})
 
