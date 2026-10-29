@@ -38,8 +38,8 @@ class WalletPacketG0Tests(unittest.TestCase):
             "segmenti_non_spot":{"BTC":["SHOULD_NOT_EXPORT_OTHER_WALLET"]}
         }
         self.snapshot={"rilevazione_utc":iso,
-                       "markets":{"ADA":{"pair":"ADA/EUR", "pair_key":"ADAEUR", "prezzo_eur":1.0},
-                                  "ETH":{"pair":"ETH/EUR", "pair_key":"XETHZEUR", "prezzo_eur":2000.0}},
+                       "markets":{"ADA":{"token":"ADA","pair":"ADA/EUR", "pair_key":"ADAEUR", "prezzo_eur":1.0},
+                                  "ETH":{"token":"ETH","pair":"ETH/EUR", "pair_key":"XETHZEUR", "prezzo_eur":2000.0}},
                        "trends":{"ADA":{"var_7g_pct":12.3,"sopra_media20":True},
                                  "ETH":{"var_7g_pct":-4.25,"sopra_media20":False}},
                        "schede_v02":[{"token":"SOL","esito":"RIESAME MIRATO",
@@ -341,7 +341,7 @@ class WalletPacketG0Tests(unittest.TestCase):
         self.report['totale_stimato_eur']=200.0
         self.report['stato_totale']='COMPLETO'
         self.report['totale_parziale']=False
-        self.snapshot['markets']={'BTC':{'pair':'XBT/EUR','pair_key':'XXBTZEUR',
+        self.snapshot['markets']={'BTC':{'token':'BTC','pair':'XBT/EUR','pair_key':'XXBTZEUR',
                                          'prezzo_eur':100.0}}
         self.dossier['grafici_4h']={}
         self.dump()
@@ -399,7 +399,7 @@ class WalletPacketG0Tests(unittest.TestCase):
         self.report['posizioni'].append({'token':'ETH','quantita':'1',
                                           'prezzo_eur':2000.0,'valore_eur':2000.0,
                                           'pl_non_realizzato_eur':None})
-        self.snapshot['markets']={'ETH':{'pair':'ETH/EUR','pair_key':'XETHZEUR',
+        self.snapshot['markets']={'ETH':{'token':'ETH','pair':'ETH/EUR','pair_key':'XETHZEUR',
                                          'prezzo_eur':2000.0}}
         self.report['totale_stimato_eur']=2000.0
         self.report['stato_totale']='PARZIALE'

@@ -128,6 +128,56 @@ def canonical_wallet_alias(token):
     return {'XBT':'BTC','XXBT':'BTC','XDG':'DOGE','XXDG':'DOGE'}.get(token,token)
 
 
+# Syntax only: a Kraken AssetPairs key is opaque, never decoded as an asset.
+KRAKEN_PAIR_KEY = re.compile(r"[A-Za-z0-9_.-]{2,48}\\Z")
+
+
+def verify_eur_market_identity(snapshot, token, market, four_row=None):
+    """Reject contradicted EUR provenance; do not infer assets from opaque keys."""
+    identity = canonical_wallet_alias(token)
+    if not isinstance(market, dict):
+        raise PacketError("Identita mercato EUR assente per posizione valorizzata")
+    pair = market.get("pair")
+    if not isinstance(pair, str) or pair.count("/") != 1:
+        raise PacketError("Coppia mercato EUR assente o non valida")
+    base, quote = pair.split("/")
+    if (not SYMBOL.fullmatch(base) or quote != "EUR"
+            or canonical_wallet_alias(base) != identity):
+        raise PacketError("Coppia mercato EUR incoerente con posizione")
+    declared = market.get("token")
+    if (not isinstance(declared, str) or not SYMBOL.fullmatch(declared)
+            or canonical_wallet_alias(declared) != identity):
+        raise PacketError("Identita token mercato EUR assente o discordante")
+    key = market.get("pair_key")
+    if not isinstance(key, str) or not KRAKEN_PAIR_KEY.fullmatch(key):
+        raise PacketError("Identita Kraken della coppia EUR non verificabile")
+    # Extra metadata, if present, must agree; it cannot override pair/token.
+    for field in ("base", "asset_base"):
+        if field in market:
+            other = market[field]
+            if (not isinstance(other, str) or not SYMBOL.fullmatch(other)
+                    or canonical_wallet_alias(other) != identity):
+                raise PacketError("Identita base mercato EUR discordante")
+    for field in ("quote", "valuta_quotazione"):
+        if field in market and market[field] != "EUR":
+            raise PacketError("Coppia mercato EUR con valuta incoerente")
+    markets = snapshot.get("markets")
+    # The exact same opaque Kraken identifier cannot name two different assets
+    # in the SAME observation; this is an observable conflict, not key parsing.
+    if isinstance(markets, dict):
+        for other_token, other in markets.items():
+            if (other_token != token and isinstance(other, dict)
+                    and other.get("pair_key") == key
+                    and canonical_wallet_alias(other_token) != identity):
+                raise PacketError("Identita Kraken riutilizzata fra asset diversi")
+    # The separately built, same-wallet/snapshot 4TF dossier is corroboration
+    # only when it identifies a EUR pair. USD/USDC 4TF never imply EUR prices.
+    if (isinstance(four_row, dict) and four_row.get("valuta_quotazione") == "EUR"
+            and isinstance(four_row.get("coppia"), str)):
+        if (four_row.get("coppia") != pair or four_row.get("pair_key") != key):
+            raise PacketError("Identita Kraken EUR contraddetta dal dossier 4TF")
+
+
 def four_tf_evidence(portfolio, report, dossier, expected_market):
     """Verify exact D1/D2 wallet/snapshot identity before using 4TF evidence.
 
@@ -353,6 +403,8 @@ def brief_positions(portfolio: dict, report: dict, snapshot: dict, dossier: dict
                 raise PacketError("Quotazione EUR di mercato non valida per posizione valorizzata")
             if snap_unit != unit:
                 raise PacketError("Prezzo incoerente con rilevazione mercato")
+            verify_eur_market_identity(
+                snapshot, token, market, four_rows[index] if four_rows is not None else None)
             basis = row.get("costo_medio_eur")
             declared_cost = None
             if basis is not None:

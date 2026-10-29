@@ -53,7 +53,7 @@ class PortfolioFourTFTests(unittest.TestCase):
 
     def source(self,tokens):
         return {'rilevazione_utc':self.now.isoformat(timespec='seconds'),
-                'markets':{t:{'pair':('XBT/EUR' if t=='BTC' else t+'/EUR'),
+                'markets':{t:{'token':t,'pair':('XBT/EUR' if t=='BTC' else t+'/EUR'),
                               'pair_key':'PAIR'+t,'prezzo_eur':100,
                               'var_oggi_utc_pct':0,'volume_24h_eur_stimato':1e6,
                               'spread_pct':0.1} for t in tokens if t!='ALT'},
