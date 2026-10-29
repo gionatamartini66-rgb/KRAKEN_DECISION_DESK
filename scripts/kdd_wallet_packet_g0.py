@@ -129,7 +129,7 @@ def canonical_wallet_alias(token):
 
 
 # Syntax only: a Kraken AssetPairs key is opaque, never decoded as an asset.
-KRAKEN_PAIR_KEY = re.compile(r"[A-Za-z0-9_.-]{2,48}\\Z")
+KRAKEN_PAIR_KEY = re.compile(r"[A-Za-z0-9_.-]{2,48}$")
 
 
 def verify_eur_market_identity(snapshot, token, market, four_row=None):
