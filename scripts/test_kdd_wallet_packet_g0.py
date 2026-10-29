@@ -217,4 +217,79 @@ class WalletPacketG0Tests(unittest.TestCase):
             self.pack()
 
 
+    def test_rt20261029_startup_original_full_both_modes(self):
+        """Original full script; direct mode diagnosed, -m canonical and usable."""
+        import subprocess, sys
+        root=Path(__file__).resolve().parents[1]
+        env=os.environ.copy()
+        env.pop('PYTHONPATH',None)
+        direct=subprocess.run([sys.executable,'-B','scripts/kdd_wallet_packet_g0.py','--help'],
+            cwd=root,env=env,text=True,capture_output=True,timeout=15)
+        # Direct invocation intentionally diagnosed here, without claiming PASS.
+        self.assertEqual(direct.returncode,1)
+        self.assertIn('ModuleNotFoundError',direct.stderr)
+        module=subprocess.run([sys.executable,'-B','-m','scripts.kdd_wallet_packet_g0','--help'],
+            cwd=root,env=env,text=True,capture_output=True,timeout=15)
+        self.assertEqual(module.returncode,0,module.stderr)
+        self.assertIn('--source-dir',module.stdout)
+        before={f.name:f.read_bytes() for f in self.root.iterdir() if f.is_file()}
+        executed=subprocess.run([sys.executable,'-B','-m','scripts.kdd_wallet_packet_g0',
+                                  '--source-dir',str(self.root)],cwd=root,env=env,
+                                  text=True,capture_output=True,timeout=20)
+        self.assertEqual(executed.returncode,0,executed.stderr)
+        self.assertIn('output: NESSUNO',executed.stdout)
+        self.assertEqual(before,{f.name:f.read_bytes() for f in self.root.iterdir() if f.is_file()})
+
+    def test_rt20261029_amount_price_value_false_but_total_matches(self):
+        self.report['posizioni'][0]['valore_eur']=100.0
+        self.report['totale_stimato_eur']=2100.0
+        self.dump()
+        with self.assertRaisesRegex(p.PacketError,'Valore.*quantita'):
+            self.pack()
+
+    def test_rt20261029_pl_without_attested_cost_must_be_null(self):
+        self.report['posizioni'][0]['pl_non_realizzato_eur']=10.0
+        self.dump()
+        with self.assertRaisesRegex(p.PacketError,'P/L.*costo'):
+            self.pack()
+
+    def test_rt20261029_pl_with_invalid_cost_must_be_null(self):
+        self.portfolio['posizioni'][0]['costo_medio_eur']='NaN'
+        self.report['posizioni'][0]['pl_non_realizzato_eur']=10.0
+        self.dump()
+        with self.assertRaisesRegex(p.PacketError,'P/L.*costo'):
+            self.pack()
+
+    def test_rt20261029_pl_false_with_known_cost(self):
+        self.portfolio['posizioni'][0]['costo_medio_eur']='0.5'
+        self.report['posizioni'][0]['pl_non_realizzato_eur']=9.0
+        self.dump()
+        with self.assertRaisesRegex(p.PacketError,'P/L.*incoerente'):
+            self.pack()
+
+    def test_rt20261029_false_complete_with_unpriced_position(self):
+        self.report['stato_totale']='COMPLETO'
+        self.report['totale_parziale']=False
+        self.dump()
+        with self.assertRaisesRegex(p.PacketError,'COMPLETO.*incomplete'):
+            self.pack()
+
+    def test_rt20261029_30min_150ms_is_stale(self):
+        self.assertEqual(p.source_status(T,T+dt.timedelta(minutes=30,milliseconds=150))['stato'],
+                         'DA_AGGIORNARE')
+        self.assertEqual(p.source_status(T,T+dt.timedelta(minutes=30))['stato'],'RECENTE')
+
+    def test_rt20261029_float_product_and_attested_pl_stay_valid(self):
+        # Use the same finite Python float arithmetic used by build_report.
+        self.portfolio['posizioni'][0]['quantita']='0.1'
+        self.portfolio['posizioni'][0]['costo_medio_eur']='0.05'
+        self.report['posizioni'][0]['quantita']='0.1'
+        self.report['posizioni'][0]['prezzo_eur']=0.2
+        self.report['posizioni'][0]['valore_eur']=float(0.1*0.2)
+        self.report['posizioni'][0]['pl_non_realizzato_eur']=float((0.2-0.05)*0.1)
+        self.report['totale_stimato_eur']=float(self.report['posizioni'][0]['valore_eur']+2000)
+        self.dump()
+        result=self.pack()
+        self.assertIsNotNone(result['patrimonio']['posizioni'][0]['pl_indicativo_eur'])
+
 if __name__=='__main__': unittest.main(verbosity=2)
