@@ -328,4 +328,108 @@ class WalletPacketG0Tests(unittest.TestCase):
         self.assertEqual(float(row['quantita_spot']),0.0)
         self.assertIsNone(row['pl_indicativo_eur'])
 
+
+    # FIN-RT-01 — synthetic BTC, deliberately separate from pre-existing ADA fixture.
+    def fin_rt01_btc(self):
+        self.portfolio['posizioni']=[{'token':'BTC','quantita':'2',
+                                     'disponibile_spot':'2',
+                                     'costo_medio_eur':'80'}]
+        self.report['posizioni']=[{'token':'BTC','quantita':'2',
+                                   'prezzo_eur':100.0,'valore_eur':200.0,
+                                   'pl_non_realizzato_eur':40.0}]
+        self.report['totale_stimato_eur']=200.0
+        self.report['stato_totale']='COMPLETO'
+        self.report['totale_parziale']=False
+        self.snapshot['markets']={'BTC':{'pair':'XBT/EUR','pair_key':'XXBTZEUR',
+                                         'prezzo_eur':100.0}}
+        self.dossier['grafici_4h']={}
+        self.dump()
+
+    def test_fin_rt01_btc_row_missing_fails_closed(self):
+        self.fin_rt01_btc()
+        self.assertEqual(float(self.pack()['patrimonio']['posizioni'][0]['valore_eur']),200)
+        del self.snapshot['markets']['BTC']
+        self.dump()
+        with self.assertRaisesRegex(p.PacketError,'Quotazione EUR di mercato'):
+            self.pack()
+
+    def test_fin_rt01_btc_eur_field_missing_fails_closed(self):
+        self.fin_rt01_btc()
+        self.assertEqual(float(self.pack()['patrimonio']['posizioni'][0]['prezzo_eur']),100)
+        del self.snapshot['markets']['BTC']['prezzo_eur']
+        self.dump()
+        with self.assertRaisesRegex(p.PacketError,'Quotazione EUR di mercato'):
+            self.pack()
+
+    def test_fin_rt01_invalid_or_mismatched_eur_source_rejected(self):
+        self.fin_rt01_btc()
+        for bad in (None,'NaN','Infinity','nonsense',0,-1,101.0):
+            with self.subTest(price=bad):
+                self.snapshot['markets']['BTC']['prezzo_eur']=bad
+                self.dump()
+                with self.assertRaises(p.PacketError):
+                    self.pack()
+        self.snapshot['markets']['BTC']['prezzo_eur']=100.0
+        self.dump()
+        self.assertEqual(self.pack()['patrimonio']['posizioni'][0]['prezzo_eur'],'100.0')
+
+    def test_fin_rt01_no_eur_source_unvalued_btc_survives(self):
+        self.fin_rt01_btc()
+        self.snapshot['markets'].pop('BTC')
+        self.report['posizioni'][0]={'token':'BTC','quantita':'2',
+                                     'errore':'Nessuna quotazione spot EUR'}
+        self.report['totale_stimato_eur']=None
+        self.report['stato_totale']='NON_DISPONIBILE'
+        self.report['totale_parziale']=True
+        self.dump()
+        packet=self.pack()
+        row=packet['patrimonio']['posizioni'][0]
+        self.assertEqual(row['quantita_spot'],'2')
+        self.assertIsNone(row['prezzo_eur'])
+        self.assertIsNone(row['valore_eur'])
+        self.assertIsNone(row['pl_indicativo_eur'])
+        self.assertIsNone(packet['patrimonio']['totale_stimato_eur_senza_cash'])
+
+    def test_fin_rt01_mixed_wallet_valid_eur_and_absent_eur(self):
+        self.fin_rt01_btc()
+        self.portfolio['posizioni'].append({'token':'ETH','quantita':'1',
+                                             'disponibile_spot':'1','costo_medio_eur':None})
+        self.report['posizioni'][0]={'token':'BTC','quantita':'2','errore':'Nessuna quotazione EUR'}
+        self.report['posizioni'].append({'token':'ETH','quantita':'1',
+                                          'prezzo_eur':2000.0,'valore_eur':2000.0,
+                                          'pl_non_realizzato_eur':None})
+        self.snapshot['markets']={'ETH':{'pair':'ETH/EUR','pair_key':'XETHZEUR',
+                                         'prezzo_eur':2000.0}}
+        self.report['totale_stimato_eur']=2000.0
+        self.report['stato_totale']='PARZIALE'
+        self.report['totale_parziale']=True
+        self.dump()
+        packet=self.pack()
+        rows=packet['patrimonio']['posizioni']
+        self.assertEqual([x['token'] for x in rows],['BTC','ETH'])
+        self.assertIsNone(rows[0]['valore_eur'])
+        self.assertEqual(float(rows[1]['valore_eur']),2000.0)
+        self.assertEqual(packet['patrimonio']['totale_stimato_eur_senza_cash'],'2000.0')
+        self.assertTrue(packet['patrimonio']['totale_parziale'])
+
+    def test_fin_rt01_real_zero_and_unknown_quantity_distinct(self):
+        self.fin_rt01_btc()
+        self.portfolio['posizioni'][0]['quantita']='0'
+        self.report['posizioni'][0].update(quantita='0',valore_eur=0.0,
+                                          pl_non_realizzato_eur=0.0)
+        self.report['totale_stimato_eur']=0.0
+        self.dump()
+        row=self.pack()['patrimonio']['posizioni'][0]
+        self.assertEqual(row['quantita_spot'],'0')
+        self.assertEqual(float(row['valore_eur']),0.0)
+        self.portfolio['posizioni'][0]['quantita']=None
+        self.report['posizioni'][0]={'token':'BTC','errore':'Quantita non nota'}
+        self.report['totale_stimato_eur']=None
+        self.report['stato_totale']='NON_DISPONIBILE'
+        self.report['totale_parziale']=True
+        self.dump()
+        row=self.pack()['patrimonio']['posizioni'][0]
+        self.assertIsNone(row['quantita_spot'])
+        self.assertIsNone(row['valore_eur'])
+
 if __name__=='__main__': unittest.main(verbosity=2)
