@@ -315,5 +315,90 @@ class PortfolioFourTFTests(unittest.TestCase):
         self.assertIsNone(report['totale_stimato_eur'])
         self.assertEqual(report['stato_totale'],'NON_DISPONIBILE')
 
+
+class SupervisioneRilievi4TFTests(PortfolioFourTFTests):
+    """Original producer/consumer with synthetic Kraken OHLC; RED on pin e72f8ab."""
+
+    def _entry(self, token='BTC'):
+        source=self.source([token])
+        data=wallet_tf.collect({'posizioni':positions([token])},source,
+            asset_pairs=catalogue([token]),fetch=self.net,now=self.now,
+            pause=lambda _:None)
+        self.assertEqual(data['posizioni'][0]['stato'],'COMPLETO')
+        return data['posizioni'][0]
+
+    def test_rt01_aggregated_stale_all_frames(self):
+        row=self._entry()
+        late=packet.technical_in_packet(row,self.now+dt.timedelta(days=4))
+        self.assertTrue(all(x['stato']=='SCADUTO' for x in late['timeframe'].values()))
+        self.assertEqual(late['stato'],'PARZIALE')
+
+    def test_rt01_aggregated_stale_mixed_frames(self):
+        row=self._entry()
+        late=packet.technical_in_packet(row,self.now+dt.timedelta(hours=3))
+        observed={x['stato'] for x in late['timeframe'].values()}
+        self.assertEqual(observed,{'AGGIORNATO','SCADUTO'})
+        self.assertEqual(late['stato'],'PARZIALE')
+
+    def test_rt02_authentic_indicator_recomputation_positive_control(self):
+        row=self._entry()
+        packet.technical_in_packet(row,self.now)
+
+    def test_rt02_single_field_mutations_all_rejected(self):
+        import copy
+        row=self._entry()
+        for field in ('close','volume','ema20','ema50','pivot_giornaliero',
+                      'livelli_strutturali','volume_vs_media20',
+                      'orientamento','supporto_vicino','resistenza_vicina'):
+            with self.subTest(field=field):
+                bad=copy.deepcopy(row)
+                frame=bad['timeframe']['15m']
+                if field in ('pivot_giornaliero','livelli_strutturali'):
+                    frame[field]={'untrusted':1234567}
+                elif field=='orientamento':
+                    frame[field]='INVENTATO'
+                else:
+                    frame[field]=1234567.0
+                with self.assertRaises(packet.PacketError):
+                    packet.technical_in_packet(bad,self.now)
+
+    def test_rt02_missing_and_nonfinite_indicator_rejected(self):
+        import copy
+        row=self._entry()
+        for field in ('close','ema20','ema50','volume','pivot_giornaliero','livelli_strutturali'):
+            with self.subTest(field=field):
+                bad=copy.deepcopy(row)
+                bad['timeframe']['15m'].pop(field,None)
+                with self.assertRaises(packet.PacketError):
+                    packet.technical_in_packet(bad,self.now)
+        for injected in (float('nan'),float('inf'),-float('inf')):
+            with self.subTest(injected=str(injected)):
+                bad=copy.deepcopy(row)
+                bad['timeframe']['15m']['ema20']=injected
+                with self.assertRaises(packet.PacketError):
+                    packet.technical_in_packet(bad,self.now)
+
+    def test_rt03_alias_xbt_and_xdg_select_real_kraken_market(self):
+        pair_data={'XXBTZEUR':{'status':'online','wsname':'XBT/EUR','altname':'XBTEUR'},
+                   'XXDGZEUR':{'status':'online','wsname':'XDG/EUR','altname':'XDGEUR'}}
+        for token,expected in (('XBT','XBT/EUR'),('XDG','XDG/EUR')):
+            with self.subTest(token=token):
+                rows=wallet_tf.collect({'posizioni':positions([token])},self.source([token]),
+                    asset_pairs=pair_data,fetch=lambda endpoint,**kw:
+                        {kw['pair']:candles({15:'15m',60:'1h',240:'4h',1440:'1d'}[kw['interval']]),
+                         'last':0},now=self.now,pause=lambda _:None)['posizioni']
+                self.assertEqual(rows[0]['coppia'],expected)
+                self.assertEqual(rows[0]['stato'],'COMPLETO')
+
+    def test_rt03_alias_collision_is_not_attributed_to_any_wallet_row(self):
+        raw=catalogue(['BTC','DOGE'])
+        for names in (['XBT','BTC'],['XDG','DOGE']):
+            with self.subTest(names=names):
+                result=wallet_tf.collect({'posizioni':positions(names)},self.source(names),
+                    asset_pairs=raw,fetch=self.net,now=self.now,pause=lambda _:None)
+                self.assertEqual(result['richieste_ohlc'],0)
+                self.assertTrue(all(x['stato']=='IDENTITA_DUPLICATA'
+                                    for x in result['posizioni']))
+
 if __name__=='__main__':
     unittest.main()
