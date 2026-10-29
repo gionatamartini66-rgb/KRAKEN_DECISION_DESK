@@ -362,8 +362,11 @@ def build_report(data, portfolio, conf, ctx, decisions):
     # Duplicate identities cannot safely be counted as distinct holdings.
     symbols = [wallet_symbol(h.get('token')) if isinstance(h, dict)
                else ('identificativo assente', False) for h in positions]
-    duplicates = {sym for sym, valid in symbols if valid and
-                  sum(1 for s, ok in symbols if ok and s == sym) > 1}
+    # Duplicate alias identities invalidate BOTH row valuations and decisions.
+    # Never merge wallet quantities or change their recorded representation.
+    identities = [canonical(sym) if valid else None for sym, valid in symbols]
+    duplicates = {key for key in identities if key is not None
+                  and identities.count(key) > 1}
     for h, (symbol, identity_ok) in zip(positions, symbols):
         if not isinstance(h, dict):
             holdings.append({'token': symbol, 'quantita': None,
@@ -376,14 +379,14 @@ def build_report(data, portfolio, conf, ctx, decisions):
         quantity, qty_state = wallet_number(raw_quantity)
         visible_quantity = wallet_quantity_display(raw_quantity)
         decision = (decision_state(symbol, decisions, now)
-                    if identity_ok and symbol not in duplicates else
+                    if identity_ok and canonical(symbol) not in duplicates else
                     'DECISIONE NON ASSOCIABILE: identificativo invalido o duplicato.')
         base = {'token': symbol, 'quantita': visible_quantity, 'decisione': decision,
                 'identita_valida': bool(identity_ok), 'quantita_stato': qty_state,
-                'identificativo_duplicato': symbol in duplicates}
+                'identificativo_duplicato': canonical(symbol) in duplicates}
         if not identity_ok:
             base['errore'] = 'Identificativo token assente o malformato: verificare la posizione.'
-        elif symbol in duplicates:
+        elif canonical(symbol) in duplicates:
             base['errore'] = 'Token duplicato: verificare le registrazioni prima del totale.'
         elif qty_state == 'NON_NOTO':
             base['errore'] = 'Quantità non nota: nessun saldo o valore stimato.'

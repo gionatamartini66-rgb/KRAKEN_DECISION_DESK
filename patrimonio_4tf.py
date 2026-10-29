@@ -31,7 +31,7 @@ def select_pair(token, catalog):
     """Choose an actual online Kraken pair, rejecting alias collisions."""
     matches = {}
     for key, meta in catalog.items():
-        if canonical_base(meta["base"]) != token or meta["quote"] not in QUOTES:
+        if canonical_base(meta["base"]) != canonical_base(token) or meta["quote"] not in QUOTES:
             continue
         matches.setdefault(meta["quote"], []).append(meta)
     for quote in QUOTES:
@@ -135,14 +135,16 @@ def collect(portfolio, source, *, asset_pairs=None, fetch=None, now=None,
     except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
         catalog = {}
         catalog_error = type(exc).__name__ + ": catalogo non verificabile"
-    seen = set()
-    duplicates = set()
+    # Alias spellings refer to the same underlying Kraken holding.
+    # Preserve raw wallet row labels but never attribute a duplicated asset.
+    counts = {}
     for row in positions:
         if isinstance(row, dict):
-            sym, ok = desk.wallet_symbol(row.get("token"))
-            if ok and sym in seen:
-                duplicates.add(sym)
-            seen.add(sym)
+            sym, valid = desk.wallet_symbol(row.get("token"))
+            if valid:
+                key = canonical_base(sym)
+                counts[key] = counts.get(key, 0) + 1
+    duplicates = {key for key, count in counts.items() if count > 1}
     # Interleave requests fairly: first timeframe for ALL positions, then the
     # next. A late wallet row must not be denied analysis by scanner rank.
     entries = []
@@ -155,7 +157,7 @@ def collect(portfolio, source, *, asset_pairs=None, fetch=None, now=None,
                                        "motivo": "Non acquisito"} for label, _ in LABELS}}
         if not valid or not isinstance(row, dict):
             entry["stato"] = "IDENTITA_NON_VALIDA"
-        elif sym in duplicates:
+        elif canonical_base(sym) in duplicates:
             entry["stato"] = "IDENTITA_DUPLICATA"
         elif catalog_error:
             entry.update(stato="CATALOGO_NON_DISPONIBILE", motivo=catalog_error)

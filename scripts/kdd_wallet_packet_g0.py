@@ -12,6 +12,8 @@ import hashlib
 import math
 import datetime as dt
 from decimal import Decimal, InvalidOperation
+import grafico_4h as charts
+import decision_desk as desk
 import json
 import os
 from pathlib import Path
@@ -150,7 +152,7 @@ def technical_in_packet(row, now):
     entries=row.get('timeframe')
     if not isinstance(entries,dict):
         raise PacketError('Timeframe patrimoniali non strutturati')
-    result={'stato':row.get('stato','PARZIALE'), 'coppia':pair,
+    result={'stato':'PARZIALE', 'coppia':pair,
             'pair_key':pair_key, 'asset_base':row.get('asset_base'),
             'valuta_quotazione':row.get('valuta_quotazione'),
             'eleggibilita_conto':'NON_VERIFICATA', 'timeframe':{}}
@@ -197,6 +199,31 @@ def technical_in_packet(row, now):
         # Source verdict was written at dossier generation. Re-evaluate when
         # composing the GPT packet, including a previously "AGGIORNATO" candle.
         expected_end=int((now.timestamp()-120)//seconds)*seconds
+        # Canonical recomputation, not trust in persisted indicator fields.
+        # Use source observation time; recompute freshness at packet time below.
+        try:
+            source_data={'timeframe':label,'interval_seconds':seconds,'candles':raw,
+                         'observed_utc':frame['rilevazione_utc'],
+                         'closed_at_utc':frame['chiusura_utc']}
+            recalculated=charts.summarize_timeframe(source_data,now=observation)
+            extra=charts.technical_from_candles(raw,interval_seconds=seconds)
+            authoritative={name:recalculated[name] for name in (
+                'stato','orientamento','chiusura_utc','rilevazione_utc',
+                'candele','close','ema20','ema50','volume','volume_vs_media20',
+                'supporto_vicino','resistenza_vicina')}
+            authoritative.update(pivot_giornaliero=extra['pivots'],
+                                 livelli_strutturali=extra['structure'],
+                                 intervallo_secondi=seconds)
+            for name,expected in authoritative.items():
+                if name not in frame or (
+                    json.dumps(frame[name],allow_nan=False,sort_keys=True)
+                    != json.dumps(expected,allow_nan=False,sort_keys=True)):
+                    raise PacketError('Indicatore non coerente con OHLCV: '+label+'/'+name)
+        except PacketError:
+            raise
+        except (ValueError,TypeError,KeyError,OverflowError,ZeroDivisionError,
+                ArithmeticError) as exc:
+            raise PacketError('Indicatori tecnici non verificabili: '+label) from exc
         status='AGGIORNATO' if last_time+seconds>=expected_end else 'SCADUTO'
         result['timeframe'][label]={
             'stato':status, 'chiusura_utc':frame['chiusura_utc'],
@@ -210,6 +237,15 @@ def technical_in_packet(row, now):
             'livelli_strutturali':frame.get('livelli_strutturali'),
             'fonte':str(frame.get('fonte') or '')[:130],
             'limite':'Solo candele chiuse Kraken Spot; non prezzo eseguibile'}
+    # A previously complete set is partial when ANY frame has aged.
+    source_state=row.get('stato')
+    if source_state=='COMPLETO' and all(
+            x['stato']=='AGGIORNATO' for x in result['timeframe'].values()):
+        result['stato']='COMPLETO'
+    elif source_state not in ('COMPLETO','PARZIALE','IN_ANALISI'):
+        result['stato']=source_state or 'PARZIALE'
+    else:
+        result['stato']='PARZIALE'
     return result
 
 
@@ -228,7 +264,8 @@ def brief_positions(portfolio: dict, report: dict, snapshot: dict, dossier: dict
             names.append(safe_symbol(raw))
         except PacketError:
             names.append(None)
-    duplicates={token for token in names if token is not None and names.count(token)>1}
+    keys=[desk.canonical(token) if token is not None else None for token in names]
+    duplicates={key for key in keys if key is not None and keys.count(key)>1}
     selected = []
     for index, row in enumerate(all_positions):
         token=names[index]
@@ -237,8 +274,8 @@ def brief_positions(portfolio: dict, report: dict, snapshot: dict, dossier: dict
             raise PacketError("Riga report non valida")
         # Invalid, duplicate or unstructured identities remain visible by row
         # index, with no attribution of assets, valuation or a decision.
-        if token is None or token in duplicates:
-            state=('IDENTITA_AMBIGUA' if token in duplicates else
+        if token is None or desk.canonical(token) in duplicates:
+            state=('IDENTITA_AMBIGUA' if token is not None and desk.canonical(token) in duplicates else
                    'IDENTITA_NON_VALIDA')
             if four_rows is not None:
                 technical4=technical_in_packet(four_rows[index], now)

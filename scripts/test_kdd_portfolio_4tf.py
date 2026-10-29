@@ -400,5 +400,33 @@ class SupervisioneRilievi4TFTests(PortfolioFourTFTests):
                 self.assertTrue(all(x['stato']=='IDENTITA_DUPLICATA'
                                     for x in result['posizioni']))
 
+    def test_rt03_d1_report_and_packet_never_value_alias_collision(self):
+        for names in (['XBT','BTC'],['XDG','DOGE']):
+            with self.subTest(names=names):
+                wallet={'posizioni':positions(names)}
+                data=self.source(names)
+                name=wallet_tf.canonical_base(names[0])
+                data['markets'][name]={'pair':name+'/EUR','pair_key':'PAIR'+name,
+                    'prezzo_eur':100,'var_oggi_utc_pct':0,
+                    'volume_24h_eur_stimato':1e6,'spread_pct':0.1}
+                report=desk.build_report(data,wallet,{}, {},[])
+                self.assertTrue(all(row['identificativo_duplicato']
+                                    for row in report['posizioni']))
+                self.assertTrue(all(row.get('valore_eur') is None
+                                    for row in report['posizioni']))
+                four=wallet_tf.collect(wallet,data,asset_pairs=catalogue([name]),
+                    fetch=self.net,now=self.now,pause=lambda _:None)
+                report['fotografia_portafoglio_sha256']=four['portafoglio_sha256']
+                dossier_doc={'schema':3,'kraken_istantanea_utc':data['rilevazione_utc'],
+                    'fotografia_portafoglio_sha256':four['portafoglio_sha256'],
+                    'patrimonio_4tf':four}
+                for path,value in [('portafoglio.json',wallet),('ultimo_report.json',report),
+                                   ('dossier_multifonte.json',dossier_doc),
+                                   ('ultima_rilevazione.json',data)]:
+                    (self.root/path).write_text(json.dumps(value))
+                actual=packet.build(self.root,now=self.now)
+                self.assertTrue(all(row['stato_identita']=='IDENTITA_AMBIGUA'
+                    and row['valore_eur'] is None for row in actual['patrimonio']['posizioni']))
+
 if __name__=='__main__':
     unittest.main()
