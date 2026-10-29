@@ -238,7 +238,7 @@ class PortfolioFourTFTests(unittest.TestCase):
                          'SCADUTO')
         self.assertEqual(late['mercato']['stato'],'DA_AGGIORNARE')
         self.assertEqual(late['patrimonio']['posizioni'][0]['analisi_4tf']['stato'],
-                         'PARZIALE'))
+                         'PARZIALE')
 
     def test_11_usd_only_position_reaches_packet_without_eur_total(self):
         source=self.source(['ALT']); wallet={'posizioni':positions(['ALT'])}
