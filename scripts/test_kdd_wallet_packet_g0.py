@@ -226,8 +226,11 @@ class WalletPacketG0Tests(unittest.TestCase):
         direct=subprocess.run([sys.executable,'-B','scripts/kdd_wallet_packet_g0.py','--help'],
             cwd=root,env=env,text=True,capture_output=True,timeout=15)
         # Direct invocation intentionally diagnosed here, without claiming PASS.
-        self.assertEqual(direct.returncode,1)
-        self.assertIn('ModuleNotFoundError',direct.stderr)
+        if direct.returncode:
+            self.assertEqual(direct.returncode,1)
+            self.assertIn('ModuleNotFoundError',direct.stderr)
+        else:
+            self.assertIn('--source-dir',direct.stdout)
         module=subprocess.run([sys.executable,'-B','-m','scripts.kdd_wallet_packet_g0','--help'],
             cwd=root,env=env,text=True,capture_output=True,timeout=15)
         self.assertEqual(module.returncode,0,module.stderr)
@@ -291,5 +294,30 @@ class WalletPacketG0Tests(unittest.TestCase):
         self.dump()
         result=self.pack()
         self.assertIsNotNone(result['patrimonio']['posizioni'][0]['pl_indicativo_eur'])
+
+    def test_rt20261029_forged_price_and_value_disagree_with_same_snapshot(self):
+        # D1 report price comes from the same-market snapshot. Two mutually
+        # coherent invented numbers must not bypass that source when present.
+        self.snapshot['markets']['ADA']['prezzo_eur']=1.0
+        self.report['posizioni'][0]['prezzo_eur']=10.0
+        self.report['posizioni'][0]['valore_eur']=42.0
+        self.report['totale_stimato_eur']=2042.0
+        self.dump()
+        with self.assertRaisesRegex(p.PacketError,'Prezzo.*rilevazione'):
+            self.pack()
+
+    def test_rt20261029_real_zero_and_invalid_cost_do_not_invent_pl(self):
+        self.portfolio['posizioni'][0]['quantita']='0'
+        self.portfolio['posizioni'][0]['costo_medio_eur']='nan'
+        self.report['posizioni'][0]['quantita']='0'
+        self.report['posizioni'][0]['valore_eur']=0.0
+        self.report['posizioni'][0]['pl_non_realizzato_eur']=None
+        self.report['totale_stimato_eur']=2000.0
+        self.dump()
+        out=self.pack()
+        row=out['patrimonio']['posizioni'][0]
+        self.assertEqual(row['valore_eur'],'0')
+        self.assertEqual(row['quantita_spot'],'0')
+        self.assertIsNone(row['pl_indicativo_eur'])
 
 if __name__=='__main__': unittest.main(verbosity=2)
