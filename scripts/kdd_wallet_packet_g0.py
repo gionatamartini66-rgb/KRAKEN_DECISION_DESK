@@ -13,7 +13,6 @@ import math
 import datetime as dt
 from decimal import Decimal, InvalidOperation
 import grafico_4h as charts
-import decision_desk as desk
 import json
 import os
 from pathlib import Path
@@ -111,6 +110,11 @@ def portfolio_identity(portfolio: dict) -> str | None:
     except (TypeError,ValueError,OverflowError):
         return None
     return hashlib.sha256(b).hexdigest()
+
+
+def canonical_wallet_alias(token):
+    """Only documented legacy Kraken identifiers: no generic prefix stripping."""
+    return {'XBT':'BTC','XXBT':'BTC','XDG':'DOGE','XXDG':'DOGE'}.get(token,token)
 
 
 def four_tf_evidence(portfolio, report, dossier, expected_market):
@@ -264,7 +268,7 @@ def brief_positions(portfolio: dict, report: dict, snapshot: dict, dossier: dict
             names.append(safe_symbol(raw))
         except PacketError:
             names.append(None)
-    keys=[desk.canonical(token) if token is not None else None for token in names]
+    keys=[canonical_wallet_alias(token) if token is not None else None for token in names]
     duplicates={key for key in keys if key is not None and keys.count(key)>1}
     selected = []
     for index, row in enumerate(all_positions):
@@ -274,8 +278,8 @@ def brief_positions(portfolio: dict, report: dict, snapshot: dict, dossier: dict
             raise PacketError("Riga report non valida")
         # Invalid, duplicate or unstructured identities remain visible by row
         # index, with no attribution of assets, valuation or a decision.
-        if token is None or desk.canonical(token) in duplicates:
-            state=('IDENTITA_AMBIGUA' if token is not None and desk.canonical(token) in duplicates else
+        if token is None or canonical_wallet_alias(token) in duplicates:
+            state=('IDENTITA_AMBIGUA' if token is not None and canonical_wallet_alias(token) in duplicates else
                    'IDENTITA_NON_VALIDA')
             if four_rows is not None:
                 technical4=technical_in_packet(four_rows[index], now)

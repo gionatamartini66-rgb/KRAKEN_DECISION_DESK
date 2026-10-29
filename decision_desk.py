@@ -84,7 +84,7 @@ def num(x):
     except (ValueError, TypeError, OverflowError): return 0.0
 
 def canonical(s):
-    return {'XBT': 'BTC', 'XXBT': 'BTC', 'XDG': 'DOGE'}.get(s.upper(), s.upper())
+    return {'XBT': 'BTC', 'XXBT': 'BTC', 'XDG': 'DOGE', 'XXDG': 'DOGE'}.get(s.upper(), s.upper())
 
 
 # Boundary for manually entered holdings only. Do not change num() because
