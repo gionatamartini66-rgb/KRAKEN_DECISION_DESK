@@ -80,6 +80,17 @@ def amount(value, label: str, *, nonnegative=True):
     return format(v, "f")
 
 
+def d1_float(value, label):
+    """Finite IEEE-754 arithmetic exactly matching decision_desk.build_report."""
+    try:
+        result = float(Decimal(value))
+    except (ValueError, TypeError, OverflowError, InvalidOperation) as exc:
+        raise PacketError("Numero fuori scala: " + label) from exc
+    if not math.isfinite(result):
+        raise PacketError("Numero fuori scala: " + label)
+    return result
+
+
 def safe_symbol(value, label="token"):
     if not isinstance(value, str) or not SYMBOL.fullmatch(value):
         raise PacketError("Identificativo non valido: " + label)
@@ -93,13 +104,13 @@ def safe_notes(items, max_items=6):
 
 
 def source_status(timestamp: dt.datetime, current: dt.datetime, *, max_age_min=30):
-    age = round((current - timestamp).total_seconds() / 60, 2)
+    age = (current - timestamp).total_seconds() / 60
     if age < -2:
         return {"stato": "OROLOGIO_INCOERENTE", "eta_minuti": None}
     if age < 0:
         return {"stato": "OROLOGI_DISALLINEATI", "eta_minuti": None}
     return {"stato": "RECENTE" if age <= max_age_min else "DA_AGGIORNARE",
-            "eta_minuti": age}
+            "eta_minuti": round(age, 2)}
 
 
 def portfolio_identity(portfolio: dict) -> str | None:
@@ -317,6 +328,37 @@ def brief_positions(portfolio: dict, report: dict, snapshot: dict, dossier: dict
                 raise PacketError("Prezzo/valore incompleto")
         else:
             price, val, pnl = None, None, None
+        if val is not None:
+            # Reconcile each reported valuation, not just the forged global sum.
+            # D1 builds float products: compare their roundtripped binary value,
+            # with NO invented cent tolerance and no suppressed small amounts.
+            q, unit = d1_float(qty, "quantita"), d1_float(price, "prezzo_eur")
+            computed = q * unit
+            if (unit <= 0 or not math.isfinite(computed)
+                    or (q > 0 and computed == 0)
+                    or d1_float(val, "valore_eur") != computed):
+                raise PacketError("Valore incoerente con quantita e prezzo EUR")
+            basis = row.get("costo_medio_eur")
+            declared_cost = None
+            if basis is not None:
+                try:
+                    declared_cost = d1_float(amount(basis, "costo medio"), "costo medio")
+                except PacketError:
+                    declared_cost = None
+            # A declared cost is not independently authenticated trade history.
+            # Missing/invalid costs MUST NOT produce a numerical P/L.
+            if declared_cost is None:
+                if pnl is not None:
+                    raise PacketError("P/L privo di costo storico attendibile")
+            else:
+                expected_pl = (unit - declared_cost) * q
+                if not math.isfinite(expected_pl):
+                    if pnl is not None:
+                        raise PacketError("P/L non rappresentabile: costo/quantita")
+                elif pnl is None or d1_float(pnl, "P/L") != expected_pl:
+                    raise PacketError("P/L incoerente con costo medio dichiarato")
+        elif pnl is not None:
+            raise PacketError("P/L senza prezzo o valore verificati")
         tr = snapshot.get("trends", {}).get(token) if isinstance(snapshot.get("trends"), dict) else None
         if not isinstance(tr, dict):
             tr = {}
@@ -447,6 +489,9 @@ def build(root: Path, now: dt.datetime | None = None) -> dict:
     valued_sum = sum((Decimal(x["valore_eur"]) for x in positions if x["valore_eur"] is not None), Decimal(0))
     has_valuation = any(x["valore_eur"] is not None for x in positions)
     state = report.get("stato_totale")
+    if state == "COMPLETO" and (incomplete or not has_valuation or
+                                bool(report.get("totale_parziale"))):
+        raise PacketError("COMPLETO dichiarato con posizioni incomplete")
     # D1/D2: no valued positions means no total (null), not a fictional zero.
     if total is None:
         if has_valuation or state == "COMPLETO":
