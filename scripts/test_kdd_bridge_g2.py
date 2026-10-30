@@ -321,5 +321,45 @@ class BridgeG2Tests(unittest.TestCase):
         self.assertIn("/aggiorna",shown)
 
 
+    def test_31_byte_digest_exact_export_and_after_transport(self):
+        import hashlib
+        out=bridge.private_directory(bridge.OUTBOX,create=True)
+        name=bridge.digest(self.bundle)+".json"
+        bridge.exclusive_json(out,name,self.bundle)
+        path=out/name
+        byte_sha=hashlib.sha256(path.read_bytes()).hexdigest()
+        result=bridge.read_bundle(path,now=T,expected_sha256=byte_sha)
+        self.assertEqual(result["n_posizioni"],3)
+        self.assertNotEqual(byte_sha,bridge.digest(self.bundle))
+        with self.assertRaises(bridge.BridgeError):
+            bridge.read_bundle(path,now=T,expected_sha256=bridge.digest(self.bundle))
+
+    def test_32_truncated_or_replaced_transfer_rejected(self):
+        import hashlib
+        out=bridge.private_directory(bridge.OUTBOX,create=True)
+        name=bridge.digest(self.bundle)+".json"
+        bridge.exclusive_json(out,name,self.bundle)
+        path=out/name
+        original_sha=hashlib.sha256(path.read_bytes()).hexdigest()
+        path.write_bytes(path.read_bytes()[:-1])
+        with self.assertRaises(bridge.BridgeError):
+            bridge.read_bundle(path,now=T,expected_sha256=original_sha)
+        path.write_bytes(b'{"schema":"kdd_private_handoff_v001"')
+        with self.assertRaises(bridge.BridgeError):
+            bridge.read_bundle(path,now=T,expected_sha256=original_sha)
+
+    def test_33_preview_is_not_approval(self):
+        from contextlib import redirect_stdout
+        import io
+        inbox=bridge.private_directory(bridge.INBOX,create=True)
+        (inbox/"proposta_portafoglio.json").write_text(json.dumps(self.plan))
+        (inbox/"pacchetto_riferimento.json").write_text(json.dumps(self.bundle))
+        buf=io.StringIO()
+        with redirect_stdout(buf):
+            self.assertEqual(bridge.main(["preview-proposal"]),0)
+        self.assertIn(bridge.digest(self.plan),buf.getvalue())
+        self.assertFalse((self.private/bridge.ARCHIVE).exists())
+
+
 if __name__=="__main__":
     unittest.main()
