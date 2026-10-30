@@ -50,6 +50,11 @@ class BridgeError(ValueError):
     """Fixed, nonsensitive rejection reasons."""
 
 
+class PublicationUncertain(OSError):
+    """Final file may exist, but its directory entry is not yet durable."""
+    state = "PUBBLICAZIONE_INCERTA"
+
+
 def canonical(value):
     try:
         return json.dumps(value, ensure_ascii=False, sort_keys=True,
@@ -186,45 +191,140 @@ def read_regular(path, *, expected_parent=None):
         raise BridgeError("Input non leggibile") from exc
 
 
+def _sync_dir(directory):
+    fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                 getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise BridgeError("Directory di commit insicura")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _pending_file(directory, filename):
+    if directory.name != ARCHIVE or not HEX.fullmatch(filename[:-5]):
+        return None
+    return directory / (".pending-" + filename)
+
+
+def _finalize_pending(directory, filename, expected_raw=None, *, explicit=False):
+    """Deterministic recovery; retain a resolved/cancelled forensic marker."""
+    pending = _pending_file(directory, filename)
+    if pending is None or not pending.exists():
+        return "NESSUNA_PENDENZA"
+    marker = strict_json(read_regular(pending, expected_parent=directory))
+    if (marker.get("schema") != "kdd_archive_commit_v001" or
+            marker.get("filename") != filename or
+            not HEX.fullmatch(str(marker.get("sha256_bytes", "")))):
+        raise BridgeError("Registro pubblicazione incerta non verificabile")
+    dest = directory / filename
+    if dest.exists() or dest.is_symlink():
+        raw = read_regular(dest, expected_parent=directory)
+        if (hashlib.sha256(raw).hexdigest() != marker["sha256_bytes"] or
+                expected_raw is not None and raw != expected_raw):
+            raise BridgeError("Pubblicazione incerta: finale discordante")
+        entry = strict_json(raw)
+        if (entry.get("versione_sha256") != filename[:-5]
+                or digest(entry.get("proposta")) != filename[:-5]
+                or entry.get("consenso") != "CONFERMATO_DA_COMANDO_UTENTE"):
+            raise BridgeError("Pubblicazione incerta: archivio invalido")
+        status = "PUBBLICATO_CONFERMATO"
+        suffix = ".resolved-"
+    else:
+        if not explicit:
+            raise BridgeError("NON_PUBBLICATO: richiede riconciliazione esplicita")
+        status = "NON_PUBBLICATO"
+        suffix = ".cancelled-"
+    # Re-sync directory before deciding that a visible entry was committed.
+    _sync_dir(directory)
+    os.replace(pending, directory / (suffix + filename))
+    _sync_dir(directory)
+    return status
+
+
+def reconcile_archive():
+    """Explicit local recovery under the same writer lock; no unverified edits."""
+    folder = private_directory(ARCHIVE)
+    with _archive_write_lock(folder):
+        records = []
+        for path in sorted(folder.glob(".pending-*.json")):
+            if not PENDING.fullmatch(path.name):
+                raise BridgeError("Registro incerto inatteso")
+            result = _finalize_pending(folder, path.name[len(".pending-"):], explicit=True)
+            records.append(result)
+        return records
+
+
 def exclusive_json(directory, filename, obj):
-    """Atomically publish a durable, complete immutable version, never a partial final."""
+    """Durable exclusive commit, with a separate persisted uncertainty marker."""
     if not filename.endswith(".json") or not (HEX.fullmatch(filename[:-5]) or CODE.fullmatch(filename[:-5])):
         raise BridgeError("Nome documento non valido")
     directory = Path(directory)
-    if directory.is_symlink() or not directory.is_dir() or directory.stat().st_mode & 0o077:
-        raise BridgeError("Directory privata non protetta")
+    _check_dir(directory)
     dest = directory / filename
     raw = canonical(obj) + b"\n"
     if len(raw) > MAX_BYTES:
         raise BridgeError("Documento troppo grande")
+    pending = _pending_file(directory, filename)
     if dest.exists() or dest.is_symlink():
-        if read_regular(dest, expected_parent=directory) == raw:
-            return "GIA_PRESENTE"
-        raise BridgeError("Collisione archivio, STOP")
+        if read_regular(dest, expected_parent=directory) != raw:
+            raise BridgeError("Collisione archivio, STOP")
+        if pending and pending.exists():
+            if _finalize_pending(directory, filename, expected_raw=raw) != "PUBBLICATO_CONFERMATO":
+                raise BridgeError("Versione non riconciliata")
+        return "GIA_PRESENTE"
+    if pending and pending.exists():
+        raise BridgeError("NON_PUBBLICATO: riconciliare prima di riprovare")
     fd, stage_name = tempfile.mkstemp(prefix=".kdd-stage-", suffix=".tmp", dir=directory)
     stage = Path(stage_name)
+    linked = False
+    recorded = False
     try:
         with os.fdopen(fd, "wb") as stream:
             os.fchmod(stream.fileno(), 0o600)
             stream.write(raw)
             stream.flush()
             os.fsync(stream.fileno())
+        if pending:
+            marker = canonical({"schema":"kdd_archive_commit_v001",
+                                "filename": filename,
+                                "sha256_bytes":hashlib.sha256(raw).hexdigest()}) + b"\n"
+            markfd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                             getattr(os, "O_NOFOLLOW", 0), 0o600)
+            with os.fdopen(markfd, "wb") as out:
+                out.write(marker)
+                out.flush()
+                os.fsync(out.fileno())
+            _sync_dir(directory)    # Journal durable BEFORE attempting final link.
+            recorded = True
         try:
             os.link(stage, dest, follow_symlinks=False)
+            linked = True
         except FileExistsError:
-            if read_regular(dest, expected_parent=directory) == raw:
-                return "GIA_PRESENTE"
-            raise BridgeError("Collisione archivio, STOP") from None
-        dirfd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
-                        getattr(os, "O_NOFOLLOW", 0))
-        try:
-            os.fsync(dirfd)
-        finally:
-            os.close(dirfd)
+            if read_regular(dest, expected_parent=directory) != raw:
+                raise BridgeError("Collisione archivio, STOP") from None
+            linked = True
+        _sync_dir(directory)
+        # Remove staging first: the final descriptor must have link count == 1.
+        stage.unlink()
+        if pending:
+            _finalize_pending(directory, filename, expected_raw=raw)
         return "INSERITO"
+    except OSError as exc:
+        if linked:
+            # Marker is retained; neither success nor durable commit is asserted.
+            raise PublicationUncertain("PUBBLICAZIONE_INCERTA: recupero obbligatorio") from exc
+        # A caught pre-link failure is proven NON_PUBBLICATO. A power cut
+        # instead leaves its journal for later explicit reconciliation.
+        if pending and pending.exists() and recorded and not dest.exists():
+            try:
+                _finalize_pending(directory, filename, explicit=True)
+            except (OSError, BridgeError):
+                pass  # In that case the pending forensic marker remains.
+        raise
     finally:
-        # Killed writers can leave inert .kdd-stage files; readers ignore them.
-        # Do not sweep another writer's in-progress staging file.
         stage.unlink(missing_ok=True)
 
 
@@ -538,9 +638,16 @@ def load_archive(*, create=False):
         raise
     out = {}
     for file in sorted(folder.iterdir()):
-        if file.name == ".approval.lock" or STAGING.fullmatch(file.name):
+        if file.name == ".approval.lock" or STAGING.fullmatch(file.name) or RESOLVED.fullmatch(file.name):
             if file.is_symlink() or not file.is_file() or file.stat().st_mode & 0o077:
                 raise BridgeError("Residuo archivio non sicuro")
+            continue
+        if PENDING.fullmatch(file.name):
+            # A pending final is not a confirmed version. An unfinished stage
+            # without final is invisible to read-only views; writers still STOP.
+            if (folder / file.name[len(".pending-"):]).exists():
+                raise BridgeError("PUBBLICAZIONE_INCERTA: archivio non confermato")
+            read_regular(file, expected_parent=folder)
             continue
         if file.is_symlink() or not file.is_file() or not re.fullmatch(r"[0-9a-f]{64}\.json", file.name):
             raise BridgeError("Archivio non regolare")
@@ -563,6 +670,8 @@ def approved_import(proposal, bundle, approved_sha, consent, *, now=None):
         raise BridgeError("Consenso umano esplicito assente o versione diversa")
     folder = private_directory(ARCHIVE, create=True)
     with _archive_write_lock(folder):
+        if any(folder.glob(".pending-*.json")):
+            raise BridgeError("PUBBLICAZIONE_INCERTA: riconciliazione obbligatoria")
         existing = load_archive()
         if version in existing:
             if existing[version]["proposta"] != proposal:
@@ -627,9 +736,12 @@ def main(argv=None):
     imp = sub.add_parser("import-approved")
     imp.add_argument("--approved-sha256", required=True)
     imp.add_argument("--consent", required=True)
+    sub.add_parser("reconcile-archive", help="riconcilia sotto lock i commit privati incerti")
     args = ap.parse_args(argv)
     try:
-        if args.action == "prepare":
+        if args.action == "reconcile-archive":
+            print("RECUPERO ARCHIVIO:", ",".join(reconcile_archive()) or "NESSUNA_PENDENZA")
+        elif args.action == "prepare":
             result = prepare()
             out = private_directory(OUTBOX, create=True)
             status = exclusive_json(out, digest(result)+".json", result)
@@ -656,8 +768,9 @@ def main(argv=None):
                 result = approved_import(prop, envelope, args.approved_sha256, args.consent)
                 print("APPROVAZIONE:", result["stato"], "sha256:", result["versione_sha256"])
         return 0
-    except (BridgeError, wallet.PacketError) as exc:
-        print("STOP G2:", str(exc))
+    except (BridgeError, wallet.PacketError, OSError, PublicationUncertain) as exc:
+        status = "PUBBLICAZIONE_INCERTA" if isinstance(exc, PublicationUncertain) else "NON_PUBBLICATO_O_NON_VERIFICATO"
+        print("STOP G2:", status, type(exc).__name__)
         return 2
 
 
