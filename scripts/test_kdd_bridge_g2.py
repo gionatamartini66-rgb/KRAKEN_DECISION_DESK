@@ -10,7 +10,8 @@ import unittest
 from unittest import mock
 
 from scripts import kdd_bridge_g2 as bridge
-from scripts.test_kdd_wallet_packet_g0 import WalletPacketG0Tests, T
+from scripts import test_kdd_wallet_packet_g0 as fixtures
+T = fixtures.T
 
 
 class BridgeG2Tests(unittest.TestCase):
@@ -25,7 +26,7 @@ class BridgeG2Tests(unittest.TestCase):
         rootpatch = mock.patch.object(bridge, "PRIVATE_ROOT", self.private)
         rootpatch.start()
         self.addCleanup(rootpatch.stop)
-        self.fixture = WalletPacketG0Tests("test_wallet_first_all_assets_even_if_quote_missing")
+        self.fixture = fixtures.WalletPacketG0Tests("test_wallet_first_all_assets_even_if_quote_missing")
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.bundle = bridge.prepare(self.fixture.root, now=T)
