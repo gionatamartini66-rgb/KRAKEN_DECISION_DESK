@@ -215,9 +215,12 @@ def read_context(bundle, *, now=None, expected_sha256=None):
     if not isinstance(section, dict) or not isinstance(section.get("posizioni"), list):
         raise BridgeError("Patrimonio non strutturato")
     rows = section["posizioni"]
+    if pkt.get("nessun_ordine") is not True:
+        raise BridgeError("Pacchetto non di sola analisi")
     if len(rows) != section.get("n_posizioni") or not rows:
         raise BridgeError("Cardinalita portafoglio incongruente")
     have_prices = []
+    canon_tokens = []
     complete = 0
     observations = []
     sum_eur = Decimal(0)
@@ -225,6 +228,19 @@ def read_context(bundle, *, now=None, expected_sha256=None):
         if not isinstance(row, dict) or type(row.get("indice")) is not int or row["indice"] != i:
             raise BridgeError("Identita o indice posizione incongruente")
         price, val, qty = (numeric(row.get(field)) for field in ("prezzo_eur", "valore_eur", "quantita_spot"))
+        pnl = numeric(row.get("pl_indicativo_eur"))
+        if (price is not None and price <= 0) or (val is not None and val < 0) or (qty is not None and qty < 0):
+            raise BridgeError("Prezzo o quantita non valida")
+        if pnl is not None and val is None:
+            raise BridgeError("P/L senza valutazione")
+        token = row.get("token")
+        if row.get("stato_identita") == "VALIDA":
+            if not isinstance(token, str) or not wallet.SYMBOL.fullmatch(token):
+                raise BridgeError("Identita valida ma token non verificabile")
+            identity = wallet.canonical_wallet_alias(token)
+            if identity in canon_tokens:
+                raise BridgeError("Collisione asset nel pacchetto")
+            canon_tokens.append(identity)
         if (price is None) != (val is None):
             raise BridgeError("Prezzo o controvalore assente")
         if val is not None:
@@ -232,6 +248,8 @@ def read_context(bundle, *, now=None, expected_sha256=None):
             token = row.get("token")
             if not isinstance(provenance, dict) or provenance.get("token") != token:
                 raise BridgeError("Provenienza quotazione EUR non verificabile")
+            if provenance.get("rilevazione_utc") != pkt["rilevazione_kdd_utc"]:
+                raise BridgeError("Fotografia quotazione EUR incoerente")
             if provenance.get("valuta") != "EUR" or not isinstance(provenance.get("pair"), str):
                 raise BridgeError("Valuta quotazione non EUR")
             parts = provenance["pair"].split("/")
@@ -259,15 +277,25 @@ def read_context(bundle, *, now=None, expected_sha256=None):
                         raise BridgeError("Stato timeframe non verificabile")
                     if state == "AGGIORNATO":
                         closed = instant(f.get("chiusura_utc"))
+                        sequence = f.get("serie_ohlcv_chiuse")
+                        if (not isinstance(sequence, list) or not 50 <= len(sequence) <= 200
+                                or not isinstance(sequence[-1], dict)
+                                or type(sequence[-1].get("time")) is not int
+                                or closed.timestamp() != sequence[-1]["time"] + seconds
+                                or closed > moment + dt.timedelta(minutes=2)):
+                            raise BridgeError("Serie 4TF o ultima chiusura incoerente")
                         last = int((moment.timestamp()-120)//seconds)*seconds
                         state = "AGGIORNATO" if closed.timestamp() >= last else "SCADUTO"
                     states[label] = state
         if len(states) != 4:
             states = {k: states.get(k, "NON_DISPONIBILE") for k in FRAMES}
         all_tf = all(value == "AGGIORNATO" for value in states.values())
-        if tf and tf.get("stato") == "COMPLETO" and any(
-                not isinstance(tf.get("timeframe", {}).get(k), dict) for k in FRAMES):
-            raise BridgeError("Quattro timeframe dichiarati ma assenti")
+        if tf and tf.get("stato") == "COMPLETO":
+            original_frames = tf.get("timeframe")
+            if (not isinstance(original_frames, dict)
+                    or any(not isinstance(original_frames.get(k), dict) for k in FRAMES)
+                    or any(original_frames[k].get("stato") not in ("AGGIORNATO", "SCADUTO") for k in FRAMES)):
+                raise BridgeError("Quattro timeframe dichiarati ma incompleti")
         complete += bool(all_tf)
         observations.append({"indice": i, "token": row.get("token"),
                              "stato_identita": row.get("stato_identita"),
@@ -287,7 +315,8 @@ def read_context(bundle, *, now=None, expected_sha256=None):
     bal_ts = saldo.get("ultima_acquisizione_utc")
     bal_status = (wallet.source_status(instant(bal_ts), moment) if bal_ts else
                   {"stato": "ORIGINE_SCONOSCIUTA", "eta_minuti": None})
-    if saldo.get("stato", {}).get("stato") in ("ORIGINE_SCONOSCIUTA", "OROLOGIO_INCOERENTE"):
+    if (not isinstance(saldo.get("stato"), dict) or
+            saldo["stato"].get("stato") in ("ORIGINE_SCONOSCIUTA", "OROLOGIO_INCOERENTE")):
         bal_status = {"stato": "ORIGINE_SCONOSCIUTA", "eta_minuti": None}
     market_status = wallet.source_status(snap, moment)
     return {"schema": "kdd_gpt_read_context_v001", "snapshot_id": digest(pkt),
@@ -346,7 +375,8 @@ def validate_proposal(proposal, bundle, *, now=None):
     if not isinstance(refs, list) or len(refs) > 30:
         raise BridgeError("Fonti non strutturate")
     for s in refs:
-        if not isinstance(s, dict) or not piano_gpt.safe_url(s.get("url", "")):
+        if (not isinstance(s, dict) or not isinstance(s.get("url"), str)
+                or not piano_gpt.safe_url(s["url"])):
             raise BridgeError("Fonte esterna non valida")
         text(s.get("nome"))
     parent = proposal.get("sostituisce_sha256")
@@ -416,11 +446,22 @@ def approved_html():
         return "<section><h2>Proposte patrimoniali GPT</h2><p>Revisione ambigua: STOP.</p></section>"
     latest = records[next(iter(heads))]
     p = latest["proposta"]
-    items = "".join("<li>"+esc(r["token"])+" — "+esc(r["azione"])+" · "+esc(r["tesi"])+"</li>"
-                    for r in p["posizioni"])
+    items = "".join(
+        "<li><b>"+esc(r["token"])+" — "+esc(r["azione"])+
+        "</b><p>"+esc(r["tesi"])+"</p><details><summary>Rischi, condizioni e riesame</summary>"+
+        "<p>Rischi: "+esc(r["rischi"])+"</p><p>Alternativa: "+esc(r["alternativa"])+
+        "</p><p>Invalidazione: "+esc(r["invalidazione"])+
+        "</p><p>Costi: "+esc(r["costi"])+
+        "</p><p>Evidenze: "+esc(r["evidenze"])+
+        "</p><p>Riesame: "+esc(r["riesame"])+"</p></details></li>"
+        for r in p["posizioni"])
     return ("<section id='kdd-gpt-patrimonio'><h2>Proposta patrimoniale GPT approvata</h2>"
             "<p>Versione "+esc(latest["versione_sha256"][:16])+" · snapshot "+esc(p["snapshot_utc"])+
             " · esecuzione NON ATTESTATA. Valutazione storica: riesaminare al nuovo mercato.</p>"
+            "<p>Scenario: "+esc(p["scenario"])+"</p><p>Alternativa generale: "+
+            esc(p["scenario_alternativo"])+"</p><p>Liquidità: "+esc(p["liquidita"])+
+            "</p><p>Rischi comuni: "+esc(p["rischi_comuni"])+
+            "</p><p>Riesame: "+esc(p["revisione"])+"</p>"
             "<ul>"+items+"</ul><p>Versioni conservate: "+str(len(records))+
             ". Nessun ordine finanziario deducibile dall'approvazione.</p></section>")
 
