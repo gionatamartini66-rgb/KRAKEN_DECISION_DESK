@@ -9,6 +9,8 @@ import html
 import hashlib
 import re
 import json
+import math
+from decimal import Decimal, InvalidOperation
 import pathlib
 import statistics
 import sys
@@ -82,7 +84,72 @@ def num(x):
     except (ValueError, TypeError, OverflowError): return 0.0
 
 def canonical(s):
-    return {'XBT': 'BTC', 'XXBT': 'BTC', 'XDG': 'DOGE'}.get(s.upper(), s.upper())
+    return {'XBT': 'BTC', 'XXBT': 'BTC', 'XDG': 'DOGE', 'XXDG': 'DOGE'}.get(s.upper(), s.upper())
+
+
+# Boundary for manually entered holdings only. Do not change num() because
+# scanner, market data, fees and other subsystems share its old contract.
+_WALLET_NUMBER_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z")
+_WALLET_SYMBOL_RE = re.compile(r"[A-Z0-9][A-Z0-9._-]{0,31}\Z")
+
+
+def wallet_symbol(raw):
+    """Return (displayed identity, valid). Never guess an invalid asset."""
+    if not isinstance(raw, str):
+        return ('identificativo assente' if raw is None else str(raw)[:120], False)
+    symbol = raw.strip().upper()
+    if not (_WALLET_SYMBOL_RE.fullmatch(symbol) and
+            any('A' <= c <= 'Z' for c in symbol)):
+        return (raw[:120] or 'identificativo assente', False)
+    return symbol, True
+
+
+def wallet_number(raw):
+    """Finite nonnegative monetary/quantity number; reason on every failure.
+
+    Decimal first prevents positive subnormal input from silently becoming zero
+    in the float representation used by the existing JSON schema.
+    """
+    if raw is None:
+        return None, 'NON_NOTO'
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        return None, 'NON_NUMERICO'
+    if isinstance(raw, str):
+        # These are valid spellings for Decimal/float non-finite numbers,
+        # but they are never valid holding quantities or cost bases.
+        if raw.strip().lower() in ('nan', '+nan', '-nan', 'inf', '+inf',
+                                   '-inf', 'infinity', '+infinity', '-infinity'):
+            return None, 'NON_FINITO'
+        if not _WALLET_NUMBER_RE.fullmatch(raw.strip()):
+            return None, 'NON_NUMERICO'
+    try:
+        number = Decimal(str(raw).strip())
+        if not number.is_finite():
+            return None, 'NON_FINITO'
+        if number < 0:
+            return None, 'NEGATIVO'
+        value = float(number)
+        if not math.isfinite(value) or (number > 0 and value == 0):
+            return None, 'FUORI_SCALA'
+        return value, 'VALIDO'
+    except (InvalidOperation, ValueError, TypeError, OverflowError):
+        return None, 'NON_NUMERICO'
+
+
+def wallet_quantity_display(raw):
+    """JSON-safe representation of invalid input, without invented zeros."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return raw[:120]
+    if isinstance(raw, bool):
+        return str(raw)
+    if isinstance(raw, float) and not math.isfinite(raw):
+        return str(raw)
+    if isinstance(raw, (int, float)):
+        return raw
+    return str(raw)[:120]
+
 
 def pct(current, old):
     return (current / old - 1) * 100 if old > 0 else None
@@ -243,7 +310,9 @@ def load_decisions():
     return out
 
 def decision_state(token, decisions, now):
-    options = [x for x in decisions if x.get('token', '').upper() in (token, 'PORTAFOGLIO')]
+    options = [x for x in decisions
+               if isinstance(x, dict) and isinstance(x.get('token'), str)
+               and x['token'].strip().upper() in (token, 'PORTAFOGLIO')]
     if not options:
         return 'NESSUNA DECISIONE REGISTRATA: formulare una scelta; non equivale a HOLD.'
     last = max(options, key=lambda x: x.get('creata_utc', ''))
@@ -287,21 +356,74 @@ def build_report(data, portfolio, conf, ctx, decisions):
     now = NOW()
     pairs = data['markets']; trends = data['trends']
     holdings = []
-    for h in portfolio.get('posizioni', []):
-        symbol = h.get('token', '').upper(); quantity = h.get('quantita', None)
-        if quantity is None: continue
-        row = pairs.get(symbol)
-        if row is None:
-            holdings.append({'token': symbol, 'quantita': quantity, 'errore': 'Nessuna quotazione spot EUR disponibile: nessuna stima inventata.',
-                             'decisione': decision_state(symbol, decisions, now)})
+    positions = portfolio.get('posizioni') or []
+    if not isinstance(positions, list):
+        raise ValueError('Posizioni non in forma di lista: non creare un totale fittizio.')
+    # Duplicate identities cannot safely be counted as distinct holdings.
+    symbols = [wallet_symbol(h.get('token')) if isinstance(h, dict)
+               else ('identificativo assente', False) for h in positions]
+    # Duplicate alias identities invalidate BOTH row valuations and decisions.
+    # Never merge wallet quantities or change their recorded representation.
+    identities = [canonical(sym) if valid else None for sym, valid in symbols]
+    duplicates = {key for key in identities if key is not None
+                  and identities.count(key) > 1}
+    for h, (symbol, identity_ok) in zip(positions, symbols):
+        if not isinstance(h, dict):
+            holdings.append({'token': symbol, 'quantita': None,
+                             'identita_valida': False, 'quantita_stato': 'NON_NOTO',
+                             'identificativo_duplicato': False,
+                             'errore': 'Posizione non strutturata: verifica manuale.',
+                             'decisione': 'DECISIONE NON ASSOCIABILE: identità non valida.'})
             continue
-        val = num(quantity)*row['prezzo_eur']
-        basis = h.get('costo_medio_eur')
-        holdings.append({'token': symbol, 'quantita': quantity,
-                         'valore_eur': val, 'prezzo_eur': row['prezzo_eur'],
-                         'pl_non_realizzato_eur': ((row['prezzo_eur'] - num(basis))*num(quantity)) if basis is not None else None,
-                         'tendenza': trends.get(symbol), 'note': signals(row, trends.get(symbol)),
-                         'decisione': decision_state(symbol, decisions, now)})
+        raw_quantity = h.get('quantita')
+        quantity, qty_state = wallet_number(raw_quantity)
+        visible_quantity = wallet_quantity_display(raw_quantity)
+        decision = (decision_state(symbol, decisions, now)
+                    if identity_ok and canonical(symbol) not in duplicates else
+                    'DECISIONE NON ASSOCIABILE: identificativo invalido o duplicato.')
+        base = {'token': symbol, 'quantita': visible_quantity, 'decisione': decision,
+                'identita_valida': bool(identity_ok), 'quantita_stato': qty_state,
+                'identificativo_duplicato': canonical(symbol) in duplicates}
+        if not identity_ok:
+            base['errore'] = 'Identificativo token assente o malformato: verificare la posizione.'
+        elif canonical(symbol) in duplicates:
+            base['errore'] = 'Token duplicato: verificare le registrazioni prima del totale.'
+        elif qty_state == 'NON_NOTO':
+            base['errore'] = 'Quantità non nota: nessun saldo o valore stimato.'
+        elif qty_state != 'VALIDO':
+            base['errore'] = ('Quantità non valida (' + qty_state +
+                              '): verificare; nessun zero o valore stimato.')
+        else:
+            row = pairs.get(symbol)
+            if not isinstance(row, dict):
+                base['errore'] = 'Nessuna quotazione spot EUR disponibile: nessuna stima inventata.'
+            else:
+                price, price_state = wallet_number(row.get('prezzo_eur'))
+                if price_state != 'VALIDO' or price <= 0:
+                    base['errore'] = 'Prezzo EUR non valido: nessuna stima patrimoniale.'
+                else:
+                    value = quantity * price
+                    if not math.isfinite(value) or (quantity > 0 and value == 0):
+                        base['errore'] = 'Controvalore non rappresentabile: nessuno zero inventato.'
+                    else:
+                        basis = h.get('costo_medio_eur')
+                        pl = None
+                        if basis is not None:
+                            basis_value, cost_state = wallet_number(basis)
+                            if cost_state == 'VALIDO':
+                                pl_candidate = (price - basis_value) * quantity
+                                if math.isfinite(pl_candidate):
+                                    pl = pl_candidate
+                                else:
+                                    base['avviso_costo_medio'] = 'P/L non rappresentabile: verificare.'
+                            else:
+                                base['avviso_costo_medio'] = ('Costo medio non valido (' +
+                                                             cost_state + '): verificare il P/L.')
+                        base.update({'valore_eur': value, 'prezzo_eur': price,
+                                     'pl_non_realizzato_eur': pl,
+                                     'tendenza': trends.get(symbol),
+                                     'note': signals(row, trends.get(symbol))})
+        holdings.append(base)
     lo = num(conf.get('scanner',{}).get('min_var_oggi_utc_pct',8))
     hi = num(conf.get('scanner',{}).get('max_var_oggi_utc_pct',20))
     min_vol = num(conf.get('scanner',{}).get('volume_24h_min_eur', 500000))
@@ -327,14 +449,39 @@ def build_report(data, portfolio, conf, ctx, decisions):
     age_minutes = max(0, (now - rilevazione).total_seconds()/60)
     freshness = 'Freschezza da ricalcolare alla consultazione; timestamp originale sempre disponibile.'
     saldo = stato_saldo(portfolio, data.get('saldo_refresh'), now=now)
-    posizioni_non_aggiornate = sum(1 for h in portfolio.get('posizioni',[]) if h.get('quantita') is None)
+    posizioni_non_aggiornate = sum(1 for h in positions
+                                  if isinstance(h, dict) and h.get('quantita') is None)
+    valued = [h['valore_eur'] for h in holdings if 'valore_eur' in h]
+    n_valued = len(valued)
+    n_incomplete = len(holdings) - n_valued
+    total_error = None
+    if not holdings:
+        state, total = 'NESSUNA_POSIZIONE_REGISTRATA', None
+    elif not valued:
+        state, total = 'NON_DISPONIBILE', None
+    else:
+        # Finite individual values can still overflow their floating sum.
+        try:
+            total = math.fsum(valued)
+        except OverflowError:
+            total = math.inf
+        if not math.isfinite(total):
+            state, total = 'NON_RAPPRESENTABILE', None
+            total_error = 'Somma dei controvalori fuori scala; non usare un totale.'
+        else:
+            state = 'PARZIALE' if n_incomplete else 'COMPLETO'
     return {'rilevazione_utc': data['rilevazione_utc'], 'mercato': market,
             'freschezza': freshness, 'saldo_stato': saldo,
             'orari_fonti': data.get('orari_fonti', {}),
             'revisione_portafoglio': decision_state('PORTAFOGLIO', decisions, now),
             'contesto': context_status(ctx, now), 'posizioni': holdings, 'candidati': gainers[:18], 'schede_v02': schede,
-            'totale_stimato_eur': sum(x.get('valore_eur',0) for x in holdings),
-            'totale_parziale': bool(posizioni_non_aggiornate) or any('errore' in x for x in holdings), 'posizioni_non_aggiornate': posizioni_non_aggiornate,
+            # D1 contract: null means no reliable numeric total; never a fake 0.
+            'totale_stimato_eur': total, 'stato_totale': state,
+            'posizioni_registrate': len(holdings), 'posizioni_valorizzate': n_valued,
+            'posizioni_incomplete': n_incomplete, 'zero_reale': state == 'COMPLETO' and total == 0,
+            'errore_totale': total_error,
+            'totale_parziale': state in ('PARZIALE','NON_DISPONIBILE','NON_RAPPRESENTABILE'),
+            'posizioni_non_aggiornate': posizioni_non_aggiornate,
             'n_mercati_eur': len(pairs), 'n_coppie_multi':data.get('n_coppie_multi'),
             'n_token_multi':data.get('n_token_multi'), 'fx_rilevati':data.get('fx_rilevati',{}),
             'feed': data.get('feed',[]),
@@ -351,6 +498,81 @@ def build_report(data, portfolio, conf, ctx, decisions):
                'Kraken BalanceEx solo lettura se configurato; nessun ordine, nessuna tassazione calcolata.'
             ]}
 
+
+def fotografia_portafoglio_sha256(portfolio):
+    """Digest of parsed local JSON content, NOT proof of authentic Kraken balance.
+
+    Stable across key order, but deliberately absent for unrepresentable JSON.
+    Raw wallet bytes, credentials and T0 never enter reports or GitHub.
+    """
+    try:
+        canonical_json = json.dumps(portfolio, sort_keys=True, separators=(',', ':'),
+                                    ensure_ascii=False, allow_nan=False)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return hashlib.sha256(canonical_json.encode('utf-8')).hexdigest()
+
+
+def qualita_portafoglio(data, portfolio):
+    """One valuation engine for dashboard and GPT dossier: build_report D1/D2.
+
+    Quantities and EUR valuation are distinct. Even a complete quoted wallet
+    is not evidence of a current private balance unless stato_saldo says so.
+    """
+    read_at = NOW().isoformat(timespec='seconds')
+    digest = fotografia_portafoglio_sha256(portfolio)
+    saldo = stato_saldo(portfolio, data.get('saldo_refresh'), now=NOW())
+    recent = (saldo['origine'] == 'KRAKEN_BALANCEEX'
+              and saldo['freschezza_saldo'] == 'RECENTE'
+              and saldo['portafoglio_aggiornato_da_api_private'])
+    fields = {'stato_quantita': 'SCHEMA_NON_VALIDO', 'posizioni_registrate': None,
+              'posizioni_quantita_valide': 0, 'posizioni_valorizzate': 0,
+              'posizioni_incomplete': None, 'stato_totale': 'NON_DISPONIBILE',
+              'totale_stimato_eur': None, 'zero_reale': False,
+              'portafoglio_noto': False, 'saldo_recente_verificato': recent,
+              'stato_saldo': saldo, 'anomalie_posizioni': [],
+              'portafoglio_letto_utc': read_at,
+              'fotografia_portafoglio_sha256': digest,
+              'significato_fotografia': 'Hash del contenuto JSON locale, non autenticazione o prova di freschezza.'}
+    if not isinstance(portfolio, dict):
+        fields['anomalie_posizioni'] = [{'motivo': 'Portafoglio non strutturato'}]
+        return fields
+    positions = portfolio.get('posizioni')
+    if not isinstance(positions, list):
+        fields['anomalie_posizioni'] = [{'motivo': 'posizioni non in forma di lista'}]
+        return fields
+    # A dossier can be built from a source that contains no EUR market
+    # rows. That means valuation unavailable, never zero or invented prices.
+    valuation_source = dict(data)
+    valuation_source.setdefault('rilevazione_utc', read_at)
+    valuation_source.setdefault('markets', {})
+    valuation_source.setdefault('trends', {})
+    valuation_source.setdefault('feed', [])
+    valuation_source.setdefault('problemi_feed', [])
+    report = build_report(valuation_source, portfolio, {}, {}, [])
+    holdings = report['posizioni']
+    valid = sum(1 for h in holdings
+                if h.get('identita_valida')
+                and h.get('quantita_stato') == 'VALIDO'
+                and not h.get('identificativo_duplicato'))
+    complete = bool(holdings) and valid == len(holdings)
+    fields.update({
+        'stato_quantita': ('ASSENTI' if not holdings else
+                           'COMPLETE' if complete else 'INCOMPLETE'),
+        'posizioni_registrate': report['posizioni_registrate'],
+        'posizioni_quantita_valide': valid,
+        'posizioni_valorizzate': report['posizioni_valorizzate'],
+        'posizioni_incomplete': report['posizioni_incomplete'],
+        'stato_totale': report['stato_totale'],
+        'totale_stimato_eur': report['totale_stimato_eur'],
+        'zero_reale': report['zero_reale'],
+        'portafoglio_noto': complete,
+        'anomalie_posizioni': [
+            {'indice': index, 'token': h['token'], 'motivo': h['errore']}
+            for index, h in enumerate(holdings) if 'errore' in h]})
+    return fields
+
+
 def fmt(x, places=2):
     if x is None: return 'n.d.'
     return f'{x:,.{places}f}'.replace(',', ' ').replace('.', ',')
@@ -364,16 +586,26 @@ def render(report):
     holdings = ''
     for h in report['posizioni']:
         if 'errore' in h:
-            holdings += f"<article><h3>{esc(h['token'])}</h3><p>{esc(h['errore'])}</p><p>{esc(h['decisione'])}</p></article>"
+            quantity_info = 'non nota' if h.get('quantita') is None else esc(h['quantita'])
+            holdings += (f"<article><h3>{esc(h['token'])}</h3><p>Quantità: {quantity_info}</p>"
+                         f"<p>{esc(h['errore'])}</p><p>{esc(h['decisione'])}</p></article>")
         else:
             trend = h.get('tendenza') or {}
             delta7 = fmt(trend.get('var_7g_pct')) + '%' if 'errore' not in trend else 'n.d.'
             unrealized = 'senza costo fiscale' if h['pl_non_realizzato_eur'] is None else f"P/L indicativo: {fmt(h['pl_non_realizzato_eur'])} €"
             notes = ''.join(f'<li>{esc(note)}</li>' for note in h['note'])
+            warning = (f"<p class='urgente'>{esc(h['avviso_costo_medio'])}</p>"
+                       if h.get('avviso_costo_medio') else '')
             holdings += (f"<article><h3>{esc(h['token'])} <span>{fmt(h['valore_eur'])} €</span></h3>"
                          f"<p>Quantità {esc(h['quantita'])} · Prezzo {fmt(h['prezzo_eur'], 5)} € · 7g {delta7} · {unrealized}</p>"
-                         f"<ul>{notes}</ul><p class='{badge(h['decisione'])}'>{esc(h['decisione'])}</p></article>")
-    if not holdings: holdings = "<article>Nessuna quantità inserita. Compila <code>portafoglio.json</code>; finché i trasferimenti sono in corso non stimiamo il saldo.</article>"
+                         f"{warning}<ul>{notes}</ul><p class='{badge(h['decisione'])}'>{esc(h['decisione'])}</p></article>")
+    if not holdings:
+        if report.get('stato_totale') == 'SCHEMA_NON_VALIDO':
+            holdings = ("<article class='urgente'>Formato posizioni non valido: "
+                        "impossibile ricostruire le righe patrimoniali. "
+                        "Verificare il file originale; nessuna posizione o valore inventato.</article>")
+        else:
+            holdings = "<article>Nessuna quantità inserita. Compila <code>portafoglio.json</code>; finché i trasferimenti sono in corso non stimiamo il saldo.</article>"
     funds=report.get('liquidita_spot_api',{})
     available_html=''
     if funds:
@@ -611,7 +843,40 @@ def render(report):
     feed = ''.join(f"<li><strong>{esc(x['fonte'])}:</strong> <a href='{esc(x['link'])}' target='_blank' rel='noopener'>{esc(x['titolo'])}</a> <small>{esc(x['data'])}</small></li>" for x in report['feed'])
     feed += ''.join(f'<li class="urgente">Fonte non disponibile: {esc(x)}</li>' for x in report['problemi_feed'])
     warnings = ''.join(f'<li>{esc(x)}</li>' for x in report['avvertenze'])
-    total = (f"{fmt(report['totale_stimato_eur'])} €" if report['posizioni'] else 'non disponibile') + (' (incompleto)' if report['totale_parziale'] else '')
+    dossier_status = report.get('dossier_stato') or {}
+    dossier_notice = ''
+    if dossier_status:
+        message = ('Dossier GPT: mercato ' +
+                   str(dossier_status.get('stato_fonti_mercato', 'NON_VERIFICATO')) +
+                   '; patrimonio ' +
+                   str(dossier_status.get('idoneita_analisi_patrimoniale', 'NON_IDONEA')) +
+                   '; stato ' + str(dossier_status.get('stato', 'NON_VERIFICATO')))
+        if dossier_status.get('stato') == 'NON_ALLINEATO_PATRIMONIO':
+            message += ' — fotografia del patrimonio diversa da quella del dossier.'
+        dossier_notice = "<p class='urgente' role='status'>" + esc(message) + "</p>"
+    # Legacy JSON reports have no stato_totale: derive availability from
+    # actual finite valued rows, never trust an unqualified legacy numeric 0.
+    actual_values = [h['valore_eur'] for h in report['posizioni']
+                     if isinstance(h.get('valore_eur'), (int, float))
+                     and not isinstance(h['valore_eur'], bool)
+                     and math.isfinite(h['valore_eur'])]
+    state = report.get('stato_totale')
+    if state is None:
+        state = ('NESSUNA_POSIZIONE_REGISTRATA' if not report['posizioni']
+                 else 'NON_DISPONIBILE' if not actual_values
+                 else 'PARZIALE' if report.get('totale_parziale') else 'COMPLETO')
+    numeric_total = report.get('totale_stimato_eur')
+    can_show = (state in ('COMPLETO', 'PARZIALE')
+                and isinstance(numeric_total, (int, float))
+                and not isinstance(numeric_total, bool)
+                and math.isfinite(numeric_total) and bool(actual_values))
+    total = f"{fmt(numeric_total)} €" if can_show else 'non disponibile'
+    if state in ('PARZIALE', 'NON_DISPONIBILE', 'NON_RAPPRESENTABILE'):
+        total += ' (incompleto)' if state != 'NON_RAPPRESENTABILE' else ' (somma fuori scala)'
+    elif state == 'NESSUNA_POSIZIONE_REGISTRATA':
+        total += ' (nessuna posizione registrata; conto non verificato)'
+    elif state == 'SCHEMA_NON_VALIDO':
+        total += ' (formato del portafoglio non valido)'
     # La data in un file statico resta identica; l'età deve essere calcolata
     # dal browser a ogni apertura, ritorno in primo piano e durante la lettura.
     freschezza_live = '''<p id="data-freschezza" data-rilevazione="__RILEVAZIONE__" role="status">Verifica dell'età dei dati in corso; in assenza di JavaScript considerali da aggiornare.</p>
@@ -648,12 +913,12 @@ def render(report):
 {piano_gpt.render_box(report.get('piano_gpt'),report['rilevazione_utc'])}
 {__import__('verifica_piani').render_summary(report.get('verifica_piano'),report.get('piano_gpt'))}
 {__import__('verifica_piani').render_archivio(report.get('verifica_storico'), __import__('verifica_piani').plan_hash(report['piano_gpt']) if report.get('piano_gpt') and 'errore' not in report['piano_gpt'] else None)}
-<h2>1 · Decisioni e posizioni</h2>{freschezza_live}<p class='muted'>Questa copia HTML è una fotografia: per ricevere nuovi prezzi apri il <a href='http://127.0.0.1:8765/'>cruscotto locale aggiornabile</a> (richiede Termux attivo).</p><article><h3>Decisione di portafoglio</h3><p class='{badge(report['revisione_portafoglio'])}'>{esc(report['revisione_portafoglio'])}</p></article><p>Ogni attesa richiede un motivo e una scadenza. Se scade, la revisione è dovuta; il sistema non decide di vendere.</p><p class='muted'>Quantità: {esc(report.get('portafoglio_fonte') or 'non documentate')} · non si aggiornano con i prezzi.</p>{available_html}{holdings}{transfer_html}
+<h2>1 · Decisioni e posizioni</h2>{dossier_notice}{freschezza_live}<p class='muted'>Questa copia HTML è una fotografia: per ricevere nuovi prezzi apri il <a href='http://127.0.0.1:8765/'>cruscotto locale aggiornabile</a> (richiede Termux attivo).</p><article><h3>Decisione di portafoglio</h3><p class='{badge(report['revisione_portafoglio'])}'>{esc(report['revisione_portafoglio'])}</p></article><p>Ogni attesa richiede un motivo e una scadenza. Se scade, la revisione è dovuta; il sistema non decide di vendere.</p><p class='muted'>Quantità: {esc(report.get('portafoglio_fonte') or 'non documentate')} · non si aggiornano con i prezzi.</p>{available_html}{holdings}{transfer_html}
 <h2>2 · Candidati da valutare</h2><p>Ricerca spot multi-coppia EUR/USD/USDC su Kraken: {report.get('n_token_multi') or 'n.d.'} token in {report.get('n_coppie_multi') or 'n.d.'} coppie. La somma dei volumi serve a scoprire token; per operare conta invece il book della singola coppia. Non sono ordini né stime di profitto.</p>{bn_html}{schede_html}{studio_html}<details><summary>Apri radar precedente solo EUR (dati grezzi)</summary><div class="scroll"><table><thead><tr><th>Token</th><th>Oggi</th><th>Vol. 24h stim.</th><th>Spread</th><th>Nota</th></tr></thead><tbody>{gainers}</tbody></table></div></details>
 <h2>3 · Macroeconomia e geopolitica</h2><p>Un contesto non verificato è un'informazione mancante, non equivale a uno scenario neutrale o ribassista.</p>{context}
 <h2>4 · Fonti e limiti</h2><details><summary>Apri titoli di Fed, BCE e Consiglio UE</summary><p>Raccolta automatica di titoli, nessuna interpretazione causale.</p><ul>{feed or '<li>Nessun feed acquisito.</li>'}</ul></details><details><summary>Apri limiti tecnici e avvertenze</summary><ul>{warnings}</ul></details><p class="muted">Strumento sperimentale per supporto alle decisioni. Nessuna previsione o consulenza personalizzata automatica.</p></body></html>'''
 
-def prepara_dossier_aggiornamento(data):
+def prepara_dossier_aggiornamento(data, *, asset_pairs=None):
     """Produce un dossier sullo stesso snapshot Kraken. API pubbliche soltanto.
 
     Se una fonte secondaria fallisce non scambia dati vecchi per aggiornati:
@@ -665,7 +930,7 @@ def prepara_dossier_aggiornamento(data):
             'motivi_incompletezza':[]}
     try:
         import dossier_trade
-        dossier=dossier_trade.collect(source=data)
+        dossier=dossier_trade.collect(source=data, **({'asset_pairs': asset_pairs} if asset_pairs is not None else {}))
         if dossier['kraken_istantanea_utc']!=data['rilevazione_utc']:
             raise ValueError("Dossier riferito ad altro snapshot")
         rows=dossier.get('candidati',[])
@@ -688,7 +953,44 @@ def prepara_dossier_aggiornamento(data):
         for metric in ('open-interest','cvd'):
             if deriv.get(metric,{}).get('errore'):
                 status['motivi_incompletezza'].append('Derivati BTC assenti: '+metric)
-        status['stato']='PARZIALE' if status['motivi_incompletezza'] else 'PRONTO_PER_ESAME_GPT'
+        market_complete = not status['motivi_incompletezza']
+        quality = dossier.get('qualita_patrimonio') or {}
+        four = dossier.get('patrimonio_4tf') or {}
+        four_rows = four.get('posizioni') or []
+        status['copertura_patrimonio_4tf'] = {
+            'posizioni': len(four_rows),
+            'completate': sum(x.get('stato') == 'COMPLETO' for x in four_rows
+                             if isinstance(x, dict)),
+            'richieste_ohlc': four.get('richieste_ohlc'),
+            'budget_ohlc': four.get('budget_ohlc'),
+            'stato': ('COMPLETO' if four_rows and all(
+                isinstance(x, dict) and x.get('stato') == 'COMPLETO'
+                for x in four_rows) else 'PARZIALE')}
+
+        status['stato_fonti_mercato'] = 'COMPLETO' if market_complete else 'PARZIALE'
+        status['stato_patrimonio'] = quality.get('stato_totale', 'NON_VERIFICABILE')
+        status['stato_quantita'] = quality.get('stato_quantita', 'NON_VERIFICABILE')
+        status['fotografia_portafoglio_sha256'] = dossier.get('fotografia_portafoglio_sha256')
+        status['portafoglio_letto_utc'] = quality.get('portafoglio_letto_utc')
+        status['acquisizione_saldo_utc'] = (quality.get('stato_saldo') or {}).get('acquisizione_saldo_utc')
+        status['posizioni_registrate'] = quality.get('posizioni_registrate')
+        status['posizioni_valorizzate'] = quality.get('posizioni_valorizzate')
+        status['posizioni_incomplete'] = quality.get('posizioni_incomplete')
+        status['zero_reale'] = quality.get('zero_reale', False)
+        status['motivi_patrimoniali'] = []
+        if not quality.get('portafoglio_noto'):
+            status['motivi_patrimoniali'].append('Identità o quantità non tutte valide')
+        if quality.get('stato_totale') != 'COMPLETO':
+            status['motivi_patrimoniali'].append('Controvalore EUR non completo')
+        if not quality.get('saldo_recente_verificato'):
+            status['motivi_patrimoniali'].append('Saldo Kraken attuale non attestato')
+        if not status['fotografia_portafoglio_sha256']:
+            status['motivi_patrimoniali'].append('Fotografia patrimoniale non identificabile')
+        suitable = (market_complete and not status['motivi_patrimoniali'])
+        status['idoneita_analisi_patrimoniale'] = 'IDONEA' if suitable else 'NON_IDONEA'
+        status['stato'] = ('PARZIALE' if not market_complete else
+                           'PRONTO_PER_ESAME_GPT' if suitable else
+                           'PRONTO_PER_ESAME_MERCATO')
         status['preparato_utc']=dossier['creato_utc']
     except Exception as exc:
         status['motivi_incompletezza']=[type(exc).__name__+': '+str(exc)[:180]]
@@ -696,19 +998,67 @@ def prepara_dossier_aggiornamento(data):
     return status
 
 
-def stato_dossier_per_report(data):
-    """Mai segnalare come attuale un dossier riferito a una rilevazione diversa."""
-    status=load('dossier_stato.json',{})
-    snap=data['rilevazione_utc']
-    if not status or status.get('rilevazione_kraken_utc')!=snap:
-        return {'stato':'NON_ALLINEATO',
-                'rilevazione_kraken_utc':snap,
-                'motivi_incompletezza':['Il dossier GPT disponibile non corrisponde a questa rilevazione Kraken']}
-    dossier=load('dossier_multifonte.json',{})
-    if status.get('stato') in ('PARZIALE','PRONTO_PER_ESAME_GPT') and dossier.get('kraken_istantanea_utc')!=snap:
-        return {'stato':'NON_ALLINEATO','rilevazione_kraken_utc':snap,
-                'motivi_incompletezza':['File dossier mancante o precedente']}
-    return status
+def stato_dossier_per_report(data, portfolio=None):
+    """Reject dossier/wallet drift even when public market timestamps match."""
+    status = load('dossier_stato.json', {}) or {}
+    dossier = load('dossier_multifonte.json', {}) or {}
+    snap = data['rilevazione_utc']
+    if (not isinstance(status, dict) or not isinstance(dossier, dict)
+            or status.get('rilevazione_kraken_utc') != snap
+            or dossier.get('kraken_istantanea_utc') != snap):
+        return {'stato': 'NON_ALLINEATO', 'rilevazione_kraken_utc': snap,
+                'idoneita_analisi_patrimoniale': 'NON_IDONEA',
+                'stato_fonti_mercato': 'NON_VERIFICABILE',
+                'motivi_incompletezza': ['Il dossier GPT non corrisponde alla rilevazione Kraken']}
+    current = fotografia_portafoglio_sha256(portfolio) if portfolio is not None else None
+    recorded = dossier.get('fotografia_portafoglio_sha256')
+    status_id = status.get('fotografia_portafoglio_sha256')
+    if recorded and status_id and current and recorded == status_id == current:
+        # A matching wallet hash does not extend the life of the market snapshot.
+        # Use the same 60-minute limit as dossier_trade.collect, at report time.
+        now = NOW()
+        try:
+            observed = dt.datetime.fromisoformat(snap.replace('Z', '+00:00'))
+            if observed.tzinfo is None:
+                raise ValueError('Market timestamp without timezone')
+            age = (now - observed.astimezone(dt.timezone.utc)).total_seconds()
+            market_recent = -120 <= age <= 3600
+        except (TypeError, ValueError, AttributeError, OverflowError):
+            market_recent = False
+        if status.get('idoneita_analisi_patrimoniale') == 'IDONEA' and not market_recent:
+            downgraded = dict(status)
+            downgraded['stato'] = 'PARZIALE'
+            downgraded['stato_fonti_mercato'] = 'SCADUTO'
+            downgraded['idoneita_analisi_patrimoniale'] = 'NON_IDONEA'
+            downgraded['motivi_incompletezza'] = (
+                list(status.get('motivi_incompletezza') or []) +
+                ['Rilevazione mercato scaduta o temporalmente incoerente alla composizione del report'])
+            return downgraded
+        # Freshness is time-dependent: a matched SHA never freezes balance age.
+        if status.get('idoneita_analisi_patrimoniale') == 'IDONEA':
+            fresh_now = stato_saldo(portfolio, data.get('saldo_refresh'), now=now)
+            if fresh_now['freschezza_saldo'] != 'RECENTE':
+                downgraded = dict(status)
+                downgraded['stato'] = ('PRONTO_PER_ESAME_MERCATO'
+                                       if status.get('stato_fonti_mercato') == 'COMPLETO'
+                                       else 'PARZIALE')
+                downgraded['idoneita_analisi_patrimoniale'] = 'NON_IDONEA'
+                downgraded['motivi_patrimoniali'] = (
+                    list(status.get('motivi_patrimoniali') or []) +
+                    ['Saldo non più recente alla composizione del report'])
+                return downgraded
+        return status
+    if recorded and status_id and current and (recorded != current or status_id != recorded):
+        problem = 'Fotografia del patrimonio diversa fra dossier e report'
+        state = 'NON_ALLINEATO_PATRIMONIO'
+    else:
+        problem = 'Identità della fotografia patrimoniale non verificabile; dossier legacy o snapshot assente'
+        state = 'PATRIMONIO_NON_VERIFICABILE'
+    safe = dict(status)
+    safe['stato'] = state
+    safe['idoneita_analisi_patrimoniale'] = 'NON_IDONEA'
+    safe['motivi_patrimoniali'] = list(status.get('motivi_patrimoniali') or []) + [problem]
+    return safe
 
 
 def refresh():
@@ -729,7 +1079,10 @@ def refresh():
     markets_multi, rates = multi.assemble(
         pairs, tickers, min_vol=num(conf.get('scanner',{}).get('volume_24h_min_eur',500000)),
         max_spread=num(conf.get('scanner',{}).get('spread_massimo_pct',0.8)))
-    tokens = sorted({'BTC','ETH','SOL'} | {h['token'].upper() for h in portfolio.get('posizioni',[])})
+    tokens = sorted({'BTC','ETH','SOL'} |
+                    {wallet_symbol(h.get('token'))[0]
+                     for h in (portfolio.get('posizioni') or [])
+                     if isinstance(h, dict) and wallet_symbol(h.get('token'))[1]})
     trends = {}
     for tok in tokens:
         row = markets.get(tok)
@@ -892,7 +1245,7 @@ def refresh():
     check_out=verifica_piani.safe_check()
     print('Verifica vecchio piano:',check_out.get('stato'),
           '| nessun trade simulato come eseguito')
-    status_dossier=prepara_dossier_aggiornamento(data)
+    status_dossier=prepara_dossier_aggiornamento(data, asset_pairs=pairs)
     # Solo dopo che entrambe le valutazioni GPT sono state congelate:
     # verifica le chiusure future se i relativi orizzonti sono maturi.
     # Al massimo 4 richieste OHLC per refresh, zero prima della scadenza.
@@ -907,12 +1260,29 @@ def refresh():
     output(data)
 
 def output(data):
-    report = build_report(data, load('portafoglio.json',{'posizioni':[]}),load('config.json',{}),
+    # One actual in-memory wallet for report valuation and dossier provenance.
+    account_portfolio = load('portafoglio.json', {'posizioni': []})
+    schema_ok = (isinstance(account_portfolio, dict)
+                 and isinstance(account_portfolio.get('posizioni'), list))
+    # The direct build_report contract still rejects malformed schema; output
+    # alone can publish an explicit error without replacing the real wallet.
+    valuation_portfolio = account_portfolio if schema_ok else {'posizioni': []}
+    report = build_report(data, valuation_portfolio, load('config.json',{}),
                           load('contesto.json',{}), load_decisions())
-    account_portfolio = load('portafoglio.json',{})
-    report['portafoglio_fonte'] = account_portfolio.get('fonte_quantita')
+    if not schema_ok:
+        report.update({'stato_totale': 'SCHEMA_NON_VALIDO',
+                       'totale_stimato_eur': None, 'zero_reale': False,
+                       'totale_parziale': True, 'posizioni_registrate': None,
+                       'posizioni_incomplete': None, 'posizioni_non_aggiornate': None,
+                       'errore_struttura_portafoglio':
+                       'Formato posizioni non valido: nessuna attribuzione patrimoniale.'})
+    report['fotografia_portafoglio_sha256'] = fotografia_portafoglio_sha256(account_portfolio)
+    report['portafoglio_letto_utc'] = NOW().isoformat(timespec='seconds')
+    report['portafoglio_fonte'] = (account_portfolio.get('fonte_quantita')
+                                   if isinstance(account_portfolio, dict) else None)
     report['binance_reference'] = data.get('binance_reference',{})
-    report['liquidita_spot_api'] = account_portfolio.get('liquidita_spot_api',{})
+    report['liquidita_spot_api'] = (account_portfolio.get('liquidita_spot_api',{})
+                                   if isinstance(account_portfolio, dict) else {})
     report['migrazione_attesa'] = load('migrazione_attesa.json',{})
     report['esperimento_delta'] = load('esperimenti_delta/stato_verifiche.json',{})
     linked_dossier=load('dossier_multifonte.json',{})
@@ -925,9 +1295,12 @@ def output(data):
     # Se verra' sostituito, l'originale resta osservabile nel tempo.
     import verifica_piani
     verifica_piani.archivia_piano(report['piano_gpt'])
-    report['dossier_stato'] = stato_dossier_per_report(data)
+    report['dossier_stato'] = stato_dossier_per_report(data, portfolio=account_portfolio)
     report['verifica_piano'] = load('verifica_piano_corrente.json',{})
     report['verifica_storico'] = load('verifica_storico_stato.json',{})
+    # Validate whole payload before saving: Python's default JSON would emit
+    # non-standard NaN/Infinity constants, which a GPT consumer might accept.
+    json.dumps(report, ensure_ascii=False, allow_nan=False)
     save('ultimo_report.json', report)
     (DIR/'cruscotto.html').write_text(render(report),encoding='utf-8')
     print('Aggiornato: cruscotto.html | ultimo_report.json')

@@ -1,0 +1,594 @@
+"""PR21 four timeframe financial invariants; no real private data/network."""
+import datetime as dt
+import json
+import pathlib
+import tempfile
+import unittest
+from unittest import mock
+
+import decision_desk as desk
+import dossier_trade as dossier
+import patrimonio_4tf as wallet_tf
+import grafico_4h as charts
+import kdd_wallet_packet_g0 as packet
+
+UTC=dt.timezone.utc
+NOW=dt.datetime(2026,10,28,17,31,tzinfo=UTC)
+
+
+def candles(frame, *, now=NOW, older=0):
+    seconds=charts.TIMEFRAMES[frame][0]*60
+    last=(int(now.timestamp())//seconds-1)*seconds-older*seconds
+    rows=[]
+    for i in range(71):
+        timestamp=last-(70-i)*seconds
+        base=100.0+(i%5)*0.01
+        rows.append([timestamp,str(base),str(base+.1),str(base-.1),str(base+.03),str(base+.02),'19',0])
+    # Last is always uncommitted in Kraken OHLC contract; original parser discards it.
+    rows.append([last+seconds,'100','100.2','99.8','100.1','100.0','12',0])
+    return rows
+
+
+def catalogue(tokens, alt_btc=True):
+    raw={}
+    for token in tokens:
+        base='XBT' if token=='BTC' else token
+        key='PAIR'+token
+        quote='USD' if token=='ALT' else 'EUR'
+        raw[key]={'status':'online','wsname':base+'/'+quote,
+                  'altname':'ALT'+token}
+    return raw
+
+
+def positions(tokens):
+    return [{'token':t,'quantita':'2','costo_medio_eur':None} for t in tokens]
+
+
+class PortfolioFourTFTests(unittest.TestCase):
+    def setUp(self):
+        self.now=NOW
+        self.rootctx=tempfile.TemporaryDirectory()
+        self.addCleanup(self.rootctx.cleanup)
+        self.root=pathlib.Path(self.rootctx.name)
+
+    def source(self,tokens):
+        return {'rilevazione_utc':self.now.isoformat(timespec='seconds'),
+                'markets':{t:{'token':t,'pair':('XBT/EUR' if t=='BTC' else t+'/EUR'),
+                              'pair_key':'PAIR'+t,'prezzo_eur':100,
+                              'var_oggi_utc_pct':0,'volume_24h_eur_stimato':1e6,
+                              'spread_pct':0.1} for t in tokens if t!='ALT'},
+                'trends':{},'schede_v02':[],'feed':[], 'problemi_feed':[]}
+
+    def net(self, *args, mismatch=None, stale_frame=None, missing=None, **kwargs):
+        endpoint=args[0]
+        if endpoint!='OHLC':
+            raise AssertionError('Unexpected public API '+endpoint)
+        key=kwargs['pair']
+        frame={15:'15m',60:'1h',240:'4h',1440:'1d'}[kwargs['interval']]
+        if missing == (key,frame):
+            raise ConnectionError('synthetic Kraken offline')
+        return {(mismatch if mismatch else key):candles(frame,older=2 if stale_frame==(key,frame) else 0),'last':0}
+
+    def test_01_all_wallet_rows_and_four_real_timeframes(self):
+        names=['BTC','ETH','ADA','SOL','LINK','DOT','UNI','ATOM','AVAX','NEAR','AAVE']
+        data=wallet_tf.collect({'posizioni':positions(names)},self.source(names),
+              asset_pairs=catalogue(names), fetch=self.net, now=self.now,
+              pause=lambda _:None)
+        self.assertEqual(len(data['posizioni']),11)
+        self.assertEqual(data['richieste_ohlc'],44)
+        for row in data['posizioni']:
+            self.assertEqual(row['stato'],'COMPLETO')
+            self.assertEqual(len(row['timeframe']),4)
+            for tf,seconds in [('15m',900),('1H',3600),('4H',14400),('1D',86400)]:
+                frame=row['timeframe'][tf]
+                self.assertEqual(frame['stato'],'AGGIORNATO')
+                self.assertEqual(frame['pair_key'],row['pair_key'])
+                self.assertEqual(frame['candele'],71)
+                self.assertEqual(frame['ultima_candela_ohlcv_chiusa']['time']+seconds,
+                                 int(dt.datetime.fromisoformat(frame['chiusura_utc']).timestamp()))
+                self.assertTrue(frame['ema20'] and frame['ema50'])
+                self.assertEqual(len(frame['serie_ohlcv_chiuse']),71)
+        self.assertEqual(data['posizioni'][0]['asset_base'],'XBT')
+        self.assertEqual(data['posizioni'][0]['token'],'BTC')
+
+    def test_02_verified_usd_alternative_no_fake_eur(self):
+        result=wallet_tf.collect({'posizioni':positions(['ALT'])}, self.source(['ALT']),
+              asset_pairs=catalogue(['ALT']),fetch=self.net,now=self.now,pause=lambda _:None)
+        row=result['posizioni'][0]
+        self.assertEqual(row['coppia'],'ALT/USD')
+        self.assertEqual(row['valuta_quotazione'],'USD')
+        self.assertEqual(row['stato'],'COMPLETO')
+        self.assertNotIn('prezzo_eur',row)
+
+    def test_03_mismatched_rest_response_does_not_reassign_candles(self):
+        result=wallet_tf.collect({'posizioni':positions(['BTC'])},self.source(['BTC']),
+            asset_pairs=catalogue(['BTC']),fetch=lambda *a,**k:self.net(*a,mismatch='NOT_BTC',**k),
+            now=self.now,pause=lambda _:None)
+        self.assertEqual(result['posizioni'][0]['stato'],'PARZIALE')
+        self.assertEqual({f['stato'] for f in result['posizioni'][0]['timeframe'].values()},
+                         {'NON_DISPONIBILE'})
+
+    def test_04_partial_stale_and_failed_timeframes(self):
+        def partial(*a,**kw):
+            if kw['interval']==15:
+                return self.net(*a,stale_frame=(kw['pair'],'15m'),**kw)
+            if kw['interval']==60:
+                raise ConnectionError('offline')
+            return self.net(*a,**kw)
+        result=wallet_tf.collect({'posizioni':positions(['BTC'])},self.source(['BTC']),
+                                 asset_pairs=catalogue(['BTC']),fetch=partial,now=self.now,
+                                 pause=lambda _:None)
+        rows=result['posizioni'][0]['timeframe']
+        self.assertEqual(rows['15m']['stato'],'SCADUTO')
+        self.assertEqual(rows['1H']['stato'],'NON_DISPONIBILE')
+        self.assertEqual(rows['4H']['stato'],'AGGIORNATO')
+        self.assertEqual(rows['1D']['stato'],'AGGIORNATO')
+
+    def test_05_budget_deferred_never_drops_wallet_rows(self):
+        names=['BTC','ETH','ADA','SOL','LINK','DOT','UNI','ATOM','AVAX','NEAR','AAVE']
+        result=wallet_tf.collect({'posizioni':positions(names)},self.source(names),
+             asset_pairs=catalogue(names),fetch=self.net,now=self.now,
+             max_queries=10,pause=lambda _:None)
+        self.assertEqual(len(result['posizioni']),len(names))
+        self.assertEqual(result['richieste_ohlc'],10)
+        self.assertTrue(any(f['stato']=='RINVIATO_BUDGET'
+                            for row in result['posizioni'] for f in row['timeframe'].values()))
+
+    def test_06_ambiguous_or_invalid_token_cannot_claim_ohlc(self):
+        pairs=catalogue(['BTC'])
+        pairs['OTHER']={'status':'online','wsname':'XBT/EUR','altname':'OTHERALT'}
+        result=wallet_tf.collect({'posizioni':[{'token':'BTC','quantita':'2'},
+                                                {'token':'BTC','quantita':'3'},
+                                                {'token':None,'quantita':'2'},
+                                                'malformed']},
+                                 self.source(['BTC']),asset_pairs=pairs,fetch=self.net,
+                                 now=self.now,pause=lambda _:None)
+        self.assertEqual(len(result['posizioni']),4)
+        self.assertEqual(result['richieste_ohlc'],0)
+        self.assertEqual(result['posizioni'][0]['stato'],'IDENTITA_DUPLICATA')
+        self.assertEqual(result['posizioni'][2]['stato'],'IDENTITA_NON_VALIDA')
+        self.assertEqual(result['posizioni'][3]['stato'],'IDENTITA_NON_VALIDA')
+
+    def test_07_full_original_dossier_to_private_gpt_packet(self):
+        tokens=['BTC','ETH','SOL']
+        source=self.source(tokens)
+        wallet={'posizioni':positions(tokens)}
+        (self.root/'portafoglio.json').write_text(json.dumps(wallet))
+        (self.root/'ultima_rilevazione.json').write_text(json.dumps(source))
+        with mock.patch.object(desk,'DIR',self.root),\
+             mock.patch.object(desk,'NOW',return_value=self.now),\
+             mock.patch.object(dossier,'recupera_4h',return_value={}),\
+             mock.patch.object(dossier,'global_context',return_value={}),\
+             mock.patch.object(dossier,'derivatives_context',return_value={}),\
+             mock.patch.object(dossier.time,'sleep'),\
+             mock.patch.object(desk,'kraken',side_effect=self.net),\
+             mock.patch.object(desk.piano_gpt,'load',return_value=None),\
+             mock.patch('verifica_piani.archivia_piano',return_value=None):
+            status=desk.prepara_dossier_aggiornamento(source,asset_pairs=catalogue(tokens))
+            desk.output(source)
+            self.assertEqual(status['copertura_patrimonio_4tf']['completate'],len(tokens))
+        dossier_raw=json.loads((self.root/'dossier_multifonte.json').read_text())
+        report=json.loads((self.root/'ultimo_report.json').read_text())
+        self.assertEqual(dossier_raw['schema'],3)
+        self.assertEqual(len(dossier_raw['patrimonio_4tf']['posizioni']),len(tokens))
+        self.assertEqual(report['fotografia_portafoglio_sha256'],
+                         dossier_raw['fotografia_portafoglio_sha256'])
+        result=packet.build(self.root,now=self.now)
+        self.assertEqual(len(result['patrimonio']['posizioni']),len(tokens))
+        for position in result['patrimonio']['posizioni']:
+            self.assertEqual(position['analisi_4tf']['stato'],'COMPLETO')
+            self.assertEqual(len(position['analisi_4tf']['timeframe']),4)
+            self.assertEqual(position['analisi_4tf']['timeframe']['15m']['stato'],'AGGIORNATO')
+        self.assertIsNone(result['patrimonio']['posizioni'][0]['pl_indicativo_eur'])
+        raw=json.dumps(result,allow_nan=False)
+        for forbidden in ('t0_id','t0_sha256','costo_medio_eur','readonly.json'):
+            self.assertNotIn(forbidden,raw)
+        dossier_raw['patrimonio_4tf']['rilevazione_kraken_utc']='2001-01-01T00:00:00Z'
+        (self.root/'dossier_multifonte.json').write_text(json.dumps(dossier_raw))
+        with self.assertRaises(packet.PacketError):
+            packet.build(self.root,now=self.now)
+
+    def test_09_invalid_and_duplicate_wallet_rows_remain_packet_visible(self):
+        tokens=['BTC','BTC',None]
+        wallet={'posizioni':[{'token':'BTC','quantita':'2'},
+                              {'token':'BTC','quantita':'3'},
+                              {'token':None,'quantita':'2'}]}
+        source=self.source(['BTC'])
+        four=wallet_tf.collect(wallet,source,asset_pairs=catalogue(['BTC']),
+                               fetch=self.net,now=self.now,pause=lambda _:None)
+        report=desk.build_report(source,wallet,{}, {},[])
+        report.update(rilevazione_utc=source['rilevazione_utc'],
+                      fotografia_portafoglio_sha256=four['portafoglio_sha256'])
+        dossier_raw={'schema':3,'kraken_istantanea_utc':source['rilevazione_utc'],
+                     'fotografia_portafoglio_sha256':four['portafoglio_sha256'],
+                     'patrimonio_4tf':four}
+        for name,obj in [('portafoglio.json',wallet),('ultimo_report.json',report),
+                         ('dossier_multifonte.json',dossier_raw),
+                         ('ultima_rilevazione.json',source)]:
+            (self.root/name).write_text(json.dumps(obj))
+        pkt=packet.build(self.root,now=self.now)
+        rows=pkt['patrimonio']['posizioni']
+        self.assertEqual(len(rows),3)
+        self.assertTrue(all(x['stato_identita']!='VALIDA' for x in rows))
+        self.assertTrue(all(x['valore_eur'] is None for x in rows))
+        self.assertTrue(all(x['analisi_4tf']['stato']!='COMPLETO' for x in rows))
+
+    def test_10_packet_rechecks_aged_technical_frames_at_creation(self):
+        tokens=['BTC']
+        source=self.source(tokens)
+        wallet={'posizioni':positions(tokens)}
+        (self.root/'portafoglio.json').write_text(json.dumps(wallet))
+        (self.root/'ultima_rilevazione.json').write_text(json.dumps(source))
+        with mock.patch.object(desk,'DIR',self.root),\
+             mock.patch.object(desk,'NOW',return_value=self.now),\
+             mock.patch.object(dossier,'recupera_4h',return_value={}),\
+             mock.patch.object(dossier,'global_context',return_value={}),\
+             mock.patch.object(dossier,'derivatives_context',return_value={}),\
+             mock.patch.object(dossier.time,'sleep'),\
+             mock.patch.object(desk,'kraken',side_effect=self.net),\
+             mock.patch.object(desk.piano_gpt,'load',return_value=None),\
+             mock.patch('verifica_piani.archivia_piano',return_value=None):
+            desk.prepara_dossier_aggiornamento(source,asset_pairs=catalogue(tokens))
+            desk.output(source)
+        old=packet.build(self.root,now=self.now)
+        late=packet.build(self.root,now=self.now+dt.timedelta(hours=3))
+        self.assertEqual(old['patrimonio']['posizioni'][0]['analisi_4tf']['timeframe']['15m']['stato'],
+                         'AGGIORNATO')
+        self.assertEqual(late['patrimonio']['posizioni'][0]['analisi_4tf']['timeframe']['15m']['stato'],
+                         'SCADUTO')
+        self.assertEqual(late['mercato']['stato'],'DA_AGGIORNARE')
+        self.assertEqual(late['patrimonio']['posizioni'][0]['analisi_4tf']['stato'],
+                         'PARZIALE')
+
+    def test_11_usd_only_position_reaches_packet_without_eur_total(self):
+        source=self.source(['ALT']); wallet={'posizioni':positions(['ALT'])}
+        (self.root/'portafoglio.json').write_text(json.dumps(wallet))
+        (self.root/'ultima_rilevazione.json').write_text(json.dumps(source))
+        with mock.patch.object(desk,'DIR',self.root),\
+             mock.patch.object(desk,'NOW',return_value=self.now),\
+             mock.patch.object(dossier,'recupera_4h',return_value={}),\
+             mock.patch.object(dossier,'global_context',return_value={}),\
+             mock.patch.object(dossier,'derivatives_context',return_value={}),\
+             mock.patch.object(dossier.time,'sleep'),\
+             mock.patch.object(desk,'kraken',side_effect=self.net),\
+             mock.patch.object(desk.piano_gpt,'load',return_value=None),\
+             mock.patch('verifica_piani.archivia_piano',return_value=None):
+            desk.prepara_dossier_aggiornamento(source,asset_pairs=catalogue(['ALT']))
+            desk.output(source)
+        pkt=packet.build(self.root,now=self.now)
+        self.assertIsNone(pkt['patrimonio']['totale_stimato_eur_senza_cash'])
+        self.assertEqual(pkt['patrimonio']['stato_totale'],'NON_DISPONIBILE')
+        row=pkt['patrimonio']['posizioni'][0]
+        self.assertEqual(row['analisi_4tf']['coppia'],'ALT/USD')
+        self.assertEqual(row['analisi_4tf']['timeframe']['1H']['stato'],'AGGIORNATO')
+        self.assertIsNone(row['prezzo_eur'])
+
+    def test_12_tampered_ohlc_and_snapshot_rejected_by_packet(self):
+        source=self.source(['BTC']);wallet={'posizioni':positions(['BTC'])}
+        four=wallet_tf.collect(wallet,source,asset_pairs=catalogue(['BTC']),
+                               fetch=self.net,now=self.now,pause=lambda _:None)
+        report=desk.build_report(source,wallet,{}, {},[])
+        report['fotografia_portafoglio_sha256']=four['portafoglio_sha256']
+        dossier_doc={'schema':3,'kraken_istantanea_utc':source['rilevazione_utc'],
+                     'fotografia_portafoglio_sha256':four['portafoglio_sha256'],
+                     'patrimonio_4tf':four}
+        for name,obj in [('portafoglio.json',wallet),('ultimo_report.json',report),
+                         ('dossier_multifonte.json',dossier_doc),
+                         ('ultima_rilevazione.json',source)]:
+            (self.root/name).write_text(json.dumps(obj))
+        packet.build(self.root,now=self.now)
+        frame=four['posizioni'][0]['timeframe']['1H']
+        frame['serie_ohlcv_chiuse'][10]['time']+=1
+        (self.root/'dossier_multifonte.json').write_text(json.dumps(dossier_doc))
+        with self.assertRaisesRegex(packet.PacketError,'Lacuna|sovrapposizione'):
+            packet.build(self.root,now=self.now)
+
+    def test_13_invalid_quantity_remains_visible_with_no_fictitious_value(self):
+        source=self.source(['BTC'])
+        wallet={'posizioni':[{'token':'BTC','quantita':'NaN','costo_medio_eur':None}]}
+        four=wallet_tf.collect(wallet,source,asset_pairs=catalogue(['BTC']),
+                               fetch=self.net,now=self.now,pause=lambda _:None)
+        report=desk.build_report(source,wallet,{}, {},[])
+        report['fotografia_portafoglio_sha256']=four['portafoglio_sha256']
+        dossier_doc={'schema':3,'kraken_istantanea_utc':source['rilevazione_utc'],
+                     'fotografia_portafoglio_sha256':four['portafoglio_sha256'],
+                     'patrimonio_4tf':four}
+        for name,obj in [('portafoglio.json',wallet),('ultimo_report.json',report),
+                         ('dossier_multifonte.json',dossier_doc),
+                         ('ultima_rilevazione.json',source)]:
+            (self.root/name).write_text(json.dumps(obj))
+        result=packet.build(self.root,now=self.now)
+        self.assertEqual(len(result['patrimonio']['posizioni']),1)
+        row=result['patrimonio']['posizioni'][0]
+        self.assertEqual(row['stato_quantita'],'INVALIDA')
+        self.assertIsNone(row['quantita_spot'])
+        self.assertIsNone(row['valore_eur'])
+        self.assertEqual(row['analisi_4tf']['timeframe']['15m']['stato'],'AGGIORNATO')
+        self.assertIsNone(result['patrimonio']['totale_stimato_eur_senza_cash'])
+
+    def test_08_real_zero_total_not_guessed_when_eur_missing(self):
+        source=self.source(['ALT'])
+        portfolio={'posizioni':positions(['ALT'])}
+        result=wallet_tf.collect(portfolio,source,asset_pairs=catalogue(['ALT']),
+                                 fetch=self.net,now=self.now,pause=lambda _:None)
+        self.assertEqual(result['posizioni'][0]['stato'],'COMPLETO')
+        # Price conversion deliberately absent in 4TF; D1/D2 report stays null.
+        report=desk.build_report(source,portfolio,{}, {},[])
+        self.assertIsNone(report['totale_stimato_eur'])
+        self.assertEqual(report['stato_totale'],'NON_DISPONIBILE')
+
+
+    def test_rt_finance_producer_to_packet_reconciles_real_d1_calculations(self):
+        """End-to-end original D1 calculation; no manually fabricated report."""
+        import copy
+        wallet={'posizioni':[{'token':'ADA','quantita':'0.1',
+                               'costo_medio_eur':'0.05'}]}
+        source=self.source(['ADA'])
+        source['markets']['ADA']['prezzo_eur']=0.2
+        report=desk.build_report(source,wallet,{}, {},[])
+        self.assertEqual(report['stato_totale'],'COMPLETO')
+        self.assertEqual(report['posizioni'][0]['valore_eur'],0.1*0.2)
+        self.assertEqual(report['posizioni'][0]['pl_non_realizzato_eur'],
+                         (0.2-0.05)*0.1)
+        four=wallet_tf.collect(wallet,source,asset_pairs=catalogue(['ADA']),
+            fetch=self.net,now=self.now,pause=lambda _:None)
+        report['fotografia_portafoglio_sha256']=four['portafoglio_sha256']
+        dossier_doc={'schema':3,'kraken_istantanea_utc':source['rilevazione_utc'],
+                     'fotografia_portafoglio_sha256':four['portafoglio_sha256'],
+                     'patrimonio_4tf':four}
+        def persist(rep):
+            for name,obj in [('portafoglio.json',wallet),('ultimo_report.json',rep),
+                             ('dossier_multifonte.json',dossier_doc),
+                             ('ultima_rilevazione.json',source)]:
+                (self.root/name).write_text(json.dumps(obj),encoding='utf-8')
+        persist(report)
+        valid=packet.build(self.root,now=self.now)
+        own=valid['patrimonio']['posizioni'][0]
+        self.assertEqual(float(own['valore_eur']),0.1*0.2)
+        self.assertEqual(float(own['pl_indicativo_eur']),(0.2-0.05)*0.1)
+        self.assertEqual(own['analisi_4tf']['stato'],'COMPLETO')
+        self.assertEqual(valid['patrimonio']['stato_totale'],'COMPLETO')
+        # Financially coherent forged row, but it contradicts the original
+        # public snapshot. All balances remain synthetic and local to CI.
+        forged=copy.deepcopy(report)
+        forged['posizioni'][0]['prezzo_eur']=0.3
+        forged['posizioni'][0]['valore_eur']=0.1*0.3
+        forged['posizioni'][0]['pl_non_realizzato_eur']=(0.3-0.05)*0.1
+        forged['totale_stimato_eur']=0.1*0.3
+        persist(forged)
+        with self.assertRaisesRegex(packet.PacketError,'Prezzo incoerente'):
+            packet.build(self.root,now=self.now)
+        # A correct snapshot/value with altered cost-based P/L is rejected.
+        forged=copy.deepcopy(report)
+        forged['posizioni'][0]['pl_non_realizzato_eur']=0.0
+        persist(forged)
+        with self.assertRaisesRegex(packet.PacketError,'P/L incoerente'):
+            packet.build(self.root,now=self.now)
+        persist(report)
+        aged=packet.build(self.root,now=self.now+dt.timedelta(minutes=30,milliseconds=150))
+        self.assertEqual(aged['mercato']['stato'],'DA_AGGIORNARE')
+        self.assertEqual(aged['patrimonio']['posizioni'][0]['analisi_4tf']['stato'],
+                         'PARZIALE')
+
+
+    def test_rt4_pair01_opaque_key_contradicts_same_market_4tf_evidence(self):
+        wallet={'posizioni':positions(['BTC'])}
+        source=self.source(['BTC'])
+        source['markets']['BTC']['token']='BTC'
+        four=wallet_tf.collect(wallet,source,asset_pairs=catalogue(['BTC']),
+                               fetch=self.net,now=self.now,pause=lambda _:None)
+        report=desk.build_report(source,wallet,{}, {},[])
+        report['fotografia_portafoglio_sha256']=four['portafoglio_sha256']
+        dossier_raw={'schema':3,'kraken_istantanea_utc':source['rilevazione_utc'],
+                     'fotografia_portafoglio_sha256':four['portafoglio_sha256'],
+                     'patrimonio_4tf':four}
+        for name,obj in [('portafoglio.json',wallet),('ultimo_report.json',report),
+                         ('dossier_multifonte.json',dossier_raw),
+                         ('ultima_rilevazione.json',source)]:
+            (self.root/name).write_text(json.dumps(obj))
+        self.assertEqual(packet.build(self.root,now=self.now)['patrimonio']
+                         ['posizioni'][0]['analisi_4tf']['stato'],'COMPLETO')
+        source['markets']['BTC']['pair_key']='XETHZEUR'
+        (self.root/'ultima_rilevazione.json').write_text(json.dumps(source))
+        with self.assertRaisesRegex(packet.PacketError,'Kraken|Identita'):
+            packet.build(self.root,now=self.now)
+
+
+    def test_rt4_pair01_real_market_producer_aliases_mixed_wallet_and_packet(self):
+        """Original EUR-only market producer, D1 valuation and full GPT consumer."""
+        pairs={
+            'XXBTZEUR':{'status':'online','wsname':'XBT/EUR'},
+            'XXDGZEUR':{'status':'online','wsname':'XDG/EUR'},
+            'XETHZEUR':{'status':'online','wsname':'ETH/EUR'},
+        }
+        def t(last):
+            return {'c':[str(last)],'o':str(last*0.95),
+                    'a':[str(last*1.001)],'b':[str(last*0.999)],
+                    'v':['0','120']}
+        tickers={'XXBTZEUR':t(100.0),'XXDGZEUR':t(1.5),
+                 'XETHZEUR':t(2000.0)}
+        markets=desk.market_pairs_and_ticker(pairs,tickers)
+        self.assertEqual(markets['BTC']['token'],'BTC')
+        self.assertEqual(markets['BTC']['pair'],'XBT/EUR')
+        self.assertEqual(markets['BTC']['pair_key'],'XXBTZEUR')
+        self.assertEqual(markets['DOGE']['token'],'DOGE')
+        self.assertEqual(markets['DOGE']['pair'],'XDG/EUR')
+        self.assertEqual(markets['DOGE']['pair_key'],'XXDGZEUR')
+        wallet={'posizioni':[{'token':'BTC','quantita':'2','costo_medio_eur':'80'},
+                              {'token':'DOGE','quantita':'3','costo_medio_eur':None},
+                              {'token':'NOEUR','quantita':None}]}
+        source={'rilevazione_utc':self.now.isoformat(timespec='seconds'),
+                'markets':markets,'trends':{},'schede_v02':[]}
+        report=desk.build_report(source,wallet,{}, {},[])
+        self.assertEqual(report['stato_totale'],'PARZIALE')
+        self.assertIsNone(report['posizioni'][2].get('valore_eur'))
+        dossier_doc={'kraken_istantanea_utc':source['rilevazione_utc'],
+                     'grafici_4h':{}}
+        def save():
+            for name,data in [('portafoglio.json',wallet),
+                              ('ultima_rilevazione.json',source),
+                              ('ultimo_report.json',report),
+                              ('dossier_multifonte.json',dossier_doc)]:
+                (self.root/name).write_text(json.dumps(data),encoding='utf-8')
+        save()
+        packet_doc=packet.build(self.root,now=self.now)
+        rows=packet_doc['patrimonio']['posizioni']
+        self.assertEqual([x['token'] for x in rows],['BTC','DOGE','NOEUR'])
+        self.assertEqual(float(rows[0]['valore_eur']),200)
+        self.assertEqual(float(rows[0]['pl_indicativo_eur']),40)
+        self.assertEqual(float(rows[1]['valore_eur']),4.5)
+        self.assertIsNone(rows[1]['pl_indicativo_eur'])
+        self.assertIsNone(rows[2]['valore_eur'])
+        self.assertIsNone(rows[2]['quantita_spot'])
+        self.assertEqual(packet_doc['patrimonio']['stato_totale'],'PARZIALE')
+        self.assertTrue(packet_doc['patrimonio']['totale_parziale'])
+        # Mutate ONE original market identity field, preserving all its prices.
+        source['markets']['BTC']['pair']='ETH/EUR'
+        save()
+        with self.assertRaisesRegex(packet.PacketError,'Coppia mercato EUR'):
+            packet.build(self.root,now=self.now)
+
+
+class SupervisioneRilievi4TFTests(PortfolioFourTFTests):
+    """Original producer/consumer with synthetic Kraken OHLC; RED on pin e72f8ab."""
+
+    def _entry(self, token='BTC'):
+        source=self.source([token])
+        data=wallet_tf.collect({'posizioni':positions([token])},source,
+            asset_pairs=catalogue([token]),fetch=self.net,now=self.now,
+            pause=lambda _:None)
+        self.assertEqual(data['posizioni'][0]['stato'],'COMPLETO')
+        return data['posizioni'][0]
+
+    def test_rt01_aggregated_stale_all_frames(self):
+        row=self._entry()
+        late=packet.technical_in_packet(row,self.now+dt.timedelta(days=4))
+        self.assertTrue(all(x['stato']=='SCADUTO' for x in late['timeframe'].values()))
+        self.assertEqual(late['stato'],'PARZIALE')
+
+    def test_rt01_aggregated_stale_mixed_frames(self):
+        row=self._entry()
+        late=packet.technical_in_packet(row,self.now+dt.timedelta(hours=3))
+        observed={x['stato'] for x in late['timeframe'].values()}
+        self.assertEqual(observed,{'AGGIORNATO','SCADUTO'})
+        self.assertEqual(late['stato'],'PARZIALE')
+
+    def test_rt02_authentic_indicator_recomputation_positive_control(self):
+        row=self._entry()
+        packet.technical_in_packet(row,self.now)
+
+    def test_rt02_single_field_mutations_all_rejected(self):
+        import copy
+        row=self._entry()
+        for field in ('close','volume','ema20','ema50','pivot_giornaliero',
+                      'livelli_strutturali','volume_vs_media20',
+                      'orientamento','supporto_vicino','resistenza_vicina'):
+            with self.subTest(field=field):
+                bad=copy.deepcopy(row)
+                frame=bad['timeframe']['15m']
+                if field in ('pivot_giornaliero','livelli_strutturali'):
+                    frame[field]={'untrusted':1234567}
+                elif field=='orientamento':
+                    frame[field]='INVENTATO'
+                else:
+                    frame[field]=1234567.0
+                with self.assertRaises(packet.PacketError):
+                    packet.technical_in_packet(bad,self.now)
+
+    def test_rt02_missing_and_nonfinite_indicator_rejected(self):
+        import copy
+        row=self._entry()
+        for field in ('close','ema20','ema50','volume','pivot_giornaliero','livelli_strutturali'):
+            with self.subTest(field=field):
+                bad=copy.deepcopy(row)
+                bad['timeframe']['15m'].pop(field,None)
+                with self.assertRaises(packet.PacketError):
+                    packet.technical_in_packet(bad,self.now)
+        for injected in (float('nan'),float('inf'),-float('inf')):
+            with self.subTest(injected=str(injected)):
+                bad=copy.deepcopy(row)
+                bad['timeframe']['15m']['ema20']=injected
+                with self.assertRaises(packet.PacketError):
+                    packet.technical_in_packet(bad,self.now)
+
+    def test_rt03_alias_xbt_and_xdg_select_real_kraken_market(self):
+        pair_data={'XXBTZEUR':{'status':'online','wsname':'XBT/EUR','altname':'XBTEUR'},
+                   'XXDGZEUR':{'status':'online','wsname':'XDG/EUR','altname':'XDGEUR'}}
+        for token,expected in (('XBT','XBT/EUR'),('XDG','XDG/EUR')):
+            with self.subTest(token=token):
+                rows=wallet_tf.collect({'posizioni':positions([token])},self.source([token]),
+                    asset_pairs=pair_data,fetch=lambda endpoint,**kw:
+                        {kw['pair']:candles({15:'15m',60:'1h',240:'4h',1440:'1d'}[kw['interval']]),
+                         'last':0},now=self.now,pause=lambda _:None)['posizioni']
+                self.assertEqual(rows[0]['coppia'],expected)
+                self.assertEqual(rows[0]['stato'],'COMPLETO')
+
+    def test_rt03_alias_collision_is_not_attributed_to_any_wallet_row(self):
+        raw=catalogue(['BTC','DOGE'])
+        for names in (['XBT','BTC'],['XDG','DOGE']):
+            with self.subTest(names=names):
+                result=wallet_tf.collect({'posizioni':positions(names)},self.source(names),
+                    asset_pairs=raw,fetch=self.net,now=self.now,pause=lambda _:None)
+                self.assertEqual(result['richieste_ohlc'],0)
+                self.assertTrue(all(x['stato']=='IDENTITA_DUPLICATA'
+                                    for x in result['posizioni']))
+
+    def test_rt03_d1_report_and_packet_never_value_alias_collision(self):
+        for names in (['XBT','BTC'],['XDG','DOGE']):
+            with self.subTest(names=names):
+                wallet={'posizioni':positions(names)}
+                data=self.source(names)
+                name=wallet_tf.canonical_base(names[0])
+                data['markets'][name]={'pair':name+'/EUR','pair_key':'PAIR'+name,
+                    'prezzo_eur':100,'var_oggi_utc_pct':0,
+                    'volume_24h_eur_stimato':1e6,'spread_pct':0.1}
+                report=desk.build_report(data,wallet,{}, {},[])
+                self.assertTrue(all(row['identificativo_duplicato']
+                                    for row in report['posizioni']))
+                self.assertTrue(all(row.get('valore_eur') is None
+                                    for row in report['posizioni']))
+                four=wallet_tf.collect(wallet,data,asset_pairs=catalogue([name]),
+                    fetch=self.net,now=self.now,pause=lambda _:None)
+                report['fotografia_portafoglio_sha256']=four['portafoglio_sha256']
+                dossier_doc={'schema':3,'kraken_istantanea_utc':data['rilevazione_utc'],
+                    'fotografia_portafoglio_sha256':four['portafoglio_sha256'],
+                    'patrimonio_4tf':four}
+                for path,value in [('portafoglio.json',wallet),('ultimo_report.json',report),
+                                   ('dossier_multifonte.json',dossier_doc),
+                                   ('ultima_rilevazione.json',data)]:
+                    (self.root/path).write_text(json.dumps(value))
+                actual=packet.build(self.root,now=self.now)
+                self.assertTrue(all(row['stato_identita']=='IDENTITA_AMBIGUA'
+                    and row['valore_eur'] is None for row in actual['patrimonio']['posizioni']))
+
+    def test_rt02_full_packet_rejects_single_derivative_mutations(self):
+        import copy
+        data=self.source(['BTC'])
+        wallet={'posizioni':positions(['BTC'])}
+        four=wallet_tf.collect(wallet,data,asset_pairs=catalogue(['BTC']),
+            fetch=self.net,now=self.now,pause=lambda _:None)
+        report=desk.build_report(data,wallet,{}, {},[])
+        report['fotografia_portafoglio_sha256']=four['portafoglio_sha256']
+        dossier_doc={'schema':3,'kraken_istantanea_utc':data['rilevazione_utc'],
+            'fotografia_portafoglio_sha256':four['portafoglio_sha256'],
+            'patrimonio_4tf':four}
+        for name,obj in [('portafoglio.json',wallet),('ultimo_report.json',report),
+                         ('dossier_multifonte.json',dossier_doc),
+                         ('ultima_rilevazione.json',data)]:
+            (self.root/name).write_text(json.dumps(obj))
+        control=packet.build(self.root,now=self.now)
+        self.assertEqual(control['patrimonio']['posizioni'][0]['analisi_4tf']['stato'],
+                         'COMPLETO')
+        for field in ('close','volume','ema20','ema50',
+                      'pivot_giornaliero','livelli_strutturali'):
+            with self.subTest(field=field):
+                modified=copy.deepcopy(dossier_doc)
+                frame=modified['patrimonio_4tf']['posizioni'][0]['timeframe']['15m']
+                frame[field]=({'falso':123} if field in (
+                    'pivot_giornaliero','livelli_strutturali') else 1234567.0)
+                (self.root/'dossier_multifonte.json').write_text(json.dumps(modified))
+                with self.assertRaises(packet.PacketError):
+                    packet.build(self.root,now=self.now)
+
+if __name__=='__main__':
+    unittest.main()

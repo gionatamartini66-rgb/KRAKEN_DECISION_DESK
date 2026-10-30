@@ -1,0 +1,24 @@
+name: KDD candidate checks
+on:
+  push:
+    branches:
+      - experiments/kdd-rt-i01-patrimonio-g2-20261028
+  pull_request:
+    branches:
+      - main
+jobs:
+  synthetic-regressions:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Core KDD regressions
+        run: python -B -m unittest -q test_decision_desk
+      - name: Private packet, market age and portfolio 4TF synthetic tests
+        run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_wallet_packet_g0 scripts.test_kdd_market_freshness scripts.test_kdd_portfolio_4tf
+      - name: Existing safe updater tests
+        run: python -B scripts/test_kdd_aggiorna.py

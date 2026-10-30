@@ -4,6 +4,8 @@ import datetime as dt
 import hmac
 import html
 import json
+import math
+import re
 import secrets
 import threading
 import time
@@ -78,10 +80,8 @@ def with_controls(page: str, result: str = "") -> str:
         "<button id='kdd-refresh-button' style='font:inherit;padding:12px 18px;border:0;"
         "border-radius:9px;background:#80cbff;color:#06162b;font-weight:700' "
         f"type='submit'{disabled}>↻ Aggiorna dati ora</button>"
-        "</form><p><a style='font-weight:700;color:#8aceff' href='/grafico/sui-4h'>"
-        "📈 Grafico SUI/EUR · 15m / 1H / 4H / 1D</a></p>"
-        "<p><a style='font-weight:700;color:#8aceff' href='/analisi/sui-mtf'>"
-        "🔎 Confronto multitimeframe SUI/EUR (4 intervalli)</a></p>"
+        "</form><p><a style='font-weight:700;color:#8aceff' href='/mercati/spot'>"
+        "🌐 Seleziona coppia Kraken Spot · grafici 15m / 1H / 4H / 1D</a></p>"
         "<p>Server solo su questo Samsung · prezzi pubblici · nessun ordine.</p>"
         f"<p id='kdd-refresh-status' role='status'>{html.escape(message)}</p>"
         "</section>"
@@ -172,12 +172,25 @@ def load_sui_comparison(public_kraken=None, now=None):
     return grafico_4h.compare_timeframes(frames, now=now)
 
 
-def render_sui_comparison(report):
+def render_sui_comparison(report, *, pair_key=None, home_url="/"):
     """Escaped server-side HTML. No JavaScript or private assets."""
     def esc(value):
         return html.escape(str(value), quote=True)
     def price(value):
-        return f"{value:.5f}" if isinstance(value, (int, float)) else "—"
+        # A fixed five decimal places could print a genuine, very small price
+        # as 0.00000. Use significant figures for arbitrary Kraken pairs.
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value)):
+            return "—"
+        return f"{value:.10g}"
+    pair = report["coppia"]
+    base, quote = pair.split("/", 1)
+    pair_label = spot_friendly_label(pair) if pair_key is not None else pair
+    volume_base = {"XBT": "BTC", "XDG": "DOGE"}.get(base, base)
+    if pair_key is not None and not re.fullmatch(r"[A-Za-z0-9_.-]{2,48}", pair_key):
+        raise ValueError("Chiave Kraken non valida")
+    graph_root = ("/grafico/spot?pair=" + urllib.parse.quote(pair_key, safe="") +
+                  "&tf=" if pair_key else "/grafico/sui-4h?tf=")
     labels = {
         "PREZZO_SOPRA_EMA20_SOPRA_EMA50": "Close > EMA20 > EMA50",
         "PREZZO_SOTTO_EMA20_SOTTO_EMA50": "Close < EMA20 < EMA50",
@@ -188,7 +201,8 @@ def render_sui_comparison(report):
     for item in report["timeframe"]:
         name = esc(item["timeframe"])
         link = {"15m": "15m", "1H": "1h", "4H": "4h", "1D": "1d"}[item["timeframe"]]
-        title = f'<a href="/grafico/sui-4h?tf={link}">{name} → grafico</a>'
+        title = ('<a href="' + esc(graph_root + link) + '">' +
+                 name + ' → grafico</a>')
         if item["stato"] != "AGGIORNATO":
             reason = esc(item.get("motivo", "Candela chiusa non recente"))
             state = esc(item["stato"])
@@ -198,17 +212,18 @@ def render_sui_comparison(report):
             continue
         vol = item["volume_vs_media20"]
         vol_text = "non calcolabile" if vol is None else f'{vol:.2f} × media delle 20 barre precedenti'
-        volume_text = f"{item['volume']:.4f}"
+        # Non trasformare volumi base piccoli ma positivi in uno zero apparente.
+        volume_text = f"{item['volume']:.10g}"
         rows.append(
             f'<article class="frame"><h2>{title}</h2>'
             f'<p class="status">AGGIORNATO · {esc(item["candele"])} barre chiuse</p>'
             f'<p><strong>{esc(labels[item["orientamento"]])}</strong></p>'
-            f'<p>Close: <b>{price(item["close"])} €</b> · '
-            f'EMA20: {price(item["ema20"])} € · EMA50: {price(item["ema50"])} €</p>'
-            f'<p>Volume ultima candela: {esc(volume_text)} SUI; '
+            f'<p>Close: <b>{price(item["close"])} {esc(quote)}</b> · '
+            f'EMA20: {price(item["ema20"])} {esc(quote)} · EMA50: {price(item["ema50"])} {esc(quote)}</p>'
+            f'<p>Volume ultima candela: {esc(volume_text)} {esc(volume_base)}; '
             f'rapporto: {esc(vol_text)}</p>'
-            f'<p>S/R euristici più vicini: supporto {price(item["supporto_vicino"])} €; '
-            f'resistenza {price(item["resistenza_vicina"])} €</p>'
+            f'<p>S/R euristici più vicini: supporto {price(item["supporto_vicino"])} {esc(quote)}; '
+            f'resistenza {price(item["resistenza_vicina"])} {esc(quote)}</p>'
             f'<p class="time">Candela chiusa: {esc(item["chiusura_utc"])} UTC<br>'
             f'Rilevazione: {esc(item["rilevazione_utc"])} UTC<br>'
             f'Fonte: {esc(item["fonte"])}</p></article>'
@@ -225,9 +240,11 @@ def render_sui_comparison(report):
     }
     picture = quadro_labels[report["quadro"]]
     # Static read-only HTML; values are local market observations, not trades.
+    if home_url not in ("/", "http://127.0.0.1:8765/"):
+        raise ValueError("Destinazione non valida")
     return ("""<!doctype html><html lang="it"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>KDD | Confronto SUI multitimeframe</title>
+<title>KDD | Confronto __PAIR__ multitimeframe</title>
 <style>:root{color-scheme:dark;font-family:system-ui;background:#0b1221;color:#eaf0fa}
 body{margin:auto;padding:14px;max-width:860px;line-height:1.5}
 h1{font-size:1.28rem}h2{font-size:1.06rem;margin:0 0 10px}
@@ -237,8 +254,8 @@ border-radius:12px;margin:12px 0;padding:14px}
 .status{color:#85e6bc}.warning{color:#ffd48a}
 .note{color:#b3c1d8;font-size:.92rem}
 strong{color:#dce9ff}</style></head><body>
-<p><a href="/">← Cruscotto</a> · <a href="/grafico/sui-4h?tf=4h">Grafico SUI 4H</a></p>
-<h1>🔎 KDD · Confronto SUI/EUR</h1>
+<p><a href="__HOME_URL__">← Cruscotto</a> · <a href="/mercati/spot">Seleziona coppia</a> · <a href="__GRAPH_URL__">Grafico 4H</a></p>
+<h1>🔎 KDD · Confronto __PAIR__</h1>
 <p>15m · 1H · 4H · 1D — candele Kraken Spot CHIUSE</p>
 <section class="top"><h2>Quadro descrittivo: __STATE__</h2>
 <p>__PICTURE__</p><p class="note">__WARNING__</p>
@@ -250,15 +267,356 @@ S/R sono livelli euristici calcolati dalla cronologia disponibile.
 La classificazione rispetto alle EMA non misura la probabilità di guadagno.
 Nessuna operazione, nessun segnale BUY/SELL.</p>
 <p class="note">Il confronto interroga Kraken Spot pubblico per tutti e quattro
-gli intervalli a ogni apertura. Il grafico 4H separato conserva il
-proprio dossier locale, aggiornabile dal cruscotto.</p>
-<p><a href="/">← Torna al cruscotto</a></p>
+gli intervalli a ogni apertura. Il grafico è una vista separata: controlla
+la fonte e l'ora riportate sulla sua pagina, che possono differire.</p>
+<p><a href="__HOME_URL__">← Torna al cruscotto</a></p>
 </body></html>"""
+        .replace("__HOME_URL__", esc(home_url))
         .replace("__STATE__", esc(report["stato"]))
         .replace("__PICTURE__", esc(picture))
         .replace("__WARNING__", esc(report["avvertenza"]))
         .replace("__OBSERVED__", esc(report["rilevazione_confronto_utc"]))
+        .replace("__PAIR__", esc(pair_label))
+        .replace("__GRAPH_URL__", esc(graph_root + "4h"))
         .replace("__CARDS__", "".join(rows)))
+
+
+
+# Identita scelta dal catalogo Kraken; nessun token privilegiato.
+SPOT_KEY_RE = re.compile(r"[A-Za-z0-9_.-]{2,48}\Z")
+SPOT_NAME_RE = re.compile(r"[A-Za-z0-9._-]{1,40}/[A-Za-z0-9._-]{1,40}\Z")
+
+
+class KrakenMarketDataUnavailable(RuntimeError):
+    """Data/source failure is not a user-invalid pair or timeframe."""
+
+
+def spot_catalog(public_kraken=None):
+    """Coppie AssetPairs attualmente online: non prova accessibilita sul conto."""
+    fetch = public_kraken or desk.kraken
+    raw = fetch("AssetPairs")
+    if not isinstance(raw, dict):
+        raise KrakenMarketDataUnavailable("Catalogo Kraken non verificabile")
+    out = {}
+    for key, row in raw.items():
+        if not isinstance(key, str) or not SPOT_KEY_RE.fullmatch(key):
+            continue
+        if key.lower().endswith(".d") or not isinstance(row, dict):
+            continue
+        name = row.get("wsname")
+        if row.get("status") != "online" or not isinstance(name, str):
+            continue
+        if not SPOT_NAME_RE.fullmatch(name):
+            continue
+        base, quote = name.split("/", 1)
+        altname = row.get("altname")
+        if not isinstance(altname, str) or not SPOT_KEY_RE.fullmatch(altname):
+            altname = None
+        out[key] = {"pair_key": key, "pair": name, "base": base, "quote": quote,
+                    "altname": altname, "eligibilita_conto": "NON_VERIFICATA"}
+    if not out:
+        raise KrakenMarketDataUnavailable("Nessuna coppia online verificabile")
+    # A REST response alias must resolve to exactly one market in the
+    # *whole* catalog, including non-online REST keys. A synthetic collision
+    # must never let candles of B be labelled with A's selected pair.
+    owner = {}
+    for key, meta in out.items():
+        for symbol in (key, meta["altname"]):
+            if symbol is None:
+                continue
+            if symbol in raw and symbol != key:
+                raise KrakenMarketDataUnavailable("Identità Kraken REST/alias ambigua")
+            previous = owner.setdefault(symbol, key)
+            if previous != key:
+                raise KrakenMarketDataUnavailable("Identità Kraken alias ambigua")
+    return out
+
+
+def spot_lookup(pair_key, catalog):
+    if (not isinstance(pair_key, str) or not SPOT_KEY_RE.fullmatch(pair_key)
+            or pair_key not in catalog):
+        raise ValueError("Coppia assente o non online nel catalogo Kraken")
+    return catalog[pair_key]
+
+
+class KrakenPairMismatch(RuntimeError):
+    """Kraken OHLC supplied candles under an unrelated market identifier."""
+
+
+def checked_spot_ohlc(raw, meta):
+    """Bind a single response market to the exact AssetPairs pair/altname.
+
+    REST OHLC response symbols need not equal wsname; never trust the first
+    non-'last' array and then label it with the requested pair.
+    """
+    if not isinstance(raw, dict):
+        raise KrakenPairMismatch("Risposta OHLC non valida")
+    symbols = [name for name in raw if name != "last"]
+    accepted = {meta["pair_key"]}
+    if meta.get("altname"):
+        accepted.add(meta["altname"])
+    if len(symbols) != 1 or symbols[0] not in accepted:
+        raise KrakenPairMismatch("Identita mercato OHLC differente dalla coppia richiesta")
+    return raw
+
+
+def spot_request_pair(path, query):
+    """Return None only for the selector route; reject missing/duplicate pairs."""
+    if path == "/mercati/spot":
+        return None
+    values = urllib.parse.parse_qs(query, keep_blank_values=True).get("pair", [])
+    if (path not in ("/grafico/spot", "/analisi/spot") or len(values) != 1
+            or not SPOT_KEY_RE.fullmatch(values[0])):
+        raise ValueError("Coppia non specificata o identificativo non valido")
+    return values[0]
+
+
+def spot_friendly_label(pair):
+    """Show common token name while preserving Kraken's actual market symbol."""
+    base, quote = pair.split("/", 1)
+    aliases = {"XBT": "BTC", "XDG": "DOGE"}
+    if base in aliases:
+        return aliases[base] + "/" + quote + " (Kraken " + pair + ")"
+    return pair
+
+
+def spot_observed_candidates(catalog, snapshot):
+    """Use KDD's EXISTING ranked public scan, never rank by alphabet or invent setups.
+
+    Link only an exact catalogued Kraken pair. Do not read portfolio or balances.
+    """
+    if not isinstance(snapshot, dict):
+        return []
+    raw = snapshot.get("schede_v02")
+    if not isinstance(raw, list):
+        return []
+    found = []
+    used = set()
+    for item in raw[:12]:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("coppia_analisi")
+        options = item.get("alternative")
+        if not isinstance(name, str) or not isinstance(options, list):
+            continue
+        key = None
+        for candidate in options:
+            if not isinstance(candidate, dict) or candidate.get("pair") != name:
+                continue
+            possible = candidate.get("pair_key")
+            if (isinstance(possible, str) and possible in catalog
+                    and catalog[possible]["pair"] == name):
+                key = possible
+                break
+        if key is None or key in used:
+            continue
+        base = catalog[key]["base"].upper()
+        normalized = {"XBT": "BTC", "XDG": "DOGE"}.get(base, base)
+        if str(item.get("token") or "").upper() != normalized:
+            continue
+        used.add(key)
+        found.append({
+            "pair_key": key, "pair": name,
+            "categoria": str(item.get("categoria") or "Caso da esaminare")[:90],
+            "esito": str(item.get("esito") or "Analisi da verificare")[:90],
+            "perche": str(item.get("perche_selezionato") or "")[:300],
+            "sintesi": str(item.get("sintesi") or "")[:300],
+            "evidenze": [str(x)[:180] for x in item.get("evidenze", [])[:5]
+                          if isinstance(x, str)] if isinstance(item.get("evidenze"), list) else [],
+            "criticita": [str(x)[:180] for x in item.get("criticita", [])[:5]
+                          if isinstance(x, str)] if isinstance(item.get("criticita"), list) else [],
+        })
+        if len(found) == 6:
+            break
+    return found
+
+
+def spot_priority_panel(catalog, snapshot, *, now=None, preview=False):
+    """Shortlist from last completed KDD scan, with observation date and direct links."""
+    esc = lambda value: html.escape(str(value), quote=True)
+    rows = spot_observed_candidates(catalog, snapshot)
+    home = "http://127.0.0.1:8765/" if preview else "/"
+    date = snapshot.get("rilevazione_utc") if isinstance(snapshot, dict) else None
+    now = now or dt.datetime.now(dt.timezone.utc)
+    stale = True
+    if isinstance(date, str):
+        try:
+            observed = dt.datetime.fromisoformat(date.replace("Z", "+00:00"))
+            if observed.tzinfo is None:
+                raise ValueError("UTC offset absent")
+            age = (now - observed).total_seconds() / 60
+            stale = age > 30 or age < -2
+            status = ("RILEVAZIONE DA AGGIORNARE" if stale
+                      else "Rilevazione recente")
+            date_info = esc(date[:40]) + " · " + status
+        except ValueError:
+            date_info = "Orario della rilevazione non verificabile"
+    else:
+        date_info = "Rilevazione KDD non disponibile"
+    if not rows:
+        return ('<section class="priority"><h2>Segnalazioni già individuate da KDD</h2>'
+                '<p>Nessun caso nell’ultima selezione KDD disponibile qui. '
+                'Posizioni, segnalazioni e piani restano nel cruscotto originale; '
+                'il catalogo sotto resta esplorabile.</p></section>')
+    cards = []
+    for c in rows:
+        key = urllib.parse.quote(c["pair_key"], safe="")
+        graph = "/grafico/spot?pair=" + key + "&amp;tf=4h"
+        compare = "/analisi/spot?pair=" + key
+        cards.append(
+            '<article class="candidate"><h3>' + esc(spot_friendly_label(c["pair"])) + '</h3>'
+            '<p><strong>' + esc(c["esito"]) + '</strong> · ' + esc(c["categoria"]) + '</p>'
+            + ('<p><strong>Motivo della selezione:</strong> ' + esc(c["perche"]) + '</p>' if c["perche"] else "")
+            + ('<p>' + esc(c["sintesi"]) + '</p>' if c["sintesi"] else "")
+            + ('<p><strong>Elementi osservati:</strong> ' + esc("; ".join(c["evidenze"])) + '</p>' if c["evidenze"] else "")
+            + ('<p><strong>Criticità:</strong> ' + esc("; ".join(c["criticita"])) + '</p>' if c["criticita"] else "")
+            + '<p class="actions"><a href="' + graph + '">Grafico 4H</a>'
+            '<a href="' + compare + '">Confronta 15m · 1H · 4H · 1D</a></p>'
+            '</article>')
+    heading = ("Segnalazioni precedenti: dati da aggiornare" if stale
+               else "Da esaminare: selezione KDD")
+    link = ('<p class="warning">Queste segnalazioni sono vecchie. '
+            '<a href="' + html.escape(home, quote=True) + '">Apri KDD completo e aggiorna</a>. '
+            'I grafici si aggiornano quando li apri, ma non aggiornano lo scanner.</p>'
+            if stale else "")
+    return ('<section class="priority"><h2>' + heading + '</h2>'
+            '<p class="source">Ultimo scanner KDD · ' + date_info +
+            '. Questi casi non sono ordini né segnali di acquisto; '
+            'la negoziabilità del conto non è verificata.</p>'
+            + link + "".join(cards) + '</section>')
+
+
+def spot_selector(catalog, snapshot=None, *, now=None, preview=None):
+    """Casi già selezionati da KDD, poi ricerca completa di qualunque coppia."""
+    if snapshot is None:
+        try:
+            snapshot = desk.load("ultima_rilevazione.json", {})
+        except (OSError, ValueError, TypeError):
+            snapshot = {}
+    if preview is None:
+        preview = PORT != 8765
+    priority = spot_priority_panel(catalog, snapshot, now=now, preview=preview)
+    home = "http://127.0.0.1:8765/" if preview else "/"
+    intro = ("Questa è una preview pubblica isolata, senza posizioni, piani o aggiornamento."
+             if preview else "Questa sezione appartiene al KDD patrimoniale originale.")
+    options = "".join(
+        '<option value="' + html.escape(p["pair_key"], quote=True) + '">' +
+        html.escape(spot_friendly_label(p["pair"])) + ' · ' + html.escape(p["pair_key"]) + '</option>'
+        for p in sorted(catalog.values(), key=lambda p: (p["pair"], p["pair_key"]))
+    )
+    return ("""<!doctype html><html lang="it"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KDD · Coppie Kraken Spot</title>
+<style>:root{color-scheme:dark;font-family:system-ui;background:#0b1221;color:#eaf0fa}
+body{max-width:760px;margin:auto;padding:16px}a{color:#8aceff}
+.priority{background:#111c30;border:1px solid #34415d;border-radius:12px;padding:16px;margin:20px 0}
+.priority h2{margin-top:0}.candidate{background:#192a43;border-radius:10px;padding:12px;margin:12px 0}
+.candidate h3{margin:0}.candidate p{margin:8px 0}.actions{display:flex;flex-wrap:wrap;gap:12px}
+.actions a{display:inline-block;padding:8px 10px;background:#244967;border-radius:8px}
+.source{font-size:.92rem;color:#d2dae8}.warning{color:#ffdc92;font-weight:600}
+.context{background:#203652;border-left:4px solid #8aceff;padding:12px 16px;border-radius:8px}
+form{background:#18263c;padding:16px;border-radius:12px}
+select,input,button{font:inherit;padding:10px;margin:10px 0;width:100%}
+button{background:#80cbff;border:0;border-radius:9px;color:#06162b;font-weight:bold}
+p{line-height:1.5}</style></head><body>
+<p><a href="__HOME_URL__">← Torna al cruscotto KDD</a></p>
+<h1>Mercati Kraken Spot</h1>
+<p class="context"><b>__INTRO__</b>
+Per aggiornare prezzi, posizioni e segnalazioni, usa
+<a href="__HOME_URL__">il cruscotto KDD e il pulsante Aggiorna</a>.
+Qui i grafici interrogano Kraken quando li apri; il catalogo non rinnova lo scanner.</p>
+<p>BTC è chiamato XBT da Kraken: BTC/USDC e XBT/USDC sono la stessa coppia.
+Catalogo pubblico AssetPairs online; la negoziabilità per il conto italiano
+non è verificata. Nessuna coppia preselezionata e nessun ordine.</p>
+__PRIORITY__
+<h2>Esplora qualsiasi altra coppia Kraken Spot</h2>
+<p>Scrivi un token o una valuta per cercare in tutto il catalogo, non soltanto tra le prime lettere.</p>
+<form method="get" action="/analisi/spot">
+<label for="filtro">Cerca coppia per token, valuta o codice Kraken</label>
+<input type="search" id="filtro" aria-controls="pair" autocomplete="off"
+placeholder="Es. BTC, ADA, USDT, GBP">
+<p id="risultati" role="status" aria-live="polite"></p>
+<label for="pair">Coppia Kraken (base/quote)</label>
+<select name="pair" id="pair" required><option value="">— Seleziona una coppia —</option>
+__OPTIONS__</select>
+<input type="hidden" name="tf" value="4h">
+<button type="submit">Confronta 15m · 1H · 4H · 1D</button>
+<button type="submit" formaction="/grafico/spot">Apri grafico della coppia</button>
+</form><p>Confronto: quattro richieste OHLC pubbliche; grafico: una.
+Solo candele chiuse, niente valori inventati.</p>
+<script>
+(() => {
+  const search = document.getElementById('filtro');
+  const select = document.getElementById('pair');
+  const counter = document.getElementById('risultati');
+  const all = Array.from(select.options).slice(1).map(o => [o.value, o.textContent]);
+  function rebuild() {
+    const needle = search.value.trim().toLocaleUpperCase('it-IT');
+    // Kraken chiama XBT il BTC e talvolta XDG il DOGE.
+    const translated = needle.replaceAll('BTC','XBT').replaceAll('DOGE','XDG');
+    const found = needle ? all.filter(([k,t]) => {
+      const haystack = (k + ' ' + t).toLocaleUpperCase('it-IT');
+      return haystack.includes(needle) || haystack.includes(translated);
+    }) : [];
+    // Empty until search: never flood the user with A-to-Z entries.
+    // Cap options shown simultaneously on mobile, NOT the underlying catalog.
+    const maxVisible = 90;
+    const choices = found.slice(0,maxVisible).map(([k,t]) => new Option(t,k));
+    const placeholder = new Option('— Seleziona una coppia —', '');
+    select.replaceChildren(placeholder,...choices);
+    select.value = '';
+    counter.textContent = needle ?
+      found.length + ' coppie trovate su ' + all.length +
+        (found.length > maxVisible ? '. Visualizzate le prime 90; affina la ricerca.' : '.') :
+      'Catalogo: ' + all.length + ' coppie. Scrivi un token per vedere i risultati.';
+  }
+  search.addEventListener('input',rebuild);
+  rebuild();
+})();
+</script>
+</body></html>""".replace("__OPTIONS__", options).replace("__PRIORITY__", priority)
+            .replace("__HOME_URL__", html.escape(home, quote=True))
+            .replace("__INTRO__", html.escape(intro, quote=True)))
+
+
+def load_spot_chart(pair_key, timeframe, *, public_kraken=None, now=None):
+    if timeframe not in grafico_4h.TIMEFRAMES:
+        raise ValueError("Timeframe non valido")
+    fetch = public_kraken or desk.kraken
+    meta = spot_lookup(pair_key, spot_catalog(fetch))
+    raw = fetch("OHLC", pair=pair_key, interval=grafico_4h.TIMEFRAMES[timeframe][0])
+    # Pair/timeframe input was already validated. From here, ValueError is
+    # malformed/insufficient upstream OHLC, not a client-side 400.
+    try:
+        series = grafico_4h.data_from_kraken_ohlc(
+            checked_spot_ohlc(raw, meta), timeframe, now=now,
+            pair=meta["pair"], token=meta["base"], pair_key=pair_key)
+        if meta["base"] in ("XBT", "XDG"):
+            shown = {"XBT": "BTC", "XDG": "DOGE"}[meta["base"]]
+            series["display_pair"] = shown + "/" + meta["quote"]
+            series["display_token"] = shown
+            series["source"] += " · Kraken usa " + meta["base"] + " per " + shown
+        home = "http://127.0.0.1:8765/" if PORT != 8765 else "/"
+        return grafico_4h.page_from_data(series, now=now, home_url=home)
+    except (ValueError, TypeError, KeyError, IndexError) as exc:
+        raise KrakenMarketDataUnavailable("OHLC o grafico pubblico non verificabile") from exc
+
+
+def load_spot_comparison(pair_key, *, public_kraken=None, now=None):
+    fetch = public_kraken or desk.kraken
+    meta = spot_lookup(pair_key, spot_catalog(fetch))
+    now = now or dt.datetime.now(dt.timezone.utc)
+    frames = {}
+    for label, frame in (("15m", "15m"), ("1H", "1h"), ("4H", "4h"), ("1D", "1d")):
+        try:
+            raw = fetch("OHLC", pair=pair_key, interval=grafico_4h.TIMEFRAMES[frame][0])
+            frames[label] = grafico_4h.data_from_kraken_ohlc(
+                checked_spot_ohlc(raw, meta), frame, now=now,
+                pair=meta["pair"], token=meta["base"],
+                pair_key=pair_key)
+        except (OSError, RuntimeError, ValueError, KeyError, IndexError, TypeError) as exc:
+            frames[label] = {"errore": type(exc).__name__}
+    return grafico_4h.compare_timeframes(frames, now=now, pair=meta["pair"])
 
 
 def host_valido(host):
@@ -302,6 +660,30 @@ class Handler(BaseHTTPRequestHandler):
         if not self.check_host():
             return
         url = urllib.parse.urlsplit(self.path)
+        if url.path in ("/mercati/spot", "/grafico/spot", "/analisi/spot"):
+            query = urllib.parse.parse_qs(url.query, keep_blank_values=True)
+            try:
+                pair_key = spot_request_pair(url.path, url.query)
+                if pair_key is None:
+                    self.send_html(200, spot_selector(spot_catalog()))
+                    return
+                if url.path == "/grafico/spot":
+                    tf = query.get("tf", ["4h"])
+                    if len(tf) != 1 or tf[0] not in grafico_4h.TIMEFRAMES:
+                        self.send_html(400, "<h1>Timeframe non valido</h1>")
+                        return
+                    page = load_spot_chart(pair_key, tf[0])
+                else:
+                    summary = load_spot_comparison(pair_key)
+                    home = "http://127.0.0.1:8765/" if PORT != 8765 else "/"
+                    page = render_sui_comparison(summary, pair_key=pair_key,
+                                                 home_url=home)
+                self.send_html(200, page)
+            except ValueError:
+                self.send_html(400, "<h1>Coppia Kraken non valida o non online</h1>")
+            except (OSError, RuntimeError, KeyError, TypeError, IndexError):
+                self.send_html(503, "<h1>Kraken pubblico non disponibile</h1>")
+            return
         if url.path == "/stato":
             self.send_body(200, json.dumps(job_snapshot(), ensure_ascii=False),
                            "application/json; charset=utf-8")
