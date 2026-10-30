@@ -753,5 +753,47 @@ class BridgeG2Tests(unittest.TestCase):
             self.assertIn("STOP",bridge.approved_html())
 
 
+    def test_rt1_04_postlink_semantic_failure_is_publication_uncertain(self):
+        self.persist_origin()
+        folder=bridge.private_directory(bridge.ARCHIVE,create=True)
+        version=bridge.digest(self.plan)
+        with mock.patch.object(bridge,"_finalize_pending",side_effect=bridge.BridgeError("synthetic postlink verification")):
+            with self.assertRaises(bridge.PublicationUncertain):
+                bridge.approved_import(self.plan,self.bundle,version,"APPROVO_VERSIONE",now=T)
+        self.assertTrue((folder/(".pending-"+version+".json")).exists())
+        with self.assertRaisesRegex(bridge.BridgeError,"INCERTA"):
+            bridge.approved_import(self.plan,self.bundle,version,"APPROVO_VERSIONE",now=T)
+        self.assertEqual(bridge.reconcile_archive(),["PUBBLICATO_CONFERMATO"])
+
+    def test_rt1_05_serve_real_corruption_and_unreadable_archive(self):
+        import serve
+        page="<h2>1 · Decisioni e posizioni</h2><p>Patrimonio e Spot invariati</p>"
+        folder=bridge.private_directory(bridge.ARCHIVE,create=True)
+        bad=folder/("f"*64+".json")
+        bad.write_bytes(b'{"incomplete":')
+        bad.chmod(0o600)
+        shown=serve.with_controls(page)
+        self.assertIn("Archivio non verificabile",shown)
+        self.assertIn("Patrimonio e Spot invariati",shown)
+        self.assertIn("/mercati/spot",shown)
+        bad.unlink()
+        folder.chmod(0o755)
+        try:
+            shown=serve.with_controls(page)
+            self.assertIn("Archivio non verificabile",shown)
+            self.assertIn("/aggiorna",shown)
+        finally:
+            folder.chmod(0o700)
+
+    def test_rt1_05_serve_when_archive_load_raises_io(self):
+        import serve
+        page="<h2>1 · Decisioni e posizioni</h2><p>Analisi ancora disponibili</p>"
+        with mock.patch.object(bridge,"load_archive",side_effect=OSError("synthetic filesystem fault")):
+            html=serve.with_controls(page)
+        self.assertIn("Archivio non verificabile",html)
+        self.assertIn("Analisi ancora disponibili",html)
+        self.assertIn("/mercati/spot",html)
+
+
 if __name__=="__main__":
     unittest.main()

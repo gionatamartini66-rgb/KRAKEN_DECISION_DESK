@@ -312,9 +312,10 @@ def exclusive_json(directory, filename, obj):
         if pending:
             _finalize_pending(directory, filename, expected_raw=raw)
         return "INSERITO"
-    except OSError as exc:
+    except (OSError, BridgeError) as exc:
         if linked:
-            # Marker is retained; neither success nor durable commit is asserted.
+            # Marker is retained even on semantic validation failure after link.
+            # Neither visible bytes nor a partial fsync establish durable success.
             raise PublicationUncertain("PUBBLICAZIONE_INCERTA: recupero obbligatorio") from exc
         # A caught pre-link failure is proven NON_PUBBLICATO. A power cut
         # instead leaves its journal for later explicit reconciliation.
