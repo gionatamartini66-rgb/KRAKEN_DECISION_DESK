@@ -337,7 +337,13 @@ def read_context(bundle, *, now=None, expected_sha256=None):
 
 
 def read_bundle(path, *, now=None, expected_sha256=None):
-    return read_context(strict_json(read_regular(path)), now=now, expected_sha256=expected_sha256)
+    raw = read_regular(path)
+    if (not isinstance(expected_sha256, str) or not HEX.fullmatch(expected_sha256)
+            or hashlib.sha256(raw).hexdigest() != expected_sha256):
+        raise BridgeError("Digest dei byte ricevuti non confermato")
+    # A matching digest must have been obtained through an independent channel.
+    # Without that external trust, this remains local byte integrity only.
+    return read_context(strict_json(raw), now=now)
 
 
 def text(value):
@@ -479,6 +485,7 @@ def main(argv=None):
     review = sub.add_parser("review")
     review.add_argument("--file", type=Path, required=True)
     review.add_argument("--expected-sha256", required=True)
+    sub.add_parser("preview-proposal", help="valida e mostra solo il digest della proposta privata")
     imp = sub.add_parser("import-approved")
     imp.add_argument("--approved-sha256", required=True)
     imp.add_argument("--consent", required=True)
@@ -488,7 +495,9 @@ def main(argv=None):
             result = prepare(args.source_dir)
             out = private_directory(OUTBOX, create=True)
             status = exclusive_json(out, digest(result)+".json", result)
-            print("PREPARATO SOLO PRIVATO:", status, "| id:", digest(result))
+            # Exact bytes as written, including the final LF; used as transport manifest.
+            raw = canonical(result) + b"\n"
+            print("PREPARATO SOLO PRIVATO:", status, "| sha256_file:", hashlib.sha256(raw).hexdigest())
         elif args.action == "review":
             # Review of a local copy only; expected digest must arrive on a separate trusted channel.
             result = read_bundle(args.file, expected_sha256=args.expected_sha256)
@@ -499,8 +508,14 @@ def main(argv=None):
             raw = read_regular(inbox / "proposta_portafoglio.json", expected_parent=inbox)
             prop = strict_json(raw)
             envelope = strict_json(read_regular(inbox / "pacchetto_riferimento.json", expected_parent=inbox))
-            result = approved_import(prop, envelope, args.approved_sha256, args.consent)
-            print("APPROVAZIONE:", result["stato"], "sha256:", result["versione_sha256"])
+            validate_proposal(prop, envelope)
+            if args.action == "preview-proposal":
+                print("ANTEPRIMA NON APPROVATA | versione:", digest(prop),
+                      "| posizioni:", len(prop["posizioni"]),
+                      "| fotografia:", prop["snapshot_id"])
+            else:
+                result = approved_import(prop, envelope, args.approved_sha256, args.consent)
+                print("APPROVAZIONE:", result["stato"], "sha256:", result["versione_sha256"])
         return 0
     except (BridgeError, wallet.PacketError) as exc:
         print("STOP G2:", str(exc))
