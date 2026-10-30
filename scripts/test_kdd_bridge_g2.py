@@ -546,7 +546,8 @@ class BridgeG2Tests(unittest.TestCase):
     def test_rt1_01_arbitrary_coherent_source_requires_test_only_seam(self):
         with self.assertRaisesRegex(bridge.BridgeError, "canonica"):
             bridge.prepare(self.fixture.root,now=T)
-        with self.assertRaises(bridge.BridgeError):
+        # argparse must reject an unsupported operational source selector.
+        with self.assertRaises(SystemExit):
             bridge.main(["prepare","--source-dir",str(self.fixture.root)])
         self.assertEqual(bridge.prepare(self.fixture.root,now=T,_fixture=True)["packet_sha256"],
                          self.bundle["packet_sha256"])

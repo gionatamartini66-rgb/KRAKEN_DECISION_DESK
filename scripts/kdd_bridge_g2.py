@@ -696,7 +696,7 @@ def approved_html():
     esc = lambda v: html.escape(str(v), quote=True)
     try:
         records = load_archive()
-    except (BridgeError, OSError, ValueError, TypeError, KeyError, RuntimeError):
+    except Exception:
         return "<section><h2>Proposte patrimoniali GPT</h2><p>Archivio non verificabile: STOP.</p></section>"
     if not records:
         return "<section id='kdd-gpt-patrimonio'><h2>Proposte patrimoniali GPT</h2><p>Nessuna versione approvata importata.</p></section>"
@@ -716,7 +716,7 @@ def approved_html():
         for r in p["posizioni"])
     return ("<section id='kdd-gpt-patrimonio'><h2>Proposta patrimoniale GPT approvata</h2>"
             "<p>Versione "+esc(latest["versione_sha256"][:16])+" · snapshot "+esc(p["snapshot_utc"])+
-            " · esecuzione NON ATTESTATA. Valutazione storica: riesaminare al nuovo mercato.</p>"
+            " · ESECUZIONE NON ATTESTATA. Testo generato da GPT, non verificato come fatto finanziario. Valutazione storica: riesaminare al nuovo mercato.</p>"
             "<p>Scenario: "+esc(p["scenario"])+"</p><p>Alternativa generale: "+
             esc(p["scenario_alternativo"])+"</p><p>Liquidità: "+esc(p["liquidita"])+
             "</p><p>Rischi comuni: "+esc(p["rischi_comuni"])+
