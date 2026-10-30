@@ -1,6 +1,6 @@
 # KDD: aggiornamento GitHub → Samsung/Termux
 
-**Stato 20 ottobre 2026:** codice KDD importato in GitHub privato, 19 file. L'aggiornatore è stato costruito nel repository e collaudato **in ambiente isolato** con 4 test (check, installazione simulata, nessuna modifica, rollback). Non è ancora stato eseguito/validato sul Samsung finché l'autore non installa il comando locale e riporta l'esito.
+**Stato materiale al 30 ottobre 2026:** il KDD del Samsung è stato aggiornato con GO dell'autore alla versione di codice `da908139ffd51872f2829fb3b305ff7e6a0e0fea` tramite `python scripts/kdd_aggiorna.py --check` e `--apply` eseguiti dal clone separato, non con copia indiscriminata della cartella. Dal resoconto Termux: **9 sorgenti sostituiti, 207 test KDD OK + pacchetto GPT OK sia prima sia dopo**, checkpoint aggiornato, backup specifico dell'updater e backup integrale privato precedente di 8,4 MB verificato. Il server è stato riavviato sulla 8765 e il browser Chrome ha mostrato navigatore Spot e quattro timeframe. I dati patrimoniali sono stati aggiornati in un'operazione distinta con GO esplicito, non dall'updater. **Questi esiti provengono da output e foto forniti dall'autore**, non da accesso remoto indipendente. Il circuito GPT/Drive/ritorno resta aperto: vedi [ROADMAP corrente](ROADMAP_KDD.md). Le ricognizioni e i fallimenti del 20 ottobre conservati sotto sono storia, non istruzioni di esecuzione attuali.
 
 ## Attivazione una volta sola dal Samsung
 
@@ -21,7 +21,7 @@ L'installer verifica la routine con 4 test sintetici locali, prepara il comando 
 
 Lo script **non** manda comandi a Kraken, **non** esegue ordini, **non** trasferisce il contenuto del telefono verso GitHub, **non** elimina dati, **non** modifica `config.json`, portafogli, T0 o altri file JSON.
 
-La procedura conserva la selezione di 16 sorgenti Python e 3 file pubblici sotto `vendor/` (biblioteca Lightweight Charts, licenza e avviso), più il README **locale** aggiornato esclusivamente nel checkpoint e nello storico deploy. L'elenco è scritto nel codice; nessun `git add .`, nessun push di archivi o dati conto.
+La allowlist effettiva in `scripts/kdd_aggiorna.py` versione `da908139` comprende **17 Python principali, 3 Python del pacchetto patrimoniale e relative prove, 3 file pubblici in `vendor/`** (Lightweight Charts, licenza e avviso), oltre al README **locale** modificato nel checkpoint e nello storico deploy. La lista autorevole resta il codice; nessun `git add .`, push di backup o dati conto.
 
 **Importante:** la sostituzione di sorgenti Python **non riavvia il server Chrome già in esecuzione**: finché il server non viene riavviato in modo controllato potrebbe mostrare la versione precedente. Il riavvio automatico e il test visivo browser rimangono da implementare/verificare separatamente, senza interrompere forzatamente un processo sconosciuto.
 
@@ -38,9 +38,9 @@ I backup sono conservati solo sul Samsung in `~/.local/share/kdd-deploy-backups/
 - Rischio significativo: aggiornare un modulo server mentre il vecchio processo serve Chrome richiede riavvio prima di considerare attive le modifiche.
 - In caso di `STOP SICUREZZA`, nessun intervento manuale sui file live: comunicare le righe d'errore in chat, senza credenziali.
 
-## Obiettivo successivo
+## Obiettivo successivo — superato il 30/10/2026
 
-Dopo il primo controllo `kdd-aggiorna --check` positivo sul Samsung, creare un cambiamento benigno con commit e verificare il percorso completo `--apply` con test reali prima di utilizzarlo per le EMA20/50 e i livelli tecnici del grafico.
+Il primo gate di prova dell'updater sul Samsung è chiuso dai riscontri sopra: preflight, backup, `--apply`, test successivi, riavvio e prova browser. Non ripetere la canary storica né usare questa guida come seconda ROADMAP. **Primo passo corrente: [ROADMAP_KDD.md](ROADMAP_KDD.md)**, dove si distingue la verifica locale del packet dal ponte privato ancora non collaudato.
 
 ## Diagnosi e correzione del primo collaudo (20 ottobre 2026)
 
