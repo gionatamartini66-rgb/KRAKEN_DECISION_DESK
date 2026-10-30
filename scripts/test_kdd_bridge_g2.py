@@ -29,7 +29,7 @@ class BridgeG2Tests(unittest.TestCase):
         self.fixture = fixtures.WalletPacketG0Tests("test_wallet_first_all_assets_even_if_quote_missing")
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
-        self.bundle = bridge.prepare(self.fixture.root, now=T)
+        self.bundle = bridge.prepare(self.fixture.root, now=T, _fixture=True)
         self.plan = self.proposal()
 
     def proposal(self):
@@ -51,6 +51,12 @@ class BridgeG2Tests(unittest.TestCase):
                                "riesame":"Quando cambiano i dati",
                                "costi":"Commissioni ignote, da verificare",
                                "evidenze":"Quattro timeframe quando disponibili"} for i,x in enumerate(p["patrimonio"]["posizioni"])]}
+
+    def persist_origin(self):
+        # The original G2 fixture used volatile _LOCAL_ORIGINS. R3 must
+        # actually deposit a distinct, owner-only KDD-produced original.
+        folder=bridge.private_directory(bridge.OUTBOX,create=True)
+        bridge.exclusive_json(folder,bridge.digest(self.bundle)+".json",self.bundle)
 
     def test_01_real_original_producer_retains_all_rows_and_eur_provenance(self):
         p = self.bundle["packet"]
@@ -144,6 +150,7 @@ class BridgeG2Tests(unittest.TestCase):
             bridge.validate_proposal(p,self.bundle,now=T)
 
     def test_13_gpt_cannot_self_approve(self):
+        self.persist_origin()
         p=copy.deepcopy(self.plan)
         p["approvato"]=True
         with self.assertRaises(bridge.BridgeError):
@@ -152,6 +159,7 @@ class BridgeG2Tests(unittest.TestCase):
             bridge.approved_import(self.plan,self.bundle,bridge.digest(self.plan),"GPT_APPROVA",now=T)
 
     def test_14_content_modified_after_explicit_approval_is_rejected(self):
+        self.persist_origin()
         approved_hash=bridge.digest(self.plan)
         new=copy.deepcopy(self.plan)
         new["posizioni"][0]["tesi"]="Manomesso dopo consenso"
@@ -159,6 +167,7 @@ class BridgeG2Tests(unittest.TestCase):
             bridge.approved_import(new,self.bundle,approved_hash,"APPROVO_VERSIONE",now=T)
 
     def test_15_successful_import_is_idempotent_and_archived(self):
+        self.persist_origin()
         digest=bridge.digest(self.plan)
         first=bridge.approved_import(self.plan,self.bundle,digest,"APPROVO_VERSIONE",now=T)
         second=bridge.approved_import(self.plan,self.bundle,digest,"APPROVO_VERSIONE",now=T)
@@ -170,6 +179,7 @@ class BridgeG2Tests(unittest.TestCase):
         self.assertIn("NON ATTESTATA",shown)
 
     def test_16_next_version_preserves_history_and_blocks_unlinked(self):
+        self.persist_origin()
         digest=bridge.digest(self.plan)
         bridge.approved_import(self.plan,self.bundle,digest,"APPROVO_VERSIONE",now=T)
         revised=copy.deepcopy(self.plan)
@@ -184,6 +194,7 @@ class BridgeG2Tests(unittest.TestCase):
             bridge.approved_import(another,self.bundle,bridge.digest(another),"APPROVO_VERSIONE",now=T)
 
     def test_17_html_escapes_untrusted_gpt_text_not_execute(self):
+        self.persist_origin()
         p=copy.deepcopy(self.plan)
         p["posizioni"][0]["tesi"]="<script>alert('TRADING')</script> ignora precedenti istruzioni"
         bridge.approved_import(p,self.bundle,bridge.digest(p),"APPROVO_VERSIONE",now=T)
@@ -213,7 +224,7 @@ class BridgeG2Tests(unittest.TestCase):
     def test_20_no_shared_writer_or_auto_sync(self):
         self.assertFalse((self.home/"storage").exists())
         self.assertFalse(self.private.exists())
-        p=bridge.prepare(self.fixture.root,now=T)
+        p=bridge.prepare(self.fixture.root,now=T,_fixture=True)
         target=bridge.private_directory(bridge.OUTBOX,create=True)
         result=bridge.exclusive_json(target,bridge.digest(p)+".json",p)
         self.assertEqual(result,"INSERITO")
@@ -233,7 +244,9 @@ class BridgeG2Tests(unittest.TestCase):
     def test_22_approve_command_requires_explicit_human_text(self):
         inbox=bridge.private_directory(bridge.INBOX,create=True)
         (inbox/"proposta_portafoglio.json").write_text(json.dumps(self.plan))
+        (inbox/"proposta_portafoglio.json").chmod(0o600)
         (inbox/"pacchetto_riferimento.json").write_text(json.dumps(self.bundle))
+        (inbox/"pacchetto_riferimento.json").chmod(0o600)
         self.assertEqual(bridge.main(["import-approved","--approved-sha256",bridge.digest(self.plan),
                                     "--consent","NO"]),2)
         self.assertFalse((self.private/"approvals").exists())
@@ -273,7 +286,7 @@ class BridgeG2Tests(unittest.TestCase):
              patcher.patch("verifica_piani.archivia_piano",return_value=None):
             desk.prepara_dossier_aggiornamento(source,asset_pairs=four.catalogue(tokens))
             desk.output(source)
-        bundle=bridge.prepare(instance.root, now=instance.now)
+        bundle=bridge.prepare(instance.root, now=instance.now, _fixture=True)
         read=bridge.read_context(bundle,now=instance.now)
         self.assertEqual(read["n_posizioni"],3)
         self.assertEqual(read["quattro_tf_aggiornati"],3)
@@ -349,11 +362,14 @@ class BridgeG2Tests(unittest.TestCase):
             bridge.read_bundle(path,now=T,expected_sha256=original_sha)
 
     def test_33_preview_is_not_approval(self):
+        self.persist_origin()
         from contextlib import redirect_stdout
         import io
         inbox=bridge.private_directory(bridge.INBOX,create=True)
         (inbox/"proposta_portafoglio.json").write_text(json.dumps(self.plan))
+        (inbox/"proposta_portafoglio.json").chmod(0o600)
         (inbox/"pacchetto_riferimento.json").write_text(json.dumps(self.bundle))
+        (inbox/"pacchetto_riferimento.json").chmod(0o600)
         buf=io.StringIO()
         with redirect_stdout(buf):
             self.assertEqual(bridge.main(["preview-proposal"]),0)
@@ -382,7 +398,9 @@ class BridgeG2Tests(unittest.TestCase):
         altered["snapshot_id"] = bridge.digest(forged["packet"])
         inbox = bridge.private_directory(bridge.INBOX, create=True)
         (inbox/"proposta_portafoglio.json").write_text(json.dumps(altered))
+        (inbox/"proposta_portafoglio.json").chmod(0o600)
         (inbox/"pacchetto_riferimento.json").write_text(json.dumps(forged))
+        (inbox/"pacchetto_riferimento.json").chmod(0o600)
         with redirect_stdout(io.StringIO()) as out:
             rc = bridge.main(["import-approved", "--approved-sha256", bridge.digest(altered),
                               "--consent", "APPROVO_VERSIONE"])
@@ -397,7 +415,9 @@ class BridgeG2Tests(unittest.TestCase):
         bridge.exclusive_json(out, bridge.digest(self.bundle)+".json", self.bundle)
         inbox = bridge.private_directory(bridge.INBOX, create=True)
         (inbox/"proposta_portafoglio.json").write_text(json.dumps(self.plan))
+        (inbox/"proposta_portafoglio.json").chmod(0o600)
         (inbox/"pacchetto_riferimento.json").write_text(json.dumps(self.bundle))
+        (inbox/"pacchetto_riferimento.json").chmod(0o600)
         with mock.patch.object(bridge, "_LOCAL_ORIGINS", set()):
             with redirect_stdout(io.StringIO()) as stream:
                 rc = bridge.main(["import-approved", "--approved-sha256", bridge.digest(self.plan),
@@ -421,14 +441,16 @@ class BridgeG2Tests(unittest.TestCase):
         folder = bridge.private_directory(bridge.ARCHIVE, create=True)
         name = bridge.digest(self.plan)+".json"
         entry = {"probe":"postcommit", "versione":1}
-        real_fsync = bridge.os.fsync
+        # The R3 durable journal adds earlier fsync calls; inject at the
+        # *post-link directory sync* (same original oracle, correct phase).
+        real_sync=bridge._sync_dir
         count = {"n":0}
-        def fail_directory(fd):
+        def fail_directory(directory):
             count["n"] += 1
             if count["n"] == 2:
-                raise OSError("synthetic crash during directory fsync")
-            return real_fsync(fd)
-        with mock.patch.object(bridge.os, "fsync", side_effect=fail_directory):
+                raise OSError("synthetic crash after hardlink during directory fsync")
+            return real_sync(directory)
+        with mock.patch.object(bridge, "_sync_dir", side_effect=fail_directory):
             with self.assertRaises(OSError):
                 bridge.exclusive_json(folder, name, entry)
         self.assertEqual(bridge.strict_json((folder/name).read_bytes()), entry)
@@ -437,6 +459,7 @@ class BridgeG2Tests(unittest.TestCase):
             bridge.exclusive_json(folder, name, {"probe":"mutated"})
 
     def test_r2_orphan_stage_inert_archive_recoverable(self):
+        self.persist_origin()
         folder = bridge.private_directory(bridge.ARCHIVE, create=True)
         (folder/".kdd-stage-interrupted.tmp").write_bytes(b'{"truncated":')
         (folder/".kdd-stage-interrupted.tmp").chmod(0o600)
@@ -446,6 +469,7 @@ class BridgeG2Tests(unittest.TestCase):
         self.assertEqual(len(bridge.load_archive()),1)
 
     def test_r2_concurrent_same_version_exactly_once(self):
+        self.persist_origin()
         from concurrent.futures import ThreadPoolExecutor
         version = bridge.digest(self.plan)
         def writer(_):
@@ -457,6 +481,7 @@ class BridgeG2Tests(unittest.TestCase):
         self.assertEqual(len(bridge.load_archive()),1)
 
     def test_r2_concurrent_conflicting_revisions_cannot_both_succeed(self):
+        self.persist_origin()
         from concurrent.futures import ThreadPoolExecutor
         root = bridge.digest(self.plan)
         bridge.approved_import(self.plan,self.bundle,root,"APPROVO_VERSIONE",now=T)
@@ -516,6 +541,215 @@ class BridgeG2Tests(unittest.TestCase):
         self.assertIn("NON_AUTENTICATA",received["origine"])
         with self.assertRaises(bridge.BridgeError):
             bridge.read_bundle(file,now=T,expected_sha256=bridge.digest(self.bundle))
+
+
+    def test_rt1_01_arbitrary_coherent_source_requires_test_only_seam(self):
+        with self.assertRaisesRegex(bridge.BridgeError, "canonica"):
+            bridge.prepare(self.fixture.root,now=T)
+        with self.assertRaises(bridge.BridgeError):
+            bridge.main(["prepare","--source-dir",str(self.fixture.root)])
+        self.assertEqual(bridge.prepare(self.fixture.root,now=T,_fixture=True)["packet_sha256"],
+                         self.bundle["packet_sha256"])
+
+    def test_rt1_01_canonical_operational_root_uses_only_fixed_path(self):
+        import shutil
+        source=self.home/"kraken-decision-desk"/"KRAKEN_DECISION_DESK_V001"
+        source.mkdir(parents=True)
+        for f in bridge.SOURCE_FILES:
+            shutil.copy2(self.fixture.root/f,source/f)
+        doc=bridge.prepare(now=T)
+        self.assertEqual(doc["packet_sha256"],self.bundle["packet_sha256"])
+        self.assertFalse((self.private/bridge.OUTBOX).exists())
+        out=bridge.private_directory(bridge.OUTBOX,create=True)
+        bridge.exclusive_json(out,bridge.digest(doc)+".json",doc)
+        self.assertEqual(bridge.verify_local_origin(doc),bridge.digest(doc))
+
+    def test_rt1_01_source_symlink_and_midflight_directory_change_stopped(self):
+        link=self.home/"aliased"
+        link.symlink_to(self.fixture.root,target_is_directory=True)
+        with self.assertRaises(bridge.BridgeError):
+            bridge.prepare(link,now=T,_fixture=True)
+        real_build=bridge.wallet.build
+        def mutate(root,now=None):
+            packet=real_build(root,now=now)
+            (root/"ultimo_report.json").write_text('{"tampered":true}')
+            return packet
+        with mock.patch.object(bridge.wallet,"build",side_effect=mutate):
+            with self.assertRaises(bridge.BridgeError):
+                bridge.prepare(self.fixture.root,now=T,_fixture=True)
+
+    def test_rt1_01_volatile_origin_never_approves_without_file(self):
+        with mock.patch.object(bridge,"_LOCAL_ORIGINS",{bridge.digest(self.bundle)}):
+            with self.assertRaisesRegex(bridge.BridgeError,"persistita"):
+                bridge.approved_import(self.plan,self.bundle,bridge.digest(self.plan),
+                                       "APPROVO_VERSIONE",now=T)
+
+    def test_rt1_02_nested_trade_claim_and_unknown_root_refused(self):
+        for level in ("root","row","source"):
+            plan=copy.deepcopy(self.plan)
+            if level=="root":
+                plan["audit"]={"approvato":True}
+            elif level=="row":
+                plan["posizioni"][0]["eseguito"]=True
+                plan["posizioni"][0]["ordine"]="BUY"
+            else:
+                plan["fonti_esterne"][0]["meta"]={"esecuzione":"CONFERMATA"}
+            with self.subTest(level=level),self.assertRaises(bridge.BridgeError):
+                bridge.validate_proposal(plan,self.bundle,now=T)
+
+    def test_rt1_02_duplicate_nested_keys_in_json_rejected(self):
+        raw=b'{"fonti_esterne":[{"nome":"a","url":"https://example.org","nome":"b"}]}'
+        with self.assertRaises(bridge.BridgeError):
+            bridge.strict_json(raw)
+
+    def test_rt1_02_narrative_false_trade_claim_is_not_attested(self):
+        self.persist_origin()
+        plan=copy.deepcopy(self.plan)
+        plan["posizioni"][0]["tesi"]="Il modello dice: ordine già eseguito; affermazione non verificata"
+        bridge.validate_proposal(plan,self.bundle,now=T)
+        bridge.approved_import(plan,self.bundle,bridge.digest(plan),"APPROVO_VERSIONE",now=T)
+        shown=bridge.approved_html()
+        self.assertIn("ordine già eseguito",shown)
+        self.assertIn("NON ATTESTATA",shown)
+        self.assertIn("generato da GPT",shown)
+
+    def test_rt1_03_descriptor_checks_0600_vs_0644_and_symlink(self):
+        folder=bridge.private_directory(bridge.INBOX,create=True)
+        f=folder/"source.json"
+        f.write_text('{"ok":true}')
+        f.chmod(0o600)
+        self.assertIn(b'"ok"',bridge.read_regular(f,expected_parent=folder))
+        f.chmod(0o644)
+        with self.assertRaises(bridge.BridgeError):
+            bridge.read_regular(f,expected_parent=folder)
+        link=folder/"sym.json"
+        link.symlink_to(f)
+        with self.assertRaises(bridge.BridgeError):
+            bridge.read_regular(link,expected_parent=folder)
+
+    def test_rt1_03_idempotence_rejects_world_readable_final(self):
+        folder=bridge.private_directory(bridge.OUTBOX,create=True)
+        doc={"probe":"immutable"}
+        dest=folder/"SYNTH.json"
+        bridge.exclusive_json(folder,dest.name,doc)
+        dest.chmod(0o644)
+        with self.assertRaises(bridge.BridgeError):
+            bridge.exclusive_json(folder,dest.name,doc)
+
+    def test_rt1_03_directory_0700_vs_0755_and_concurrent_created_dir(self):
+        folder=bridge.private_directory(bridge.INBOX,create=True)
+        bridge.ensure_dir(folder)
+        folder.chmod(0o755)
+        with self.assertRaises(bridge.BridgeError):
+            bridge.ensure_dir(folder)
+        folder.chmod(0o700)
+        bridge.ensure_dir(folder)
+        with mock.patch.object(bridge.Path,"mkdir",side_effect=FileExistsError("synthetic")):
+            with self.assertRaises(bridge.BridgeError):
+                bridge.ensure_dir(folder/"missing")
+
+    def test_rt1_03_replacement_between_open_and_check_fails(self):
+        folder=bridge.private_directory(bridge.INBOX,create=True)
+        path=folder/"target.json"
+        path.write_text('{"old":true}')
+        path.chmod(0o600)
+        alternate=folder/"replacement.json"
+        alternate.write_text('{"new":true}')
+        alternate.chmod(0o600)
+        real_stat=bridge.os.stat
+        done={"ok":False}
+        def replace_after_open(p,*args,**kwargs):
+            if str(p)==str(path) and not done["ok"] and kwargs.get("follow_symlinks") is False:
+                done["ok"]=True
+                alternate.replace(path)
+            return real_stat(p,*args,**kwargs)
+        with mock.patch.object(bridge.os,"stat",side_effect=replace_after_open):
+            with self.assertRaisesRegex(bridge.BridgeError,"sostituito"):
+                bridge.read_regular(path,expected_parent=folder)
+
+    def test_rt1_03_fifo_not_regular_rejected_without_hang(self):
+        folder=bridge.private_directory(bridge.INBOX,create=True)
+        fifo=folder/"pipe.json"
+        os.mkfifo(fifo,0o600)
+        with self.assertRaises(bridge.BridgeError):
+            bridge.read_regular(fifo,expected_parent=folder)
+
+    def test_rt1_04_uncertain_commit_blocks_new_revision_until_reconcile(self):
+        self.persist_origin()
+        root=bridge.digest(self.plan)
+        folder=bridge.private_directory(bridge.ARCHIVE,create=True)
+        original_sync=bridge._sync_dir
+        n={"i":0}
+        def failure(directory):
+            n["i"]+=1
+            if n["i"]==2:
+                raise OSError("fsync post link simulated")
+            return original_sync(directory)
+        with mock.patch.object(bridge,"_sync_dir",side_effect=failure):
+            with self.assertRaises(bridge.PublicationUncertain) as caught:
+                bridge.approved_import(self.plan,self.bundle,root,"APPROVO_VERSIONE",now=T)
+        self.assertEqual(caught.exception.state,"PUBBLICAZIONE_INCERTA")
+        self.assertTrue((folder/(root+".json")).exists())
+        self.assertTrue((folder/(".pending-"+root+".json")).exists())
+        revised=copy.deepcopy(self.plan)
+        revised["proposta_id"]="NEXT"
+        revised["sostituisce_sha256"]=root
+        with self.assertRaisesRegex(bridge.BridgeError,"INCERTA"):
+            bridge.approved_import(revised,self.bundle,bridge.digest(revised),"APPROVO_VERSIONE",now=T)
+        self.assertEqual(bridge.reconcile_archive(),["PUBBLICATO_CONFERMATO"])
+        self.assertEqual(bridge.approved_import(self.plan,self.bundle,root,"APPROVO_VERSIONE",now=T)["stato"],"GIA_PRESENTE")
+        self.assertEqual(bridge.approved_import(revised,self.bundle,bridge.digest(revised),"APPROVO_VERSIONE",now=T)["stato"],"INSERITO")
+
+    def test_rt1_04_unclean_prelink_crash_requires_explicit_reconcile(self):
+        self.persist_origin()
+        folder=bridge.private_directory(bridge.ARCHIVE,create=True)
+        root=bridge.digest(self.plan)
+        with mock.patch.object(bridge.os,"link",side_effect=KeyboardInterrupt("synthetic abrupt stop")):
+            with self.assertRaises(KeyboardInterrupt):
+                bridge.approved_import(self.plan,self.bundle,root,"APPROVO_VERSIONE",now=T)
+        self.assertFalse((folder/(root+".json")).exists())
+        self.assertTrue((folder/(".pending-"+root+".json")).exists())
+        with self.assertRaisesRegex(bridge.BridgeError,"INCERTA"):
+            bridge.approved_import(self.plan,self.bundle,root,"APPROVO_VERSIONE",now=T)
+        self.assertEqual(bridge.reconcile_archive(),["NON_PUBBLICATO"])
+        self.assertEqual(bridge.approved_import(self.plan,self.bundle,root,"APPROVO_VERSIONE",now=T)["stato"],"INSERITO")
+
+    def test_rt1_04_cli_status_does_not_print_payload(self):
+        from contextlib import redirect_stdout
+        import io
+        self.persist_origin()
+        inbox=bridge.private_directory(bridge.INBOX,create=True)
+        for name,obj in (("proposta_portafoglio.json",self.plan),("pacchetto_riferimento.json",self.bundle)):
+            p=inbox/name
+            p.write_text(json.dumps(obj))
+            p.chmod(0o600)
+        with mock.patch.object(bridge,"approved_import",side_effect=bridge.PublicationUncertain("fake secret PRICE-EXAMPLE")):
+            out=io.StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(bridge.main(["import-approved","--approved-sha256",bridge.digest(self.plan),"--consent","APPROVO_VERSIONE"]),2)
+        self.assertIn("PUBBLICAZIONE_INCERTA",out.getvalue())
+        self.assertNotIn("PRICE-EXAMPLE",out.getvalue())
+
+    def test_rt1_05_dashboard_fails_closed_without_taking_home_offline(self):
+        import serve
+        page="<h2>1 · Decisioni e posizioni</h2><p>Storico Spot conservato</p>"
+        for err in (OSError("permission"), RuntimeError("unexpected"), ValueError("bad archive")):
+            with mock.patch.object(serve.bridge_g2,"approved_html",side_effect=err):
+                shown=serve.with_controls(page)
+            self.assertIn("Archivio GPT temporaneamente non verificabile",shown)
+            self.assertIn("Nessuna proposta è stata certificata",shown)
+            for expected in ("/mercati/spot", "/aggiorna", "Storico Spot conservato"):
+                self.assertIn(expected,shown)
+
+    def test_rt1_05_archive_corrupt_and_access_exception_are_diagnostic(self):
+        self.persist_origin()
+        folder=bridge.private_directory(bridge.ARCHIVE,create=True)
+        damaged=folder/("0"*64+".json")
+        damaged.write_bytes(b'{"truncated":')
+        damaged.chmod(0o600)
+        self.assertIn("STOP",bridge.approved_html())
+        with mock.patch.object(bridge,"load_archive",side_effect=OSError("private access")):
+            self.assertIn("STOP",bridge.approved_html())
 
 
 if __name__=="__main__":

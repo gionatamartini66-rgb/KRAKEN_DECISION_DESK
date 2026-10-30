@@ -132,7 +132,16 @@ def with_controls(page: str, result: str = "") -> str:
                      "<a href='http://127.0.0.1:8765/'>cruscotto locale aggiornabile</a> "
                      "(richiede Termux attivo).</p>")
     page = page.replace(static_notice, "", 1)
-    return page.replace(target, toolbar + js + bridge_g2.approved_html() + target, 1)
+    # The bridge is nonessential to the home: an unreadable archive must never
+    # take Spot navigation, wallet report or refresh controls offline.
+    try:
+        portfolio_proposals = bridge_g2.approved_html()
+    except Exception:
+        portfolio_proposals = ("<section id='kdd-gpt-patrimonio' role='status'>"
+                               "<h2>Proposte patrimoniali GPT</h2>"
+                               "<p>Archivio GPT temporaneamente non verificabile: STOP. "
+                               "Nessuna proposta è stata certificata.</p></section>")
+    return page.replace(target, toolbar + js + portfolio_proposals + target, 1)
 
 
 def load_sui_chart(timeframe, public_kraken=None):

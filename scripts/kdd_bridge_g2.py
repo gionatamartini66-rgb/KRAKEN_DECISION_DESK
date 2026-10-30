@@ -226,7 +226,7 @@ def _finalize_pending(directory, filename, expected_raw=None, *, explicit=False)
                 expected_raw is not None and raw != expected_raw):
             raise BridgeError("Pubblicazione incerta: finale discordante")
         entry = strict_json(raw)
-        if (entry.get("versione_sha256") != filename[:-5]
+        if expected_raw is None and (entry.get("versione_sha256") != filename[:-5]
                 or digest(entry.get("proposta")) != filename[:-5]
                 or entry.get("consenso") != "CONFERMATO_DA_COMANDO_UTENTE"):
             raise BridgeError("Pubblicazione incerta: archivio invalido")
@@ -770,7 +770,8 @@ def main(argv=None):
         return 0
     except (BridgeError, wallet.PacketError, OSError, PublicationUncertain) as exc:
         status = "PUBBLICAZIONE_INCERTA" if isinstance(exc, PublicationUncertain) else "NON_PUBBLICATO_O_NON_VERIFICATO"
-        print("STOP G2:", status, type(exc).__name__)
+        detail = str(exc) if isinstance(exc, (BridgeError, wallet.PacketError)) else type(exc).__name__
+        print("STOP G2:", status, detail)
         return 2
 
 
