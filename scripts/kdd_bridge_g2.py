@@ -6,6 +6,9 @@ Digest comparisons prove local byte consistency, NOT remote origin authenticatio
 """
 from __future__ import annotations
 import argparse
+import contextlib
+import fcntl
+import tempfile
 import datetime as dt
 from decimal import Decimal, InvalidOperation
 import hashlib
@@ -31,6 +34,9 @@ HEX = re.compile(r"[0-9a-f]{64}\Z")
 CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,39}\Z")
 ALLOWED = frozenset(("MANTENERE", "INCREMENTARE", "ALLEGGERIRE", "USCIRE", "RUOTARE", "RINVIARE"))
 FRAMES = {"15m": 900, "1H": 3600, "4H": 14400, "1D": 86400}
+# In-memory origin is producer evidence within one process; CLI uses the private outbox.
+_LOCAL_ORIGINS = set()
+STAGING = re.compile(r"\.kdd-stage-[A-Za-z0-9_-]+\.tmp\Z")
 
 
 class BridgeError(ValueError):
@@ -160,30 +166,82 @@ def read_regular(path, *, expected_parent=None):
 
 
 def exclusive_json(directory, filename, obj):
-    """Immutable, exclusive, app-private file. No overwrite or shared storage."""
+    """Atomically publish a durable, complete immutable version, never a partial final."""
     if not filename.endswith(".json") or not (HEX.fullmatch(filename[:-5]) or CODE.fullmatch(filename[:-5])):
         raise BridgeError("Nome documento non valido")
+    directory = Path(directory)
+    if directory.is_symlink() or not directory.is_dir() or directory.stat().st_mode & 0o077:
+        raise BridgeError("Directory privata non protetta")
     dest = directory / filename
     raw = canonical(obj) + b"\n"
     if len(raw) > MAX_BYTES:
         raise BridgeError("Documento troppo grande")
-    try:
-        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
-                     getattr(os, "O_NOFOLLOW", 0), 0o600)
-    except FileExistsError:
+    if dest.exists() or dest.is_symlink():
         if read_regular(dest, expected_parent=directory) == raw:
             return "GIA_PRESENTE"
-        raise BridgeError("Collisione archivio, STOP") from None
+        raise BridgeError("Collisione archivio, STOP")
+    fd, stage_name = tempfile.mkstemp(prefix=".kdd-stage-", suffix=".tmp", dir=directory)
+    stage = Path(stage_name)
     try:
         with os.fdopen(fd, "wb") as stream:
             os.fchmod(stream.fileno(), 0o600)
             stream.write(raw)
             stream.flush()
             os.fsync(stream.fileno())
-    except Exception:
-        dest.unlink(missing_ok=True)
-        raise
-    return "INSERITO"
+        try:
+            os.link(stage, dest, follow_symlinks=False)
+        except FileExistsError:
+            if read_regular(dest, expected_parent=directory) == raw:
+                return "GIA_PRESENTE"
+            raise BridgeError("Collisione archivio, STOP") from None
+        dirfd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                        getattr(os, "O_NOFOLLOW", 0))
+        try:
+            os.fsync(dirfd)
+        finally:
+            os.close(dirfd)
+        return "INSERITO"
+    finally:
+        # Killed writers can leave inert .kdd-stage files; readers ignore them.
+        # Do not sweep another writer's in-progress staging file.
+        stage.unlink(missing_ok=True)
+
+
+@contextlib.contextmanager
+def _archive_write_lock(folder):
+    """Serialize read/check/publish so competing revisions cannot fork the chain."""
+    lock = folder / ".approval.lock"
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError as exc:
+        raise BridgeError("Lock archivio non sicuro") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o077:
+            raise BridgeError("Lock archivio non regolare")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def verify_local_origin(bundle):
+    """Require KDD-side origin: incoming packet+proposal cannot attest each other."""
+    if not isinstance(bundle, dict):
+        raise BridgeError("Fotografia originale assente")
+    origin_id = digest(bundle)
+    if origin_id in _LOCAL_ORIGINS:
+        return origin_id
+    try:
+        outgoing = private_directory(OUTBOX)
+        raw = read_regular(outgoing / (origin_id + ".json"), expected_parent=outgoing)
+        original = strict_json(raw)
+    except (BridgeError, OSError) as exc:
+        raise BridgeError("Fotografia KDD originaria non trovata nell'area privata") from exc
+    if original != bundle or digest(original) != origin_id or raw != canonical(original) + b"\n":
+        raise BridgeError("Fotografia KDD originaria non corrispondente")
+    return origin_id
 
 
 def prepare(root, *, now=None):
@@ -195,6 +253,7 @@ def prepare(root, *, now=None):
               "provenienza": "KDD_LOCALE_DICHIARATA_NON_AUTENTICATA",
               "trasporto": "MANUALE_NON_ESEGUITO"}
     read_context(result, now=moment)
+    _LOCAL_ORIGINS.add(digest(result))
     return result
 
 
@@ -343,7 +402,10 @@ def read_bundle(path, *, now=None, expected_sha256=None):
         raise BridgeError("Digest dei byte ricevuti non confermato")
     # A matching digest must have been obtained through an independent channel.
     # Without that external trust, this remains local byte integrity only.
-    return read_context(strict_json(raw), now=now)
+    context = read_context(strict_json(raw), now=now)
+    context["integrita_trasporto"] = "SHA256_BYTE_ESATTI_CONFRONTATO"
+    context["origine"] = "BYTE_INTEGRI_SECONDO_HASH_FORNITO_ORIGINE_NON_AUTENTICATA"
+    return context
 
 
 def text(value):
@@ -405,6 +467,10 @@ def load_archive(*, create=False):
         raise
     out = {}
     for file in sorted(folder.iterdir()):
+        if file.name == ".approval.lock" or STAGING.fullmatch(file.name):
+            if file.is_symlink() or not file.is_file() or file.stat().st_mode & 0o077:
+                raise BridgeError("Residuo archivio non sicuro")
+            continue
         if file.is_symlink() or not file.is_file() or not re.fullmatch(r"[0-9a-f]{64}\.json", file.name):
             raise BridgeError("Archivio non regolare")
         entry = strict_json(read_regular(file, expected_parent=folder))
@@ -418,29 +484,31 @@ def load_archive(*, create=False):
 
 
 def approved_import(proposal, bundle, approved_sha, consent, *, now=None):
-    """Human enters exact digest into an explicit local command. Not GPT self-approval."""
+    """Only a KDD-origin photograph may be bound to explicit human consent."""
+    verify_local_origin(bundle)
     validate_proposal(proposal, bundle, now=now)
     version = digest(proposal)
     if not isinstance(approved_sha, str) or approved_sha != version or consent != "APPROVO_VERSIONE":
         raise BridgeError("Consenso umano esplicito assente o versione diversa")
-    existing = load_archive()
-    if version in existing:
-        if existing[version]["proposta"] != proposal:
-            raise BridgeError("Versione gia archiviata ma differente")
-        return {"stato": "GIA_PRESENTE", "versione_sha256": version}
-    parent = proposal.get("sostituisce_sha256")
-    # Sequential chain, preserve every earlier version; no destructive overwrite.
-    heads = set(existing) - {e["proposta"].get("sostituisce_sha256") for e in existing.values()}
-    if existing and (len(heads) != 1 or parent not in heads):
-        raise BridgeError("Revisione non collegata alla versione corrente")
-    if not existing and parent is not None:
-        raise BridgeError("Versione precedente inesistente")
-    entry = {"versione_sha256": version, "consenso": "CONFERMATO_DA_COMANDO_UTENTE",
-             "approvato_utc": checked_now(now).isoformat(timespec="seconds"),
-             "snapshot_id": proposal["snapshot_id"], "proposta": proposal,
-             "nessun_ordine": True, "esecuzione": "NON_ATTESTATA"}
-    status = exclusive_json(private_directory(ARCHIVE, create=True), version+".json", entry)
-    return {"stato": status, "versione_sha256": version}
+    folder = private_directory(ARCHIVE, create=True)
+    with _archive_write_lock(folder):
+        existing = load_archive()
+        if version in existing:
+            if existing[version]["proposta"] != proposal:
+                raise BridgeError("Versione gia archiviata ma differente")
+            return {"stato": "GIA_PRESENTE", "versione_sha256": version}
+        parent = proposal.get("sostituisce_sha256")
+        heads = set(existing) - {e["proposta"].get("sostituisce_sha256") for e in existing.values()}
+        if existing and (len(heads) != 1 or parent not in heads):
+            raise BridgeError("Revisione non collegata alla versione corrente")
+        if not existing and parent is not None:
+            raise BridgeError("Versione precedente inesistente")
+        entry = {"versione_sha256": version, "consenso": "CONFERMATO_DA_COMANDO_UTENTE",
+                 "approvato_utc": checked_now(now).isoformat(timespec="seconds"),
+                 "snapshot_id": proposal["snapshot_id"], "proposta": proposal,
+                 "nessun_ordine": True, "esecuzione": "NON_ATTESTATA"}
+        status = exclusive_json(folder, version+".json", entry)
+        return {"stato": status, "versione_sha256": version}
 
 
 def approved_html():
@@ -508,6 +576,7 @@ def main(argv=None):
             raw = read_regular(inbox / "proposta_portafoglio.json", expected_parent=inbox)
             prop = strict_json(raw)
             envelope = strict_json(read_regular(inbox / "pacchetto_riferimento.json", expected_parent=inbox))
+            verify_local_origin(envelope)
             validate_proposal(prop, envelope)
             if args.action == "preview-proposal":
                 print("ANTEPRIMA NON APPROVATA | versione:", digest(prop),

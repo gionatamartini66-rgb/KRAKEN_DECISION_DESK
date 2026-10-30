@@ -361,5 +361,162 @@ class BridgeG2Tests(unittest.TestCase):
         self.assertFalse((self.private/bridge.ARCHIVE).exists())
 
 
+    def test_r1_coherent_replacement_proposal_and_packet_still_rejected(self):
+        forged = copy.deepcopy(self.bundle)
+        forged["packet"]["scenario_mercato_kdd"] = "FOTO FALSA CONSISTENTE"
+        forged["packet_sha256"] = bridge.digest(forged["packet"])
+        altered = copy.deepcopy(self.plan)
+        altered["snapshot_id"] = bridge.digest(forged["packet"])
+        bridge.validate_proposal(altered, forged, now=T)
+        with self.assertRaisesRegex(bridge.BridgeError, "originaria"):
+            bridge.approved_import(altered, forged, bridge.digest(altered), "APPROVO_VERSIONE", now=T)
+        self.assertFalse((self.private / bridge.ARCHIVE).exists())
+
+    def test_r1_cli_rejects_coherent_replaced_pair_without_kdd_outbox(self):
+        from contextlib import redirect_stdout
+        import io
+        forged = copy.deepcopy(self.bundle)
+        forged["packet"]["scenario_mercato_kdd"] = "ORIGINE SOSTITUITA"
+        forged["packet_sha256"] = bridge.digest(forged["packet"])
+        altered = copy.deepcopy(self.plan)
+        altered["snapshot_id"] = bridge.digest(forged["packet"])
+        inbox = bridge.private_directory(bridge.INBOX, create=True)
+        (inbox/"proposta_portafoglio.json").write_text(json.dumps(altered))
+        (inbox/"pacchetto_riferimento.json").write_text(json.dumps(forged))
+        with redirect_stdout(io.StringIO()) as out:
+            rc = bridge.main(["import-approved", "--approved-sha256", bridge.digest(altered),
+                              "--consent", "APPROVO_VERSIONE"])
+        self.assertEqual(rc, 2)
+        self.assertIn("originaria", out.getvalue())
+        self.assertFalse((self.private / bridge.ARCHIVE).exists())
+
+    def test_r1_persistent_kdd_private_origin_survives_process_restart_simulation(self):
+        from contextlib import redirect_stdout
+        import io
+        out = bridge.private_directory(bridge.OUTBOX, create=True)
+        bridge.exclusive_json(out, bridge.digest(self.bundle)+".json", self.bundle)
+        inbox = bridge.private_directory(bridge.INBOX, create=True)
+        (inbox/"proposta_portafoglio.json").write_text(json.dumps(self.plan))
+        (inbox/"pacchetto_riferimento.json").write_text(json.dumps(self.bundle))
+        with mock.patch.object(bridge, "_LOCAL_ORIGINS", set()):
+            with redirect_stdout(io.StringIO()) as stream:
+                rc = bridge.main(["import-approved", "--approved-sha256", bridge.digest(self.plan),
+                                  "--consent", "APPROVO_VERSIONE"])
+        self.assertEqual(rc, 0, stream.getvalue())
+        self.assertEqual(len(bridge.load_archive()), 1)
+
+    def test_r2_interruption_before_link_no_partial_final_retry(self):
+        folder = bridge.private_directory(bridge.ARCHIVE, create=True)
+        name = bridge.digest(self.plan)+".json"
+        entry = {"probe":"synthetic","versione":1}
+        with mock.patch.object(bridge.os, "link", side_effect=OSError("injected crash")):
+            with self.assertRaises(OSError):
+                bridge.exclusive_json(folder, name, entry)
+        self.assertFalse((folder/name).exists())
+        self.assertEqual(bridge.exclusive_json(folder, name, entry), "INSERITO")
+        self.assertEqual(bridge.exclusive_json(folder, name, entry), "GIA_PRESENTE")
+        self.assertEqual(bridge.strict_json((folder/name).read_bytes()), entry)
+
+    def test_r2_post_link_interrupt_yields_complete_final_and_idempotent_retry(self):
+        folder = bridge.private_directory(bridge.ARCHIVE, create=True)
+        name = bridge.digest(self.plan)+".json"
+        entry = {"probe":"postcommit", "versione":1}
+        real_fsync = bridge.os.fsync
+        count = {"n":0}
+        def fail_directory(fd):
+            count["n"] += 1
+            if count["n"] == 2:
+                raise OSError("synthetic crash during directory fsync")
+            return real_fsync(fd)
+        with mock.patch.object(bridge.os, "fsync", side_effect=fail_directory):
+            with self.assertRaises(OSError):
+                bridge.exclusive_json(folder, name, entry)
+        self.assertEqual(bridge.strict_json((folder/name).read_bytes()), entry)
+        self.assertEqual(bridge.exclusive_json(folder, name, entry), "GIA_PRESENTE")
+        with self.assertRaises(bridge.BridgeError):
+            bridge.exclusive_json(folder, name, {"probe":"mutated"})
+
+    def test_r2_orphan_stage_inert_archive_recoverable(self):
+        folder = bridge.private_directory(bridge.ARCHIVE, create=True)
+        (folder/".kdd-stage-interrupted.tmp").write_bytes(b'{"truncated":')
+        (folder/".kdd-stage-interrupted.tmp").chmod(0o600)
+        self.assertEqual(bridge.load_archive(), {})
+        version = bridge.digest(self.plan)
+        self.assertEqual(bridge.approved_import(self.plan,self.bundle,version,"APPROVO_VERSIONE",now=T)["stato"],"INSERITO")
+        self.assertEqual(len(bridge.load_archive()),1)
+
+    def test_r2_concurrent_same_version_exactly_once(self):
+        from concurrent.futures import ThreadPoolExecutor
+        version = bridge.digest(self.plan)
+        def writer(_):
+            return bridge.approved_import(self.plan,self.bundle,version,"APPROVO_VERSIONE",now=T)["stato"]
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            statuses = list(pool.map(writer, range(12)))
+        self.assertEqual(statuses.count("INSERITO"),1)
+        self.assertEqual(statuses.count("GIA_PRESENTE"),11)
+        self.assertEqual(len(bridge.load_archive()),1)
+
+    def test_r2_concurrent_conflicting_revisions_cannot_both_succeed(self):
+        from concurrent.futures import ThreadPoolExecutor
+        root = bridge.digest(self.plan)
+        bridge.approved_import(self.plan,self.bundle,root,"APPROVO_VERSIONE",now=T)
+        candidates = []
+        for label in ("REV-A","REV-B"):
+            candidate = copy.deepcopy(self.plan)
+            candidate["proposta_id"]=label
+            candidate["sostituisce_sha256"]=root
+            candidates.append(candidate)
+        def writer(p):
+            try:
+                return bridge.approved_import(p,self.bundle,bridge.digest(p),"APPROVO_VERSIONE",now=T)["stato"]
+            except bridge.BridgeError:
+                return "RIFIUTATO"
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            statuses=list(pool.map(writer,candidates))
+        self.assertEqual(sorted(statuses),["INSERITO","RIFIUTATO"])
+        self.assertEqual(len(bridge.load_archive()),2)
+
+    def test_r2_live_reader_never_sees_uncommitted_partial_final(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        folder=bridge.private_directory(bridge.ARCHIVE,create=True)
+        entry={"probe":"ready"}
+        key=bridge.digest(self.plan)
+        linked=Event()
+        release=Event()
+        genuine=bridge.os.link
+        def held_link(*args,**kwargs):
+            linked.set()
+            if not release.wait(5):
+                raise OSError("test barrier")
+            return genuine(*args,**kwargs)
+        with mock.patch.object(bridge.os,"link",side_effect=held_link):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future=pool.submit(bridge.exclusive_json,folder,key+".json",entry)
+                self.assertTrue(linked.wait(5))
+                self.assertFalse((folder/(key+".json")).exists())
+                # Interrupted stage is not a commit; archive stays readable.
+                self.assertEqual(bridge.load_archive(), {})
+                release.set()
+                self.assertEqual(future.result(timeout=5),"INSERITO")
+        self.assertEqual(bridge.strict_json((folder/(key+".json")).read_bytes()),entry)
+
+    def test_read_bundle_marks_byte_digest_separately_from_json_coherence(self):
+        import hashlib
+        folder=bridge.private_directory(bridge.OUTBOX,create=True)
+        name=bridge.digest(self.bundle)+".json"
+        bridge.exclusive_json(folder,name,self.bundle)
+        file=folder/name
+        bytehash=hashlib.sha256(file.read_bytes()).hexdigest()
+        semantic=bridge.read_context(self.bundle,now=T)
+        received=bridge.read_bundle(file,now=T,expected_sha256=bytehash)
+        self.assertEqual(semantic["origine"],"COERENZA_INTERNA_SOLTANTO")
+        self.assertEqual(received["integrita_trasporto"],"SHA256_BYTE_ESATTI_CONFRONTATO")
+        self.assertNotEqual(received["origine"], semantic["origine"])
+        self.assertIn("NON_AUTENTICATA",received["origine"])
+        with self.assertRaises(bridge.BridgeError):
+            bridge.read_bundle(file,now=T,expected_sha256=bridge.digest(self.bundle))
+
+
 if __name__=="__main__":
     unittest.main()
