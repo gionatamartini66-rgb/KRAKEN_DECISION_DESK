@@ -156,7 +156,7 @@ def read_regular(path, *, expected_parent=None):
 
 def exclusive_json(directory, filename, obj):
     """Immutable, exclusive, app-private file. No overwrite or shared storage."""
-    if not CODE.fullmatch(filename[:-5]) or not filename.endswith(".json"):
+    if not filename.endswith(".json") or not (HEX.fullmatch(filename[:-5]) or CODE.fullmatch(filename[:-5])):
         raise BridgeError("Nome documento non valido")
     dest = directory / filename
     raw = canonical(obj) + b"\n"
@@ -355,8 +355,13 @@ def validate_proposal(proposal, bundle, *, now=None):
     return proposal
 
 
-def load_archive():
-    folder = private_directory(ARCHIVE, create=True)
+def load_archive(*, create=False):
+    try:
+        folder = private_directory(ARCHIVE, create=create)
+    except BridgeError:
+        if not create and not (PRIVATE_ROOT / ARCHIVE).exists():
+            return {}
+        raise
     out = {}
     for file in sorted(folder.iterdir()):
         if file.is_symlink() or not file.is_file() or not re.fullmatch(r"[0-9a-f]{64}\.json", file.name):
