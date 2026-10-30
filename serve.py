@@ -13,6 +13,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import decision_desk as desk
 import grafico_4h
+from scripts import kdd_bridge_g2 as bridge_g2
 
 HOST, PORT = "127.0.0.1", 8765
 TOKEN = secrets.token_urlsafe(28)
@@ -131,7 +132,7 @@ def with_controls(page: str, result: str = "") -> str:
                      "<a href='http://127.0.0.1:8765/'>cruscotto locale aggiornabile</a> "
                      "(richiede Termux attivo).</p>")
     page = page.replace(static_notice, "", 1)
-    return page.replace(target, toolbar + js + target, 1)
+    return page.replace(target, toolbar + js + bridge_g2.approved_html() + target, 1)
 
 
 def load_sui_chart(timeframe, public_kraken=None):
