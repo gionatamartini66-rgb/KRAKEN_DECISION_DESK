@@ -468,8 +468,13 @@ def brief_positions(portfolio: dict, report: dict, snapshot: dict, dossier: dict
                     chart_info["lettura_4h"] = summary
         technical4 = ({'stato':'NON_DISPONIBILE','motivo':'Dossier senza 4TF verificati'}
                       if four_rows is None else technical_in_packet(four_rows[index], now))
+        market_eur = snapshot.get("markets", {}).get(token) if price is not None else None
+        price_source = ({"token":market_eur["token"], "pair":market_eur["pair"],
+                         "pair_key":market_eur["pair_key"], "valuta":"EUR",
+                         "rilevazione_utc":snapshot["rilevazione_utc"]}
+                        if isinstance(market_eur, dict) else None)
         selected.append({"indice":index, "token": token, "stato_identita":"VALIDA", "stato_quantita":qty_state, "quantita_spot": qty,
-                         "analisi_4tf": technical4,
+                         "analisi_4tf": technical4, "fonte_prezzo_eur": price_source,
                          "disponibile_spot": amount(row.get("disponibile_spot"), "disponibile_spot"),
                          "prezzo_eur": price, "valore_eur": val,
                          "pl_indicativo_eur": pnl, "variazione": technical,
