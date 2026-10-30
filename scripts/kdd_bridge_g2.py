@@ -37,6 +37,13 @@ FRAMES = {"15m": 900, "1H": 3600, "4H": 14400, "1D": 86400}
 # In-memory origin is producer evidence within one process; CLI uses the private outbox.
 _LOCAL_ORIGINS = set()
 STAGING = re.compile(r"\.kdd-stage-[A-Za-z0-9_-]+\.tmp\Z")
+PENDING = re.compile(r"\.pending-[0-9a-f]{64}\.json\Z")
+RESOLVED = re.compile(r"\.(?:resolved|cancelled)-[0-9a-f]{64}\.json\Z")
+SOURCE_FILES = tuple(wallet.SRC_MAX)
+CANONICAL_KDD_SOURCE = wallet.DEFAULT_SOURCE
+PROPOSAL_FIELDS = frozenset(("schema", "proposta_id", "snapshot_id", "snapshot_utc", "creato_utc", "posizioni", "scenario", "scenario_alternativo", "rischi_comuni", "liquidita", "revisione", "fonti_esterne", "sostituisce_sha256"))
+POSITION_FIELDS = frozenset(("indice", "token", "azione", "tesi", "rischi", "alternativa", "invalidazione", "riesame", "costi", "evidenze"))
+SOURCE_REF_FIELDS = frozenset(("nome", "url"))
 
 
 class BridgeError(ValueError):
@@ -103,64 +110,78 @@ def strict_json(raw):
     return parsed
 
 
+def _check_dir(path, *, owner_only=True):
+    """Check the opened directory descriptor, not merely a preceding stat."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            st = os.fstat(fd)
+            if (not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid()
+                    or (st.st_mode & (0o077 if owner_only else 0o022))):
+                raise BridgeError("Directory privata non sicura")
+            current = os.stat(path, follow_symlinks=False)
+            if (st.st_ino, st.st_dev) != (current.st_ino, current.st_dev):
+                raise BridgeError("Directory sostituita durante apertura")
+            return st.st_dev, st.st_ino
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise BridgeError("Directory non verificabile") from exc
+
+
 def ensure_dir(path):
-    """App-private only. Does not grant safety against a hostile same-UID process."""
+    """No symlink, even after an EEXIST due to concurrent creation."""
     path = Path(path)
-    if path.is_symlink():
-        raise BridgeError("Directory symlink")
-    if path.exists():
-        if not path.is_dir() or path.stat().st_mode & 0o077:
-            raise BridgeError("Permessi directory non privati")
-    else:
+    try:
         path.mkdir(mode=0o700, parents=False, exist_ok=True)
+    except OSError as exc:
+        raise BridgeError("Creazione directory fallita") from exc
+    _check_dir(path)
     return path
 
 
 def private_directory(name, *, create=False):
+    """Only named children under the existing owner-only Termux app state."""
+    if name not in (OUTBOX, INBOX, ARCHIVE):
+        raise BridgeError("Nome directory non autorizzato")
     root = PRIVATE_ROOT
-    if root.is_symlink():
-        raise BridgeError("Root privata symlink")
     parent = root.parent
     if create:
-        # Avoid touching arbitrary shared paths. HOME/.local/state belongs to app.
         for path in (Path.home() / ".local", Path.home() / ".local" / "state", parent, root):
-            if path.is_symlink():
-                raise BridgeError("Percorso privato symlink")
-            if not path.exists():
+            try:
                 path.mkdir(mode=0o700, exist_ok=True)
-            mode = path.stat().st_mode
-            if not path.is_dir() or (mode & 0o022):
-                raise BridgeError("Directory privata non protetta")
-            # Shared read permission on pre-existing ~/.local or ~/.local/state
-            # is normal. The actual KDD state and bridge must be owner-only.
-            if path in (parent, root) and mode & 0o077:
-                raise BridgeError("Directory KDD non privata")
+            except OSError as exc:
+                raise BridgeError("Creazione percorso privato fallita") from exc
+            _check_dir(path, owner_only=(path in (parent, root)))
         return ensure_dir(root / name)
-    if not root.is_dir() or root.is_symlink():
-        raise BridgeError("Root privata assente")
+    _check_dir(parent)
+    _check_dir(root)
     child = root / name
-    if not child.is_dir() or child.is_symlink() or child.stat().st_mode & 0o077:
-        raise BridgeError("Directory privata assente o non protetta")
+    _check_dir(child)
     return child
 
 
 def read_regular(path, *, expected_parent=None):
+    """Fail closed on the actual opened inode (owner, mode, link count, type)."""
     path = Path(path)
     if expected_parent is not None and path.parent != expected_parent:
         raise BridgeError("Percorso fuori dal perimetro privato")
-    if path.is_symlink():
-        raise BridgeError("Input symlink")
     try:
-        info = path.stat()
-        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_BYTES or info.st_size < 2:
-            raise BridgeError("Input non regolare")
-        # O_NOFOLLOW rejects last-component replacement with a symlink.
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        with os.fdopen(fd, "rb") as src:
-            data = src.read(MAX_BYTES + 1)
-        if len(data) > MAX_BYTES:
-            raise BridgeError("Input fuori misura")
-        return data
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) |
+                     getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "rb") as stream:
+            st = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid()
+                    or st.st_mode & 0o077 or st.st_nlink != 1
+                    or not 2 <= st.st_size <= MAX_BYTES):
+                raise BridgeError("Input non privato o non regolare")
+            current = os.stat(path, follow_symlinks=False)
+            if (current.st_ino, current.st_dev) != (st.st_ino, st.st_dev):
+                raise BridgeError("Input sostituito durante apertura")
+            raw = stream.read(MAX_BYTES+1)
+            if len(raw) > MAX_BYTES or len(raw) != st.st_size:
+                raise BridgeError("Input troncato o mutato")
+            return raw
     except OSError as exc:
         raise BridgeError("Input non leggibile") from exc
 
@@ -226,34 +247,82 @@ def _archive_write_lock(folder):
         os.close(fd)
 
 
+def _source_evidence(root, *, fixture=False):
+    """Bracket wallet.build with exact dir+four-file inode and content evidence.
+
+    Fixture injection is a Python test-only seam. The CLI does not expose it.
+    Same-UID concurrent writers remain outside this local guarantee.
+    """
+    canonical_root = Path.home() / "kraken-decision-desk" / "KRAKEN_DECISION_DESK_V001"
+    root = Path(root)
+    if not fixture and (root != canonical_root or root.is_symlink()):
+        raise BridgeError("Sorgente non canonica KDD")
+    if root.is_symlink() or not root.is_dir():
+        raise BridgeError("Directory sorgente non regolare")
+    try:
+        directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                               getattr(os, "O_NOFOLLOW", 0))
+        try:
+            dir_st = os.fstat(directory_fd)
+            if not stat.S_ISDIR(dir_st.st_mode) or dir_st.st_uid != os.getuid():
+                raise BridgeError("Sorgente di proprietario diverso")
+            listed = os.stat(root, follow_symlinks=False)
+            if (dir_st.st_dev, dir_st.st_ino) != (listed.st_dev, listed.st_ino):
+                raise BridgeError("Directory sorgente sostituita")
+            files = []
+            for name in SOURCE_FILES:
+                fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) |
+                             getattr(os, "O_NONBLOCK", 0), dir_fd=directory_fd)
+                with os.fdopen(fd, "rb") as stream:
+                    st = os.fstat(stream.fileno())
+                    on_path = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                    if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid()
+                            or st.st_nlink != 1 or not 2 <= st.st_size <= wallet.SRC_MAX[name]
+                            or (st.st_dev, st.st_ino) != (on_path.st_dev, on_path.st_ino)):
+                        raise BridgeError("Fonte KDD irregolare o sostituita")
+                    contents = stream.read(wallet.SRC_MAX[name]+1)
+                    if len(contents) != st.st_size:
+                        raise BridgeError("Fonte KDD mutata durante lettura")
+                    files.append((name, st.st_dev, st.st_ino, hashlib.sha256(contents).hexdigest()))
+            return ((dir_st.st_dev, dir_st.st_ino), tuple(files))
+        finally:
+            os.close(directory_fd)
+    except OSError as exc:
+        raise BridgeError("Sorgente KDD non verificabile") from exc
+
+
 def verify_local_origin(bundle):
-    """Require KDD-side origin: incoming packet+proposal cannot attest each other."""
+    """The incoming pair cannot attest itself. An actual persisted outbox is mandatory."""
     if not isinstance(bundle, dict):
         raise BridgeError("Fotografia originale assente")
     origin_id = digest(bundle)
-    if origin_id in _LOCAL_ORIGINS:
-        return origin_id
     try:
         outgoing = private_directory(OUTBOX)
         raw = read_regular(outgoing / (origin_id + ".json"), expected_parent=outgoing)
         original = strict_json(raw)
     except (BridgeError, OSError) as exc:
-        raise BridgeError("Fotografia KDD originaria non trovata nell'area privata") from exc
+        raise BridgeError("Fotografia KDD originaria non persistita") from exc
     if original != bundle or digest(original) != origin_id or raw != canonical(original) + b"\n":
         raise BridgeError("Fotografia KDD originaria non corrispondente")
     return origin_id
 
 
-def prepare(root, *, now=None):
-    """Uses the original four-file D1/4TF consumer; no duplicate valuation engine."""
+def prepare(root=None, *, now=None, _fixture=False):
+    """Origin contract: production always uses canonical KDD root; no auto-publish."""
     moment = checked_now(now)
-    pkt = wallet.build(Path(root), now=moment)
+    root = Path.home() / "kraken-decision-desk" / "KRAKEN_DECISION_DESK_V001" if root is None else Path(root)
+    if _fixture is not True and root != (Path.home() / "kraken-decision-desk" / "KRAKEN_DECISION_DESK_V001"):
+        raise BridgeError("Sorgente non canonica KDD")
+    before = _source_evidence(root, fixture=_fixture)
+    pkt = wallet.build(root, now=moment)
+    after = _source_evidence(root, fixture=_fixture)
+    if before != after:
+        raise BridgeError("Fotografia KDD cambiata durante composizione")
     result = {"schema": SCHEMA_BUNDLE, "packet": pkt,
               "packet_sha256": digest(pkt), "preparato_utc": moment.isoformat(timespec="seconds"),
               "provenienza": "KDD_LOCALE_DICHIARATA_NON_AUTENTICATA",
               "trasporto": "MANUALE_NON_ESEGUITO"}
     read_context(result, now=moment)
-    _LOCAL_ORIGINS.add(digest(result))
     return result
 
 
@@ -419,8 +488,8 @@ def validate_proposal(proposal, bundle, *, now=None):
     context = read_context(bundle, now=now)
     if not isinstance(proposal, dict) or proposal.get("schema") != SCHEMA_PROPOSAL:
         raise BridgeError("Schema proposta sconosciuto")
-    if any(key in proposal for key in ("approvato", "eseguito", "ordine", "trading", "api_key")):
-        raise BridgeError("Il documento non puo approvare o eseguire ordini")
+    if set(proposal) != PROPOSAL_FIELDS:
+        raise BridgeError("Contratto proposta non chiuso")
     if proposal.get("snapshot_id") != context["snapshot_id"]:
         raise BridgeError("Fotografia proposta non attribuibile")
     if proposal.get("snapshot_utc") != context["snapshot_utc"]:
@@ -436,7 +505,9 @@ def validate_proposal(proposal, bundle, *, now=None):
     if not isinstance(rows, list) or len(rows) != len(originals):
         raise BridgeError("Proposta non copre tutto il patrimonio")
     for i, (row, original) in enumerate(zip(rows, originals)):
-        if not isinstance(row, dict) or row.get("indice") != i or row.get("token") != original.get("token"):
+        if not isinstance(row, dict) or set(row) != POSITION_FIELDS:
+            raise BridgeError("Campi posizione sconosciuti")
+        if row.get("indice") != i or row.get("token") != original.get("token"):
             raise BridgeError("Identita proposta e portafoglio discordanti")
         if row.get("azione") not in ALLOWED or (original.get("stato_identita") != "VALIDA" and row.get("azione") != "RINVIARE"):
             raise BridgeError("Azione posizione non autorizzata")
@@ -448,7 +519,7 @@ def validate_proposal(proposal, bundle, *, now=None):
     if not isinstance(refs, list) or len(refs) > 30:
         raise BridgeError("Fonti non strutturate")
     for s in refs:
-        if (not isinstance(s, dict) or not isinstance(s.get("url"), str)
+        if (not isinstance(s, dict) or set(s) != SOURCE_REF_FIELDS or not isinstance(s.get("url"), str)
                 or not piano_gpt.safe_url(s["url"])):
             raise BridgeError("Fonte esterna non valida")
         text(s.get("nome"))
@@ -516,7 +587,7 @@ def approved_html():
     esc = lambda v: html.escape(str(v), quote=True)
     try:
         records = load_archive()
-    except BridgeError:
+    except (BridgeError, OSError, ValueError, TypeError, KeyError, RuntimeError):
         return "<section><h2>Proposte patrimoniali GPT</h2><p>Archivio non verificabile: STOP.</p></section>"
     if not records:
         return "<section id='kdd-gpt-patrimonio'><h2>Proposte patrimoniali GPT</h2><p>Nessuna versione approvata importata.</p></section>"
@@ -549,7 +620,6 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Ponte KDD privato G2: nessuna sincronizzazione")
     sub = ap.add_subparsers(dest="action", required=True)
     prep = sub.add_parser("prepare")
-    prep.add_argument("--source-dir", type=Path, required=True)
     review = sub.add_parser("review")
     review.add_argument("--file", type=Path, required=True)
     review.add_argument("--expected-sha256", required=True)
@@ -560,7 +630,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
     try:
         if args.action == "prepare":
-            result = prepare(args.source_dir)
+            result = prepare()
             out = private_directory(OUTBOX, create=True)
             status = exclusive_json(out, digest(result)+".json", result)
             # Exact bytes as written, including the final LF; used as transport manifest.
