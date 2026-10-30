@@ -122,8 +122,13 @@ def private_directory(name, *, create=False):
                 raise BridgeError("Percorso privato symlink")
             if not path.exists():
                 path.mkdir(mode=0o700)
-            if path.stat().st_mode & 0o077 or not path.is_dir():
+            mode = path.stat().st_mode
+            if not path.is_dir() or (mode & 0o022):
                 raise BridgeError("Directory privata non protetta")
+            # Shared read permission on pre-existing ~/.local or ~/.local/state
+            # is normal. The actual KDD state and bridge must be owner-only.
+            if path in (parent, root) and mode & 0o077:
+                raise BridgeError("Directory KDD non privata")
         return ensure_dir(root / name)
     if not root.is_dir() or root.is_symlink():
         raise BridgeError("Root privata assente")
