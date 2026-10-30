@@ -263,6 +263,12 @@ def read_context(bundle, *, now=None, expected_sha256=None):
         have_prices.append(val is not None and qty is not None)
         tf = row.get("analisi_4tf")
         states = {}
+        if tf and tf.get("stato") == "COMPLETO":
+            original_frames = tf.get("timeframe")
+            if (not isinstance(original_frames, dict)
+                    or any(not isinstance(original_frames.get(k), dict) for k in FRAMES)
+                    or any(original_frames[k].get("stato") not in ("AGGIORNATO", "SCADUTO") for k in FRAMES)):
+                raise BridgeError("Quattro timeframe dichiarati ma incompleti")
         if isinstance(tf, dict):
             frames = tf.get("timeframe")
             if isinstance(frames, dict):
@@ -290,12 +296,6 @@ def read_context(bundle, *, now=None, expected_sha256=None):
         if len(states) != 4:
             states = {k: states.get(k, "NON_DISPONIBILE") for k in FRAMES}
         all_tf = all(value == "AGGIORNATO" for value in states.values())
-        if tf and tf.get("stato") == "COMPLETO":
-            original_frames = tf.get("timeframe")
-            if (not isinstance(original_frames, dict)
-                    or any(not isinstance(original_frames.get(k), dict) for k in FRAMES)
-                    or any(original_frames[k].get("stato") not in ("AGGIORNATO", "SCADUTO") for k in FRAMES)):
-                raise BridgeError("Quattro timeframe dichiarati ma incompleti")
         complete += bool(all_tf)
         observations.append({"indice": i, "token": row.get("token"),
                              "stato_identita": row.get("stato_identita"),
