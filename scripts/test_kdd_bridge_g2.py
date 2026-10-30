@@ -248,5 +248,78 @@ class BridgeG2Tests(unittest.TestCase):
             self.assertNotIn(forbidden,source)
 
 
+    def test_25_actual_four_timeframe_pipeline_to_read_contract(self):
+        from scripts import test_kdd_portfolio_4tf as four
+        from scripts import kdd_wallet_packet_g0 as wallet_packet
+        from unittest import mock as patcher
+        import decision_desk as desk
+        import dossier_trade as dossier
+        instance=four.PortfolioFourTFTests("test_07_full_original_dossier_to_private_gpt_packet")
+        instance.setUp()
+        self.addCleanup(instance.doCleanups)
+        tokens=['BTC','ETH','SOL']
+        source=instance.source(tokens)
+        portfolio={"posizioni":four.positions(tokens)}
+        (instance.root/"portafoglio.json").write_text(json.dumps(portfolio))
+        (instance.root/"ultima_rilevazione.json").write_text(json.dumps(source))
+        with patcher.patch.object(desk,"DIR",instance.root), \
+             patcher.patch.object(desk,"NOW",return_value=instance.now), \
+             patcher.patch.object(dossier,"recupera_4h",return_value={}), \
+             patcher.patch.object(dossier,"global_context",return_value={}), \
+             patcher.patch.object(dossier,"derivatives_context",return_value={}), \
+             patcher.patch.object(dossier.time,"sleep"), \
+             patcher.patch.object(desk,"kraken",side_effect=instance.net), \
+             patcher.patch.object(desk.piano_gpt,"load",return_value=None), \
+             patcher.patch("verifica_piani.archivia_piano",return_value=None):
+            desk.prepara_dossier_aggiornamento(source,asset_pairs=four.catalogue(tokens))
+            desk.output(source)
+        bundle=bridge.prepare(instance.root, now=instance.now)
+        read=bridge.read_context(bundle,now=instance.now)
+        self.assertEqual(read["n_posizioni"],3)
+        self.assertEqual(read["quattro_tf_aggiornati"],3)
+        self.assertTrue(all(r["quattro_tf_aggiornati"] for r in read["copertura"]))
+        aged=bridge.read_context(bundle,now=instance.now+dt.timedelta(days=2))
+        self.assertEqual(aged["quattro_tf_aggiornati"],0)
+        self.assertEqual(aged["mercato"]["stato"],"DA_AGGIORNARE")
+
+    def test_26_false_ohlc_completeness_at_read_rejected(self):
+        p=copy.deepcopy(self.bundle)
+        tf=p["packet"]["patrimonio"]["posizioni"][0]["analisi_4tf"]
+        tf["stato"]="COMPLETO"
+        tf["timeframe"]={k:{"stato":"AGGIORNATO","chiusura_utc":T.isoformat()} for k in bridge.FRAMES}
+        p["packet_sha256"]=bridge.digest(p["packet"])
+        with self.assertRaises(bridge.BridgeError):
+            bridge.read_context(p,now=T)
+
+    def test_27_market_pair_snapshot_timestamp_is_checked(self):
+        p=copy.deepcopy(self.bundle)
+        p["packet"]["patrimonio"]["posizioni"][0]["fonte_prezzo_eur"]["rilevazione_utc"]="2025-01-01T00:00:00+00:00"
+        p["packet_sha256"]=bridge.digest(p["packet"])
+        with self.assertRaises(bridge.BridgeError):
+            bridge.read_context(p,now=T)
+
+    def test_28_identity_alias_collision_after_packet_forgery_rejected(self):
+        p=copy.deepcopy(self.bundle)
+        p["packet"]["patrimonio"]["posizioni"][1]["token"]="ADA"
+        p["packet_sha256"]=bridge.digest(p["packet"])
+        with self.assertRaises(bridge.BridgeError):
+            bridge.read_context(p,now=T)
+
+    def test_29_order_flag_is_not_allowed(self):
+        p=copy.deepcopy(self.bundle)
+        p["packet"]["nessun_ordine"]=False
+        p["packet_sha256"]=bridge.digest(p["packet"])
+        with self.assertRaises(bridge.BridgeError):
+            bridge.read_context(p,now=T)
+
+    def test_30_dashboard_reuses_existing_spot_and_legacy_plan_display(self):
+        import serve
+        page="<html><body><h2>1 · Decisioni e posizioni</h2></body></html>"
+        shown=serve.with_controls(page)
+        self.assertIn("Proposte patrimoniali GPT",shown)
+        self.assertIn("/mercati/spot",shown)
+        self.assertIn("/aggiorna",shown)
+
+
 if __name__=="__main__":
     unittest.main()
