@@ -112,7 +112,7 @@ def ensure_dir(path):
         if not path.is_dir() or path.stat().st_mode & 0o077:
             raise BridgeError("Permessi directory non privati")
     else:
-        path.mkdir(mode=0o700, parents=False)
+        path.mkdir(mode=0o700, parents=False, exist_ok=True)
     return path
 
 
@@ -127,7 +127,7 @@ def private_directory(name, *, create=False):
             if path.is_symlink():
                 raise BridgeError("Percorso privato symlink")
             if not path.exists():
-                path.mkdir(mode=0o700)
+                path.mkdir(mode=0o700, exist_ok=True)
             mode = path.stat().st_mode
             if not path.is_dir() or (mode & 0o022):
                 raise BridgeError("Directory privata non protetta")
