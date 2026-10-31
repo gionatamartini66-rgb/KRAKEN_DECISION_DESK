@@ -1105,7 +1105,7 @@ else:
                     self.assertEqual(bridge.reconcile_directory(area),[])
                     marks = sorted(folder.glob(".cancelled-"+version+"-*.json"))
                     self.assertEqual(len(marks),attempt_number+1)
-                    self.assertFalse(set(marks).intersection(records))
+                    self.assertTrue(set(records).issubset(set(marks)))
                     records = marks
                     parsed=[bridge.strict_json(m.read_bytes()) for m in records]
                     self.assertEqual(len({m["attempt_id"] for m in parsed}),attempt_number+1)
