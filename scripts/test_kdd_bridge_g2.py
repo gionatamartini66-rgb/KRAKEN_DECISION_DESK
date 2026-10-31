@@ -631,7 +631,9 @@ class BridgeG2Tests(unittest.TestCase):
     def test_rt1_03_idempotence_rejects_world_readable_final(self):
         folder=bridge.private_directory(bridge.OUTBOX,create=True)
         doc={"probe":"immutable"}
-        dest=folder/"SYNTH.json"
+        # This G2 backend identifies every committed document by SHA256;
+        # original R5 0600-vs-0644 assertion is unchanged.
+        dest=folder/(bridge.digest(doc)+".json")
         bridge.exclusive_json(folder,dest.name,doc)
         dest.chmod(0o644)
         with self.assertRaises(bridge.BridgeError):
@@ -849,10 +851,10 @@ if phase=="recover" or phase=="during-recovery":
     print(json.dumps(bridge.reconcile_directory(kind)),flush=True)
 elif phase=="publish":
     with bridge._archive_write_lock(folder):
-        print(bridge.exclusive_json(folder,name,json.loads(Path(fixture).read_text()),_lock_held=True),flush=True)
+        print(bridge._exclusive_json_locked(folder,name,json.loads(Path(fixture).read_text())),flush=True)
 else:
     with bridge._archive_write_lock(folder):
-        bridge.exclusive_json(folder,name,json.loads(Path(fixture).read_text()),_lock_held=True)
+        bridge._exclusive_json_locked(folder,name,json.loads(Path(fixture).read_text()))
 """
         cmd=[sys.executable,"-B","-c",script,str(self.private),kind,name,str(fixture),phase]
         env=os.environ.copy()

@@ -324,5 +324,178 @@ print(bridge.exclusive_json(folder,name,obj),flush=True)
         self.assertEqual(len(broken.load_archive()),1)
 
 
+    def test_g2_confirmed_final_not_overwritten_and_anonymous_name_rejected(self):
+        for area in (bridge.OUTBOX,bridge.ARCHIVE):
+            with self.subTest(area=area):
+                isolated=self.home/("immutable-"+area)
+                with mock.patch.object(bridge,"PRIVATE_ROOT",isolated):
+                    folder=self.folder(area)
+                    doc=self.obj(area);name=self.version(area)+".json"
+                    self.assertEqual(bridge.exclusive_json(folder,name,doc),"INSERITO")
+                    original=(folder/name).read_bytes()
+                    different=copy.deepcopy(doc)
+                    different["synthetic_extra"]=True
+                    with self.assertRaises(bridge.BridgeError):
+                        bridge.exclusive_json(folder,name,different)
+                    self.assertEqual(original,(folder/name).read_bytes())
+                    with self.assertRaises(bridge.BridgeError):
+                        bridge.exclusive_json(folder,"ANON.json",doc)
+                    self.assertFalse((folder/"ANON.json").exists())
+        with tempfile.TemporaryDirectory(prefix="external-",dir=self.home) as scratch:
+            folder=Path(scratch);folder.chmod(0o700)
+            with self.assertRaises(bridge.BridgeError):
+                bridge.exclusive_json(folder,bridge.digest(self.bundle)+".json",self.bundle)
+
+    def test_g2_incomplete_legacy_and_malformed_journals_never_auto_reconciled(self):
+        for area in (bridge.OUTBOX,bridge.ARCHIVE):
+            for data in (b"",b'{"schema":"kdd_file_commit_v003"}\n',
+                         b'{"schema":"kdd_android_rename_commit_v001","invalid":true}\n'):
+                with self.subTest(area=area,data=data):
+                    isolated=self.home/("old-"+area+"-"+hashlib.sha256(data).hexdigest()[:10])
+                    with mock.patch.object(bridge,"PRIVATE_ROOT",isolated):
+                        folder=self.folder(area);name=self.version(area)+".json"
+                        pending=folder/(".pending-"+name)
+                        pending.write_bytes(data)
+                        pending.chmod(0o600)
+                        with self.assertRaises(bridge.BridgeError):
+                            bridge.reconcile_directory(area)
+                        self.assertEqual(pending.read_bytes(),data)
+                        self.assertFalse((folder/name).exists())
+                        with self.assertRaises(bridge.BridgeError):
+                            bridge.exclusive_json(folder,name,self.obj(area))
+                        self.assertTrue(pending.exists())
+
+    def test_g2_rename_wrapper_raises_after_commit_is_uncertain(self):
+        for area in (bridge.OUTBOX,bridge.ARCHIVE):
+            with self.subTest(area=area):
+                isolated=self.home/("wrapper-"+area)
+                with mock.patch.object(bridge,"PRIVATE_ROOT",isolated):
+                    folder=self.folder(area);name=self.version(area)+".json"
+                    actual=os.rename
+                    def raises_after_real(src,dest):
+                        actual(src,dest)
+                        raise OSError("SYNTHETIC rename returned error AFTER effect")
+                    with mock.patch.object(bridge.os,"rename",side_effect=raises_after_real):
+                        with self.assertRaises(bridge.PublicationUncertain):
+                            bridge.exclusive_json(folder,name,self.obj(area))
+                    self.assertTrue((folder/name).is_file())
+                    self.assertTrue((folder/(".pending-"+name)).is_file())
+                    self.assertEqual(bridge.reconcile_directory(area),["PUBBLICATO_CONFERMATO"])
+                    self.assertEqual(bridge.exclusive_json(folder,name,self.obj(area)),"GIA_PRESENTE")
+
+    def test_g2_process_kill_before_journal_retains_unknown_stage_with_stop(self):
+        for area in (bridge.OUTBOX,bridge.ARCHIVE):
+            with self.subTest(area=area):
+                isolated=self.home/("prejournal-"+area)
+                script=r"""
+import json,os,sys,signal
+from pathlib import Path
+from scripts import kdd_bridge_g2 as b
+b.PRIVATE_ROOT=Path(sys.argv[1])
+area,name,payload=sys.argv[2:]
+folder=b.private_directory(area,create=True)
+real=os.open
+def kill_before_marker(path,*args,**kwargs):
+    if str(path).split("/")[-1].startswith(".pending-"):
+        os.kill(os.getpid(),signal.SIGKILL)
+    return real(path,*args,**kwargs)
+os.open=kill_before_marker
+b.exclusive_json(folder,name,json.loads(Path(payload).read_text()))
+"""
+                f=self.home/("prejournal-"+area+".json")
+                f.write_text(json.dumps(self.obj(area)))
+                p=subprocess.run([sys.executable,"-B","-c",script,
+                                  str(isolated),area,self.version(area)+".json",str(f)],
+                    cwd=str(Path(bridge.__file__).resolve().parents[1]),
+                    env={**os.environ,"PYTHONPATH":str(Path(bridge.__file__).resolve().parents[1])},
+                    capture_output=True,text=True,timeout=20)
+                self.assertEqual(p.returncode,-9,p.stderr)
+                with mock.patch.object(bridge,"PRIVATE_ROOT",isolated):
+                    folder=self.folder(area)
+                    self.assertEqual(bridge.reconcile_directory(area),[])
+                    self.assertFalse((folder/(self.version(area)+".json")).exists())
+                    stages=list(folder.glob(".kdd-stage-*.tmp"))
+                    self.assertEqual(len(stages),1)
+                    with self.assertRaisesRegex(bridge.BridgeError,"Staging senza"):
+                        bridge.exclusive_json(folder,self.version(area)+".json",self.obj(area))
+                    self.assertTrue(stages[0].is_file())
+
+    def test_g2_two_independent_processes_cooperative_no_overwrite(self):
+        for area in (bridge.OUTBOX,bridge.ARCHIVE):
+            with self.subTest(area=area):
+                isolated=self.home/("multiproc-"+area)
+                payload=self.home/("payload-multiproc-"+area+".json")
+                payload.write_text(json.dumps(self.obj(area)))
+                script=r"""
+import json,sys,time
+from pathlib import Path
+from scripts import kdd_bridge_g2 as b
+b.PRIVATE_ROOT=Path(sys.argv[1])
+a,name,file=sys.argv[2:]
+obj=json.loads(Path(file).read_text())
+folder=b.private_directory(a,create=True)
+time.sleep(0.12)
+print(b.exclusive_json(folder,name,obj),flush=True)
+"""
+                cmd=[sys.executable,"-B","-c",script,str(isolated),area,
+                     self.version(area)+".json",str(payload)]
+                env={**os.environ,"PYTHONPATH":str(Path(bridge.__file__).resolve().parents[1])}
+                p1=subprocess.Popen(cmd,cwd=env["PYTHONPATH"],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+                p2=subprocess.Popen(cmd,cwd=env["PYTHONPATH"],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+                out1,err1=p1.communicate(timeout=20);out2,err2=p2.communicate(timeout=20)
+                self.assertEqual((p1.returncode,p2.returncode),(0,0),err1+"\n"+err2)
+                self.assertCountEqual([out1.strip(),out2.strip()],["INSERITO","GIA_PRESENTE"])
+                with mock.patch.object(bridge,"PRIVATE_ROOT",isolated):
+                    folder=self.folder(area)
+                    self.assertEqual(len(list(folder.glob(self.version(area)+".json"))),1)
+                    self.assertFalse(list(folder.glob(".pending-*")))
+
+    def test_g2_mutant_consent_bypass_falsified_with_valid_persisted_original(self):
+        self.base.persist_origin()
+        source=Path(bridge.__file__).read_text()
+        needle='or consent != "APPROVO_VERSIONE":'
+        self.assertIn(needle,source)
+        mutant=source.replace(needle,'or False:',1)
+        path=self.home/"mutant_consent.py"
+        path.write_text(mutant)
+        spec=importlib.util.spec_from_file_location("mutant_consent",path)
+        broken=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(broken)
+        broken.PRIVATE_ROOT=self.private
+        digest=bridge.digest(self.plan)
+        with self.assertRaises(bridge.BridgeError):
+            bridge.approved_import(self.plan,self.bundle,digest,"RIFIUTO",now=T)
+        published=broken.approved_import(self.plan,self.bundle,digest,"RIFIUTO",now=T)
+        self.assertEqual(published["stato"],"INSERITO")
+        self.assertEqual(len(broken.load_archive()),1)
+
+    def test_g2_mutant_missing_final_directory_sync_is_detected(self):
+        source=Path(bridge.__file__).read_text()
+        needle='_sync_dir(directory)         # REQUIRED before any success or pending release'
+        self.assertIn(needle,source)
+        mutant=source.replace(needle,'pass  # MUTANT: missing mandatory final fsync',1)
+        path=self.home/"mutant_nosync.py"
+        path.write_text(mutant)
+        spec=importlib.util.spec_from_file_location("mutant_nosync",path)
+        broken=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(broken)
+        isolated=self.home/"sync-mutant"
+        bridge.PRIVATE_ROOT=isolated
+        broken.PRIVATE_ROOT=isolated
+        name=self.version(bridge.OUTBOX)+".json"
+        def simulate_fsync_failure(directory):
+            if (Path(directory)/name).exists():
+                raise OSError("SYNTHETIC final fsync unavailable")
+        with mock.patch.object(bridge,"_sync_dir",side_effect=simulate_fsync_failure):
+            with self.assertRaises(bridge.PublicationUncertain):
+                bridge.exclusive_json(self.folder(bridge.OUTBOX),name,self.bundle)
+        # Independent isolated root to avoid original's pending final.
+        broken.PRIVATE_ROOT=self.home/"sync-mutant-broken"
+        folder=broken.private_directory(bridge.OUTBOX,create=True)
+        with mock.patch.object(broken,"_sync_dir",side_effect=simulate_fsync_failure):
+            result=broken.exclusive_json(folder,name,self.bundle)
+        self.assertEqual(result,"INSERITO")  # mutant incorrectly claims success
+
+
 if __name__=="__main__":
     unittest.main()

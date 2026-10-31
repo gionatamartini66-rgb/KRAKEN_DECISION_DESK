@@ -363,19 +363,27 @@ def reconcile_outbox():
     return reconcile_directory(OUTBOX)
 
 
-def exclusive_json(directory, filename, obj, *, _lock_held=False):
-    """Cooperative-writer Android publication; no hardlink and no auto-recovery.
+def exclusive_json(directory, filename, obj):
+    """Public writer ALWAYS takes the directory lock; no bypass boolean."""
+    directory = Path(directory)
+    if directory not in (PRIVATE_ROOT / OUTBOX, PRIVATE_ROOT / ARCHIVE):
+        raise BridgeError("Destinazione pubblicazione fuori dalle directory KDD")
+    _check_dir(directory)
+    with _archive_write_lock(directory):
+        return _exclusive_json_locked(directory, filename, obj)
 
-    Public direct calls take the SAME per-directory flock. approved_import and
-    prepare keep their surrounding lock and pass _lock_held=True.
+
+def _exclusive_json_locked(directory, filename, obj):
+    """Internal-only path for holders of the matching private-directory flock.
+
+    Cooperative writers are the explicit trust boundary. Never claims to
+    resist a process that writes the final name without taking this lock.
     """
     directory = Path(directory)
-    if not _lock_held:
-        with _archive_write_lock(directory):
-            return exclusive_json(directory, filename, obj, _lock_held=True)
-    if (not filename.endswith(".json")
-            or not (HEX.fullmatch(filename[:-5]) or CODE.fullmatch(filename[:-5]))):
-        raise BridgeError("Nome documento non valido")
+    if directory not in (PRIVATE_ROOT / OUTBOX, PRIVATE_ROOT / ARCHIVE):
+        raise BridgeError("Destinazione pubblicazione fuori dalle directory KDD")
+    if (not filename.endswith(".json") or not HEX.fullmatch(filename[:-5])):
+        raise BridgeError("Documento non identificato da SHA256")
     _check_dir(directory)
     dest = directory / filename
     raw = canonical(obj) + b"\n"
@@ -801,7 +809,7 @@ def approved_import(proposal, bundle, approved_sha, consent, *, now=None):
                  "approvato_utc": checked_now(now).isoformat(timespec="seconds"),
                  "snapshot_id": proposal["snapshot_id"], "proposta": proposal,
                  "nessun_ordine": True, "esecuzione": "NON_ATTESTATA"}
-        status = exclusive_json(folder, version+".json", entry, _lock_held=True)
+        status = _exclusive_json_locked(folder, version+".json", entry)
         return {"stato": status, "versione_sha256": version}
 
 
@@ -864,7 +872,7 @@ def main(argv=None):
             with _archive_write_lock(out):
                 if any(p.name.startswith(".pending-") for p in out.iterdir()):
                     raise BridgeError("PUBBLICAZIONE_INCERTA: riconciliare outbox")
-                status = exclusive_json(out, digest(result)+".json", result, _lock_held=True)
+                status = _exclusive_json_locked(out, digest(result)+".json", result)
             # Exact bytes as written, including the final LF; used as transport manifest.
             raw = canonical(result) + b"\n"
             print("PREPARATO SOLO PRIVATO:", status, "| sha256_file:", hashlib.sha256(raw).hexdigest())
