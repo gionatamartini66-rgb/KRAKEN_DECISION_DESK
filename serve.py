@@ -82,6 +82,7 @@ def with_controls(page: str, result: str = "") -> str:
         f"type='submit'{disabled}>↻ Aggiorna dati ora</button>"
         "</form><p><a style='font-weight:700;color:#8aceff' href='/mercati/spot'>"
         "🌐 Seleziona coppia Kraken Spot · grafici 15m / 1H / 4H / 1D</a></p>"
+        "<p><a href='/gpt'>📄 Proposte GPT su Drive</a></p>" 
         "<p>Server solo su questo Samsung · prezzi pubblici · nessun ordine.</p>"
         f"<p id='kdd-refresh-status' role='status'>{html.escape(message)}</p>"
         "</section>"
@@ -131,7 +132,19 @@ def with_controls(page: str, result: str = "") -> str:
                      "<a href='http://127.0.0.1:8765/'>cruscotto locale aggiornabile</a> "
                      "(richiede Termux attivo).</p>")
     page = page.replace(static_notice, "", 1)
-    return page.replace(target, toolbar + js + target, 1)
+    # The bridge is nonessential to the home: an unreadable archive must never
+    # take Spot navigation, wallet report or refresh controls offline.
+    try:
+        # Delay optional bridge import: malformed or unavailable G2 code cannot
+        # prevent localhost Spot dashboard from starting.
+        from scripts import kdd_bridge_g2 as bridge_g2
+        portfolio_proposals = bridge_g2.approved_html()
+    except Exception:
+        portfolio_proposals = ("<section id='kdd-gpt-patrimonio' role='status'>"
+                               "<h2>Proposte patrimoniali GPT</h2>"
+                               "<p>Archivio GPT temporaneamente non verificabile: STOP. "
+                               "Nessuna proposta è stata certificata.</p></section>")
+    return page.replace(target, toolbar + js + portfolio_proposals + target, 1)
 
 
 def load_sui_chart(timeframe, public_kraken=None):
@@ -660,6 +673,14 @@ class Handler(BaseHTTPRequestHandler):
         if not self.check_host():
             return
         url = urllib.parse.urlsplit(self.path)
+        if url.path == "/gpt":
+            try:
+                from scripts import kdd_drive_exchange as exchange
+                self.send_html(200, exchange.render_page(TOKEN))
+            except Exception:
+                self.send_html(503, "<h1>Ponte Drive non disponibile</h1>"
+                                   "<p>Il KDD Spot resta accessibile.</p>")
+            return
         if url.path in ("/mercati/spot", "/grafico/spot", "/analisi/spot"):
             query = urllib.parse.parse_qs(url.query, keep_blank_values=True)
             try:
@@ -738,7 +759,25 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.check_host():
             return
-        if urllib.parse.urlsplit(self.path).path != "/aggiorna":
+        path = urllib.parse.urlsplit(self.path).path
+        if path in ("/gpt/prepara", "/gpt/ricevi", "/gpt/conferma"):
+            if not hmac.compare_digest(self.headers.get("X-KDD-Token", ""), TOKEN):
+                self.send_error(403, "Verifica richiesta non riuscita")
+                return
+            try:
+                n = int(self.headers.get("Content-Length", "-1"))
+                if not 0 <= n <= 8_000_000:
+                    raise ValueError("Dimensione non valida")
+                raw = self.rfile.read(n)
+                if len(raw) != n:
+                    raise ValueError("Lettura incompleta")
+                from scripts import kdd_drive_exchange as exchange
+                reply = exchange.handle(path.rsplit("/", 1)[-1], raw)
+                self.send_body(200, reply, "text/plain; charset=utf-8")
+            except (ValueError, OSError) as exc:
+                self.send_body(422, str(exc)[:180], "text/plain; charset=utf-8")
+            return
+        if path != "/aggiorna":
             self.send_error(404)
             return
         # Chrome Traduttore può inviare Origin:null: restano obbligatori Host e token.

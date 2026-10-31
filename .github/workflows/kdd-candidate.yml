@@ -3,6 +3,8 @@ on:
   push:
     branches:
       - experiments/kdd-rt-i01-patrimonio-g2-20261028
+      - experiments/kdd-android-transaction-g2-20261031
+      - experiments/kdd-drive-ui-bridge-g2-20261031
   pull_request:
     branches:
       - main
@@ -19,6 +21,40 @@ jobs:
       - name: Core KDD regressions
         run: python -B -m unittest -q test_decision_desk
       - name: Private packet, market age and portfolio 4TF synthetic tests
-        run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_wallet_packet_g0 scripts.test_kdd_market_freshness scripts.test_kdd_portfolio_4tf
+        run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_wallet_packet_g0 scripts.test_kdd_market_freshness scripts.test_kdd_portfolio_4tf scripts.test_kdd_android_transaction_g2
+      - name: Drive UI handoff through the genuine bridge (no remote API)
+        run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_drive_exchange
+      - name: Unchanged R5 invariant tests against Android candidate (mapped, no skips)
+        run: PYTHONPATH=.:scripts python -B scripts/kdd_android_regressions.py
       - name: Existing safe updater tests
         run: python -B scripts/test_kdd_aggiorna.py
+
+  r5-historical-reference:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fc2306fd118024c9bdeb7908d85360c3fc578943
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: R5 ORIGINAL unmodified historical regression suite (NOT Android claims)
+        run: |
+          python -B -m unittest -q test_decision_desk
+          PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_wallet_packet_g0 scripts.test_kdd_market_freshness scripts.test_kdd_portfolio_4tf scripts.test_kdd_bridge_g2
+          python -B scripts/test_kdd_aggiorna.py
+
+  android-transaction-focused:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: G2 Android transaction independent discriminators (Linux synthetic)
+        run: PYTHONPATH=.:scripts python -B -m unittest -v scripts.test_kdd_android_transaction_g2
