@@ -820,13 +820,16 @@ bridge.PRIVATE_ROOT=Path(sys.argv[1])
 kind,name,fixture,phase=sys.argv[2:]
 folder=bridge.private_directory(kind,create=True)
 if phase in ("before-link","after-link"):
-    original_link=os.link
-    def broken_link(*args,**kwargs):
+    # G2: R5 post-link kill sites are now pre/post atomic rename;
+    # preservation of partial-final/commit gates is tested separately.
+    actual_rename=os.rename
+    def killed_rename(*args,**kwargs):
         if phase=="before-link":
             os.kill(os.getpid(),signal.SIGKILL)
-        original_link(*args,**kwargs)
+        result=actual_rename(*args,**kwargs)
         os.kill(os.getpid(),signal.SIGKILL)
-    bridge.os.link=broken_link
+        return result
+    bridge.os.rename=killed_rename
 if phase=="before-cleanup":
     old_unlink=Path.unlink
     def stop_unlink(path,*args,**kwargs):
@@ -846,10 +849,10 @@ if phase=="recover" or phase=="during-recovery":
     print(json.dumps(bridge.reconcile_directory(kind)),flush=True)
 elif phase=="publish":
     with bridge._archive_write_lock(folder):
-        print(bridge.exclusive_json(folder,name,json.loads(Path(fixture).read_text())),flush=True)
+        print(bridge.exclusive_json(folder,name,json.loads(Path(fixture).read_text()),_lock_held=True),flush=True)
 else:
     with bridge._archive_write_lock(folder):
-        bridge.exclusive_json(folder,name,json.loads(Path(fixture).read_text()))
+        bridge.exclusive_json(folder,name,json.loads(Path(fixture).read_text()),_lock_held=True)
 """
         cmd=[sys.executable,"-B","-c",script,str(self.private),kind,name,str(fixture),phase]
         env=os.environ.copy()
