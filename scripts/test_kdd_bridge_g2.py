@@ -795,5 +795,263 @@ class BridgeG2Tests(unittest.TestCase):
         self.assertIn("/mercati/spot",html)
 
 
+    # R4 uses the actual checked-out bridge file in distinct Python processes.
+    # Kill paths never execute a Python finally block.
+    def _r4_entry(self):
+        version=bridge.digest(self.plan)
+        return {"versione_sha256":version,"consenso":"CONFERMATO_DA_COMANDO_UTENTE",
+                "approvato_utc":T.isoformat(timespec="seconds"),
+                "snapshot_id":self.plan["snapshot_id"],"proposta":self.plan,
+                "nessun_ordine":True,"esecuzione":"NON_ATTESTATA"}
+
+    def _r4_worker(self, kind, name, obj, phase, *, recover=False):
+        import subprocess
+        import sys
+        import signal
+        import uuid
+        fixture=self.home/("worker-"+uuid.uuid4().hex+".json")
+        fixture.write_text(json.dumps(obj))
+        fixture.chmod(0o600)
+        script=r"""
+import json,os,sys,signal
+from pathlib import Path
+from scripts import kdd_bridge_g2 as bridge
+bridge.PRIVATE_ROOT=Path(sys.argv[1])
+kind,name,fixture,phase=sys.argv[2:]
+folder=bridge.private_directory(kind,create=True)
+if phase in ("before-link","after-link"):
+    original_link=os.link
+    def broken_link(*args,**kwargs):
+        if phase=="before-link":
+            os.kill(os.getpid(),signal.SIGKILL)
+        original_link(*args,**kwargs)
+        os.kill(os.getpid(),signal.SIGKILL)
+    bridge.os.link=broken_link
+if phase=="before-cleanup":
+    old_unlink=Path.unlink
+    def stop_unlink(path,*args,**kwargs):
+        if path.name.startswith(".kdd-stage-"):
+            os.kill(os.getpid(),signal.SIGKILL)
+        return old_unlink(path,*args,**kwargs)
+    Path.unlink=stop_unlink
+if phase=="during-recovery":
+    old_unlink=Path.unlink
+    def stop_after_unlink(path,*args,**kwargs):
+        answer=old_unlink(path,*args,**kwargs)
+        if path.name.startswith(".kdd-stage-"):
+            os.kill(os.getpid(),signal.SIGKILL)
+        return answer
+    Path.unlink=stop_after_unlink
+if phase=="recover" or phase=="during-recovery":
+    print(json.dumps(bridge.reconcile_directory(kind)),flush=True)
+elif phase=="publish":
+    with bridge._archive_write_lock(folder):
+        print(bridge.exclusive_json(folder,name,json.loads(Path(fixture).read_text())),flush=True)
+else:
+    with bridge._archive_write_lock(folder):
+        bridge.exclusive_json(folder,name,json.loads(Path(fixture).read_text()))
+"""
+        cmd=[sys.executable,"-B","-c",script,str(self.private),kind,name,str(fixture),phase]
+        env=os.environ.copy()
+        env["PYTHONPATH"]=str(Path(bridge.__file__).resolve().parents[1])
+        return subprocess.run(cmd,env=env,cwd=env["PYTHONPATH"],
+                              capture_output=True,text=True,timeout=18)
+
+    def test_rt2_real_sigkill_before_link_archive(self):
+        self.persist_origin()
+        version=bridge.digest(self.plan)
+        folder=bridge.private_directory(bridge.ARCHIVE,create=True)
+        proc=self._r4_worker(bridge.ARCHIVE,version+".json",self._r4_entry(),"before-link")
+        self.assertEqual(proc.returncode,-9,proc.stderr)
+        self.assertFalse((folder/(version+".json")).exists())
+        self.assertTrue((folder/(".pending-"+version+".json")).exists())
+        recovery=self._r4_worker(bridge.ARCHIVE,version+".json",self._r4_entry(),"recover")
+        self.assertEqual(recovery.returncode,0,recovery.stderr)
+        self.assertIn("NON_PUBBLICATO",recovery.stdout)
+        self.assertEqual(bridge.approved_import(self.plan,self.bundle,version,
+                          "APPROVO_VERSIONE",now=T)["stato"],"INSERITO")
+
+    def test_rt2_real_sigkill_after_link_archive_nlink2_and_recovery(self):
+        self.persist_origin()
+        version=bridge.digest(self.plan)
+        folder=bridge.private_directory(bridge.ARCHIVE,create=True)
+        kill=self._r4_worker(bridge.ARCHIVE,version+".json",self._r4_entry(),"after-link")
+        self.assertEqual(kill.returncode,-9,kill.stderr)
+        dest=folder/(version+".json")
+        marker=bridge.strict_json((folder/(".pending-"+version+".json")).read_bytes())
+        stage=folder/marker["stage"]
+        self.assertTrue(stage.exists())
+        self.assertEqual(dest.stat().st_nlink,2)
+        self.assertEqual((dest.stat().st_dev,dest.stat().st_ino),
+                         (stage.stat().st_dev,stage.stat().st_ino))
+        with self.assertRaises(bridge.BridgeError):
+            bridge.read_regular(dest,expected_parent=folder)  # nlink1 still mandatory
+        self.assertIn("STOP",bridge.approved_html())
+        recovery=self._r4_worker(bridge.ARCHIVE,version+".json",self._r4_entry(),"recover")
+        self.assertEqual(recovery.returncode,0,recovery.stderr)
+        self.assertIn("PUBBLICATO_CONFERMATO",recovery.stdout)
+        self.assertFalse(stage.exists())
+        self.assertEqual(dest.stat().st_nlink,1)
+        self.assertEqual(bridge.load_archive()[version]["consenso"],"CONFERMATO_DA_COMANDO_UTENTE")
+        self.assertEqual(bridge.approved_import(self.plan,self.bundle,version,
+                            "APPROVO_VERSIONE",now=T)["stato"],"GIA_PRESENTE")
+
+    def test_rt2_real_sigkill_before_cleanup_outbox(self):
+        folder=bridge.private_directory(bridge.OUTBOX,create=True)
+        name=bridge.digest(self.bundle)+".json"
+        kill=self._r4_worker(bridge.OUTBOX,name,self.bundle,"before-cleanup")
+        self.assertEqual(kill.returncode,-9,kill.stderr)
+        dest=folder/name
+        self.assertEqual(dest.stat().st_nlink,2)
+        with self.assertRaises(bridge.BridgeError):
+            bridge.verify_local_origin(self.bundle)
+        repair=self._r4_worker(bridge.OUTBOX,name,self.bundle,"recover")
+        self.assertEqual(repair.returncode,0,repair.stderr)
+        self.assertIn("PUBBLICATO_CONFERMATO",repair.stdout)
+        self.assertEqual(dest.stat().st_nlink,1)
+        self.assertEqual(bridge.verify_local_origin(self.bundle),bridge.digest(self.bundle))
+        self.assertEqual(bridge.exclusive_json(folder,name,self.bundle),"GIA_PRESENTE")
+
+    def test_rt2_real_sigkill_during_reconciliation_then_retry(self):
+        self.persist_origin()
+        version=bridge.digest(self.plan)
+        folder=bridge.private_directory(bridge.ARCHIVE,create=True)
+        crash=self._r4_worker(bridge.ARCHIVE,version+".json",self._r4_entry(),"after-link")
+        self.assertEqual(crash.returncode,-9,crash.stderr)
+        second=self._r4_worker(bridge.ARCHIVE,version+".json",self._r4_entry(),"during-recovery")
+        self.assertEqual(second.returncode,-9,second.stderr)
+        self.assertTrue((folder/(".pending-"+version+".json")).exists())
+        self.assertEqual((folder/(version+".json")).stat().st_nlink,1)
+        third=self._r4_worker(bridge.ARCHIVE,version+".json",self._r4_entry(),"recover")
+        self.assertEqual(third.returncode,0,third.stderr)
+        self.assertIn("PUBBLICATO_CONFERMATO",third.stdout)
+        self.assertEqual(bridge.reconcile_archive(),[])
+        self.assertEqual(len(bridge.load_archive()),1)
+
+    def test_rt2_two_independent_processes_reconcile_same_version(self):
+        import subprocess
+        from concurrent.futures import ThreadPoolExecutor
+        version=bridge.digest(self.plan)
+        folder=bridge.private_directory(bridge.ARCHIVE,create=True)
+        self.assertEqual(self._r4_worker(bridge.ARCHIVE,version+".json",
+                         self._r4_entry(),"after-link").returncode,-9)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            procs=list(pool.map(lambda _:self._r4_worker(bridge.ARCHIVE,version+".json",
+                         self._r4_entry(),"recover"),range(2)))
+        self.assertTrue(all(p.returncode==0 for p in procs),[p.stderr for p in procs])
+        results=" ".join(p.stdout for p in procs)
+        self.assertEqual(results.count("PUBBLICATO_CONFERMATO"),1)
+        self.assertEqual((folder/(version+".json")).stat().st_nlink,1)
+        self.assertEqual(len(bridge.load_archive()),1)
+
+    def test_rt2_malicious_stage_wrong_inode_and_symlink_stops(self):
+        folder=bridge.private_directory(bridge.ARCHIVE,create=True)
+        version=bridge.digest(self.plan)
+        self.assertEqual(self._r4_worker(bridge.ARCHIVE,version+".json",
+                         self._r4_entry(),"after-link").returncode,-9)
+        marker=bridge.strict_json((folder/(".pending-"+version+".json")).read_bytes())
+        stage=folder/marker["stage"]
+        dest=folder/(version+".json")
+        stage.unlink()
+        stage.write_text('{"fake":true}')
+        stage.chmod(0o600)
+        with self.assertRaises(bridge.BridgeError):
+            bridge.reconcile_archive()
+        self.assertTrue(dest.exists())
+        stage.unlink()
+        stage.symlink_to(dest)
+        with self.assertRaises(bridge.BridgeError):
+            bridge.reconcile_archive()
+        self.assertTrue(dest.exists())
+
+    def test_rt2_wrong_digest_and_nonprivate_permissions_stop(self):
+        folder=bridge.private_directory(bridge.OUTBOX,create=True)
+        name=bridge.digest(self.bundle)+".json"
+        self.assertEqual(self._r4_worker(bridge.OUTBOX,name,self.bundle,"after-link").returncode,-9)
+        pending=folder/(".pending-"+name)
+        marker=bridge.strict_json(pending.read_bytes())
+        altered=dict(marker)
+        altered["sha256_bytes"]="0"*64
+        pending.write_bytes(bridge.canonical(altered)+b"\n")
+        pending.chmod(0o600)
+        with self.assertRaises(bridge.BridgeError):
+            bridge.reconcile_outbox()
+        pending.write_bytes(bridge.canonical(marker)+b"\n")
+        pending.chmod(0o600)
+        (folder/name).chmod(0o644)
+        with self.assertRaises(bridge.BridgeError):
+            bridge.reconcile_outbox()
+        (folder/name).chmod(0o600)
+        self.assertEqual(bridge.reconcile_outbox(),["PUBBLICATO_CONFERMATO"])
+
+    def test_rt2_extra_unattributable_hardlink_rejected(self):
+        folder=bridge.private_directory(bridge.OUTBOX,create=True)
+        name=bridge.digest(self.bundle)+".json"
+        self.assertEqual(self._r4_worker(bridge.OUTBOX,name,self.bundle,"after-link").returncode,-9)
+        extra=folder/"extraneous.link"
+        os.link(folder/name,extra)
+        self.assertEqual((folder/name).stat().st_nlink,3)
+        with self.assertRaises(bridge.BridgeError):
+            bridge.reconcile_outbox()
+        extra.unlink()
+        self.assertEqual(bridge.reconcile_outbox(),["PUBBLICATO_CONFERMATO"])
+
+    def test_rt2_orphan_stage_not_deleted_by_glob(self):
+        folder=bridge.private_directory(bridge.OUTBOX,create=True)
+        name=bridge.digest(self.bundle)+".json"
+        stray=folder/".kdd-stage-unrelated.tmp"
+        stray.write_bytes(b"stray")
+        stray.chmod(0o600)
+        self.assertEqual(self._r4_worker(bridge.OUTBOX,name,self.bundle,"after-link").returncode,-9)
+        self.assertEqual(bridge.reconcile_outbox(),["PUBBLICATO_CONFERMATO"])
+        self.assertEqual(stray.read_bytes(),b"stray")
+
+    def test_rt2_cleanup_error_does_not_mask_uncertain_fsync(self):
+        folder=bridge.private_directory(bridge.ARCHIVE,create=True)
+        entry=self._r4_entry()
+        version=bridge.digest(self.plan)
+        genuine_sync=bridge._sync_dir
+        count={"n":0}
+        def broken_sync(directory):
+            count["n"]+=1
+            if count["n"]==2:
+                raise OSError("injected fsync after final link")
+            return genuine_sync(directory)
+        with mock.patch.object(bridge,"_sync_dir",side_effect=broken_sync), \
+             mock.patch.object(bridge.Path,"unlink",side_effect=OSError("cleanup failure")):
+            with self.assertRaises(bridge.PublicationUncertain):
+                bridge.exclusive_json(folder,version+".json",entry)
+        self.assertTrue((folder/(".pending-"+version+".json")).exists())
+        self.assertEqual(bridge.reconcile_archive(),["PUBBLICATO_CONFERMATO"])
+
+    def test_rt2_successful_link_cleanup_failure_is_uncertain(self):
+        folder=bridge.private_directory(bridge.OUTBOX,create=True)
+        name=bridge.digest(self.bundle)+".json"
+        with mock.patch.object(bridge.Path,"unlink",side_effect=OSError("cleanup failure")):
+            with self.assertRaises(bridge.PublicationUncertain):
+                bridge.exclusive_json(folder,name,self.bundle)
+        self.assertTrue((folder/(".pending-"+name)).exists())
+        self.assertEqual(bridge.reconcile_outbox(),["PUBBLICATO_CONFERMATO"])
+
+    def test_rt2_pending_guard_prevents_new_revision_and_dashboard_safe(self):
+        import serve
+        self.persist_origin()
+        version=bridge.digest(self.plan)
+        folder=bridge.private_directory(bridge.ARCHIVE,create=True)
+        self.assertEqual(self._r4_worker(bridge.ARCHIVE,version+".json",
+                         self._r4_entry(),"after-link").returncode,-9)
+        revised=copy.deepcopy(self.plan)
+        revised["proposta_id"]="NEW-REVISION"
+        revised["sostituisce_sha256"]=version
+        with self.assertRaises(bridge.BridgeError):
+            bridge.approved_import(revised,self.bundle,bridge.digest(revised),
+                                  "APPROVO_VERSIONE",now=T)
+        shown=serve.with_controls("<h2>1 · Decisioni e posizioni</h2><p>Spot retained</p>")
+        self.assertIn("STOP",shown)
+        self.assertIn("/mercati/spot",shown)
+        self.assertIn("Spot retained",shown)
+        self.assertEqual(bridge.reconcile_archive(),["PUBBLICATO_CONFERMATO"])
+
+
 if __name__=="__main__":
     unittest.main()
