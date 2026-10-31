@@ -85,6 +85,48 @@ class DriveUIHandoffTests(unittest.TestCase):
             exchange.receive(b'{"schema":"bad"')
         self.assertEqual(bridge.digest(exchange.pending()[0]),sha)
 
+    def test_actual_local_http_get_and_post_drive_ui(self):
+        """Exercise the real serve.Handler, not only direct helper calls."""
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+        import serve
+        server=ThreadingHTTPServer(("127.0.0.1",0),serve.Handler)
+        thread=threading.Thread(target=server.serve_forever,daemon=True)
+        thread.start()
+        self.addCleanup(thread.join,1)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        def call(method,path,body=None,with_token=True):
+            conn=http.client.HTTPConnection("127.0.0.1",server.server_port,timeout=5)
+            headers={"Host":"127.0.0.1:8765"}
+            if with_token:
+                headers["X-KDD-Token"]=serve.TOKEN
+            conn.request(method,path,body=body,headers=headers)
+            resp=conn.getresponse()
+            result=(resp.status,resp.read().decode("utf-8"))
+            conn.close()
+            return result
+        state,page=call("GET","/gpt")
+        self.assertEqual(state,200)
+        self.assertIn("Apri la proposta da Drive",page)
+        with mock.patch.object(bridge,"prepare",return_value=self.original.bundle):
+            status,message=call("POST","/gpt/prepara",b"",False)
+            self.assertEqual(status,403)
+            status,message=call("POST","/gpt/prepara",b"")
+            self.assertEqual(status,200,message)
+        status,message=call("POST","/gpt/ricevi",bridge.canonical(self.original.plan))
+        self.assertEqual(status,200,message)
+        self.assertIn("NON approvata",message)
+        state,page=call("GET","/gpt")
+        self.assertIn("ADA",page)
+        self.assertIn("NON APPROVATA",page)
+        self.assertEqual(bridge.load_archive(),{})
+        payload=json.dumps({"sha256":bridge.digest(self.original.plan)}).encode()
+        state,message=call("POST","/gpt/conferma",payload)
+        self.assertEqual(state,200,message)
+        self.assertEqual(len(bridge.load_archive()),1)
+
     def test_handle_rejects_implicit_consent(self):
         self.original.persist_origin()
         self.assertIn("NON approvata",exchange.handle("ricevi",bridge.canonical(self.original.plan)))
