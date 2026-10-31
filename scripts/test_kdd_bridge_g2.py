@@ -1084,5 +1084,196 @@ else:
         self.assertEqual(bridge.exclusive_json(folder,name,self.bundle),"GIA_PRESENTE")
 
 
+    # RT3: the original module is imported by separate children. A killed
+    # child never executes finally; the next child reads persistent Linux inodes.
+    def test_rt3_a_four_consecutive_cancelled_attempts_same_version_both_areas(self):
+        for area in (bridge.OUTBOX, bridge.ARCHIVE):
+            with self.subTest(area=area):
+                version = bridge.digest(self.bundle if area==bridge.OUTBOX else self.plan)
+                obj = self.bundle if area==bridge.OUTBOX else self._r4_entry()
+                name = version + ".json"
+                folder = bridge.private_directory(area, create=True)
+                records = []
+                for attempt_number in range(4):
+                    killed = self._r4_worker(area,name,obj,"before-link")
+                    self.assertEqual(killed.returncode,-9,killed.stderr)
+                    self.assertTrue((folder/(".pending-"+name)).is_file())
+                    self.assertFalse((folder/name).exists())
+                    second = self._r4_worker(area,name,obj,"recover")
+                    self.assertEqual(second.returncode,0,second.stderr)
+                    self.assertIn("NON_PUBBLICATO",second.stdout)
+                    self.assertEqual(bridge.reconcile_directory(area),[])
+                    marks = sorted(folder.glob(".cancelled-"+version+"-*.json"))
+                    self.assertEqual(len(marks),attempt_number+1)
+                    self.assertFalse(set(marks).intersection(records))
+                    records = marks
+                    parsed=[bridge.strict_json(m.read_bytes()) for m in records]
+                    self.assertEqual(len({m["attempt_id"] for m in parsed}),attempt_number+1)
+                    for m in parsed:
+                        self.assertEqual(m["schema"],bridge.PENDING_SCHEMA_R5)
+                        self.assertEqual(m["filename"],name)
+                        self.assertTrue(m["stage"].startswith(".kdd-stage-"+m["attempt_id"]+"-"))
+                        self.assertFalse((folder/m["stage"]).exists())
+                third = self._r4_worker(area,name,obj,"publish")
+                self.assertEqual(third.returncode,0,third.stderr)
+                self.assertIn("INSERITO",third.stdout)
+                self.assertEqual(len(list(folder.glob(".cancelled-"+version+"-*.json"))),4)
+                self.assertEqual(len(list(folder.glob(".resolved-"+version+"-*.json"))),1)
+                final=folder/name
+                self.assertEqual(final.stat().st_nlink,1)
+                if area==bridge.ARCHIVE:
+                    self.persist_origin()
+                    self.assertEqual(len(bridge.load_archive()),1)
+                    self.assertEqual(bridge.approved_import(self.plan,self.bundle,version,
+                                     "APPROVO_VERSIONE",now=T)["stato"],"GIA_PRESENTE")
+                else:
+                    self.assertEqual(bridge.verify_local_origin(self.bundle),version)
+                    self.assertEqual(bridge.exclusive_json(folder,name,self.bundle),"GIA_PRESENTE")
+                self.assertEqual(len(list(folder.glob(".cancelled-"+version+"-*.json"))),4)
+
+    def test_rt3_a_legacy_forensic_marker_remains_separate_from_new_attempt(self):
+        area=bridge.ARCHIVE
+        version=bridge.digest(self.plan)
+        name=version+".json"
+        folder=bridge.private_directory(area,create=True)
+        p=self._r4_worker(area,name,self._r4_entry(),"before-link")
+        self.assertEqual(p.returncode,-9,p.stderr)
+        journal=folder/(".pending-"+name)
+        legacy=bridge.strict_json(journal.read_bytes())
+        legacy.pop("attempt_id")
+        legacy["schema"]=bridge.PENDING_SCHEMA_R4
+        journal.write_bytes(bridge.canonical(legacy)+b"\n")
+        journal.chmod(0o600)
+        self.assertEqual(bridge.reconcile_archive(),["NON_PUBBLICATO"])
+        historic=folder/(".cancelled-"+name)
+        self.assertTrue(historic.is_file())
+        historic_bytes=historic.read_bytes()
+        p=self._r4_worker(area,name,self._r4_entry(),"before-link")
+        self.assertEqual(p.returncode,-9,p.stderr)
+        self.assertEqual(bridge.reconcile_archive(),["NON_PUBBLICATO"])
+        self.assertEqual(historic.read_bytes(),historic_bytes)
+        self.assertEqual(len(list(folder.glob(".cancelled-"+version+"-*.json"))),1)
+        self.assertEqual(bridge.load_archive(),{})
+
+    def test_rt3_a_changed_attempt_id_is_rejected_without_cleanup(self):
+        folder=bridge.private_directory(bridge.OUTBOX,create=True)
+        name=bridge.digest(self.bundle)+".json"
+        killed=self._r4_worker(bridge.OUTBOX,name,self.bundle,"before-link")
+        self.assertEqual(killed.returncode,-9,killed.stderr)
+        journal=folder/(".pending-"+name)
+        marker=bridge.strict_json(journal.read_bytes())
+        saved_stage=folder/marker["stage"]
+        marker["attempt_id"]="0"*32 if marker["attempt_id"]!="0"*32 else "1"*32
+        journal.write_bytes(bridge.canonical(marker)+b"\n")
+        journal.chmod(0o600)
+        with self.assertRaisesRegex(bridge.BridgeError,"Identita tentativo"):
+            bridge.reconcile_outbox()
+        self.assertTrue(journal.is_file())
+        self.assertTrue(saved_stage.exists())
+        self.assertFalse((folder/name).exists())
+
+    def test_rt3_b_dangling_and_live_symlink_journals_fail_closed(self):
+        for area in (bridge.ARCHIVE, bridge.OUTBOX):
+            for dangling in (True,False):
+                with self.subTest(area=area,dangling=dangling):
+                    folder=bridge.private_directory(area,create=True)
+                    obj=self.bundle if area==bridge.OUTBOX else self._r4_entry()
+                    name=(bridge.digest(self.bundle) if area==bridge.OUTBOX
+                          else bridge.digest(self.plan))+".json"
+                    pending=folder/(".pending-"+name)
+                    target=self.home/("no-such-target" if dangling else "live-target")
+                    if not dangling:
+                        target.write_text('{"legitimate":false}')
+                        target.chmod(0o600)
+                    pending.symlink_to(target)
+                    with self.assertRaises(bridge.BridgeError):
+                        bridge.reconcile_directory(area)
+                    self.assertTrue(pending.is_symlink())
+                    self.assertFalse((folder/name).exists())
+                    with self.assertRaises(bridge.BridgeError):
+                        bridge.exclusive_json(folder,name,obj)
+                    self.assertTrue(pending.is_symlink())
+                    if area==bridge.OUTBOX:
+                        with self.assertRaises(bridge.BridgeError):
+                            bridge.verify_local_origin(self.bundle)
+                    else:
+                        self.persist_origin()
+                        with self.assertRaises(bridge.BridgeError):
+                            bridge.approved_import(self.plan,self.bundle,
+                                bridge.digest(self.plan),"APPROVO_VERSIONE",now=T)
+                        self.assertIn("STOP",bridge.approved_html())
+                    pending.unlink()
+                    if not dangling:
+                        target.unlink()
+                    self.assertEqual(bridge.reconcile_directory(area),[])
+
+    def _r5_mark_worker(self,area,name,phase):
+        import subprocess
+        import sys
+        script=r"""
+import os,signal,sys
+from pathlib import Path
+from scripts import kdd_bridge_g2 as bridge
+bridge.PRIVATE_ROOT=Path(sys.argv[1])
+area,name,phase=sys.argv[2:]
+old_rename=os.rename
+def kill_on_marker(*args,**kwargs):
+    if phase=="pre-mark":
+        os.kill(os.getpid(),signal.SIGKILL)
+    result=old_rename(*args,**kwargs)
+    if phase=="post-mark":
+        os.kill(os.getpid(),signal.SIGKILL)
+    return result
+os.rename=kill_on_marker
+bridge.reconcile_directory(area)
+"""
+        env=os.environ.copy()
+        env["PYTHONPATH"]=str(Path(bridge.__file__).resolve().parents[1])
+        return subprocess.run([sys.executable,"-B","-c",script,str(self.private),
+                               area,name,phase],env=env,cwd=env["PYTHONPATH"],
+                              text=True,capture_output=True,timeout=18)
+
+    def test_rt3_a_real_sigkill_before_and_after_forensic_marking(self):
+        for area in (bridge.ARCHIVE,bridge.OUTBOX):
+            for linked in (False,True):
+                for point in ("pre-mark","post-mark"):
+                    with self.subTest(area=area,linked=linked,point=point):
+                        obj=self.bundle if area==bridge.OUTBOX else self._r4_entry()
+                        ver=bridge.digest(self.bundle) if area==bridge.OUTBOX else bridge.digest(self.plan)
+                        folder=bridge.private_directory(area,create=True)
+                        name=ver+".json"
+                        # Each subtest uses a newly named document? The same
+                        # version may already exist after a previous linked test.
+                        # Use one isolated private-root per phase while keeping
+                        # the original module and separate child processes.
+                        local_root=self.private
+                        isolated=self.home/(area+str(linked)+point)
+                        with mock.patch.object(bridge,"PRIVATE_ROOT",isolated), \
+                             mock.patch.object(self,"private",isolated):
+                            if linked:
+                                killed=self._r4_worker(area,name,obj,"after-link")
+                            else:
+                                killed=self._r4_worker(area,name,obj,"before-link")
+                            self.assertEqual(killed.returncode,-9,killed.stderr)
+                            before=self._r5_mark_worker(area,name,point)
+                            self.assertEqual(before.returncode,-9,before.stderr)
+                            pending=bridge.private_directory(area)/(".pending-"+name)
+                            if point=="pre-mark":
+                                self.assertTrue(pending.is_file())
+                                self.assertEqual(bridge.reconcile_directory(area),
+                                    ["PUBBLICATO_CONFERMATO" if linked else "NON_PUBBLICATO"])
+                            else:
+                                self.assertFalse(pending.exists())
+                                self.assertEqual(bridge.reconcile_directory(area),[])
+                            prefix=".resolved-" if linked else ".cancelled-"
+                            marks=list(bridge.private_directory(area).glob(prefix+ver+"-*.json"))
+                            self.assertEqual(len(marks),1)
+                            self.assertEqual(bridge.reconcile_directory(area),[])
+                            if linked:
+                                self.assertEqual((bridge.private_directory(area)/name).stat().st_nlink,1)
+                            else:
+                                self.assertFalse((bridge.private_directory(area)/name).exists())
+
+
 if __name__=="__main__":
     unittest.main()

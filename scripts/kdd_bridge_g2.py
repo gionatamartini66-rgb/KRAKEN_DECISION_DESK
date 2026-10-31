@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import stat
 import sys
+import secrets
 
 from scripts import kdd_wallet_packet_g0 as wallet
 import piano_gpt
@@ -40,7 +41,9 @@ _LOCAL_ORIGINS = set()
 STAGING = re.compile(r"\.kdd-stage-[A-Za-z0-9_-]+\.tmp\Z")
 PENDING = re.compile(r"\.pending-[0-9a-f]{64}\.json\Z")
 PENDING_SCHEMA_R4 = "kdd_file_commit_v002"
-RESOLVED = re.compile(r"\.(?:resolved|cancelled)-[0-9a-f]{64}\.json\Z")
+PENDING_SCHEMA_R5 = "kdd_file_commit_v003"
+ATTEMPT = re.compile(r"[0-9a-f]{32}\\Z")
+RESOLVED = re.compile(r"\.(?:resolved|cancelled)-[0-9a-f]{64}(?:-[0-9a-f]{32})?\.json\Z")
 SOURCE_FILES = tuple(wallet.SRC_MAX)
 CANONICAL_KDD_SOURCE = wallet.DEFAULT_SOURCE
 PROPOSAL_FIELDS = frozenset(("schema", "proposta_id", "snapshot_id", "snapshot_utc", "creato_utc", "posizioni", "scenario", "scenario_alternativo", "rischi_comuni", "liquidita", "revisione", "fonti_esterne", "sostituisce_sha256"))
@@ -205,6 +208,17 @@ def _sync_dir(directory):
         os.close(fd)
 
 
+def _path_present(path):
+    """lstat (no follow): a dangling symlink is present, NEVER 'no pending'."""
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise BridgeError("Percorso transazione non verificabile") from exc
+    return True
+
+
 def _pending_file(directory, filename):
     """R4 uses the identical durable journal for approvals and private snapshots."""
     if directory.name not in (ARCHIVE, OUTBOX) or not HEX.fullmatch(filename[:-5]):
@@ -250,14 +264,15 @@ def _link_identity(path, directory, *, expected_nlink):
 def _finalize_pending(directory, filename, expected_raw=None, *, explicit=False):
     """Reconcile one named transaction; never glob-unlink or assume nlink2 is safe."""
     pending = _pending_file(directory, filename)
-    if pending is None or not pending.exists():
+    if pending is None or not _path_present(pending):
         return "NESSUNA_PENDENZA"
     marker = strict_json(read_regular(pending, expected_parent=directory))
     if (not isinstance(marker, dict)
             or marker.get("filename") != filename
             or not HEX.fullmatch(str(marker.get("sha256_bytes", "")))):
         raise BridgeError("Registro pubblicazione non verificabile")
-    modern = marker.get("schema") == PENDING_SCHEMA_R4
+    modern = marker.get("schema") in (PENDING_SCHEMA_R4, PENDING_SCHEMA_R5)
+    v5 = marker.get("schema") == PENDING_SCHEMA_R5
     legacy = marker.get("schema") == "kdd_archive_commit_v001" and directory.name == ARCHIVE
     if not modern and not legacy:
         raise BridgeError("Registro pubblicazione sconosciuto")
@@ -270,10 +285,15 @@ def _finalize_pending(directory, filename, expected_raw=None, *, explicit=False)
                 or not isinstance(marker.get("owner"), int)
                 or marker.get("mode") != 0o600):
             raise BridgeError("Transazione priva di identita dello staging")
+        if v5:
+            attempt = marker.get("attempt_id")
+            if (not isinstance(attempt, str) or not ATTEMPT.fullmatch(attempt)
+                    or not stage_name.startswith(".kdd-stage-" + attempt + "-")):
+                raise BridgeError("Identita tentativo incompatibile con staging")
         stage = directory / stage_name
     dest = directory / filename
-    has_dest = dest.exists() or dest.is_symlink()
-    has_stage = stage is not None and (stage.exists() or stage.is_symlink())
+    has_dest = _path_present(dest)
+    has_stage = stage is not None and _path_present(stage)
     if has_dest:
         if not explicit and expected_raw is None:
             raise BridgeError("Pubblicazione non riconciliata")
@@ -327,11 +347,17 @@ def _finalize_pending(directory, filename, expected_raw=None, *, explicit=False)
             _sync_dir(directory)
         _sync_dir(directory)
         status, suffix = "NON_PUBBLICATO", ".cancelled-"
-    target = directory / (suffix + filename)
-    if target.exists() or target.is_symlink():
-        # If previous recovery was killed after rename, do not overwrite.
-        raise BridgeError("Marcatura di riconciliazione ambigua")
-    os.replace(pending, target)
+    # R3/R4 use their historic, unversioned forensic names unchanged. R5
+    # binds one unique forensic record to ONE publication attempt, not to
+    # the document version; earlier records must never be overwritten.
+    target_name = (suffix + filename[:-5] + "-" + marker["attempt_id"] + ".json"
+                   if v5 else suffix + filename)
+    target = directory / target_name
+    if _path_present(target):
+        raise BridgeError("Marcatura forense precedente: STOP")
+    # All compliant writers/reconcilers hold the per-directory flock; within
+    # that regime rename is exclusive by the checked unique destination.
+    os.rename(pending, target)
     _sync_dir(directory)
     return status
 
@@ -388,7 +414,7 @@ def exclusive_json(directory, filename, obj):
     if len(raw) > MAX_BYTES:
         raise BridgeError("Documento troppo grande")
     pending = _pending_file(directory, filename)
-    if pending and pending.exists():
+    if pending and _path_present(pending):
         # An explicit same-document retry may reconcile its *exact* file and
         # journal. New revisions are still held by approved_import's gate.
         if dest.exists() or dest.is_symlink():
@@ -396,11 +422,15 @@ def exclusive_json(directory, filename, obj):
             if status == "PUBBLICATO_CONFERMATO":
                 return "GIA_PRESENTE"
         raise BridgeError("PUBBLICAZIONE_INCERTA: usare riconciliazione")
-    if dest.exists() or dest.is_symlink():
+    if _path_present(dest):
         if read_regular(dest, expected_parent=directory) == raw:
             return "GIA_PRESENTE"
         raise BridgeError("Collisione archivio, STOP")
-    fd, stage_name = tempfile.mkstemp(prefix=".kdd-stage-", suffix=".tmp", dir=directory)
+    # Document SHA identifies the version, attempt_id identifies this write.
+    # A repeated SIGKILL + retry of the SAME SHA gets a new forensic identity.
+    attempt_id = secrets.token_hex(16) if pending else None
+    prefix = ".kdd-stage-" + attempt_id + "-" if attempt_id else ".kdd-stage-"
+    fd, stage_name = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=directory)
     stage = Path(stage_name)
     linked = False
     recorded = False
@@ -414,7 +444,8 @@ def exclusive_json(directory, filename, obj):
         if pending:
             st = stage.stat(follow_symlinks=False)
             marker = canonical({
-                "schema":PENDING_SCHEMA_R4, "filename":filename, "stage":stage.name,
+                "schema":PENDING_SCHEMA_R5, "filename":filename, "stage":stage.name,
+                "attempt_id":attempt_id,
                 "sha256_bytes":hashlib.sha256(raw).hexdigest(), "inode":st.st_ino,
                 "device":st.st_dev, "owner":st.st_uid, "mode":stat.S_IMODE(st.st_mode)
             }) + b"\n"
@@ -440,11 +471,11 @@ def exclusive_json(directory, filename, obj):
             _finalize_pending(directory, filename, expected_raw=raw, explicit=True)
         return "INSERITO"
     except (OSError, BridgeError) as exc:
-        if linked or (pending and recorded and (dest.exists() or dest.is_symlink())):
+        if linked or (pending and recorded and _path_present(dest)):
             # A wrapper/filesystem may surface an error *after* creating the
             # link but before os.link returns. Never mislabel it unpublished.
             raise PublicationUncertain("PUBBLICAZIONE_INCERTA: recupero obbligatorio") from exc
-        if pending and pending.exists() and recorded and not dest.exists():
+        if pending and _path_present(pending) and recorded and not _path_present(dest):
             try:
                 _finalize_pending(directory, filename, explicit=True)
             except (OSError, BridgeError):
@@ -452,11 +483,11 @@ def exclusive_json(directory, filename, obj):
         raise
     finally:
         active = sys.exc_info()[1]    # Keep the *original* classification.
-        if stage.exists() or stage.is_symlink():
+        if _path_present(stage):
             try:
                 # Never blindly unlink a stage while the journal still refers
                 # to it or after an uncertain post-link failure.
-                if not linked and not (pending and pending.exists()):
+                if not linked and not (pending and _path_present(pending)):
                     stage.unlink()
             except OSError:
                 if active is None and linked:
@@ -529,7 +560,7 @@ def verify_local_origin(bundle):
     origin_id = digest(bundle)
     try:
         outgoing = private_directory(OUTBOX)
-        if (outgoing / (".pending-" + origin_id + ".json")).exists():
+        if _path_present(outgoing / (".pending-" + origin_id + ".json")):
             raise BridgeError("Fotografia originaria in recupero incerto")
         raw = read_regular(outgoing / (origin_id + ".json"), expected_parent=outgoing)
         original = strict_json(raw)
@@ -803,7 +834,7 @@ def approved_import(proposal, bundle, approved_sha, consent, *, now=None):
         raise BridgeError("Consenso umano esplicito assente o versione diversa")
     folder = private_directory(ARCHIVE, create=True)
     with _archive_write_lock(folder):
-        if any(folder.glob(".pending-*.json")):
+        if any(PENDING.fullmatch(p.name) for p in folder.iterdir()):
             raise BridgeError("PUBBLICAZIONE_INCERTA: riconciliazione obbligatoria")
         existing = load_archive()
         if version in existing:
