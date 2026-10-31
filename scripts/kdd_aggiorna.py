@@ -31,7 +31,8 @@ PY_FILES = (
 )
 PACKET_FILES = (
     'scripts/kdd_wallet_packet_g0.py',
-    'scripts/kdd_bridge_g2.py', 'scripts/test_kdd_bridge_g2.py',
+    'scripts/kdd_bridge_g2.py', 'scripts/kdd_drive_exchange.py',
+    'scripts/test_kdd_drive_exchange.py', 'scripts/test_kdd_bridge_g2.py',
     'scripts/test_kdd_android_transaction_g2.py',
     'scripts/kdd_android_regressions.py',
     'scripts/test_kdd_wallet_packet_g0.py',
@@ -276,7 +277,8 @@ def isolated_test(staging: Path) -> None:
         # that same import root (unlike scripts.test_kdd_wallet_packet_g0).
         for pattern in ('test_kdd_wallet_packet_g0.py',
                         'test_kdd_portfolio_4tf.py',
-                        'test_kdd_android_transaction_g2.py'):
+                        'test_kdd_android_transaction_g2.py',
+                        'test_kdd_drive_exchange.py'):
             proc = command([sys.executable, '-B', '-m', 'unittest', 'discover',
                             '-s', 'scripts', '-p', pattern, '-q'], cwd=staging)
             if proc.returncode:
