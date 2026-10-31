@@ -294,6 +294,14 @@ def _finalize_pending(directory, filename, expected_raw=None, *, explicit=False)
     dest = directory / filename
     has_dest = _path_present(dest)
     has_stage = stage is not None and _path_present(stage)
+    # Check the immutable forensic destination BEFORE unlinking the stage.
+    # A reused/colliding attempt identity must preserve all evidence on STOP.
+    suffix = ".resolved-" if has_dest else ".cancelled-"
+    target_name = (suffix + filename[:-5] + "-" + marker["attempt_id"] + ".json"
+                   if v5 else suffix + filename)
+    target = directory / target_name
+    if _path_present(target):
+        raise BridgeError("Marcatura forense precedente: STOP")
     if has_dest:
         if not explicit and expected_raw is None:
             raise BridgeError("Pubblicazione non riconciliata")
@@ -350,11 +358,6 @@ def _finalize_pending(directory, filename, expected_raw=None, *, explicit=False)
     # R3/R4 use their historic, unversioned forensic names unchanged. R5
     # binds one unique forensic record to ONE publication attempt, not to
     # the document version; earlier records must never be overwritten.
-    target_name = (suffix + filename[:-5] + "-" + marker["attempt_id"] + ".json"
-                   if v5 else suffix + filename)
-    target = directory / target_name
-    if _path_present(target):
-        raise BridgeError("Marcatura forense precedente: STOP")
     # All compliant writers/reconcilers hold the per-directory flock; within
     # that regime rename is exclusive by the checked unique destination.
     os.rename(pending, target)

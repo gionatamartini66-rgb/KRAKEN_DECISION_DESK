@@ -1279,5 +1279,44 @@ bridge.reconcile_directory(area)
                                 self.assertFalse((bridge.private_directory(area)/name).exists())
 
 
+    def test_rt3_a_forced_attempt_collision_preserves_prior_and_current_evidence(self):
+        for area in (bridge.ARCHIVE,bridge.OUTBOX):
+            with self.subTest(area=area):
+                isolated=self.home/("rt3-collision-"+area)
+                with mock.patch.object(bridge,"PRIVATE_ROOT",isolated), \
+                     mock.patch.object(self,"private",isolated):
+                    folder=bridge.private_directory(area,create=True)
+                    version=bridge.digest(self.bundle) if area==bridge.OUTBOX else bridge.digest(self.plan)
+                    doc=self.bundle if area==bridge.OUTBOX else self._r4_entry()
+                    name=version+".json"
+                    first=self._r4_worker(area,name,doc,"before-link")
+                    self.assertEqual(first.returncode,-9,first.stderr)
+                    journal=folder/(".pending-"+name)
+                    old_marker=bridge.strict_json(journal.read_bytes())
+                    self.assertEqual(bridge.reconcile_directory(area),["NON_PUBBLICATO"])
+                    historic=folder/(".cancelled-"+version+"-"+old_marker["attempt_id"]+".json")
+                    original_bytes=historic.read_bytes()
+                    second=self._r4_worker(area,name,doc,"before-link")
+                    self.assertEqual(second.returncode,-9,second.stderr)
+                    journal=folder/(".pending-"+name)
+                    current=bridge.strict_json(journal.read_bytes())
+                    self.assertNotEqual(current["attempt_id"],old_marker["attempt_id"])
+                    current_stage=folder/current["stage"]
+                    forced_name=".kdd-stage-"+old_marker["attempt_id"]+"-forced.tmp"
+                    forced_stage=folder/forced_name
+                    current_stage.rename(forced_stage)
+                    current["attempt_id"]=old_marker["attempt_id"]
+                    current["stage"]=forced_name
+                    journal.write_bytes(bridge.canonical(current)+b"\n")
+                    journal.chmod(0o600)
+                    with self.assertRaisesRegex(bridge.BridgeError,"Marcatura forense"):
+                        bridge.reconcile_directory(area)
+                    self.assertEqual(historic.read_bytes(),original_bytes)
+                    self.assertTrue(journal.is_file())
+                    self.assertTrue(forced_stage.is_file())
+                    self.assertFalse((folder/name).exists())
+                    self.assertEqual(len(list(folder.glob(".cancelled-"+version+"-*.json"))),1)
+
+
 if __name__=="__main__":
     unittest.main()
