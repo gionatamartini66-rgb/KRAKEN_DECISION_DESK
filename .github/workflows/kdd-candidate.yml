@@ -4,6 +4,7 @@ on:
     branches:
       - experiments/kdd-rt-i01-patrimonio-g2-20261028
       - experiments/kdd-android-transaction-g2-20261031
+      - experiments/kdd-drive-ui-bridge-g2-20261031
   pull_request:
     branches:
       - main
@@ -21,6 +22,8 @@ jobs:
         run: python -B -m unittest -q test_decision_desk
       - name: Private packet, market age and portfolio 4TF synthetic tests
         run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_wallet_packet_g0 scripts.test_kdd_market_freshness scripts.test_kdd_portfolio_4tf scripts.test_kdd_android_transaction_g2
+      - name: Drive UI handoff through the genuine bridge (no remote API)
+        run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_drive_exchange
       - name: Unchanged R5 invariant tests against Android candidate (mapped, no skips)
         run: PYTHONPATH=.:scripts python -B scripts/kdd_android_regressions.py
       - name: Existing safe updater tests

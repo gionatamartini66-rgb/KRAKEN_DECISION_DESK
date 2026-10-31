@@ -1,0 +1,237 @@
+"""KDD Drive handoff: existing FolderSync outbound, Android Drive picker inbound.
+No remote API, Kraken order, automatic approval, or background synchronization.
+"""
+from __future__ import annotations
+import hashlib
+import html
+import json
+import os
+from pathlib import Path
+import re
+import tempfile
+from scripts import kdd_bridge_g2 as bridge
+
+EXCHANGE_ROOT = Path("/storage/emulated/0/Kraken")
+INCOMING_NAME = "proposta_portafoglio.json"
+EXPORT_NAME = re.compile(r"kdd_handoff_[0-9a-f]{64}\.json\Z")
+
+
+def export_bundle(bundle):
+    """Only write the finished KDD-origin envelope to the existing sync source."""
+    root = EXCHANGE_ROOT
+    if root.is_symlink() or not root.is_dir():
+        raise bridge.BridgeError("Cartella Kraken condivisa non disponibile")
+    name = "kdd_handoff_" + bridge.digest(bundle) + ".json"
+    final = root / name
+    raw = bridge.canonical(bundle) + b"\n"
+    if final.is_symlink():
+        raise bridge.BridgeError("Percorso condiviso non regolare")
+    if final.exists():
+        if final.is_file() and final.read_bytes() == raw:
+            return name
+        raise bridge.BridgeError("Esportazione gia presente ma differente")
+    stage = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix=".kdd-handoff-", suffix=".tmp",
+                                         dir=root, delete=False) as f:
+            stage = Path(f.name)
+            f.write(raw)
+            f.flush()
+            os.fsync(f.fileno())
+        if final.exists() or final.is_symlink():
+            raise bridge.BridgeError("Collisione prima della pubblicazione")
+        os.rename(stage, final)
+        stage = None
+    finally:
+        if stage is not None:
+            stage.unlink(missing_ok=True)
+    return name
+
+
+def prepare_export():
+    original = bridge.prepare()
+    outgoing = bridge.private_directory(bridge.OUTBOX, create=True)
+    name = bridge.digest(original) + ".json"
+    status = bridge.exclusive_json(outgoing, name, original)
+    if status not in ("INSERITO", "GIA_PRESENTE"):
+        raise bridge.BridgeError("Fotografia originale non confermata")
+    bridge.verify_local_origin(original)
+    return export_bundle(original)
+
+
+def find_origin(proposal):
+    snapshot = proposal.get("snapshot_id") if isinstance(proposal, dict) else None
+    if not isinstance(snapshot, str) or not bridge.HEX.fullmatch(snapshot):
+        raise bridge.BridgeError("Identita della fotografia non valida")
+    outgoing = bridge.private_directory(bridge.OUTBOX)
+    matches = []
+    for path in outgoing.iterdir():
+        if not re.fullmatch(r"[0-9a-f]{64}\.json", path.name):
+            continue
+        bundle = bridge.strict_json(bridge.read_regular(path, expected_parent=outgoing))
+        if bundle.get("packet_sha256") == snapshot:
+            bridge.verify_local_origin(bundle)
+            matches.append(bundle)
+    if len(matches) != 1:
+        raise bridge.BridgeError("Fotografia KDD originaria assente o ambigua")
+    return matches[0]
+
+
+def validate_raw(raw):
+    proposal = bridge.strict_json(raw)
+    bundle = find_origin(proposal)
+    bridge.validate_proposal(proposal, bundle)
+    return proposal, bundle
+
+
+def receive(raw):
+    """The browser file picker gives JSON bytes; save only after validation."""
+    proposal, _ = validate_raw(raw)
+    folder = bridge.private_directory(bridge.INBOX, create=True)
+    final = folder / INCOMING_NAME
+    stage = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix=".kdd-proposal-", suffix=".tmp",
+                                         dir=folder, delete=False) as f:
+            stage = Path(f.name)
+            f.write(bridge.canonical(proposal) + b"\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(stage, 0o600)
+        os.replace(stage, final)  # replaces ONLY a previously unapproved inbox copy
+        stage = None
+        bridge._sync_dir(folder)
+    finally:
+        if stage is not None:
+            stage.unlink(missing_ok=True)
+    return bridge.digest(proposal)
+
+
+def pending():
+    try:
+        folder = bridge.private_directory(bridge.INBOX)
+        raw = bridge.read_regular(folder / INCOMING_NAME, expected_parent=folder)
+    except bridge.BridgeError:
+        return None
+    return validate_raw(raw)
+
+
+def confirm(sha):
+    item = pending()
+    if item is None:
+        raise bridge.BridgeError("Nessuna proposta in attesa")
+    proposal, bundle = item
+    if not isinstance(sha, str) or bridge.digest(proposal) != sha:
+        raise bridge.BridgeError("Versione diversa: rivedere la proposta")
+    return bridge.approved_import(proposal, bundle, sha, "APPROVO_VERSIONE")
+
+
+def latest_export():
+    if EXCHANGE_ROOT.is_symlink() or not EXCHANGE_ROOT.is_dir():
+        return "Cartella di FolderSync non accessibile."
+    files = [p for p in EXCHANGE_ROOT.iterdir()
+             if EXPORT_NAME.fullmatch(p.name) and p.is_file() and not p.is_symlink()]
+    if not files:
+        return "Nessun dossier pronto per FolderSync."
+    return "Ultimo dossier pronto: " + max(files, key=lambda p: p.stat().st_mtime).name
+
+
+def render_page(token):
+    esc = lambda s: html.escape(str(s), quote=True)
+    try:
+        item = pending()
+        error = None
+    except bridge.BridgeError as exc:
+        item, error = None, str(exc)
+    if error:
+        preview = "<p class='warn'>STOP: " + esc(error) + "</p>"
+    elif item is None:
+        preview = "<p>Nessuna proposta importata da Drive.</p>"
+    else:
+        proposal, bundle = item
+        state = bridge.read_context(bundle)
+        sha = bridge.digest(proposal)
+        rows = "".join(
+            "<article><b>" + esc(r["token"]) + " · " + esc(r["azione"]) + "</b><p>" +
+            esc(r["tesi"]) + "</p><details><summary>Rischi, alternative, costi, evidenze e riesame</summary>" +
+            "".join("<p><b>" + label + ":</b> " + esc(r[key]) + "</p>"
+                    for key, label in (("rischi", "Rischi"), ("alternativa", "Alternativa"),
+                                       ("invalidazione", "Invalidazione"), ("costi", "Costi"),
+                                       ("evidenze", "Evidenze"), ("riesame", "Riesame"))) +
+            "</details></article>" for r in proposal["posizioni"])
+        preview = ("<p><b>NON APPROVATA</b> · SHA256 " + esc(sha) +
+                   "</p><p>Fotografia " + esc(proposal["snapshot_utc"]) +
+                   " · mercato " + esc(state["mercato"]["stato"]) +
+                   " · saldo " + esc(state["saldo"]["stato"]) + "</p>" +
+                   "<p>Scenario: " + esc(proposal["scenario"]) +
+                   "</p><p>Alternativa: " + esc(proposal["scenario_alternativo"]) +
+                   "</p><p>Rischi comuni: " + esc(proposal["rischi_comuni"]) +
+                   "</p><p>Liquidità: " + esc(proposal["liquidita"]) +
+                   "</p><p>Riesame: " + esc(proposal["revisione"]) + "</p>" + rows +
+                   "<p>La conferma archivia una proposta, NON esegue operazioni finanziarie.</p>" +
+                   "<button onclick='kddSend(\"/gpt/conferma\",JSON.stringify({sha256:" +
+                   json.dumps(sha) +
+                   "}),\"application/json\")'>Confermo questa versione nel KDD</button>")
+    try:
+        archive = bridge.approved_html()
+    except Exception:
+        archive = "<p>Archivio non verificabile: nessuna approvazione attestata.</p>"
+    script = """<script>
+const KDD_TOKEN=__TOKEN__;
+async function kddSend(path,body,kind){
+ const status=document.getElementById('feedback');status.textContent='Operazione in corso...';
+ try {
+  const r=await fetch(path,{method:'POST',headers:{'X-KDD-Token':KDD_TOKEN,
+   'Content-Type':kind},body:body});
+  status.textContent=await r.text();
+  if(r.ok) setTimeout(()=>location.reload(),1200);
+ } catch(e) { status.textContent='KDD locale non raggiungibile.'; }
+}
+async function kddFile(){
+ const f=document.getElementById('gpt-json').files[0];
+ if(!f){document.getElementById('feedback').textContent='Scegli il JSON da Drive.';return;}
+ if(f.size>8000000){document.getElementById('feedback').textContent='File troppo grande.';return;}
+ await kddSend('/gpt/ricevi',await f.arrayBuffer(),'application/json');
+}
+</script>""".replace("__TOKEN__", json.dumps(token))
+    return ("""<!doctype html><html lang="it"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KDD · GPT e Drive</title><style>
+body{max-width:900px;margin:auto;padding:18px;background:#0b1120;color:#e5edf9;
+font:16px/1.5 system-ui}article,section{background:#15223a;padding:15px;margin:12px 0;
+border-radius:10px}button,input{font:inherit;padding:10px;margin:6px}button{cursor:pointer}
+.warn{color:#fbbf24}a{color:#7dd3fc}details{margin:10px 0}
+</style></head><body><p><a href="/">Torna al KDD</a></p>
+<h1>Proposte GPT su Drive</h1>
+<section><h2>1 · Prepara dossier per GPT</h2><p>Il KDD prepara il documento,
+lo conserva come origine e lo copia nella cartella Kraken già utilizzata da FolderSync.
+Avvia la sincronizzazione manuale per trovarlo su Drive.</p><p>""" +
+        esc(latest_export()) +
+        """</p><button onclick='kddSend("/gpt/prepara","","text/plain")'>
+Prepara per Drive</button></section>
+<section><h2>2 · Apri la proposta da Drive</h2><p>Dopo aver discusso con GPT,
+seleziona il file proposta_portafoglio.json dal selettore file del telefono.
+Aprirlo NON lo approva.</p>
+<input id="gpt-json" type="file" accept=".json,application/json">
+<button onclick="kddFile()">Apri proposta</button>
+<p id="feedback" role="status"></p></section>
+<section><h2>3 · Esamina e decidi</h2>""" + preview +
+        """</section><section><h2>4 · Archivio KDD</h2>""" +
+        archive + "</section>" + script + "</body></html>")
+
+
+def handle(action, raw):
+    if action == "prepara":
+        if raw:
+            raise bridge.BridgeError("Preparazione: dati inattesi")
+        return "Dossier pronto per FolderSync: " + prepare_export()
+    if action == "ricevi":
+        return "Proposta valida, NON approvata. Versione: " + receive(raw)
+    if action == "conferma":
+        if len(raw) > 4096:
+            raise bridge.BridgeError("Conferma troppo lunga")
+        obj = bridge.strict_json(raw)
+        if set(obj) != {"sha256"}:
+            raise bridge.BridgeError("Conferma non valida")
+        return "Decisione conservata nel KDD: " + confirm(obj["sha256"])["stato"]
+    raise bridge.BridgeError("Azione non autorizzata")
