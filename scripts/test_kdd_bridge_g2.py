@@ -1176,36 +1176,40 @@ else:
         for area in (bridge.ARCHIVE, bridge.OUTBOX):
             for dangling in (True,False):
                 with self.subTest(area=area,dangling=dangling):
-                    folder=bridge.private_directory(area,create=True)
-                    obj=self.bundle if area==bridge.OUTBOX else self._r4_entry()
-                    name=(bridge.digest(self.bundle) if area==bridge.OUTBOX
-                          else bridge.digest(self.plan))+".json"
-                    pending=folder/(".pending-"+name)
-                    target=self.home/("no-such-target" if dangling else "live-target")
-                    if not dangling:
-                        target.write_text('{"legitimate":false}')
-                        target.chmod(0o600)
-                    pending.symlink_to(target)
-                    with self.assertRaises(bridge.BridgeError):
-                        bridge.reconcile_directory(area)
-                    self.assertTrue(pending.is_symlink())
-                    self.assertFalse((folder/name).exists())
-                    with self.assertRaises(bridge.BridgeError):
-                        bridge.exclusive_json(folder,name,obj)
-                    self.assertTrue(pending.is_symlink())
-                    if area==bridge.OUTBOX:
+                    # Each symlink case owns a fresh, independent private
+                    # fixture: never reuse a successful outbox from RT3-A.
+                    with mock.patch.object(bridge,"PRIVATE_ROOT",
+                           self.home/("rt3-symlink-"+area+"-"+str(dangling))):
+                        folder=bridge.private_directory(area,create=True)
+                        obj=self.bundle if area==bridge.OUTBOX else self._r4_entry()
+                        name=(bridge.digest(self.bundle) if area==bridge.OUTBOX
+                              else bridge.digest(self.plan))+".json"
+                        pending=folder/(".pending-"+name)
+                        target=self.home/("no-such-target" if dangling else "live-target")
+                        if not dangling:
+                            target.write_text('{"legitimate":false}')
+                            target.chmod(0o600)
+                        pending.symlink_to(target)
                         with self.assertRaises(bridge.BridgeError):
-                            bridge.verify_local_origin(self.bundle)
-                    else:
-                        self.persist_origin()
+                            bridge.reconcile_directory(area)
+                        self.assertTrue(pending.is_symlink())
+                        self.assertFalse((folder/name).exists())
                         with self.assertRaises(bridge.BridgeError):
-                            bridge.approved_import(self.plan,self.bundle,
-                                bridge.digest(self.plan),"APPROVO_VERSIONE",now=T)
-                        self.assertIn("STOP",bridge.approved_html())
-                    pending.unlink()
-                    if not dangling:
-                        target.unlink()
-                    self.assertEqual(bridge.reconcile_directory(area),[])
+                            bridge.exclusive_json(folder,name,obj)
+                        self.assertTrue(pending.is_symlink())
+                        if area==bridge.OUTBOX:
+                            with self.assertRaises(bridge.BridgeError):
+                                bridge.verify_local_origin(self.bundle)
+                        else:
+                            self.persist_origin()
+                            with self.assertRaises(bridge.BridgeError):
+                                bridge.approved_import(self.plan,self.bundle,
+                                    bridge.digest(self.plan),"APPROVO_VERSIONE",now=T)
+                            self.assertIn("STOP",bridge.approved_html())
+                        pending.unlink()
+                        if not dangling:
+                            target.unlink()
+                        self.assertEqual(bridge.reconcile_directory(area),[])
 
     def _r5_mark_worker(self,area,name,phase):
         import subprocess
