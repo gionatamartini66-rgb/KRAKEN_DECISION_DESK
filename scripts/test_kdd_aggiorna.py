@@ -42,7 +42,7 @@ class UpdateTests(unittest.TestCase):
             (directory / 'test_decision_desk.py').write_text(TEST_BODY)
             for name in kdd.PACKET_FILES:
                 origin = Path(__file__).resolve().parents[1] / name
-                if name.endswith(('test_kdd_portfolio_4tf.py', 'test_kdd_bridge_g2.py')):
+                if name.endswith(('test_kdd_portfolio_4tf.py', 'test_kdd_bridge_g2.py', 'test_kdd_android_transaction_g2.py')):
                     # The updater's synthetic source tree intentionally uses
                     # placeholder application code. Its staging test verifies
                     # packaging only; real E2E runs separately on true KDD.
@@ -59,6 +59,17 @@ class UpdateTests(unittest.TestCase):
         (self.root / 'serve.py').write_text('# CHANGE on GitHub\n')
         self.sha = 'a'*40
         # BACKUP ROOT è sempre HOME/.local/share, qui isolato con la mock.
+
+    def test_capability_preflight_failure_stops_before_any_functional_check(self):
+        with patch.object(kdd,'capability_preflight',
+                          side_effect=kdd.SafetyError('CAPACITY STOP')):
+            with self.assertRaisesRegex(kdd.SafetyError,'CAPACITY STOP'):
+                kdd.isolated_test(self.root)
+        self.assertEqual((self.live/'README.md').read_text(),self.old_readme)
+
+    def test_preflight_real_synthetic_file_flags_and_lock(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            kdd.capability_preflight()
 
     def test_check_does_not_touch_original(self):
         with contextlib.redirect_stdout(io.StringIO()) as stream:

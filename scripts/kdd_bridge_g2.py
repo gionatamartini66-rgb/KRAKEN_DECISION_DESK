@@ -258,7 +258,7 @@ def _verified_transaction_file(path, directory, marker, *, expected_raw=None):
     return raw
 
 
-def _finalize_pending(directory, filename, expected_raw=None, *, explicit=False):
+def _finalize_pending(directory, filename, expected_raw=None, *, explicit=False, validator=None):
     """Android: explicit recovery of ONE verified journal. Legacy pending => STOP.
 
     No hardlinks, no completed-mark files. The pending name is the read gate:
@@ -299,8 +299,8 @@ def _finalize_pending(directory, filename, expected_raw=None, *, explicit=False)
         if not explicit:
             raise BridgeError("PUBBLICAZIONE_INCERTA: riconciliare")
         raw = _verified_transaction_file(dest, directory, marker, expected_raw=expected_raw)
-        if expected_raw is None:
-            _validate_transaction_document(directory, filename, raw)
+        if validator is not None:
+            validator(raw)
         # Mandatory final-name durability boundary: an error leaves pending
         # in place and the normal reader will NOT accept this document.
         _sync_dir(directory)
@@ -349,7 +349,9 @@ def reconcile_directory(name):
         statuses = []
         for p in pending:
             statuses.append(_finalize_pending(
-                folder, p.name[len(".pending-"):], explicit=True))
+                folder, p.name[len(".pending-"):], explicit=True,
+            validator=lambda raw, fn=p.name[len(".pending-"):]:
+                _validate_transaction_document(folder, fn, raw)))
         return statuses
 
 
