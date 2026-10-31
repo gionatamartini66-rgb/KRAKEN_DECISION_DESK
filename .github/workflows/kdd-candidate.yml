@@ -23,3 +23,16 @@ jobs:
         run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_wallet_packet_g0 scripts.test_kdd_market_freshness scripts.test_kdd_portfolio_4tf scripts.test_kdd_bridge_g2 scripts.test_kdd_android_transaction_g2
       - name: Existing safe updater tests
         run: python -B scripts/test_kdd_aggiorna.py
+
+  android-transaction-focused:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: G2 Android transaction independent discriminators (Linux synthetic)
+        run: PYTHONPATH=.:scripts python -B -m unittest -v scripts.test_kdd_android_transaction_g2

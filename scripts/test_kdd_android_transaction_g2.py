@@ -16,14 +16,14 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 from scripts import kdd_bridge_g2 as bridge
-from scripts.test_kdd_bridge_g2 import BridgeG2Tests
+from scripts import test_kdd_bridge_g2 as legacy_bridge_tests
 from scripts.test_kdd_wallet_packet_g0 import T
 
 
 class AndroidTransactionTests(unittest.TestCase):
     def setUp(self):
         # Reuse the genuine producer fixture; do not mock wallet.build.
-        b = BridgeG2Tests("test_01_real_original_producer_retains_all_rows_and_eur_provenance")
+        b = legacy_bridge_tests.BridgeG2Tests("test_01_real_original_producer_retains_all_rows_and_eur_provenance")
         b.setUp()
         self.addCleanup(b.doCleanups)
         self.base = b
@@ -114,8 +114,13 @@ print(bridge.exclusive_json(folder,name,obj),flush=True)
                             with self.assertRaises(bridge.BridgeError):
                                 bridge.verify_local_origin(self.bundle)
                         else:
-                            with self.assertRaises(bridge.BridgeError):
-                                bridge.load_archive()
+                            if phase=="before-rename":
+                                # Pending without a published final hides the
+                                # tentative decision without falsely approving.
+                                self.assertEqual(bridge.load_archive(),{})
+                            else:
+                                with self.assertRaises(bridge.BridgeError):
+                                    bridge.load_archive()
                         # The next process, not the killed writer, reconciles.
                         next_process=subprocess.run([
                             sys.executable,"-B","-c",
@@ -285,8 +290,6 @@ print(bridge.exclusive_json(folder,name,obj),flush=True)
         with self.assertRaises(bridge.BridgeError):
             bridge._validate_transaction_document(folder,name,
                           bridge.read_regular(folder/name))
-        self.assertEqual(bridge.verify_local_origin(self.bundle) if False else
-                         "CONTRATTI_DISTINTI","CONTRATTI_DISTINTI")
 
     def test_g2_dashboard_does_not_propagate_corruption(self):
         self.base.persist_origin()
@@ -296,7 +299,7 @@ print(bridge.exclusive_json(folder,name,obj),flush=True)
         (folder/(bridge.digest(self.plan)+".json")).write_text('{"broken":')
         self.assertIn("STOP",bridge.approved_html())
         import serve
-        self.assertIn("Proposte",serve.with_controls("<html><body><main><h1>KDD</h1></main></body></html>"))
+        self.assertIn("Proposte",serve.with_controls("<html><body><h2>1 · Decisioni e posizioni</h2></body></html>"))
 
     def test_g2_mutant_origin_bypass_detected_on_temporary_copy(self):
         original=Path(bridge.__file__).read_text()
