@@ -247,7 +247,7 @@ def isolated_test(staging: Path) -> None:
     if packet_test.exists():
         proc = command([sys.executable, '-B', '-m', 'unittest', '-q',
                         'scripts.test_kdd_wallet_packet_g0',
-                        'scripts.test_kdd_market_freshness',
+                        # Market freshness test is CI-only and not packaged by updater.
                         'scripts.test_kdd_portfolio_4tf',
                         'scripts.test_kdd_android_transaction_g2'], cwd=staging)
         if proc.returncode:
