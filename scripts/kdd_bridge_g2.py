@@ -440,7 +440,9 @@ def exclusive_json(directory, filename, obj):
             _finalize_pending(directory, filename, expected_raw=raw, explicit=True)
         return "INSERITO"
     except (OSError, BridgeError) as exc:
-        if linked:
+        if linked or (pending and recorded and (dest.exists() or dest.is_symlink())):
+            # A wrapper/filesystem may surface an error *after* creating the
+            # link but before os.link returns. Never mislabel it unpublished.
             raise PublicationUncertain("PUBBLICAZIONE_INCERTA: recupero obbligatorio") from exc
         if pending and pending.exists() and recorded and not dest.exists():
             try:

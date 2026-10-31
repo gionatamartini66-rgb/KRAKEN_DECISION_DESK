@@ -1053,5 +1053,33 @@ else:
         self.assertEqual(bridge.reconcile_archive(),["PUBBLICATO_CONFERMATO"])
 
 
+    def test_rt2_two_independent_publishers_same_outbox_version(self):
+        from concurrent.futures import ThreadPoolExecutor
+        name=bridge.digest(self.bundle)+".json"
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            procs=list(pool.map(lambda _:self._r4_worker(
+                bridge.OUTBOX,name,self.bundle,"publish"),range(2)))
+        self.assertTrue(all(x.returncode==0 for x in procs),[x.stderr for x in procs])
+        self.assertEqual(sum("INSERITO" in x.stdout for x in procs),1)
+        self.assertEqual(sum("GIA_PRESENTE" in x.stdout for x in procs),1)
+        folder=bridge.private_directory(bridge.OUTBOX)
+        self.assertEqual((folder/name).stat().st_nlink,1)
+        self.assertEqual(bridge.verify_local_origin(self.bundle),bridge.digest(self.bundle))
+
+    def test_rt2_postlink_exception_before_link_return_remains_uncertain(self):
+        folder=bridge.private_directory(bridge.OUTBOX,create=True)
+        name=bridge.digest(self.bundle)+".json"
+        real_link=bridge.os.link
+        def linked_then_error(*args,**kwargs):
+            real_link(*args,**kwargs)
+            raise OSError("synthetic error after link syscall succeeded")
+        with mock.patch.object(bridge.os,"link",side_effect=linked_then_error):
+            with self.assertRaises(bridge.PublicationUncertain):
+                bridge.exclusive_json(folder,name,self.bundle)
+        self.assertEqual((folder/name).stat().st_nlink,2)
+        self.assertEqual(bridge.reconcile_outbox(),["PUBBLICATO_CONFERMATO"])
+        self.assertEqual(bridge.exclusive_json(folder,name,self.bundle),"GIA_PRESENTE")
+
+
 if __name__=="__main__":
     unittest.main()
