@@ -1,73 +1,56 @@
-# KDD — GOVERNO OPERATIVO DELLE DECISIONI
+# KDD — Governo del progetto
 
-**Data di cristallizzazione:** 21 ottobre 2026.  
-**Natura:** sintesi documentale dei vincoli confermati dall'autore per KDD; **non è un nuovo mandato autonomo**.
+**Fonte di autorità:** mandato dell'autore conservato nel [README](README.md), comprese le precisazioni successive. **Stato operativo e prossimo incarico:** [ROADMAP](ROADMAP_KDD.md). Questo file stabilisce scopo, responsabilità e criteri di decisione; non è un diario delle sessioni.
 
-## 1. Autorità, integrità e precedenza
+## 1. Destinazione economica
 
-L'autore decide obiettivi, tolleranza al rischio, priorità della roadmap, operazioni e ampliamenti dei permessi. ChatGPT può proporre autonomamente analisi e scelte con motivazioni, ma **non esegue operazioni finanziarie senza autorizzazione esplicita**, non attiva strumenti negoziali e non modifica il conto.
+Kraken Decision Desk è **un unico sistema di supporto alla gestione attiva dell'intero patrimonio crypto**.
 
-Il presente documento governa l'interpretazione delle indicazioni presenti nel repository tecnico privato. È **subordinato al mandato KDD originale e ai vincoli di sicurezza già vigenti nel runtime Termux**; non pretende di sostituire il file operativo locale di subentro, non acquisito direttamente in questa ricognizione. In caso di contrasto, **STOP** e confronto con la fonte originale prima di adeguare il repository o il Samsung.
+- **Componente strategica prevalente:** il capitale è gestito in base a opportunità, rischi e condizioni di mercato. Mantenere, incrementare, alleggerire, liquidare e ruotare sono alternative da valutare, non comportamenti prestabiliti. «Strategica» **non significa immobilizzata**.
+- **Componente operativa:** impiego flessibile di capitale per operazioni **Spot e Futures, long e short**. Ai derivati è destinabile una **quota minoritaria**; nessuna percentuale, durata, leva o ripartizione rigida è prescritta qui.
+- Le componenti sono funzioni economiche del capitale, **non tre portafogli artificiali**. Eventuali passaggi di risorse sono decisioni dell'autore, da valutare per costo, rischio ed effetti sul patrimonio complessivo.
+- KDD deve riconoscere regimi rialzisti, ribassisti, laterali e transizioni. Anche non intervenire è un'ipotesi da giustificare e riesaminare, mai una risposta automatica.
 
-Distingui sempre: **idea strategica ≠ GO tecnico; test PASS ≠ prova di redditività; analisi short ≠ permesso short; commit GitHub ≠ deploy sul telefono; simulazione ≠ trade realmente eseguito**.
+**I Futures appartengono alla destinazione del KDD. Non esiste un divieto generale di esaminarli o di considerarli nelle decisioni dell'autore.** Il programma attuale, tuttavia, **non dispone ancora delle funzioni necessarie a gestire posizioni Futures**: questa è una lacuna di implementazione, non un cambio di obiettivo.
 
-## 2. Perimetro di investimento e di azione
+## 2. Autorità e responsabilità
 
-- **Destinazione:** gestione attiva dell'intero patrimonio: **componente strategica prevalente** e **componente operativa** su Spot e Futures long/short, con quota minoritaria destinabile ai derivati. Non sono imposte percentuali o durate fisse. Mantenere una posizione è una scelta da motivare, non un obbligo.
-- **Regimi:** KDD deve interpretare mercati rialzisti, laterali, ribassisti e transizioni; nei ribassi riconoscere sia opportunità di gestione del rischio sia eventuali rimbalzi/rotazioni spot selettivi.
-- **Azioni da confrontare:** mantenere, incrementare, alleggerire, vendere, ruotare, ribilanciare, operare Spot o Futures long/short quando pertinenti, restare liquidi o attendere con motivazione. Per ogni ipotesi distinguere strumento, rischi, alternative e disponibilità effettiva: nessuna risposta predefinita.
-- **Contesto obbligatorio quando pertinente:** singolo token, struttura di mercato, volumi, book, liquidità, spread, costi netti, orizzonte, macro (tassi/liquidità/dollaro) e geopolitica verificabili. Non imporre parametri numerici rigidi senza motivazione economica.
-- **Limite finanziario:** lo spot long non genera profitto automaticamente durante una discesa; lo studio dei ribassi serve anche a riconoscere condizioni in cui alleggerire, ruotare o restare liquidi. Stablecoin e exchange conservano rischi propri.
+- **Autore:** sceglie obiettivi, esposizione, rischio e operazioni; approva i lavori che intervengono su codice, dispositivi, dati e permessi. Qualsiasi eventuale ordine viene deciso ed eseguito **manualmente dall'autore sulla piattaforma di negoziazione**, non da GPT o dal KDD.
+- **GPT:** analizza il dossier, cerca fonti pertinenti, contesta ipotesi, confronta scenari e alternative, propone azioni e condizioni di riesame; **non è l'esecutore di un ordine**.
+- **Supervisione apicale:** ricostruisce il progetto dai documenti e dal codice effettivi, coordina il lavoro, valuta conseguenze e prove, decide la raccomandazione tecnica e sottopone all'autore i passaggi che richiedono autorizzazione.
+- **Costruttrice:** implementa nel perimetro assegnato, preserva i collegamenti esistenti e fornisce prove riproducibili. I propri test non sono una certificazione indipendente.
+- **Red Team/revisore:** tenta di falsificare requisiti e comportamenti nel modello di minaccia dichiarato; separa difetto tecnico, rischio reale e scelta di accettazione.
 
-## 3. Short, leva e futures
+**Le autorizzazioni non si trasferiscono per implicazione:** esaminare il codice non autorizza a modificarlo; sviluppare su un ramo non autorizza merge o installazione; installare non autorizza a movimentare fondi. Non trasformare una precedente limitazione dello sviluppo Spot in una proibizione permanente dei Futures.
 
-**Spot e Futures sono strumenti previsti dal progetto**, con analisi sia long sia short. KDD e GPT valutano condizioni, scenari contrari, dimensionamento e rischio; **l'autore decide e compie personalmente qualsiasi operazione**. KDD e GPT non trasmettono ordini, non movimentano fondi e non aumentano autonomamente i permessi API. Le credenziali software attuali consentono soltanto lettura.
+## 3. Semantica dei dati e strumenti
 
-**Distinzione tecnica indispensabile:** posizioni Spot, contratti Futures, nozionale, margine, collaterale, funding, costi e rischio di liquidazione non sono intercambiabili. L'eventuale quota Futures va valutata senza esporre inconsapevolmente il patrimonio strategico, anche nel caso di wallet unificato o margine cross. Prima di usare dati o funzioni operative si verificano idoneità dell'account, condizioni Kraken e configurazione reale. Le future funzioni KDD/GPT dovranno essere introdotte con schema esplicito e controlli appropriati.
+- **Patrimonio:** distinguere asset, quantità posseduta, disponibilità, valore indicativo, costo storico ignoto e capitale allocato. Zero, dato mancante e dato non verificato non coincidono. Il saldo privato e le quotazioni hanno **fonti e timestamp indipendenti**, da ricontrollare al consumo.
+- **Mercato Spot:** preservare identificità dell'asset e della coppia, valuta di quotazione, bid/ask, profondità, spread, liquidità, commissioni, conversioni, minimi e negoziabilità effettiva per account/territorio. Una coppia pubblicata nelle API non è necessariamente negoziabile dall'autore.
+- **Futures:** non confondere il contratto derivato con il token Spot. Distinguere direzione long/short, nozionale, leva, margine, collaterale esposto, funding, prezzo mark/index, eventuale scadenza, costi, P&L, rischio di liquidazione e configurazione wallet/cross/isolated. Il capitale strategico non va esposto inconsapevolmente come collaterale. L'eventuale integrazione KDD/GPT dovrà impiegare contratti informativi **distinti e versionati**, senza reinterpretare schemi Spot esistenti.
+- **Fonti esterne:** on-chain, tokenomics, unlock, Binance, CoinGecko, notizie, macro e geopolitica entrano nell'analisi quando pertinenti e verificabili. OI/CVD di un singolo contratto o exchange non equivalgono al mercato aggregato. Hash, URL e metadati non provano da soli autenticità dell'origine. Un deposito su exchange non prova una vendita.
 
+## 4. Circuito decisionale KDD ↔ GPT ↔ autore
 
-## 4. Sequenza, responsabilità e divieto di cantieri paralleli
+Il ciclo richiesto è: **fotografia datata KDD → dossier e fonti → GPT in chat → discussione e proposta motivata → scelta dell'autore → eventuale pubblicazione/archivio nel KDD → verifica successiva**.
 
-La roadmap `ROADMAP_KDD.md` registra la dipendenza principale già concordata:
+Ogni proposta deve distinguere osservazione, ipotesi, decisione, eventuale esecuzione manuale **dichiarata dall'autore** e verifica successiva. Quando i dati lo permettono, deve mostrare ragioni favorevoli e contrarie, alternativa concreta, effetti sul patrimonio, dimensionamento, condizioni di ingresso/uscita/invalidazione, costi e rischio. Una soglia di prezzo attraversata non prova un fill; una proposta archiviata non prova un trade; un test verde non dimostra utilità economica.
 
-**G0 delta spot → G2 esperimento delimitato (INJ, QNT, AVA, PUMP) → decisione motivata sul delta → una sola integrazione giustificata → motore GPT su opportunità reali.**
+Il circuito del programma deve poter evolvere per gli strumenti previsti, **senza rifare il KDD** e senza presentare come già esistente una funzione ancora da realizzare.
 
-**Aggiornamento 21/10 — prova A/B completata entro il campione:** decisione di uso del delta spot = **LIMITARE** a osservazione secondaria, soltanto con coppia, finestra, copertura e freschezza verificabili. Da output di Termux: fasi A/B integre, **4 token**, **12/12 orizzonti** a +1h/+4h/+24h presenti, **0/4 azioni cambiate**; delta della candela negativo e prezzi successivi positivi per tutti e quattro. **Nessuna prova di miglioramento decisionale, rendimento o validità predittiva generale**. Vedi [GIUDIZIO_DELTA_SPOT_G0_G2.md](GIUDIZIO_DELTA_SPOT_G0_G2.md). La fonte primaria locale resta sul Samsung; il rapporto conserva solo sintesi priva di snapshot privati. **Nessuna nuova sperimentazione o implementazione nasce implicitamente dal giudizio**, da uno screenshot, da una notizia o da un indicatore.
+## 5. Sicurezza e cambiamenti
 
-La capacità multitimeframe già costruita resta preservata come strumento disponibile. Correzioni urgenti motivate da difetti riproducibili possono essere considerate nel rispetto del perimetro già autorizzato, senza trasformarsi in espansioni funzionali incontrollate.
+- Le credenziali e i dati finanziari privati restano sul Samsung o in un canale privato autorizzato; niente chiavi, T0, saldi, indirizzi privati o backup nel repository. Il client Kraken oggi presente usa permessi **di sola lettura**; non attribuirgli operazioni che non implementa.
+- GitHub è la fonte del codice versionato, **non** prova dell'installazione sul Samsung. Un documento su Drive non dimostra freschezza o ritorno nel KDD. Nessuna sincronizzazione indiscriminata della home Termux.
+- Per cambiare il software: ramo e perimetro definiti, confronto con la baseline, prove su sorgenti autentici, revisione indipendente proporzionata al rischio, decisione dell'autore per merge e deploy. Sul Samsung: [aggiornamento controllato](AGGIORNAMENTI_TERMUX.md), backup, preflight, postflight, rollback e verifica del servizio.
+- Le prove sono classificate per ambiente: ispezione, fixture, modulo reale in laboratorio, Android isolato, runtime Samsung, ciclo informativo completo. **Non promuovere uno stato sulla base dei PASS scritti da chi ha costruito il codice**.
 
-### 4A. Priorità informativa successiva — on-chain (21/10)
+## 6. Gerarchia documentale
 
-L'autore ha indicato che il prossimo navigatore deve mettere **soprattutto dati on-chain** al servizio delle decisioni, assieme a fondamentali, notizie specifiche del token, macro e geopolitica. I canali informativi compongono una **unica futura integrazione**, non quattro progetti autonomi. Design controllato: [NAVIGATORE_ONCHAIN_V001.md](NAVIGATORE_ONCHAIN_V001.md).
+1. **README:** presentazione e architettura attuale; mandato originale e storia nella sezione archivistica, con date preservate.
+2. **GOVERNO (questo file):** destinazione, responsabilità e criteri duraturi.
+3. **ROADMAP:** unica fotografia corrente dei lavori, delle dipendenze e del prossimo passo.
+4. **PR, commit, log e rapporti originali:** evidenze tecniche e decisioni storiche da verificare sui rispettivi SHA.
+5. **Dispositivo e Drive:** stato e dati effettivi, da osservare separatamente.
 
-**Primo limite interpretativo:** transazioni on-chain ≠ operazioni Kraken; deposito a un exchange ≠ vendita; indirizzo ≠ persona; unlock ≠ cessione; crescita di indirizzi ≠ crescita di utenti; notizia ≠ causalità. Identità token, chain/contract, finestra temporale e fonti hanno precedenza su qualsiasi conclusione.
-
-**Stato di governo: REQUISITO DOCUMENTATO; IMPLEMENTAZIONE NON AUTORIZZATA.** Iniziare solo con un mandato tecnico esplicito, verifiche G0 delle fonti e un pilota delimitato; nessuna chiave Kraken aggiuntiva, API commerciali implicite, sorveglianza personale o trading automatico.
-
-## 5. Procedura per una decisione proposta da GPT
-
-Una proposta utile presenta, nei limiti della copertura dati verificata:
-
-1. **Che cosa**: token/coppia/mercato Kraken, timeframe e condizioni attuali con orari delle fonti.
-2. **Perché**: regime, liquidità, motivi pro e contro, alternative spot compreso USDC/attesa motivata.
-3. **Come cambierebbe il portafoglio**: effetto sulla componente strategica e su quella operativa, dimensione ipotetica, minimi e commissioni, prezzo negoziabile e possibile slippage.
-4. **Quando l'ipotesi decade**: condizione di invalidazione, scenari avversi e limite di rischio.
-5. **Qual è lo stato della proposta**: osservazione, idea condizionata, piano presentato, decisione umana, ordine manuale dichiarato; **mai simulare in rendicontazione un ordine non eseguito**.
-
-La mancata esecuzione è una decisione da spiegare quando pertinente, non una scorciatoia per evitare la valutazione del rischio. Non promettere rendimenti né confondere capacità di previsione con abilità tecnica del software.
-
-## 6. Sicurezza dei dati, codice e installazione
-
-Le API Kraken eventualmente usate per leggere saldo e cronologia sono **solo lettura**, con segreti custoditi localmente sul Samsung; nessuna chiave, estratto di conto, portafoglio, T0, dossier privato, log finanziario o backup viene copiato nel repository.
-
-Il programma attivo sul Samsung e la sua documentazione operativa privata restano distinti dal repository GitHub. Solo sorgenti e documentazione **esplicitamente approvati e inseriti nella allowlist** possono essere versionati. Niente `git add -f`, nessun push indiscriminato, nessuna API generativa a pagamento.
-
-Gli aggiornamenti di codice attraversano verifiche isolate, applicazione volontaria, backup/rollback e test successivi; per il server serve anche riavvio controllato e prova browser. L'aggiornamento **solo documentale** di questi file GitHub non autorizza e non richiede deploy del runtime, né riscrittura del README privato su Termux.
-
-## 7. Registro della decisione 21/10/2026
-
-**Acquisito dall'autore:** KDD deve leggere mercati ribassisti e lavorare opportunisticamente in **spot** anche durante le discese, quando esistano rimbalzi, rotazioni o strategie di gestione del rischio sensate. Gli short erano stati evitati in passato perché l'autore individuava più naturalmente movimenti rialzisti, **non per un divieto teorico universale**.
-
-**Nota archivistica:** la decisione del 21/10 descriveva il perimetro operativo di quella data. Non prevale sulla destinazione stabilita in §2–3; i riferimenti storici restano nel README e nella cronologia Git.
-
-Il presente documento cristallizza l'indirizzo e i limiti. Qualsiasi mutamento di diritti operativi esige un nuovo intervento esplicito dell'autore.
+Le decisioni storiche descrivono il **perimetro e lo stato della loro data**: non sostituiscono gli obiettivi complessivi dell'autore. Prima di cambiare un documento, riconciliare la sua affermazione con le fonti originali e con il software. **Non creare altra documentazione di governo parallela.**
