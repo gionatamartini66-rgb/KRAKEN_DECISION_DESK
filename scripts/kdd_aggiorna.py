@@ -245,13 +245,17 @@ def isolated_test(staging: Path) -> None:
     if not packet_test.is_file() or not (staging / 'scripts/test_kdd_portfolio_4tf.py').is_file():
         raise SafetyError('test del pacchetto e 4TF mancanti nello staging')
     if packet_test.exists():
-        proc = command([sys.executable, '-B', '-m', 'unittest', '-q',
-                        'scripts.test_kdd_wallet_packet_g0',
-                        # Market freshness test is CI-only and not packaged by updater.
-                        'scripts.test_kdd_portfolio_4tf',
-                        'scripts.test_kdd_android_transaction_g2'], cwd=staging)
-        if proc.returncode:
-            raise SafetyError('regressioni packet+Android synthetic non superate')
+        # The legacy packet fixture intentionally imports kdd_wallet_packet_g0
+        # as a top-level module. unittest discovery with -s scripts supplies
+        # that same import root (unlike scripts.test_kdd_wallet_packet_g0).
+        for pattern in ('test_kdd_wallet_packet_g0.py',
+                        'test_kdd_portfolio_4tf.py',
+                        'test_kdd_android_transaction_g2.py'):
+            proc = command([sys.executable, '-B', '-m', 'unittest', 'discover',
+                            '-s', 'scripts', '-p', pattern, '-q'], cwd=staging)
+            if proc.returncode:
+                raise SafetyError('regressioni packet+Android synthetic non superate: '
+                                  + pattern)
         retained = command([sys.executable, '-B', 'scripts/kdd_android_regressions.py'],
                            cwd=staging)
         if retained.returncode:
