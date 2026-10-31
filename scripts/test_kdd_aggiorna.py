@@ -89,7 +89,6 @@ class UpdateTests(unittest.TestCase):
         self.assertIn('PRECHECK OK', stream.getvalue())
         self.assertEqual((self.live / 'serve.py').read_text(), '# file serve.py\n')
         self.assertEqual((self.live / 'README.md').read_text(), self.old_readme)
-        self.assertEqual(synthetic.read_bytes(), evidence)
 
     def test_apply_changes_code_and_updates_private_readme(self):
         home = Path(self.tmp.name) / 'fakehome'
@@ -128,6 +127,7 @@ class UpdateTests(unittest.TestCase):
                 kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=False)
         self.assertEqual((self.live / 'serve.py').read_text(), '# file serve.py\n')
         self.assertEqual((self.live / 'README.md').read_text(), self.old_readme)
+        self.assertEqual(synthetic.read_bytes(), evidence)
 
     def test_no_change_is_noop(self):
         (self.root / 'serve.py').write_text((self.live / 'serve.py').read_text())
