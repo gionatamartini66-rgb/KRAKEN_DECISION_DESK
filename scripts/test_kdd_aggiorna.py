@@ -42,7 +42,7 @@ class UpdateTests(unittest.TestCase):
             (directory / 'test_decision_desk.py').write_text(TEST_BODY)
             for name in kdd.PACKET_FILES:
                 origin = Path(__file__).resolve().parents[1] / name
-                if name.endswith(('test_kdd_portfolio_4tf.py', 'test_kdd_bridge_g2.py')):
+                if name.endswith(('test_kdd_portfolio_4tf.py', 'test_kdd_bridge_g2.py', 'test_kdd_android_transaction_g2.py', 'kdd_android_regressions.py')):
                     # The updater's synthetic source tree intentionally uses
                     # placeholder application code. Its staging test verifies
                     # packaging only; real E2E runs separately on true KDD.
@@ -59,6 +59,29 @@ class UpdateTests(unittest.TestCase):
         (self.root / 'serve.py').write_text('# CHANGE on GitHub\n')
         self.sha = 'a'*40
         # BACKUP ROOT è sempre HOME/.local/share, qui isolato con la mock.
+
+    def test_capability_preflight_failure_stops_before_any_functional_check(self):
+        with patch.object(kdd,'capability_preflight',
+                          side_effect=kdd.SafetyError('CAPACITY STOP')):
+            with self.assertRaisesRegex(kdd.SafetyError,'CAPACITY STOP'):
+                kdd.isolated_test(self.root)
+        self.assertEqual((self.live/'README.md').read_text(),self.old_readme)
+
+    def test_preflight_real_synthetic_file_flags_and_lock(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            kdd.capability_preflight()
+
+    def test_preflight_truly_rejects_missing_os_nofollow(self):
+        # Unlike a mock of the entire preflight, this removes the ACTUAL
+        # capability and requires the preflight's own missing-flag guard.
+        flag=kdd.os.O_NOFOLLOW
+        try:
+            del kdd.os.O_NOFOLLOW
+            with self.assertRaisesRegex(kdd.SafetyError, 'capacita'):
+                kdd.capability_preflight()
+        finally:
+            kdd.os.O_NOFOLLOW=flag
+
 
     def test_check_does_not_touch_original(self):
         with contextlib.redirect_stdout(io.StringIO()) as stream:
@@ -83,6 +106,12 @@ class UpdateTests(unittest.TestCase):
     def test_rollback_when_postflight_fails(self):
         home = Path(self.tmp.name) / 'fakehome'
         home.mkdir()
+        private = home / '.local' / 'state' / 'kraken-decision-desk' / 'bridge' / 'outgoing'
+        private.mkdir(parents=True, mode=0o700)
+        (home / '.local' / 'state' / 'kraken-decision-desk').chmod(0o700)
+        synthetic = private / '.pending-rollback-synthetic.json'
+        evidence = b'G2 SYNTHETIC STATE MUST SURVIVE CODE ROLLBACK'
+        synthetic.write_bytes(evidence)
         first = kdd.isolated_test
         seen = {'calls': 0}
         def fail_second(stage):
@@ -98,6 +127,7 @@ class UpdateTests(unittest.TestCase):
                 kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=False)
         self.assertEqual((self.live / 'serve.py').read_text(), '# file serve.py\n')
         self.assertEqual((self.live / 'README.md').read_text(), self.old_readme)
+        self.assertEqual(synthetic.read_bytes(), evidence)
 
     def test_no_change_is_noop(self):
         (self.root / 'serve.py').write_text((self.live / 'serve.py').read_text())

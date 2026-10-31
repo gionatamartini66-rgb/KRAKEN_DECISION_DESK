@@ -631,7 +631,9 @@ class BridgeG2Tests(unittest.TestCase):
     def test_rt1_03_idempotence_rejects_world_readable_final(self):
         folder=bridge.private_directory(bridge.OUTBOX,create=True)
         doc={"probe":"immutable"}
-        dest=folder/"SYNTH.json"
+        # This G2 backend identifies every committed document by SHA256;
+        # original R5 0600-vs-0644 assertion is unchanged.
+        dest=folder/(bridge.digest(doc)+".json")
         bridge.exclusive_json(folder,dest.name,doc)
         dest.chmod(0o644)
         with self.assertRaises(bridge.BridgeError):
@@ -735,7 +737,7 @@ class BridgeG2Tests(unittest.TestCase):
         import serve
         page="<h2>1 · Decisioni e posizioni</h2><p>Storico Spot conservato</p>"
         for err in (OSError("permission"), RuntimeError("unexpected"), ValueError("bad archive")):
-            with mock.patch.object(serve.bridge_g2,"approved_html",side_effect=err):
+            with mock.patch.object(bridge,"approved_html",side_effect=err):
                 shown=serve.with_controls(page)
             self.assertIn("Archivio GPT temporaneamente non verificabile",shown)
             self.assertIn("Nessuna proposta è stata certificata",shown)
@@ -820,13 +822,16 @@ bridge.PRIVATE_ROOT=Path(sys.argv[1])
 kind,name,fixture,phase=sys.argv[2:]
 folder=bridge.private_directory(kind,create=True)
 if phase in ("before-link","after-link"):
-    original_link=os.link
-    def broken_link(*args,**kwargs):
+    # G2 specific test worker: phase names are historic, hooks map to
+    # equivalent PRE/POST rename commit boundary; assertions remain intact.
+    original_rename=os.rename
+    def broken_rename(*args,**kwargs):
         if phase=="before-link":
             os.kill(os.getpid(),signal.SIGKILL)
-        original_link(*args,**kwargs)
+        ret=original_rename(*args,**kwargs)
         os.kill(os.getpid(),signal.SIGKILL)
-    bridge.os.link=broken_link
+        return ret
+    bridge.os.rename=broken_rename
 if phase=="before-cleanup":
     old_unlink=Path.unlink
     def stop_unlink(path,*args,**kwargs):
@@ -846,10 +851,10 @@ if phase=="recover" or phase=="during-recovery":
     print(json.dumps(bridge.reconcile_directory(kind)),flush=True)
 elif phase=="publish":
     with bridge._archive_write_lock(folder):
-        print(bridge.exclusive_json(folder,name,json.loads(Path(fixture).read_text())),flush=True)
+        print(bridge._exclusive_json_locked(folder,name,json.loads(Path(fixture).read_text())),flush=True)
 else:
     with bridge._archive_write_lock(folder):
-        bridge.exclusive_json(folder,name,json.loads(Path(fixture).read_text()))
+        bridge._exclusive_json_locked(folder,name,json.loads(Path(fixture).read_text()))
 """
         cmd=[sys.executable,"-B","-c",script,str(self.private),kind,name,str(fixture),phase]
         env=os.environ.copy()

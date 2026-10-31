@@ -32,6 +32,8 @@ PY_FILES = (
 PACKET_FILES = (
     'scripts/kdd_wallet_packet_g0.py',
     'scripts/kdd_bridge_g2.py', 'scripts/test_kdd_bridge_g2.py',
+    'scripts/test_kdd_android_transaction_g2.py',
+    'scripts/kdd_android_regressions.py',
     'scripts/test_kdd_wallet_packet_g0.py',
     'scripts/test_kdd_portfolio_4tf.py',
 )
@@ -145,7 +147,108 @@ def write_atomic(dest: Path, data: bytes, mode: int | None = None) -> None:
             temp_name.unlink(missing_ok=True)
 
 
+def capability_preflight() -> None:
+    """Filesystem capabilities before ANY functional test, in disposable Termux state.
+
+    Does not touch KDD live documents, credentials or private outgoing/approvals.
+    Tests same-device file/dir fsync, NOFOLLOW, O_EXCL, rename and flock;
+    it never assumes os.link exists or that rename is no-replace.
+    """
+    import fcntl
+    import stat
+    home = Path.home()
+    state = home / '.local' / 'state' / 'kraken-decision-desk'
+    for part in (home / '.local', home / '.local' / 'state', state):
+        if part.is_symlink():
+            raise SafetyError('preflight: percorso stato Termux symlink')
+        part.mkdir(mode=0o700, exist_ok=True)
+        info = part.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise SafetyError('preflight: percorso stato non regolare')
+        if part == state and info.st_mode & 0o077:
+            raise SafetyError('preflight: directory stato non privata')
+    try:
+        with tempfile.TemporaryDirectory(prefix='.kdd-android-cap-', dir=state) as tmp:
+            root=Path(tmp)
+            root.chmod(0o700)
+            a=root/'a'; b=root/'b'
+            essential=('O_EXCL','O_CREAT','O_NOFOLLOW','O_DIRECTORY')
+            if not all(hasattr(os, n) for n in essential):
+                raise SafetyError('capacita Termux mancanti: O_EXCL/O_NOFOLLOW/O_DIRECTORY')
+            # prepare() also relies on dir_fd when opening the original
+            # four KDD source files. Verify this capability before import.
+            supports=getattr(os,'supports_dir_fd',set())
+            if os.open not in supports or os.stat not in supports:
+                raise SafetyError('capacita Termux mancante: dir_fd')
+            fd=os.open(a,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
+            with os.fdopen(fd,'wb') as stream:
+                stream.write(b'SYNTHETIC KDD CAPACITY\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                fd=os.open(a,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
+            except FileExistsError:
+                pass
+            else:
+                os.close(fd)
+                raise SafetyError('O_EXCL non preserva file esistenti')
+            symlink=root/'symlink'
+            symlink.symlink_to(root/'nonexistent')
+            try:
+                fd=os.open(symlink,os.O_RDONLY|os.O_NOFOLLOW)
+            except OSError:
+                pass
+            else:
+                os.close(fd)
+                raise SafetyError('O_NOFOLLOW segue il symlink')
+            os.rename(a,b)
+            if a.exists() or b.read_bytes()!=b'SYNTHETIC KDD CAPACITY\n':
+                raise SafetyError('rename same-directory non verificabile')
+            probe_dir=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+            try:
+                probe_file=os.open('b',os.O_RDONLY|os.O_NOFOLLOW,dir_fd=probe_dir)
+                try:
+                    opened=os.fstat(probe_file)
+                    named=os.stat('b',dir_fd=probe_dir,follow_symlinks=False)
+                    if (opened.st_dev,opened.st_ino)!=(named.st_dev,named.st_ino):
+                        raise SafetyError('dir_fd inode inatteso')
+                finally:
+                    os.close(probe_file)
+            finally:
+                os.close(probe_dir)
+            dfd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+            try:
+                if not stat.S_ISDIR(os.fstat(dfd).st_mode):
+                    raise SafetyError('directory non regolare')
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+            if (stat.S_IMODE(b.stat().st_mode)!=0o600 or
+                    stat.S_IMODE(root.stat().st_mode)!=0o700):
+                raise SafetyError('permessi privati non rispettati')
+            lockfd=os.open(root/'lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
+            try:
+                fcntl.flock(lockfd,fcntl.LOCK_EX)
+                # Distinct Python child must find the same inode locked.
+                script=('import fcntl,os,sys; '
+                        'fd=os.open(sys.argv[1],os.O_RDWR); '
+                        'ok=False\n'
+                        'try:\n fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)\n'
+                        'except BlockingIOError:\n ok=True\n'
+                        'sys.exit(0 if ok else 2)\n')
+                proc=subprocess.run([sys.executable,'-B','-c',script,str(root/'lock')],
+                                    timeout=12,check=False,capture_output=True)
+                if proc.returncode:
+                    raise SafetyError('flock fra processi non verificabile')
+            finally:
+                fcntl.flock(lockfd,fcntl.LOCK_UN)
+                os.close(lockfd)
+    except (OSError,subprocess.TimeoutExpired) as exc:
+        raise SafetyError('preflight filesystem Android/Termux FALLITO') from exc
+
+
 def isolated_test(staging: Path) -> None:
+    capability_preflight()
     # Non serve rete. I test usano fixture sintetiche e file privati SOLO locali.
     proc = command([sys.executable, '-m', 'unittest', '-q', 'test_decision_desk'],
                    cwd=staging, timeout=150)
@@ -168,11 +271,22 @@ def isolated_test(staging: Path) -> None:
     if not packet_test.is_file() or not (staging / 'scripts/test_kdd_portfolio_4tf.py').is_file():
         raise SafetyError('test del pacchetto e 4TF mancanti nello staging')
     if packet_test.exists():
-        proc = command([sys.executable, '-B', '-m', 'unittest', 'discover',
-                        '-s', 'scripts', '-p', 'test_kdd_*.py', '-q'], cwd=staging)
-        if proc.returncode:
-            raise SafetyError('regressioni del pacchetto GPT non superate')
-        print('Test pacchetto GPT: OK')
+        # The legacy packet fixture intentionally imports kdd_wallet_packet_g0
+        # as a top-level module. unittest discovery with -s scripts supplies
+        # that same import root (unlike scripts.test_kdd_wallet_packet_g0).
+        for pattern in ('test_kdd_wallet_packet_g0.py',
+                        'test_kdd_portfolio_4tf.py',
+                        'test_kdd_android_transaction_g2.py'):
+            proc = command([sys.executable, '-B', '-m', 'unittest', 'discover',
+                            '-s', 'scripts', '-p', pattern, '-q'], cwd=staging)
+            if proc.returncode:
+                raise SafetyError('regressioni packet+Android synthetic non superate: '
+                                  + pattern)
+        retained = command([sys.executable, '-B', 'scripts/kdd_android_regressions.py'],
+                           cwd=staging)
+        if retained.returncode:
+            raise SafetyError('invarianti R5 ancora pertinenti FALLITI')
+        print('Test pacchetto GPT / Android + R5 mappati: OK')
 
 
 def service_alive() -> bool:
