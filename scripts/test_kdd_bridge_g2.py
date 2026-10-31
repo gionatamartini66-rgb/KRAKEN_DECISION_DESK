@@ -846,10 +846,10 @@ if phase=="recover" or phase=="during-recovery":
     print(json.dumps(bridge.reconcile_directory(kind)),flush=True)
 elif phase=="publish":
     with bridge._archive_write_lock(folder):
-        print(bridge.exclusive_json(folder,name,json.loads(Path(fixture).read_text())),flush=True)
+        print(bridge.exclusive_json(folder,name,json.loads(Path(fixture).read_text()),_lock_held=True),flush=True)
 else:
     with bridge._archive_write_lock(folder):
-        bridge.exclusive_json(folder,name,json.loads(Path(fixture).read_text()))
+        bridge.exclusive_json(folder,name,json.loads(Path(fixture).read_text()),_lock_held=True)
 """
         cmd=[sys.executable,"-B","-c",script,str(self.private),kind,name,str(fixture),phase]
         env=os.environ.copy()
