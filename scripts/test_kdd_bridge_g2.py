@@ -737,7 +737,7 @@ class BridgeG2Tests(unittest.TestCase):
         import serve
         page="<h2>1 · Decisioni e posizioni</h2><p>Storico Spot conservato</p>"
         for err in (OSError("permission"), RuntimeError("unexpected"), ValueError("bad archive")):
-            with mock.patch.object(serve.bridge_g2,"approved_html",side_effect=err):
+            with mock.patch.object(bridge,"approved_html",side_effect=err):
                 shown=serve.with_controls(page)
             self.assertIn("Archivio GPT temporaneamente non verificabile",shown)
             self.assertIn("Nessuna proposta è stata certificata",shown)

@@ -175,6 +175,11 @@ def capability_preflight() -> None:
             essential=('O_EXCL','O_CREAT','O_NOFOLLOW','O_DIRECTORY')
             if not all(hasattr(os, n) for n in essential):
                 raise SafetyError('capacita Termux mancanti: O_EXCL/O_NOFOLLOW/O_DIRECTORY')
+            # prepare() also relies on dir_fd when opening the original
+            # four KDD source files. Verify this capability before import.
+            supports=getattr(os,'supports_dir_fd',set())
+            if os.open not in supports or os.stat not in supports:
+                raise SafetyError('capacita Termux mancante: dir_fd')
             fd=os.open(a,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
             with os.fdopen(fd,'wb') as stream:
                 stream.write(b'SYNTHETIC KDD CAPACITY\n')
@@ -199,6 +204,18 @@ def capability_preflight() -> None:
             os.rename(a,b)
             if a.exists() or b.read_bytes()!=b'SYNTHETIC KDD CAPACITY\n':
                 raise SafetyError('rename same-directory non verificabile')
+            probe_dir=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+            try:
+                probe_file=os.open('b',os.O_RDONLY|os.O_NOFOLLOW,dir_fd=probe_dir)
+                try:
+                    opened=os.fstat(probe_file)
+                    named=os.stat('b',dir_fd=probe_dir,follow_symlinks=False)
+                    if (opened.st_dev,opened.st_ino)!=(named.st_dev,named.st_ino):
+                        raise SafetyError('dir_fd inode inatteso')
+                finally:
+                    os.close(probe_file)
+            finally:
+                os.close(probe_dir)
             dfd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
             try:
                 if not stat.S_ISDIR(os.fstat(dfd).st_mode):

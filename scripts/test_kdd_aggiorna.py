@@ -109,6 +109,7 @@ class UpdateTests(unittest.TestCase):
         home.mkdir()
         private = home / '.local' / 'state' / 'kraken-decision-desk' / 'bridge' / 'outgoing'
         private.mkdir(parents=True, mode=0o700)
+        (home / '.local' / 'state' / 'kraken-decision-desk').chmod(0o700)
         synthetic = private / '.pending-rollback-synthetic.json'
         evidence = b'G2 SYNTHETIC STATE MUST SURVIVE CODE ROLLBACK'
         synthetic.write_bytes(evidence)
