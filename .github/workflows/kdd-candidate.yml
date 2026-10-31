@@ -19,6 +19,6 @@ jobs:
       - name: Core KDD regressions
         run: python -B -m unittest -q test_decision_desk
       - name: Private packet, market age and portfolio 4TF synthetic tests
-        run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_wallet_packet_g0 scripts.test_kdd_market_freshness scripts.test_kdd_portfolio_4tf
+        run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_wallet_packet_g0 scripts.test_kdd_market_freshness scripts.test_kdd_portfolio_4tf scripts.test_kdd_bridge_g2
       - name: Existing safe updater tests
         run: python -B scripts/test_kdd_aggiorna.py
