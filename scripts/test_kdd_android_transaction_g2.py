@@ -497,5 +497,54 @@ print(b.exclusive_json(folder,name,obj),flush=True)
         self.assertEqual(result,"INSERITO")  # mutant incorrectly claims success
 
 
+    def test_g2_noncooperative_writer_can_replace_final_and_consumer_detects(self):
+        """RT4-C1 LIMIT DEMONSTRATED, not 'protected against all writers'."""
+        for area in (bridge.OUTBOX,bridge.ARCHIVE):
+            with self.subTest(area=area):
+                isolated=self.home/("noncoop-"+area)
+                with mock.patch.object(bridge,"PRIVATE_ROOT",isolated):
+                    folder=self.folder(area)
+                    name=self.version(area)+".json"
+                    doc=self.obj(area)
+                    self.assertEqual(bridge.exclusive_json(folder,name,doc),"INSERITO")
+                    original=(folder/name).read_bytes()
+                    external=folder/".noncooperative.tmp"
+                    external.write_bytes(b'{"synthetic":"noncooperative"}\n')
+                    external.chmod(0o600)
+                    os.rename(external,folder/name)  # deliberately bypasses LOCK
+                    self.assertNotEqual((folder/name).read_bytes(),original)
+                    if area==bridge.OUTBOX:
+                        with self.assertRaises(bridge.BridgeError):
+                            bridge.verify_local_origin(self.bundle)
+                    else:
+                        with self.assertRaises(bridge.BridgeError):
+                            bridge.load_archive()
+                    self.assertTrue((folder/name).is_file())
+                    # No automatic repair or fabricated approval.
+
+    def test_g2_server_launch_without_importable_bridge_keeps_spot_controls(self):
+        script=r"""
+import builtins,sys
+real=builtins.__import__
+def fail_bridge(name,globals=None,locals=None,fromlist=(),level=0):
+    if name=="scripts" and "kdd_bridge_g2" in tuple(fromlist or ()):
+        raise ImportError("SYNTHETIC optional bridge import unavailable")
+    return real(name,globals,locals,fromlist,level)
+builtins.__import__=fail_bridge
+import serve
+assert serve.HOST=="127.0.0.1"
+page=serve.with_controls("<html><body><h2>1 · Decisioni e posizioni</h2></body></html>")
+assert "Archivio GPT temporaneamente non verificabile: STOP" in page
+assert "Aggiorna dati ora" in page
+assert "Seleziona coppia Kraken Spot" in page
+print("BRIDGE_IMPORT_FAIL_CLOSED_SPOT_ALIVE")
+"""
+        env={**os.environ,"PYTHONPATH":str(Path(bridge.__file__).resolve().parents[1])}
+        p=subprocess.run([sys.executable,"-B","-c",script],cwd=env["PYTHONPATH"],
+                         env=env,capture_output=True,text=True,timeout=20)
+        self.assertEqual(p.returncode,0,p.stderr)
+        self.assertIn("BRIDGE_IMPORT_FAIL_CLOSED_SPOT_ALIVE",p.stdout)
+
+
 if __name__=="__main__":
     unittest.main()

@@ -156,8 +156,17 @@ def capability_preflight() -> None:
     """
     import fcntl
     import stat
-    state = Path.home() / '.local' / 'state' / 'kraken-decision-desk'
-    state.mkdir(parents=True, exist_ok=True)
+    home = Path.home()
+    state = home / '.local' / 'state' / 'kraken-decision-desk'
+    for part in (home / '.local', home / '.local' / 'state', state):
+        if part.is_symlink():
+            raise SafetyError('preflight: percorso stato Termux symlink')
+        part.mkdir(mode=0o700, exist_ok=True)
+        info = part.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise SafetyError('preflight: percorso stato non regolare')
+        if part == state and info.st_mode & 0o077:
+            raise SafetyError('preflight: directory stato non privata')
     try:
         with tempfile.TemporaryDirectory(prefix='.kdd-android-cap-', dir=state) as tmp:
             root=Path(tmp)

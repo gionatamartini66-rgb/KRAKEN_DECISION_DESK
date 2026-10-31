@@ -13,7 +13,6 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import decision_desk as desk
 import grafico_4h
-from scripts import kdd_bridge_g2 as bridge_g2
 
 HOST, PORT = "127.0.0.1", 8765
 TOKEN = secrets.token_urlsafe(28)
@@ -135,6 +134,9 @@ def with_controls(page: str, result: str = "") -> str:
     # The bridge is nonessential to the home: an unreadable archive must never
     # take Spot navigation, wallet report or refresh controls offline.
     try:
+        # Delay optional bridge import: malformed or unavailable G2 code cannot
+        # prevent localhost Spot dashboard from starting.
+        from scripts import kdd_bridge_g2 as bridge_g2
         portfolio_proposals = bridge_g2.approved_html()
     except Exception:
         portfolio_proposals = ("<section id='kdd-gpt-patrimonio' role='status'>"

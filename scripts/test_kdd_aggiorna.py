@@ -71,12 +71,25 @@ class UpdateTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             kdd.capability_preflight()
 
+    def test_preflight_truly_rejects_missing_os_nofollow(self):
+        # Unlike a mock of the entire preflight, this removes the ACTUAL
+        # capability and requires the preflight's own missing-flag guard.
+        flag=kdd.os.O_NOFOLLOW
+        try:
+            del kdd.os.O_NOFOLLOW
+            with self.assertRaisesRegex(kdd.SafetyError, 'capacita'):
+                kdd.capability_preflight()
+        finally:
+            kdd.os.O_NOFOLLOW=flag
+
+
     def test_check_does_not_touch_original(self):
         with contextlib.redirect_stdout(io.StringIO()) as stream:
             kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=True)
         self.assertIn('PRECHECK OK', stream.getvalue())
         self.assertEqual((self.live / 'serve.py').read_text(), '# file serve.py\n')
         self.assertEqual((self.live / 'README.md').read_text(), self.old_readme)
+        self.assertEqual(synthetic.read_bytes(), evidence)
 
     def test_apply_changes_code_and_updates_private_readme(self):
         home = Path(self.tmp.name) / 'fakehome'
@@ -94,6 +107,11 @@ class UpdateTests(unittest.TestCase):
     def test_rollback_when_postflight_fails(self):
         home = Path(self.tmp.name) / 'fakehome'
         home.mkdir()
+        private = home / '.local' / 'state' / 'kraken-decision-desk' / 'bridge' / 'outgoing'
+        private.mkdir(parents=True, mode=0o700)
+        synthetic = private / '.pending-rollback-synthetic.json'
+        evidence = b'G2 SYNTHETIC STATE MUST SURVIVE CODE ROLLBACK'
+        synthetic.write_bytes(evidence)
         first = kdd.isolated_test
         seen = {'calls': 0}
         def fail_second(stage):
