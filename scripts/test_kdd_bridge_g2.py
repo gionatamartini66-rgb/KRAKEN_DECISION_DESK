@@ -820,13 +820,16 @@ bridge.PRIVATE_ROOT=Path(sys.argv[1])
 kind,name,fixture,phase=sys.argv[2:]
 folder=bridge.private_directory(kind,create=True)
 if phase in ("before-link","after-link"):
-    original_link=os.link
-    def broken_link(*args,**kwargs):
+    # G2 specific test worker: phase names are historic, hooks map to
+    # equivalent PRE/POST rename commit boundary; assertions remain intact.
+    original_rename=os.rename
+    def broken_rename(*args,**kwargs):
         if phase=="before-link":
             os.kill(os.getpid(),signal.SIGKILL)
-        original_link(*args,**kwargs)
+        ret=original_rename(*args,**kwargs)
         os.kill(os.getpid(),signal.SIGKILL)
-    bridge.os.link=broken_link
+        return ret
+    bridge.os.rename=broken_rename
 if phase=="before-cleanup":
     old_unlink=Path.unlink
     def stop_unlink(path,*args,**kwargs):
