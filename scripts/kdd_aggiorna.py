@@ -33,6 +33,7 @@ PACKET_FILES = (
     'scripts/kdd_wallet_packet_g0.py',
     'scripts/kdd_bridge_g2.py', 'scripts/test_kdd_bridge_g2.py',
     'scripts/test_kdd_android_transaction_g2.py',
+    'scripts/kdd_android_regressions.py',
     'scripts/test_kdd_wallet_packet_g0.py',
     'scripts/test_kdd_portfolio_4tf.py',
 )
@@ -244,11 +245,18 @@ def isolated_test(staging: Path) -> None:
     if not packet_test.is_file() or not (staging / 'scripts/test_kdd_portfolio_4tf.py').is_file():
         raise SafetyError('test del pacchetto e 4TF mancanti nello staging')
     if packet_test.exists():
-        proc = command([sys.executable, '-B', '-m', 'unittest', 'discover',
-                        '-s', 'scripts', '-p', 'test_kdd_*.py', '-q'], cwd=staging)
+        proc = command([sys.executable, '-B', '-m', 'unittest', '-q',
+                        'scripts.test_kdd_wallet_packet_g0',
+                        'scripts.test_kdd_market_freshness',
+                        'scripts.test_kdd_portfolio_4tf',
+                        'scripts.test_kdd_android_transaction_g2'], cwd=staging)
         if proc.returncode:
-            raise SafetyError('regressioni del pacchetto GPT non superate')
-        print('Test pacchetto GPT: OK')
+            raise SafetyError('regressioni packet+Android synthetic non superate')
+        retained = command([sys.executable, '-B', 'scripts/kdd_android_regressions.py'],
+                           cwd=staging)
+        if retained.returncode:
+            raise SafetyError('invarianti R5 ancora pertinenti FALLITI')
+        print('Test pacchetto GPT / Android + R5 mappati: OK')
 
 
 def service_alive() -> bool:
