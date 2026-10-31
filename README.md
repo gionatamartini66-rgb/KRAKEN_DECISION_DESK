@@ -42,7 +42,7 @@ Il KDD studia mercati rialzisti, ribassisti, laterali e in transizione. Le fonti
 | Pacchetto patrimoniale privato | `scripts/kdd_wallet_packet_g0.py` | Composizione offline; scrittura privata soltanto su opzione esplicita; **nessun trasporto automatico a GPT** |
 | Dashboard e grafici | `serve.py` su `127.0.0.1:8765`; `grafico_4h.py` | Browser locale; rotte `/mercati/spot`, `/grafico/spot`, `/analisi/spot`, `/stato`; aggiornamento controllato |
 | Distribuzione | `scripts/kdd_aggiorna.py`, [procedura Termux](AGGIORNAMENTI_TERMUX.md) | Allowlist, preflight, backup, postflight, rollback e riavvio del servizio secondo GO |
-| Ponte bilaterale GPT | [PR #22](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/22): `scripts/kdd_bridge_g2.py` e test | **Solo candidato G2**, fuori da `main` e dal Samsung; contratto patrimoniale chiuso e non ancora esteso ai Futures |
+| Ponte bilaterale GPT | [PR #22 R5](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/22) e [PR #23 Android](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/23): `scripts/kdd_bridge_g2.py` e test | **Candidati sperimentali, OPEN/DRAFT, NON integrati e NON installati**; #23 elimina gli hard link in laboratorio Linux, senza collaudo funzionale Termux |
 
 **Attenzione ai due consumer:** i grafici a quattro timeframe nel browser e i dati numerici nel dossier GPT devono essere verificati **separatamente**. Un grafico visualizzato non dimostra che GPT abbia ricevuto le medesime evidenze; un file valido non dimostra che sia passato dal Samsung a Drive o sia tornato indietro.
 
@@ -61,10 +61,12 @@ Il KDD studia mercati rialzisti, ribassisti, laterali e in transizione. Le fonti
 
 ## 5. Stato e lavoro: non duplicare la Roadmap
 
-- **Integrato:** [PR #21](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/21), patrimonio e Spot/4TF; installazione Samsung del 30 ottobre documentata da prove dell'autore.
-- **Candidato separato:** [PR #22](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/22), ponte e ritorno GPT, al momento dell'ultima verifica HEAD `fc2306fd118024c9bdeb7908d85360c3fc578943`, **OPEN/DRAFT e non distribuito**.
-- **Altre linee non integrate:** [PR #14](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/14) on-chain/Punto 4, [PR #20](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/20) prove Spot precedenti, [PR #17](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/17) publisher D2 non promosso. Non fonderle indiscriminatamente.
-- **In esame:** audit indipendente dell'architettura del ponte affidato ad Astra, prima di qualsiasi ulteriore modifica alla PR #22. **La Roadmap è l'unica fonte da consultare per sapere se questo stato è cambiato.**
+- **Prodotto distribuito:** [PR #21](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/21) **MERGED** il 30/10; installazione del codice `da908139ffd51872f2829fb3b305ff7e6a0e0fea` sul Samsung documentata da output Termux e screenshot dell'autore. Questa ricognizione non verifica in tempo reale il processo sul dispositivo.
+- **Ponte R5 originale:** [PR #22](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/22), `fc2306fd118024c9bdeb7908d85360c3fc578943`, **OPEN/DRAFT, fuori da main e dal Samsung**. Il collaudo sintetico Termux incontra `os.link` non disponibile.
+- **Candidato Android:** [PR #23](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/23), HEAD `af5f7f34a516a7aa48ebda8ce0d197a22e93d936`, **OPEN/DRAFT, nessun merge/deploy**. CI Linux sintetica 383 PASS e 2 SKIP; la revisione G0 RT1 segnala una lacuna circoscritta nel recupero assistito dopo interruzioni particolari. Nessun collaudo funzionale del ponte #23 sul Samsung.
+- **Altre linee separate:** [PR #14](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/14) on-chain/Punto 4, [PR #20](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/20) sperimentazioni Spot precedenti, [PR #17](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/17) publisher D2 non promosso. Non fonderle indiscriminatamente.
+
+**Prossima valutazione:** ricostruire dai sorgenti e dalle prove autentiche la catena completa dato patrimoniale → dossier → GPT/autore → proposta → ritorno e riesame, prima di prescrivere altri lavori o attribuire ai test una riuscita di prodotto. La [Roadmap](ROADMAP_KDD.md) è l'unica fotografia corrente, da aggiornare a ogni cambiamento materiale. Nessun GO implicito al pilota Android, merge, deploy o trattamento di dati privati.
 
 Il requisito Futures **non autorizza a confondere uno schema Spot con un derivato** e non esige di costruire ora un secondo desk. È un vincolo di evolvibilità, distinto dall'effettiva copertura del prodotto odierno.
 
