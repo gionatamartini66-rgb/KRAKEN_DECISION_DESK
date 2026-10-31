@@ -476,6 +476,50 @@ def _archive_write_lock(folder):
         os.close(fd)
 
 
+def _source_evidence(root, *, fixture=False):
+    """Bracket wallet.build with exact dir+four-file inode and content evidence.
+
+    Fixture injection is a Python test-only seam. The CLI does not expose it.
+    Same-UID concurrent writers remain outside this local guarantee.
+    """
+    canonical_root = Path.home() / "kraken-decision-desk" / "KRAKEN_DECISION_DESK_V001"
+    root = Path(root)
+    if not fixture and (root != canonical_root or root.is_symlink()):
+        raise BridgeError("Sorgente non canonica KDD")
+    if root.is_symlink() or not root.is_dir():
+        raise BridgeError("Directory sorgente non regolare")
+    try:
+        directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                               getattr(os, "O_NOFOLLOW", 0))
+        try:
+            dir_st = os.fstat(directory_fd)
+            if not stat.S_ISDIR(dir_st.st_mode) or dir_st.st_uid != os.getuid():
+                raise BridgeError("Sorgente di proprietario diverso")
+            listed = os.stat(root, follow_symlinks=False)
+            if (dir_st.st_dev, dir_st.st_ino) != (listed.st_dev, listed.st_ino):
+                raise BridgeError("Directory sorgente sostituita")
+            files = []
+            for name in SOURCE_FILES:
+                fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) |
+                             getattr(os, "O_NONBLOCK", 0), dir_fd=directory_fd)
+                with os.fdopen(fd, "rb") as stream:
+                    st = os.fstat(stream.fileno())
+                    on_path = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                    if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid()
+                            or st.st_nlink != 1 or not 2 <= st.st_size <= wallet.SRC_MAX[name]
+                            or (st.st_dev, st.st_ino) != (on_path.st_dev, on_path.st_ino)):
+                        raise BridgeError("Fonte KDD irregolare o sostituita")
+                    contents = stream.read(wallet.SRC_MAX[name]+1)
+                    if len(contents) != st.st_size:
+                        raise BridgeError("Fonte KDD mutata durante lettura")
+                    files.append((name, st.st_dev, st.st_ino, hashlib.sha256(contents).hexdigest()))
+            return ((dir_st.st_dev, dir_st.st_ino), tuple(files))
+        finally:
+            os.close(directory_fd)
+    except OSError as exc:
+        raise BridgeError("Sorgente KDD non verificabile") from exc
+
+
 def verify_local_origin(bundle):
     """The incoming pair cannot attest itself. An actual persisted outbox is mandatory."""
     if not isinstance(bundle, dict):
