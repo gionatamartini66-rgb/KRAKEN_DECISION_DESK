@@ -1055,6 +1055,9 @@ else:
 
     def test_rt2_two_independent_publishers_same_outbox_version(self):
         from concurrent.futures import ThreadPoolExecutor
+        # The parent establishes the fixture's private home. Both independent
+        # child processes then race on publishing (not on fixture bootstrapping).
+        bridge.private_directory(bridge.OUTBOX,create=True)
         name=bridge.digest(self.bundle)+".json"
         with ThreadPoolExecutor(max_workers=2) as pool:
             procs=list(pool.map(lambda _:self._r4_worker(
