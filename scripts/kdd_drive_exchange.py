@@ -94,9 +94,15 @@ def receive(raw):
         raise bridge.BridgeError("Versione già deliberata: nessuna riattivazione")
     if final.exists() or final.is_symlink():
         existing = pending()
-        if existing is None or bridge.digest(existing[0]) != sha:
+        if existing is None:
+            raise bridge.BridgeError("Inbox privata non verificabile: STOP")
+        old = bridge.digest(existing[0])
+        if old == sha:
+            return sha
+        if not (old in bridge.load_archive() or any(
+                e["versione_sha256"] == old and e["stato"] in ("RIFIUTATA", "RINVIATA")
+                for e in decision_history())):
             raise bridge.BridgeError("Proposta in attesa diversa: STOP, nessuna sovrascrittura")
-        return sha
     stage = None
     try:
         with tempfile.NamedTemporaryFile(prefix=".kdd-proposal-", suffix=".tmp",
@@ -149,7 +155,11 @@ def receive_synced():
     if sha in bridge.load_archive() or any(e["versione_sha256"] == sha for e in decision_history()):
         return sha
     if current is not None:
-        raise bridge.BridgeError("Proposta diversa già presente: STOP, nessuna sostituzione automatica")
+        old = bridge.digest(current[0])
+        if not (old in bridge.load_archive() or any(
+                e["versione_sha256"] == old and e["stato"] in ("RIFIUTATA", "RINVIATA")
+                for e in decision_history())):
+            raise bridge.BridgeError("Proposta diversa già presente: STOP, nessuna sostituzione automatica")
     return receive(raw)
 
 
