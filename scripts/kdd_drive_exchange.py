@@ -158,6 +158,8 @@ def confirm(sha):
     proposal, bundle = item
     if not isinstance(sha, str) or bridge.digest(proposal) != sha:
         raise bridge.BridgeError("Versione diversa: rivedere la proposta")
+    if any(row["versione_sha256"] == sha and row["stato"] in ("RIFIUTATA", "RINVIATA") for row in decision_history()):
+        raise bridge.BridgeError("Versione gia rifiutata o rinviata: occorre nuova proposta")
     return bridge.approved_import(proposal, bundle, sha, "APPROVO_VERSIONE")
 
 
@@ -169,6 +171,57 @@ def latest_export():
     if not files:
         return "Nessun dossier pronto per FolderSync."
     return "Ultimo dossier pronto: " + max(files, key=lambda p: p.stat().st_mtime).name
+
+
+DECISION_EVENTS = "decision_events"
+DECISION_STATES = {"RIFIUTATA", "RINVIATA", "ESECUZIONE_DICHIARATA", "RIESAME", "RISULTATO_VERIFICATO"}
+
+
+def decision_history():
+    """Read append-only human statements; not evidence of Kraken execution."""
+    try:
+        folder = bridge.private_directory(DECISION_EVENTS)
+    except bridge.BridgeError:
+        if not (bridge.PRIVATE_ROOT / DECISION_EVENTS).exists():
+            return []
+        raise
+    rows = []
+    for path in sorted(folder.iterdir()):
+        if not re.fullmatch(r"[0-9a-f]{64}\\.json", path.name):
+            raise bridge.BridgeError("Archivio decisionale non regolare")
+        record = bridge.strict_json(bridge.read_regular(path, expected_parent=folder))
+        if bridge.digest(record) != path.stem or set(record) != {"versione_sha256", "stato", "nota", "creato_utc"}:
+            raise bridge.BridgeError("Archivio decisionale alterato")
+        rows.append(record)
+    return sorted(rows, key=lambda row: (row["creato_utc"], bridge.digest(row)))
+
+
+def record_decision(raw):
+    """Record explicit dated choices without modifying existing approved archive."""
+    obj = bridge.strict_json(raw)
+    if not isinstance(obj, dict) or set(obj) != {"sha256", "stato", "nota"}:
+        raise bridge.BridgeError("Decisione non valida")
+    sha, state, note = obj["sha256"], obj["stato"], obj["nota"]
+    if not isinstance(sha, str) or not bridge.HEX.fullmatch(sha) or state not in DECISION_STATES:
+        raise bridge.BridgeError("Versione o stato non valido")
+    if not isinstance(note, str) or not note.strip() or len(note) > 1500:
+        raise bridge.BridgeError("Motivazione o evidenza obbligatoria (massimo 1500 caratteri)")
+    current = pending()
+    approved = bridge.load_archive()
+    if state in ("RIFIUTATA", "RINVIATA"):
+        if current is None or bridge.digest(current[0]) != sha or sha in approved:
+            raise bridge.BridgeError("Rifiuto/rinvio ammesso solo per proposta in attesa")
+    elif sha not in approved:
+        raise bridge.BridgeError("Dichiarazioni successive richiedono versione approvata")
+    if state == "RISULTATO_VERIFICATO" and not any(
+            row["versione_sha256"] == sha and row["stato"] == "RIESAME"
+            for row in decision_history()):
+        raise bridge.BridgeError("Risultato senza riesame precedente")
+    entry = {"versione_sha256": sha, "stato": state, "nota": note.strip(),
+             "creato_utc": bridge.checked_now(None).isoformat(timespec="seconds")}
+    folder = bridge.private_directory(DECISION_EVENTS, create=True)
+    status = bridge.exclusive_json(folder, bridge.digest(entry) + ".json", entry)
+    return status
 
 
 def render_page(token):
@@ -188,6 +241,8 @@ def render_page(token):
         state = bridge.read_context(bundle)
         sha = bridge.digest(proposal)
         already_approved = sha in bridge.load_archive()
+        decisions = [x for x in decision_history() if x["versione_sha256"] == sha]
+        declined = any(x["stato"] in ("RIFIUTATA", "RINVIATA") for x in decisions)
         rows = "".join(
             "<article><b>" + esc(r["token"]) + " · " + esc(r["azione"]) + "</b><p>" +
             esc(r["tesi"]) + "</p><details><summary>Rischi, alternative, costi, evidenze e riesame</summary>" +
@@ -196,7 +251,7 @@ def render_page(token):
                                        ("invalidazione", "Invalidazione"), ("costi", "Costi"),
                                        ("evidenze", "Evidenze"), ("riesame", "Riesame"))) +
             "</details></article>" for r in proposal["posizioni"])
-        preview = ("<p><b>" + ("VERSIONE APPROVATA · STORICO" if already_approved else "NON APPROVATA") + "</b> · SHA256 " + esc(sha) +
+        preview = ("<p><b>" + ("VERSIONE APPROVATA · STORICO" if already_approved else ("RIFIUTATA / RINVIATA" if declined else "NON APPROVATA")) + "</b> · SHA256 " + esc(sha) +
                    "</p><p>Fotografia " + esc(proposal["snapshot_utc"]) +
                    " · mercato " + esc(state["mercato"]["stato"]) +
                    " · saldo " + esc(state["saldo"]["stato"]) + "</p>" +
@@ -210,7 +265,9 @@ def render_page(token):
                    json.dumps(sha) +
                    "}),\"application/json\")'>Confermo questa versione nel KDD</button>")
     try:
-        archive = bridge.approved_html()
+        events = decision_history()
+        history = "".join("<p>" + esc(x["creato_utc"]) + " · " + esc(x["stato"]) + " · " + esc(x["versione_sha256"][:12]) + " · " + esc(x["nota"]) + "</p>" for x in events)
+        archive = bridge.approved_html() + "<h3>Decisioni e riesami datati</h3>" + (history or "<p>Nessun evento registrato.</p>")
     except Exception:
         archive = "<p>Archivio non verificabile: nessuna approvazione attestata.</p>"
     script = """<script>
@@ -224,13 +281,27 @@ async function kddSend(path,body,kind){
   if(r.ok) setTimeout(()=>location.reload(),1200);
  } catch(e) { status.textContent='KDD locale non raggiungibile.'; }
 }
-async function kddFile(){
+function kddDecision(sha){\n const stato=document.getElementById("kdd-decision-state").value;\n const nota=document.getElementById("kdd-decision-note").value;\n if(!nota.trim())return;\n kddSend("/gpt/decisione",JSON.stringify({sha256:sha,stato:stato,nota:nota}),"application/json");\n}\nasync function kddFile(){
  const f=document.getElementById('gpt-json').files[0];
  if(!f){document.getElementById('feedback').textContent='Scegli il JSON da Drive.';return;}
  if(f.size>8000000){document.getElementById('feedback').textContent='File troppo grande.';return;}
  await kddSend('/gpt/ricevi',await f.arrayBuffer(),'application/json');
 }
 </script>""".replace("__TOKEN__", json.dumps(token))
+    decision_form = ""
+    if item is not None and not error:
+        sha = bridge.digest(item[0])
+        states = (("ESECUZIONE_DICHIARATA", "RIESAME", "RISULTATO_VERIFICATO")
+                  if sha in bridge.load_archive() else ("RIFIUTATA", "RINVIATA"))
+        if states and not (sha not in bridge.load_archive() and any(
+                x["versione_sha256"] == sha and x["stato"] in ("RIFIUTATA", "RINVIATA")
+                for x in decision_history())):
+            decision_form = ("<h3>Registra scelta o evento dell'autore</h3>"
+                "<select id='kdd-decision-state'>" +
+                "".join("<option value='" + x + "'>" + x + "</option>" for x in states) +
+                "</select><input id='kdd-decision-note' maxlength='1500' placeholder='Motivo, prova o riscontro' required>"
+                "<button onclick='kddDecision(" + json.dumps(sha) + ")'>Registra evento datato</button>"
+                "<p>Dichiarazione manuale non significa ordine verificato. Risultato verificato richiede riesame e prova esplicita.</p>")
     return ("""<!doctype html><html lang="it"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KDD · GPT e Drive</title><style>
@@ -241,19 +312,19 @@ border-radius:10px}button,input{font:inherit;padding:10px;margin:6px}button{curs
 </style></head><body><p><a href="/">Torna al KDD</a></p>
 <h1>Proposte GPT su Drive</h1>
 <section><h2>1 · Prepara dossier per GPT</h2><p>Il KDD prepara il documento,
-lo conserva come origine e lo copia nella cartella Kraken già utilizzata da FolderSync.
-Avvia la sincronizzazione manuale per trovarlo su Drive.</p><p>""" +
+lo conserva come origine e lo copia nella cartella KDD_TEST_SAMSUNG utilizzata da FolderSync.
+FolderSync deve sincronizzare questa cartella verso Drive (configurazione Android dopo GO).</p><p>""" +
         esc(latest_export()) +
         """</p><button onclick='kddSend("/gpt/prepara","","text/plain")'>
 Prepara per Drive</button></section>
 <section><h2>2 · Apri la proposta da Drive</h2><p>Dopo aver discusso con GPT,
-FolderSync deve scaricare proposta_portafoglio.json nella cartella Kraken del telefono. Il KDD la legge automaticamente quando apri questa pagina.
+FolderSync deve scaricare proposta_portafoglio.json nella cartella KDD_TEST_SAMSUNG del telefono. Il KDD la legge automaticamente quando apri questa pagina.
 Aprirlo NON lo approva.</p>
 <input id="gpt-json" type="file" accept=".json,application/json">
 <button onclick="kddFile()">Apri proposta</button>
 <p id="feedback" role="status"></p></section>
 <section><h2>3 · Esamina e decidi</h2>""" + preview +
-        """</section><section><h2>4 · Archivio KDD</h2>""" +
+        """ + decision_form + "</section><section><h2>4 · Archivio KDD</h2>" +
         archive + "</section>" + script + "</body></html>")
 
 
@@ -264,6 +335,8 @@ def handle(action, raw):
         return "Dossier pronto per FolderSync: " + prepare_export()
     if action == "ricevi":
         return "Proposta valida, NON approvata. Versione: " + receive(raw)
+    if action == "decisione":
+        return "Evento decisionale conservato: " + record_decision(raw)
     if action == "conferma":
         if len(raw) > 4096:
             raise bridge.BridgeError("Conferma troppo lunga")
