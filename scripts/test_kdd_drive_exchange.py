@@ -247,6 +247,25 @@ class DriveUIHandoffTests(unittest.TestCase):
         self.assertEqual(len(bridge.load_archive()), 2)
         self.assertEqual(exchange._approved_head(bridge.load_archive()), b_sha)
 
+    def test_late_stale_replay_of_decided_a_does_not_hide_current_b(self):
+        self.original.persist_origin()
+        a = self._candidate("A")
+        b = self._candidate("B")
+        sha_a = exchange.receive(bridge.canonical(a))
+        exchange.record_decision(bridge.canonical(
+            {"sha256": sha_a, "stato": "RIFIUTATA", "nota": "Superata"}))
+        exchange.receive(bridge.canonical(b))
+        (self.sync / exchange.INCOMING_NAME).write_bytes(bridge.canonical(a))
+        real_validate = exchange.validate_raw
+        def expire_only_old(raw):
+            if bridge.strict_json(raw)["proposta_id"] == "A":
+                raise bridge.BridgeError("Fotografia A scaduta")
+            return real_validate(raw)
+        with mock.patch.object(exchange, "validate_raw", side_effect=expire_only_old):
+            self.assertEqual(exchange.receive_synced(), sha_a)
+        self.assertEqual(exchange.pending()[0], b)
+        self.assertEqual(len(exchange.decision_history()), 1)
+
     def test_deferred_parent_is_not_approved_parent(self):
         self.original.persist_origin()
         a = self._candidate("A")
