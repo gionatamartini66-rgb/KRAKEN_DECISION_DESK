@@ -66,6 +66,8 @@ def find_origin(proposal):
     outgoing = bridge.private_directory(bridge.OUTBOX)
     matches = []
     for path in outgoing.iterdir():
+        if path.name.startswith(".kdd-event-") and path.name.endswith(".tmp"):
+            continue
         if not re.fullmatch(r"[0-9a-f]{64}\.json", path.name):
             continue
         bundle = bridge.strict_json(bridge.read_regular(path, expected_parent=outgoing))
