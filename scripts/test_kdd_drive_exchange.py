@@ -308,7 +308,7 @@ class DriveUIHandoffTests(unittest.TestCase):
         row = {"versione_sha256": sha, "stato": state, "nota": note,
                "creato_utc": timestamp}
         path = folder / (bridge.digest(row) + ".json")
-        path.write_bytes(bridge.canonical(row) + b"\\n")
+        path.write_bytes(bridge.canonical(row) + b"\n")
         path.chmod(0o600)
         return row
 
