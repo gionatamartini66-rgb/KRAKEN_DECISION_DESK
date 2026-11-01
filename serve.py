@@ -182,7 +182,7 @@ def decision_home():
     balance = balance if isinstance(balance, dict) else {}
     balance_time = balance.get("acquisizione_saldo_utc")
     balance_fresh = _decision_age(balance_time, now=now)
-    blocks.append("<p><b>Patrimonio:</b> " + esc(state) + " · " +
+    blocks.append("<p>Patrimonio: " + esc(state) + " · " +
                   str(len(positions)) + " posizioni" +
                   " · valorizzate " + esc(complete if isinstance(complete, int) else "n.d.") +
                   " · incomplete " + esc(incomplete if isinstance(incomplete, int) else "n.d.") +
@@ -481,10 +481,10 @@ def with_controls(page: str, result: str = "") -> str:
                           "Patrimonio originale, Spot, grafici e aggiornamento restano accessibili.</p></section>")
     if target not in page:
         # Unexpected legacy markup: do not discard the original HTML/navigation.
-        return page.replace("</body>", toolbar + js + decision_panel + "</body>", 1)
+        return page.replace("</body>", toolbar + js + decision_panel + portfolio_proposals + "</body>", 1)
     before, after = page.split(target, 1)
     if "</header>" not in before:
-        return before + toolbar + js + decision_panel + target + after
+        return before + toolbar + js + decision_panel + portfolio_proposals + target + after
     header, legacy = before.split("</header>", 1)
     # Keep existing Spot plan and archives intact but secondary. Their script
     # freshness callbacks continue running; no archive or contract is rewritten.
