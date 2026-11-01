@@ -3938,7 +3938,8 @@ class IntegratedDecisionHomeTests(unittest.TestCase):
             "perche_selezionato": "Osservazione 1H",
             "evidenze": ["OHLC 1H"], "criticita": ["Spread da aggiornare"],
             "coppia_analisi": "ADA/USD",
-            "alternative": [{"pair": "ADA/USD", "pair_key": "ADAUSD"}],
+            "alternative": [{"pair": "ADA/USD", "pair_key": "ADAUSD",
+                             "volume_eur_stimato": 100000, "spread_pct": 0.2}],
             "costi_roundtrip": []}]
         self.report["saldo_stato"] = {
             "origine": "KRAKEN_BALANCEEX",
