@@ -265,6 +265,8 @@ def render_page(token):
                    "<button onclick='kddSend(\"/gpt/conferma\",JSON.stringify({sha256:" +
                    json.dumps(sha) +
                    "}),\"application/json\")'>Confermo questa versione nel KDD</button>")
+    if item is not None and not error and (already_approved or declined):
+        preview = preview.split("<button onclick=", 1)[0]
     try:
         events = decision_history()
         history = "".join("<p>" + esc(x["creato_utc"]) + " · " + esc(x["stato"]) + " · " + esc(x["versione_sha256"][:12]) + " · " + esc(x["nota"]) + "</p>" for x in events)
