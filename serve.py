@@ -62,12 +62,41 @@ def start_refresh():
     return True
 
 
+def _decision_origin(token, displayed, records, observed_at):
+    """Attribute a displayed decision only if its source record reproduces it."""
+    unknown = "Stato decisionale del report KDD (origine non accertata)"
+    if not isinstance(token, str) or not isinstance(displayed, str) or observed_at is None:
+        return unknown
+    matches = [r for r in records if isinstance(r, dict) and isinstance(r.get("token"), str)
+               and r["token"].strip().upper() in (token.upper(), "PORTAFOGLIO")]
+    if not matches:
+        return unknown
+    try:
+        if desk.decision_state(token.upper(), records, observed_at) != displayed:
+            return unknown
+        chosen = max(matches, key=lambda r: r.get("creata_utc", ""))
+        if chosen["token"].strip().upper() == "PORTAFOGLIO":
+            return "Criterio generale PORTAFOGLIO applicato alla posizione (non decisione individuale)"
+        return "Decisione specifica del token da decisioni.jsonl"
+    except (KeyError, TypeError, ValueError):
+        return unknown
+
+
 def decision_home():
     """Decision-first projection of the existing KDD report and bridge."""
     esc = lambda value: html.escape(str(value), quote=True)
     blocks = ["<section id='kdd-decisioni'><h2>Quadro decisionale · patrimonio e Spot</h2>"]
-    report = desk.load("ultimo_report.json", {})
+    try:
+        report = desk.load("ultimo_report.json", {})
+    except (OSError, ValueError, UnicodeError):
+        report = None  # incomplete report must not take the original HTML offline
+    records, observed_at = [], None
     if isinstance(report, dict) and isinstance(report.get("posizioni"), list):
+        try:
+            records = desk.load_decisions()
+            observed_at = dt.datetime.fromisoformat(report["rilevazione_utc"])
+        except (OSError, ValueError, KeyError, TypeError, UnicodeError):
+            records, observed_at = [], None
         blocks.append("<p>Patrimonio: " + esc(report.get("stato_totale", "NON DISPONIBILE")) +
                       " · totale stimato EUR " + esc(report.get("totale_stimato_eur", "n.d.")) +
                       " · rilevazione " + esc(report.get("rilevazione_utc", "n.d.")) +
@@ -77,8 +106,9 @@ def decision_home():
                 continue
             token = esc(h.get("token", "?"))
             notes = h.get("note") if isinstance(h.get("note"), list) else []
-            blocks.append("<article><b>" + token + "</b> · decisione registrata autore: " +
-                          esc(h.get("decisione", "NON DISPONIBILE")) +
+            blocks.append("<article><b>" + token + "</b> · " +
+                          esc(_decision_origin(h.get("token"), h.get("decisione"), records, observed_at)) +
+                          ": " + esc(h.get("decisione", "NON DISPONIBILE")) +
                           "<p>Valore EUR: " + esc(h.get("valore_eur", "n.d.")) +
                           " · valutazione tecnica KDD: " + esc("; ".join(str(n) for n in notes) if notes else h.get("errore", "Non disponibile")) + "</p></article>")
         opportunities = report.get("schede_v02", [])
@@ -93,7 +123,9 @@ def decision_home():
         blocks.append("<p><a href='/mercati/spot'>Coppie Spot e grafici 15m / 1H / 4H / 1D</a>"
                       " · <a href='/analisi/sui-mtf'>Analisi comparata SUI</a></p>")
     else:
-        blocks.append("<p>Report KDD non disponibile: aggiornare i dati dal cruscotto. "
+        blocks.append("<p>Quadro decisionale aggiunto temporaneamente non disponibile: "
+                      "report assente, incompleto o non leggibile. "
+                      "Il cruscotto originale, Spot e i grafici restano consultabili. "
                       "Nessun saldo o giudizio inventato.</p>")
     try:
         from scripts import kdd_drive_exchange as exchange
@@ -114,10 +146,15 @@ def decision_home():
                           esc(proposal["scenario_alternativo"]) + "</p>")
             linked_events = [e for e in events if e["versione_sha256"] == sha]
             if linked_events:
-                latest = linked_events[-1]
-                blocks.append("<p>Ultimo evento autore · " + esc(latest["stato"]) +
-                              " · " + esc(latest["creato_utc"]) +
-                              " · " + esc(latest["nota"]) + "</p>")
+                recent, unordered = exchange.latest_events(linked_events)
+                if unordered:
+                    blocks.append("<p>Eventi più recenti nel medesimo secondo: "
+                                  "ordine reciproco non documentato.</p>")
+                for event in recent:
+                    blocks.append("<p>" + ("Evento autore" if unordered else "Ultimo evento autore") +
+                                  " · " + esc(exchange.event_label(event["stato"])) +
+                                  " · " + esc(event["creato_utc"]) +
+                                  " · " + esc(event["nota"]) + "</p>")
             for item in proposal["posizioni"]:
                 blocks.append("<article><b>" + esc(item["token"]) + " · GPT: " +
                               esc(item["azione"]) + "</b><p>" + esc(item["tesi"]) +
@@ -217,7 +254,14 @@ def with_controls(page: str, result: str = "") -> str:
                                "<h2>Proposte patrimoniali GPT</h2>"
                                "<p>Archivio GPT temporaneamente non verificabile: STOP. "
                                "Nessuna proposta è stata certificata.</p></section>")
-    return page.replace(target, toolbar + js + decision_home() + portfolio_proposals + target, 1)
+    try:
+        decision_panel = decision_home()
+    except Exception:
+        # Never let this optional overlay prevent the intact original home from loading.
+        decision_panel = ("<section id='kdd-decisioni' role='status'><h2>Quadro decisionale</h2>"
+                          "<p>Riepilogo aggiunto non disponibile. "
+                          "Patrimonio originale, Spot, grafici e aggiornamento restano accessibili.</p></section>")
+    return page.replace(target, toolbar + js + decision_panel + portfolio_proposals + target, 1)
 
 
 def load_sui_chart(timeframe, public_kraken=None):
