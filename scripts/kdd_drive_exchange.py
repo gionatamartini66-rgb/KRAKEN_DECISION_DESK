@@ -89,6 +89,14 @@ def receive(raw):
     proposal, _ = validate_raw(raw)
     folder = bridge.private_directory(bridge.INBOX, create=True)
     final = folder / INCOMING_NAME
+    sha = bridge.digest(proposal)
+    if sha in bridge.load_archive() or any(e["versione_sha256"] == sha for e in decision_history()):
+        raise bridge.BridgeError("Versione già deliberata: nessuna riattivazione")
+    if final.exists() or final.is_symlink():
+        existing = pending()
+        if existing is None or bridge.digest(existing[0]) != sha:
+            raise bridge.BridgeError("Proposta in attesa diversa: STOP, nessuna sovrascrittura")
+        return sha
     stage = None
     try:
         with tempfile.NamedTemporaryFile(prefix=".kdd-proposal-", suffix=".tmp",
@@ -137,8 +145,11 @@ def receive_synced():
     current = pending()
     if current is not None and bridge.digest(current[0]) == bridge.digest(proposal):
         return bridge.digest(proposal)
-    if bridge.digest(proposal) in bridge.load_archive():
-        return bridge.digest(proposal)
+    sha = bridge.digest(proposal)
+    if sha in bridge.load_archive() or any(e["versione_sha256"] == sha for e in decision_history()):
+        return sha
+    if current is not None:
+        raise bridge.BridgeError("Proposta diversa già presente: STOP, nessuna sostituzione automatica")
     return receive(raw)
 
 
@@ -188,7 +199,7 @@ def decision_history():
         raise
     rows = []
     for path in sorted(folder.iterdir()):
-        if not re.fullmatch(r"[0-9a-f]{64}\\.json", path.name):
+        if not re.fullmatch(r"[0-9a-f]{64}\.json", path.name):
             raise bridge.BridgeError("Archivio decisionale non regolare")
         record = bridge.strict_json(bridge.read_regular(path, expected_parent=folder))
         if bridge.digest(record) != path.stem or set(record) != {"versione_sha256", "stato", "nota", "creato_utc"}:
