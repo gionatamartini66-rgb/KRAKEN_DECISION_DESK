@@ -2844,6 +2844,31 @@ class AnyKrakenSpotTests(unittest.TestCase):
         self.assertTrue(callable(serve.load_sui_chart))
         self.assertTrue(callable(serve.load_sui_comparison))
 
+    def test_home_with_saved_report_does_not_restore_fixed_sui_link(self):
+        # Match the Samsung postflight: a real ultimo_report.json is present.
+        report = {
+            "rilevazione_utc": self.now.isoformat(),
+            "stato_totale": "PARZIALE",
+            "totale_stimato_eur": "12",
+            "posizioni": [{"token": "ADA", "valore_eur": "12",
+                           "decisione": "NESSUNA DECISIONE REGISTRATA",
+                           "note": ["Riesame"]}],
+            "schede_v02": [{"token": "DOT", "esito": "DA RIESAMINARE",
+                            "sintesi": "Esempio isolato"}],
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder)
+            (root / "ultimo_report.json").write_text(
+                json.dumps(report), encoding="utf-8")
+            with mock.patch.object(d, "DIR", root):
+                page = serve.with_controls("<h2>1 · Decisioni e posizioni</h2>")
+        self.assertIn("Patrimonio:", page)  # the report-present branch was used
+        self.assertIn("ADA", page)
+        self.assertIn("Opportunità Spot selezionate", page)
+        self.assertIn("href='/mercati/spot'", page)
+        self.assertNotIn("href='/analisi/sui-mtf'", page)
+        self.assertNotIn("href='/grafico/sui-4h'", page)
+
     def test_user_selected_pair_not_derived_from_portfolio(self):
         with mock.patch.object(serve.desk, "load",
                                side_effect=AssertionError("no private local files")):
