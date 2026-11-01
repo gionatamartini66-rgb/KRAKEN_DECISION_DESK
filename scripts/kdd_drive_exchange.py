@@ -119,9 +119,13 @@ def _receive_locked(raw):
 
     if final.exists() or final.is_symlink():
         existing = pending()
-        if existing is None:
-            raise bridge.BridgeError("Inbox privata non verificabile: STOP")
-        old = bridge.digest(existing[0])
+        if existing is not None:
+            old = bridge.digest(existing[0])
+        else:
+            # Expired proposals remain identifiable from their private JSON.
+            # Never treat an unreadable existing file as an empty inbox.
+            old = bridge.digest(bridge.strict_json(
+                bridge.read_regular(final, expected_parent=folder)))
         if old == sha:
             return sha
         if not (old in approved or any(
@@ -174,16 +178,18 @@ def receive_synced():
             raise bridge.BridgeError("Proposta FolderSync troppo grande")
     finally:
         os.close(fd)
-    proposal, _ = validate_raw(raw)
+    # A known, already decided version may be stale when FolderSync copies it
+    # back. Recognize its exact content digest before freshness validation.
+    proposal = bridge.strict_json(raw)
     sha = bridge.digest(proposal)
     with _DECISION_LOCK:
-        current = pending()
-        if current is not None and bridge.digest(current[0]) == sha:
-            return sha
         approved = bridge.load_archive()
         events = decision_history()
         if sha in approved or any(e["versione_sha256"] == sha for e in events):
             return sha  # previous A must not replace current B
+        current = pending()
+        if current is not None and bridge.digest(current[0]) == sha:
+            return sha
         return _receive_locked(raw)
 
 def pending():
