@@ -63,49 +63,66 @@ def start_refresh():
 
 
 def decision_home():
-    """Single read-only decision surface; optional Drive and GPT never block Spot."""
+    """Decision-first projection of the existing KDD report and bridge."""
     esc = lambda value: html.escape(str(value), quote=True)
+    blocks = ["<section id='kdd-decisioni'><h2>Quadro decisionale · patrimonio e Spot</h2>"]
+    report = desk.load("ultimo_report.json", {})
+    if isinstance(report, dict) and isinstance(report.get("posizioni"), list):
+        blocks.append("<p>Patrimonio: " + esc(report.get("stato_totale", "NON DISPONIBILE")) +
+                      " · totale stimato EUR " + esc(report.get("totale_stimato_eur", "n.d.")) +
+                      " · rilevazione " + esc(report.get("rilevazione_utc", "n.d.")) +
+                      "</p><p>Giudizi KDD e dati di posizione: nella sezione sottostante del cruscotto originale.</p>")
+        for h in report["posizioni"]:
+            if not isinstance(h, dict):
+                continue
+            token = esc(h.get("token", "?"))
+            blocks.append("<article><b>" + token + "</b> · giudizio KDD: " +
+                          esc(h.get("decisione", "NON DISPONIBILE")) +
+                          "<p>Valore EUR: " + esc(h.get("valore_eur", "n.d.")) +
+                          " · analisi e alternative nel report originale</p></article>")
+        opportunities = report.get("schede_v02", [])
+        if isinstance(opportunities, list):
+            blocks.append("<h3>Opportunità Spot selezionate dal KDD</h3>")
+            for x in opportunities[:4]:
+                if not isinstance(x, dict):
+                    continue
+                blocks.append("<article><b>" + esc(x.get("token", "?")) +
+                              "</b> · " + esc(x.get("esito", "NON VALUTATO")) +
+                              "<p>" + esc(x.get("sintesi", "")) + "</p></article>")
+        blocks.append("<p><a href='/mercati/spot'>Coppie Spot e grafici 15m / 1H / 4H / 1D</a>"
+                      " · <a href='/analisi/sui-mtf'>Analisi comparata SUI</a></p>")
+    else:
+        blocks.append("<p>Report KDD non disponibile: aggiornare i dati dal cruscotto. "
+                      "Nessun saldo o giudizio inventato.</p>")
     try:
         from scripts import kdd_drive_exchange as exchange
         exchange.receive_synced()
-        pending = exchange.pending()
+        item = exchange.pending()
         approved = exchange.bridge.load_archive()
-        blocks = ["<section id='kdd-decisioni'><h2>Patrimonio e decisioni</h2>"]
-        if pending:
-            proposal, bundle = pending
-            context = exchange.bridge.read_context(bundle)
+        if item:
+            proposal, bundle = item
             sha = exchange.bridge.digest(proposal)
-            blocks.append("<h3>Proposta GPT ricevuta · NON APPROVATA</h3>"
-                          "<p>Versione " + esc(sha) + " · fotografia " +
-                          esc(proposal["snapshot_utc"]) + " · mercato " +
-                          esc(context["mercato"]["stato"]) + " · saldo " +
-                          esc(context["saldo"]["stato"]) + "</p>"
-                          "<p>Scenario: " + esc(proposal["scenario"]) +
-                          " · Alternativa: " + esc(proposal["scenario_alternativo"]) +
-                          " · Rischi: " + esc(proposal["rischi_comuni"]) +
-                          " · Liquidità: " + esc(proposal["liquidita"]) +
-                          " · Riesame: " + esc(proposal["revisione"]) + "</p>")
+            is_approved = sha in approved
+            blocks.append("<h3>Proposta GPT · " +
+                          ("VERSIONE APPROVATA" if is_approved else "IN ATTESA DI DECISIONE") +
+                          "</h3><p>SHA256 " + esc(sha) + " · fotografia " +
+                          esc(proposal["snapshot_utc"]) + "</p><p>Scenario: " +
+                          esc(proposal["scenario"]) + " · alternativa: " +
+                          esc(proposal["scenario_alternativo"]) + "</p>")
             for item in proposal["posizioni"]:
-                blocks.append("<article><strong>" + esc(item["token"]) + " · " +
-                              esc(item["azione"]) + "</strong><p>" + esc(item["tesi"]) +
-                              "</p><details><summary>Rischi, alternative, condizioni e riesame</summary>" +
-                              "".join("<p><b>" + esc(label) + ":</b> " + esc(item[key]) + "</p>"
-                                      for key, label in (("rischi","Rischi"),("alternativa","Alternativa"),
-                                          ("invalidazione","Invalidazione"),("costi","Costi"),
-                                          ("evidenze","Evidenze"),("riesame","Riesame"))) +
-                              "</details></article>")
-            blocks.append("<p>La proposta non costituisce ordine. "
-                          "<a href='/gpt'>Approva la versione esatta o consulta l'archivio</a>.</p>")
+                blocks.append("<article><b>" + esc(item["token"]) + " · GPT: " +
+                              esc(item["azione"]) + "</b><p>" + esc(item["tesi"]) +
+                              "</p><details><summary>Alternativa, rischi e riesame</summary><p>" +
+                              esc(item["alternativa"]) + "</p><p>" + esc(item["rischi"]) +
+                              "</p><p>" + esc(item["riesame"]) + "</p></details></article>")
         else:
-            blocks.append("<p>Nessuna proposta GPT ricevuta e validata. "
-                          "FolderSync deve scaricare proposta_portafoglio.json nella cartella Kraken.</p>")
-        blocks.append("<p>Versioni approvate conservate: " + str(len(approved)) +
-                      ". Esecuzioni finanziarie non attestate.</p></section>")
-        return "".join(blocks)
+            blocks.append("<p>Proposta GPT: nessuna versione ricevuta.</p>")
+        blocks.append("<p>Versioni approvate in archivio: " + str(len(approved)) +
+                      ". Approvazione non equivale a esecuzione manuale né a risultato verificato.</p>"
+                      "<p><a href='/gpt'>Esamina proposta, decidi e consulta storico</a></p>")
     except Exception:
-        return ("<section id='kdd-decisioni'><h2>Patrimonio e decisioni</h2>"
-                "<p>Ricezione o archivio non verificabile: STOP. "
-                "Nessuna proposta viene considerata approvata.</p></section>")
+        blocks.append("<p>Bridge GPT non verificabile: STOP. Patrimonio e Spot restano consultabili.</p>")
+    return "".join(blocks) + "</section>"
 
 
 def with_controls(page: str, result: str = "") -> str:
