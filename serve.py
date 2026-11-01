@@ -120,8 +120,7 @@ def decision_home():
                 blocks.append("<article><b>" + esc(x.get("token", "?")) +
                               "</b> · " + esc(x.get("esito", "NON VALUTATO")) +
                               "<p>" + esc(x.get("sintesi", "")) + "</p></article>")
-        blocks.append("<p><a href='/mercati/spot'>Coppie Spot e grafici 15m / 1H / 4H / 1D</a>"
-                      " · <a href='/analisi/sui-mtf'>Analisi comparata SUI</a></p>")
+        blocks.append("<p><a href='/mercati/spot'>Coppie Spot e grafici 15m / 1H / 4H / 1D</a></p>")
     else:
         blocks.append("<p>Quadro decisionale aggiunto temporaneamente non disponibile: "
                       "report assente, incompleto o non leggibile. "
