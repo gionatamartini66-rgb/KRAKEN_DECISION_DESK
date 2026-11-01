@@ -249,7 +249,7 @@ def record_decision(raw):
         with tempfile.NamedTemporaryFile(prefix=".kdd-event-", suffix=".tmp",
                                          dir=folder, delete=False) as f:
             stage = Path(f.name)
-            f.write(bridge.canonical(entry) + b"\\n")
+            f.write(bridge.canonical(entry) + b"\n")
             f.flush()
             os.fsync(f.fileno())
         os.chmod(stage, 0o600)
