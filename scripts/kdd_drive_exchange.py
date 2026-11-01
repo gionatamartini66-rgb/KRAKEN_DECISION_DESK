@@ -370,7 +370,7 @@ def render_page(token):
             attribution = ""
             if isinstance(source, dict):
                 tokens = ", ".join(str(p["token"]) for p in source.get("posizioni", []) if isinstance(p, dict) and "token" in p)
-                attribution = " · fotografia " + esc(source.get("snapshot_utc", "?")) + " · asset " + esc(tokens)
+                attribution = " · fotografia " + esc(source.get("snapshot_utc", "?")) + " · asset compresi nella proposta: " + esc(tokens)
             else:
                 attribution = " · dettaglio asset non ricostruibile dal record storico"
             return ("<p>" + esc(x["creato_utc"]) + " · " + esc(x["stato"]) +
@@ -427,11 +427,13 @@ FolderSync deve sincronizzare questa cartella verso Drive (configurazione Androi
         esc(latest_export()) +
         """</p><button onclick='kddSend("/gpt/prepara","","text/plain")'>
 Prepara per Drive</button></section>
-<section><h2>2 · Apri la proposta da Drive</h2><p>Dopo aver discusso con GPT,
-FolderSync deve scaricare proposta_portafoglio.json nella cartella KDD_TEST_SAMSUNG del telefono. Il KDD la legge automaticamente quando apri questa pagina.
-Aprirlo NON lo approva.</p>
+<section><h2>2 · Apri la proposta da Drive</h2><p>Quando la coppia FolderSync di ritorno sarà configurata con GO distinto,
+il file proposta_portafoglio.json arriverà nella cartella KDD_TEST_SAMSUNG.
+Il KDD lo acquisirà automaticamente già dalla home, senza scegliere o copiare JSON.
+La lettura NON approva la proposta. La sincronizzazione Android va collaudata a parte.</p>
+<details><summary>Recupero manuale straordinario</summary>
 <input id="gpt-json" type="file" accept=".json,application/json">
-<button onclick="kddFile()">Apri proposta</button>
+<button onclick="kddFile()">Importa da file locale</button></details>
 <p id="feedback" role="status"></p></section>
 <section><h2>3 · Esamina e decidi</h2>""" + preview +
         decision_form + "</section><section><h2>4 · Archivio KDD</h2>" +
