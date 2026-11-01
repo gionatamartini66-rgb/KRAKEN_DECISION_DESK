@@ -1,5 +1,6 @@
 """Real bridge + user-interface handoff tests; no Drive/network/phone involved."""
 import copy
+import datetime as dt
 import html
 import json
 from pathlib import Path
@@ -299,6 +300,143 @@ class DriveUIHandoffTests(unittest.TestCase):
         self.assertIn("RIFIUTATA", page)
         self.assertIn(a["snapshot_utc"], page)
         self.assertEqual(len(exchange.decision_history()), 1)
+
+
+    def _write_existing_event(self, sha, state, note, timestamp):
+        folder = bridge.ensure_dir(
+            bridge.private_directory(bridge.INBOX, create=True) / exchange.DECISION_EVENTS)
+        row = {"versione_sha256": sha, "stato": state, "nota": note,
+               "creato_utc": timestamp}
+        path = folder / (bridge.digest(row) + ".json")
+        path.write_bytes(bridge.canonical(row) + b"\\n")
+        path.chmod(0o600)
+        return row
+
+    def test_rt26_01_declared_result_never_certifies_market_and_legacy_remains_readable(self):
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        exchange.confirm(sha)
+        payload = lambda state, note: bridge.canonical(
+            {"sha256": sha, "stato": state, "nota": note})
+        exchange.record_decision(payload("RIESAME", "Ho consultato il quadro"))
+        with self.assertRaises(bridge.BridgeError):
+            exchange.record_decision(payload("RISULTATO_VERIFICATO", "Prova non attestata"))
+        self.assertEqual(exchange.record_decision(
+            payload("RISCONTRO_DICHIARATO", "Riferisco un esito")),"INSERITO")
+        legacy = self._write_existing_event(
+            sha, "RISULTATO_VERIFICATO", "Nota storica senza prova allegata",
+            "2026-01-01T11:00:00+00:00")
+        self.assertIn(legacy, exchange.decision_history())
+        page = exchange.render_page("TOKEN")
+        self.assertIn("RISCONTRO STORICO DICHIARATO", page)
+        self.assertIn("RISCONTRO DICHIARATO DALL", page)
+        self.assertIn("verifica su dati non attestata", page)
+        self.assertNotIn("<option value='RISULTATO_VERIFICATO'>", page)
+        self.assertNotIn("RISULTATO_VERIFICATO ·", page)
+
+    def test_rt26_02_general_decision_not_misattributed_to_each_token(self):
+        import serve
+        now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+        created = (now - dt.timedelta(minutes=5)).isoformat()
+        expiry = (now + dt.timedelta(days=1)).isoformat()
+        records = [
+            {"token": "PORTAFOGLIO", "scelta": "RIVEDERE", "motivo": "Quadro generale",
+             "creata_utc": created, "scade_utc": expiry},
+            {"token": "BTC", "scelta": "ALLEGGERIRE", "motivo": "Scelta specifica",
+             "creata_utc": now.isoformat(), "scade_utc": expiry},
+        ]
+        report = {
+            "rilevazione_utc": now.isoformat(), "stato_totale": "DISPONIBILE",
+            "totale_stimato_eur": "dato di prova", "schede_v02": [],
+            "posizioni": [
+                {"token": token, "decisione": serve.desk.decision_state(token, records, now),
+                 "valore_eur": "n.d.", "note": []}
+                for token in ("ADA", "BTC")
+            ] + [{"token":"ETH", "decisione":"Testo non riconciliabile",
+                  "valore_eur":"n.d.", "note":[]}],
+        }
+        with mock.patch.object(serve.desk, "load", return_value=report), \
+             mock.patch.object(serve.desk, "load_decisions", return_value=records):
+            html_home = serve.decision_home()
+        self.assertIn("Criterio generale PORTAFOGLIO applicato alla posizione", html_home)
+        self.assertIn("Decisione specifica del token da decisioni.jsonl", html_home)
+        self.assertIn("origine non accertata", html_home)
+        self.assertNotIn("decisione registrata autore", html_home)
+
+    def test_rt26_03_corrupt_report_does_not_disable_original_home_or_http(self):
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+        import serve
+        # Real on-disk JSON parse path; valid original HTML stays untouched.
+        (self.sync / "ultimo_report.json").write_text('{"posizioni":', encoding="utf-8")
+        (self.sync / "cruscotto.html").write_text(
+            "<html><body><nav>ORIGINALE_PATRIMONIO_SPOT_GRAFICI</nav>"
+            "<h2>1 · Decisioni e posizioni</h2></body></html>", encoding="utf-8")
+        with mock.patch.object(serve.desk, "DIR", self.sync):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+                conn.request("GET", "/", headers={"Host":"127.0.0.1:8765"})
+                resp = conn.getresponse()
+                body = resp.read().decode("utf-8")
+                conn.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+            self.assertEqual(resp.status, 200)
+            self.assertIn("ORIGINALE_PATRIMONIO_SPOT_GRAFICI", body)
+            self.assertIn("Aggiorna dati ora", body)
+            self.assertIn("/mercati/spot", body)
+            self.assertIn("report assente, incompleto o non leggibile", body)
+            # Also isolate unforeseen failures in the added overlay only.
+            with mock.patch.object(serve, "decision_home", side_effect=RuntimeError("overlay")):
+                fallback = serve.with_controls(
+                    "<h2>1 · Decisioni e posizioni</h2><p>STORICO ORIGINALE</p>")
+            self.assertIn("STORICO ORIGINALE", fallback)
+            self.assertIn("Riepilogo aggiunto non disponibile", fallback)
+            self.assertIn("Aggiorna dati ora", fallback)
+
+    def test_rt26_04_legacy_second_tie_has_no_invented_last_event(self):
+        import serve
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        exchange.confirm(sha)
+        timestamp = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+        self._write_existing_event(sha,"RIESAME","Primo record, ordine ignoto",timestamp)
+        self._write_existing_event(sha,"RISULTATO_VERIFICATO","Secondo record, ordine ignoto",timestamp)
+        history = exchange.decision_history()
+        self.assertEqual(len(history),2)
+        recent, ambiguous = exchange.latest_events(history)
+        self.assertTrue(ambiguous)
+        self.assertEqual(len(recent),2)
+        self.assertEqual(len(exchange.uncertain_event_seconds(history)),1)
+        page = exchange.render_page("TOKEN")
+        self.assertIn("ordine nel secondo non documentato",page)
+        home = serve.decision_home()
+        self.assertIn("ordine reciproco non documentato",home)
+        self.assertIn("Primo record, ordine ignoto",home)
+        self.assertIn("Secondo record, ordine ignoto",home)
+        self.assertNotIn("Ultimo evento autore",home)
+
+    def test_rt26_04_new_microsecond_order_without_digest_sort(self):
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        exchange.confirm(sha)
+        base = dt.datetime.now(dt.timezone.utc).replace(microsecond=100000)
+        first = base.isoformat(timespec="microseconds")
+        second = (base + dt.timedelta(microseconds=1)).isoformat(timespec="microseconds")
+        self._write_existing_event(sha,"RIESAME","Prima azione",first)
+        self._write_existing_event(sha,"RISCONTRO_DICHIARATO","Seconda azione",second)
+        result = exchange.decision_history()
+        self.assertEqual([row["nota"] for row in result],["Prima azione","Seconda azione"])
+        self.assertFalse(exchange.uncertain_event_seconds(result))
+        recent, ambiguous = exchange.latest_events(result)
+        self.assertFalse(ambiguous)
+        self.assertEqual(recent[0]["nota"],"Seconda azione")
 
 
 if __name__ == "__main__":
