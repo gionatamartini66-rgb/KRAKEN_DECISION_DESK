@@ -158,6 +158,35 @@ class DriveUIHandoffTests(unittest.TestCase):
             exchange.receive_synced()
         self.assertIsNone(exchange.pending())
 
+    def test_decision_events_require_explicit_author_and_approval(self):
+        self.original.persist_origin()
+        sha=exchange.receive(bridge.canonical(self.original.plan))
+        payload=lambda state,note: bridge.canonical({"sha256":sha,"stato":state,"nota":note})
+        with self.assertRaises(bridge.BridgeError):
+            exchange.record_decision(payload("ESECUZIONE_DICHIARATA","Dichiarazione"))
+        with self.assertRaises(bridge.BridgeError):
+            exchange.record_decision(payload("RIFIUTATA",""))
+        self.assertEqual(exchange.record_decision(payload("RINVIATA","Attendere")), "INSERITO")
+        with self.assertRaises(bridge.BridgeError):
+            exchange.confirm(sha)
+        self.assertEqual(bridge.load_archive(),{})
+        self.assertIn("RINVIATA",exchange.render_page("TOKEN"))
+
+    def test_approved_version_has_no_second_approval_and_review_is_dated(self):
+        self.original.persist_origin()
+        sha=exchange.receive(bridge.canonical(self.original.plan))
+        self.assertEqual(exchange.confirm(sha)["stato"],"INSERITO")
+        page=exchange.render_page("TOKEN")
+        self.assertIn("VERSIONE APPROVATA",page)
+        self.assertNotIn("Confermo questa versione nel KDD</button>",page)
+        payload=lambda state,note: bridge.canonical({"sha256":sha,"stato":state,"nota":note})
+        with self.assertRaises(bridge.BridgeError):
+            exchange.record_decision(payload("RISULTATO_VERIFICATO","Riscontro"))
+        self.assertEqual(exchange.record_decision(payload("ESECUZIONE_DICHIARATA","Dichiarazione manuale non verificata")),"INSERITO")
+        self.assertEqual(exchange.record_decision(payload("RIESAME","Nuova rilevazione da confrontare")),"INSERITO")
+        self.assertEqual(len(exchange.decision_history()),2)
+        self.assertEqual(len(bridge.load_archive()),1)
+
     def test_handle_rejects_implicit_consent(self):
         self.original.persist_origin()
         self.assertIn("NON approvata",exchange.handle("ricevi",bridge.canonical(self.original.plan)))
