@@ -198,5 +198,89 @@ class DriveUIHandoffTests(unittest.TestCase):
         self.assertEqual(bridge.load_archive(),{})
 
 
+    def _candidate(self, name, parent=None):
+        plan = copy.deepcopy(self.original.plan)
+        plan["proposta_id"] = name
+        plan["sostituisce_sha256"] = parent
+        return plan
+
+    def test_a_deferred_b_imported_stale_a_cannot_overwrite_even_after_restart(self):
+        self.original.persist_origin()
+        a = self._candidate("A")
+        b = self._candidate("B")
+        a_sha = exchange.receive(bridge.canonical(a))
+        self.assertEqual(exchange.receive(bridge.canonical(a)), a_sha)
+        with self.assertRaisesRegex(bridge.BridgeError, "in attesa"):
+            exchange.receive(bridge.canonical(b))
+        self.assertEqual(exchange.record_decision(bridge.canonical(
+            {"sha256": a_sha, "stato": "RINVIATA", "nota": "Riesaminare"})), "INSERITO")
+        self.assertEqual(exchange.receive(bridge.canonical(b)), bridge.digest(b))
+        events = exchange.decision_history()
+        self.assertEqual(events[0]["proposta"]["posizioni"], a["posizioni"])
+        self.assertEqual(events[0]["proposta"]["snapshot_utc"], a["snapshot_utc"])
+        source = self.sync / exchange.INCOMING_NAME
+        source.write_bytes(bridge.canonical(a) + b"\n")
+        with mock.patch.object(bridge, "_LOCAL_ORIGINS", set()):
+            self.assertEqual(exchange.receive_synced(), a_sha)
+            self.assertEqual(exchange.pending()[0], b)
+            self.assertEqual(exchange.confirm(bridge.digest(b))["stato"], "INSERITO")
+            self.assertEqual(exchange.pending()[0], b)
+            self.assertEqual(len(exchange.decision_history()), 1)
+        self.assertEqual(len(bridge.load_archive()), 1)
+
+    def test_approved_a_requires_exact_parent_for_b_and_replay_is_inert(self):
+        self.original.persist_origin()
+        a = self._candidate("A")
+        a_sha = exchange.receive(bridge.canonical(a))
+        exchange.confirm(a_sha)
+        b_unlinked = self._candidate("B-UNLINKED")
+        with self.assertRaisesRegex(bridge.BridgeError, "Revisione"):
+            exchange.receive(bridge.canonical(b_unlinked))
+        self.assertEqual(exchange.pending()[0], a)
+        b = self._candidate("B", a_sha)
+        b_sha = exchange.receive(bridge.canonical(b))
+        self.assertEqual(exchange.receive_synced(), None)
+        (self.sync / exchange.INCOMING_NAME).write_bytes(bridge.canonical(a))
+        self.assertEqual(exchange.receive_synced(), a_sha)
+        self.assertEqual(exchange.pending()[0], b)
+        self.assertEqual(exchange.confirm(b_sha)["stato"], "INSERITO")
+        self.assertEqual(len(bridge.load_archive()), 2)
+        self.assertEqual(exchange._approved_head(bridge.load_archive()), b_sha)
+
+    def test_deferred_parent_is_not_approved_parent(self):
+        self.original.persist_origin()
+        a = self._candidate("A")
+        a_sha = exchange.receive(bridge.canonical(a))
+        exchange.record_decision(bridge.canonical(
+            {"sha256": a_sha, "stato": "RIFIUTATA", "nota": "Motivazione"}))
+        b = self._candidate("B", a_sha)
+        with self.assertRaisesRegex(bridge.BridgeError, "Revisione"):
+            exchange.receive(bridge.canonical(b))
+        self.assertEqual(exchange.pending()[0], a)
+
+    def test_termux_no_os_link_and_interrupted_event_stage_is_inert(self):
+        self.original.persist_origin()
+        a = self._candidate("A")
+        a_sha = exchange.receive(bridge.canonical(a))
+        payload = bridge.canonical({"sha256": a_sha, "stato": "RIFIUTATA",
+                                    "nota": "Rifiuto manuale"})
+        with mock.patch.object(exchange.os, "link", side_effect=AssertionError("os.link forbidden"),
+                               create=True):
+            self.assertEqual(exchange.record_decision(payload), "INSERITO")
+        folder = bridge.PRIVATE_ROOT / bridge.INBOX / exchange.DECISION_EVENTS
+        interrupted = folder / ".kdd-event-interrupted.tmp"
+        interrupted.write_bytes(b'{"partial":')
+        interrupted.chmod(0o600)
+        history = exchange.decision_history()
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["proposta"], a)
+        with self.assertRaisesRegex(bridge.BridgeError, "già"):
+            exchange.record_decision(payload)
+        page = exchange.render_page("TOKEN")
+        self.assertIn("RIFIUTATA", page)
+        self.assertIn(a["snapshot_utc"], page)
+        self.assertEqual(len(exchange.decision_history()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
