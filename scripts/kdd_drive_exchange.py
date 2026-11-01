@@ -441,7 +441,13 @@ async function kddSend(path,body,kind){
   if(r.ok) setTimeout(()=>location.reload(),1200);
  } catch(e) { status.textContent='KDD locale non raggiungibile.'; }
 }
-function kddDecision(sha){\n const stato=document.getElementById("kdd-decision-state").value;\n const nota=document.getElementById("kdd-decision-note").value;\n if(!nota.trim())return;\n kddSend("/gpt/decisione",JSON.stringify({sha256:sha,stato:stato,nota:nota}),"application/json");\n}\nasync function kddFile(){
+function kddDecision(sha){
+ const stato=document.getElementById("kdd-decision-state").value;
+ const nota=document.getElementById("kdd-decision-note").value;
+ if(!nota.trim())return;
+ kddSend("/gpt/decisione",JSON.stringify({sha256:sha,stato:stato,nota:nota}),"application/json");
+}
+async function kddFile(){
  const f=document.getElementById('gpt-json').files[0];
  if(!f){document.getElementById('feedback').textContent='Scegli il JSON da Drive.';return;}
  if(f.size>8000000){document.getElementById('feedback').textContent='File troppo grande.';return;}
