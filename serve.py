@@ -479,7 +479,38 @@ def with_controls(page: str, result: str = "") -> str:
         decision_panel = ("<section id='kdd-decisioni' role='status'><h2>Quadro decisionale</h2>"
                           "<p>Riepilogo aggiunto non disponibile. "
                           "Patrimonio originale, Spot, grafici e aggiornamento restano accessibili.</p></section>")
-    return page.replace(target, toolbar + js + decision_panel + portfolio_proposals + target, 1)
+    if target not in page:
+        # Unexpected legacy markup: do not discard the original HTML/navigation.
+        return page.replace("</body>", toolbar + js + decision_panel + "</body>", 1)
+    before, after = page.split(target, 1)
+    if "</header>" not in before:
+        return before + toolbar + js + decision_panel + target + after
+    header, legacy = before.split("</header>", 1)
+    # Keep existing Spot plan and archives intact but secondary. Their script
+    # freshness callbacks continue running; no archive or contract is rewritten.
+    old_spot = ("<details id='kdd-legacy-spot'><summary>Apri precedenti piani Spot "
+                "singolo-token e verifiche storiche</summary>" + legacy +
+                "</details>")
+    portfolio = portfolio_proposals
+    archive = ("<details id='kdd-approved-archive'><summary>Apri archivio proposte "
+               "patrimoniali approvate</summary>" + portfolio + "</details>")
+    part2 = "<h2>2 · Candidati da valutare</h2>"
+    part3 = "<h2>3 · Macroeconomia e geopolitica</h2>"
+    if part2 in after and part3 in after:
+        old_wallet, remaining = after.split(part2, 1)
+        old_scan, last = remaining.split(part3, 1)
+        diagnostics = (
+            "<details id='kdd-wallet-diagnostics'><summary>Apri patrimonio originale "
+            "e diagnostica dettagliata</summary>" + target + old_wallet + "</details>"
+            "<details id='kdd-spot-diagnostics'><summary>Apri schede scanner, "
+            "costi e dati tecnici completi</summary>" + part2 + old_scan + "</details>" +
+            part3 + last)
+    else:
+        # Source markup changed: retain it verbatim rather than moving sections
+        # by unverified text boundaries.
+        diagnostics = target + after
+    return (header + "</header>" + toolbar + js + decision_panel +
+            old_spot + archive + diagnostics)
 
 
 def load_sui_chart(timeframe, public_kraken=None):
