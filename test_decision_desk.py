@@ -4015,7 +4015,7 @@ class IntegratedDecisionHomeTests(unittest.TestCase):
         self.assertIn("href='/analisi/spot?pair=XXBTZEUR'", page)
         self.assertIn("href='/grafico/spot?pair=ADAUSD&amp;tf=15m'", page)
         self.assertIn("href='/analisi/spot?pair=ADAUSD'", page)
-        self.assertIn("1D NON DISPONIBILE", page)
+        self.assertIn("<a href='/grafico/spot?pair=XXBTZEUR&amp;tf=1d'>1D</a> NON_DISPONIBILE", page)
         self.assertNotIn("href='/analisi/sui-mtf'", page)
         self.assertNotIn("href='/grafico/spot?pair=ETH", page)
 
@@ -4025,7 +4025,7 @@ class IntegratedDecisionHomeTests(unittest.TestCase):
         (self.root / "ultimo_report.json").write_text(json.dumps(report), encoding="utf-8")
         page = self.render_home()
         self.assertIn("DA AGGIORNARE", page)
-        self.assertIn("fotografia GPT", page.lower())
+        self.assertIn("fotografia gpt", page.lower())
         self.assertNotIn("href='/grafico/spot?pair=XXBTZEUR", page)
         self.assertNotIn("href='/grafico/spot?pair=ADAUSD", page)
 
