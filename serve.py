@@ -165,6 +165,13 @@ def decision_home():
             blocks.append("<p>Versione " + esc(proposal_sha) + " · fotografia GPT " +
                           esc(proposal.get("snapshot_utc", "n.d.")) +
                           ". Nessun giudizio attribuito a un portafoglio non leggibile.</p>")
+            if isinstance(proposal.get("posizioni"), list):
+                blocks.append("<details><summary>Posizioni della proposta storica "
+                              "(non riconciliate col report corrente)</summary>" +
+                              "".join("<p>" + esc(row.get("token", "?")) + " · GPT: " +
+                                      esc(row.get("azione", "n.d.")) + "</p>"
+                                      for row in proposal["posizioni"] if isinstance(row, dict)) +
+                              "</details>")
             related = [e for e in events if e["versione_sha256"] == proposal_sha]
             latest, unordered = exchange.latest_events(related)
             if unordered:
