@@ -1,4 +1,4 @@
-"""KDD Drive handoff: existing FolderSync outbound, Android Drive picker inbound.
+"""KDD Drive handoff: existing FolderSync outbound, FolderSync inbound.
 No remote API, Kraken order, automatic approval, or background synchronization.
 """
 from __future__ import annotations
@@ -11,7 +11,7 @@ import re
 import tempfile
 from scripts import kdd_bridge_g2 as bridge
 
-EXCHANGE_ROOT = Path("/storage/emulated/0/Kraken")
+EXCHANGE_ROOT = Path("/storage/emulated/0/KDD_TEST_SAMSUNG")
 INCOMING_NAME = "proposta_portafoglio.json"
 EXPORT_NAME = re.compile(r"kdd_handoff_[0-9a-f]{64}\.json\Z")
 
@@ -137,6 +137,8 @@ def receive_synced():
     current = pending()
     if current is not None and bridge.digest(current[0]) == bridge.digest(proposal):
         return bridge.digest(proposal)
+    if bridge.digest(proposal) in bridge.load_archive():
+        return bridge.digest(proposal)
     return receive(raw)
 
 
@@ -185,6 +187,7 @@ def render_page(token):
         proposal, bundle = item
         state = bridge.read_context(bundle)
         sha = bridge.digest(proposal)
+        already_approved = sha in bridge.load_archive()
         rows = "".join(
             "<article><b>" + esc(r["token"]) + " · " + esc(r["azione"]) + "</b><p>" +
             esc(r["tesi"]) + "</p><details><summary>Rischi, alternative, costi, evidenze e riesame</summary>" +
@@ -193,7 +196,7 @@ def render_page(token):
                                        ("invalidazione", "Invalidazione"), ("costi", "Costi"),
                                        ("evidenze", "Evidenze"), ("riesame", "Riesame"))) +
             "</details></article>" for r in proposal["posizioni"])
-        preview = ("<p><b>NON APPROVATA</b> · SHA256 " + esc(sha) +
+        preview = ("<p><b>" + ("VERSIONE APPROVATA · STORICO" if already_approved else "NON APPROVATA") + "</b> · SHA256 " + esc(sha) +
                    "</p><p>Fotografia " + esc(proposal["snapshot_utc"]) +
                    " · mercato " + esc(state["mercato"]["stato"]) +
                    " · saldo " + esc(state["saldo"]["stato"]) + "</p>" +
