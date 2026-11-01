@@ -79,7 +79,7 @@ def decision_home():
             blocks.append("<article><b>" + token + "</b> · giudizio KDD: " +
                           esc(h.get("decisione", "NON DISPONIBILE")) +
                           "<p>Valore EUR: " + esc(h.get("valore_eur", "n.d.")) +
-                          " · analisi e alternative nel report originale</p></article>")
+                          " · valutazione tecnica KDD: " + esc("; ".join(str(n) for n in notes) if notes else h.get("errore", "Non disponibile")) + "</p></article>")
         opportunities = report.get("schede_v02", [])
         if isinstance(opportunities, list):
             blocks.append("<h3>Opportunità Spot selezionate dal KDD</h3>")
@@ -99,12 +99,14 @@ def decision_home():
         exchange.receive_synced()
         item = exchange.pending()
         approved = exchange.bridge.load_archive()
+        events = exchange.decision_history()
         if item:
             proposal, bundle = item
             sha = exchange.bridge.digest(proposal)
             is_approved = sha in approved
+            dismissed = any(e["versione_sha256"] == sha and e["stato"] in ("RIFIUTATA", "RINVIATA") for e in events)
             blocks.append("<h3>Proposta GPT · " +
-                          ("VERSIONE APPROVATA" if is_approved else "IN ATTESA DI DECISIONE") +
+                          ("VERSIONE APPROVATA" if is_approved else ("RIFIUTATA / RINVIATA" if dismissed else "IN ATTESA DI DECISIONE")) +
                           "</h3><p>SHA256 " + esc(sha) + " · fotografia " +
                           esc(proposal["snapshot_utc"]) + "</p><p>Scenario: " +
                           esc(proposal["scenario"]) + " · alternativa: " +
@@ -117,6 +119,7 @@ def decision_home():
                               "</p><p>" + esc(item["riesame"]) + "</p></details></article>")
         else:
             blocks.append("<p>Proposta GPT: nessuna versione ricevuta.</p>")
+        blocks.append("<p>Eventi autore datati: " + str(len(events)) + " · versioni approvate: " + str(len(approved)) + "</p>")
         blocks.append("<p>Versioni approvate in archivio: " + str(len(approved)) +
                       ". Approvazione non equivale a esecuzione manuale né a risultato verificato.</p>"
                       "<p><a href='/gpt'>Esamina proposta, decidi e consulta storico</a></p>")
@@ -823,7 +826,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.check_host():
             return
         path = urllib.parse.urlsplit(self.path).path
-        if path in ("/gpt/prepara", "/gpt/ricevi", "/gpt/conferma"):
+        if path in ("/gpt/prepara", "/gpt/ricevi", "/gpt/conferma", "/gpt/decisione"):
             if not hmac.compare_digest(self.headers.get("X-KDD-Token", ""), TOKEN):
                 self.send_error(403, "Verifica richiesta non riuscita")
                 return
