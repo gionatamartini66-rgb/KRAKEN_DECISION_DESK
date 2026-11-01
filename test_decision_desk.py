@@ -2844,6 +2844,31 @@ class AnyKrakenSpotTests(unittest.TestCase):
         self.assertTrue(callable(serve.load_sui_chart))
         self.assertTrue(callable(serve.load_sui_comparison))
 
+    def test_home_with_present_report_never_links_fixed_sui_mtf(self):
+        # Unlike report-free preflight, exercise the real report-loaded home.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            report = {
+                'rilevazione_utc': self.now.isoformat(),
+                'stato_totale': 'PARZIALE',
+                'totale_stimato_eur': 0,
+                'posizioni': [{'token': 'BTC', 'decisione': 'NESSUNA DECISIONE',
+                               'valore_eur': 0, 'note': []}],
+                'schede_v02': [],
+            }
+            (root / 'ultimo_report.json').write_text(
+                json.dumps(report), encoding='utf-8')
+            with mock.patch.object(serve.desk, 'DIR', root), \
+                 mock.patch('scripts.kdd_drive_exchange.receive_synced',
+                            side_effect=RuntimeError('bridge isolated for this test')):
+                page = serve.with_controls("<h2>1 · Decisioni e posizioni</h2>")
+        self.assertIn('Patrimonio: PARZIALE', page)
+        self.assertIn('<b>BTC</b>', page)
+        self.assertIn("href='/mercati/spot'", page)
+        self.assertNotIn("href='/analisi/sui-mtf'", page)
+        self.assertNotIn("href='/grafico/sui-4h'", page)
+        self.assertIn('Aggiorna dati ora', page)
+
     def test_user_selected_pair_not_derived_from_portfolio(self):
         with mock.patch.object(serve.desk, "load",
                                side_effect=AssertionError("no private local files")):
