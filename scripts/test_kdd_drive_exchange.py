@@ -1,5 +1,6 @@
 """Real bridge + user-interface handoff tests; no Drive/network/phone involved."""
 import copy
+import datetime as dt
 import html
 import json
 from pathlib import Path
@@ -127,6 +128,66 @@ class DriveUIHandoffTests(unittest.TestCase):
         self.assertEqual(state,200,message)
         self.assertEqual(len(bridge.load_archive()),1)
 
+    def test_foldersync_inbound_home_preview_without_approval(self):
+        self.original.persist_origin()
+        source=self.sync/exchange.INCOMING_NAME
+        source.write_bytes(bridge.canonical(self.original.plan)+b"\n")
+        import serve
+        with mock.patch.object(serve,"TOKEN","SYNTHETIC"):
+            home=serve.decision_home()
+        self.assertIn("IN ATTESA DI DECISIONE",home)
+        self.assertIn("ADA",home)
+        self.assertIn(bridge.digest(self.original.plan),home)
+        self.assertEqual(bridge.load_archive(),{})
+        self.assertEqual(bridge.digest(exchange.pending()[0]),bridge.digest(self.original.plan))
+
+    def test_foldersync_invalid_input_keeps_previous_pending(self):
+        self.original.persist_origin()
+        old=exchange.receive(bridge.canonical(self.original.plan))
+        (self.sync/exchange.INCOMING_NAME).write_bytes(b'{"schema":"invalid"}')
+        with self.assertRaises(bridge.BridgeError):
+            exchange.receive_synced()
+        self.assertEqual(bridge.digest(exchange.pending()[0]),old)
+        self.assertIn("STOP",__import__("serve").decision_home())
+
+    def test_foldersync_symlink_never_imported(self):
+        self.original.persist_origin()
+        target=self.sync/"outside.json"
+        target.write_bytes(bridge.canonical(self.original.plan))
+        (self.sync/exchange.INCOMING_NAME).symlink_to(target)
+        with self.assertRaises(bridge.BridgeError):
+            exchange.receive_synced()
+        self.assertIsNone(exchange.pending())
+
+    def test_decision_events_require_explicit_author_and_approval(self):
+        self.original.persist_origin()
+        sha=exchange.receive(bridge.canonical(self.original.plan))
+        payload=lambda state,note: bridge.canonical({"sha256":sha,"stato":state,"nota":note})
+        with self.assertRaises(bridge.BridgeError):
+            exchange.record_decision(payload("ESECUZIONE_DICHIARATA","Dichiarazione"))
+        with self.assertRaises(bridge.BridgeError):
+            exchange.record_decision(payload("RIFIUTATA",""))
+        self.assertEqual(exchange.record_decision(payload("RINVIATA","Attendere")), "INSERITO")
+        with self.assertRaises(bridge.BridgeError):
+            exchange.confirm(sha)
+        self.assertEqual(bridge.load_archive(),{})
+        self.assertIn("RINVIATA",exchange.render_page("TOKEN"))
+
+    def test_approved_version_has_no_second_approval_and_review_is_dated(self):
+        self.original.persist_origin()
+        sha=exchange.receive(bridge.canonical(self.original.plan))
+        self.assertEqual(exchange.confirm(sha)["stato"],"INSERITO")
+        page=exchange.render_page("TOKEN")
+        self.assertIn("VERSIONE APPROVATA",page)
+        self.assertNotIn("Confermo questa versione nel KDD</button>",page)
+        payload=lambda state,note: bridge.canonical({"sha256":sha,"stato":state,"nota":note})
+        with self.assertRaises(bridge.BridgeError):
+            exchange.record_decision(payload("RISULTATO_VERIFICATO","Riscontro"))
+        self.assertEqual(exchange.record_decision(payload("ESECUZIONE_DICHIARATA","Dichiarazione manuale non verificata")),"INSERITO")
+        self.assertEqual(exchange.record_decision(payload("RIESAME","Nuova rilevazione da confrontare")),"INSERITO")
+        self.assertEqual(len(exchange.decision_history()),2)
+        self.assertEqual(len(bridge.load_archive()),1)
+
     def test_handle_rejects_implicit_consent(self):
         self.original.persist_origin()
         self.assertIn("NON approvata",exchange.handle("ricevi",bridge.canonical(self.original.plan)))
@@ -136,6 +197,346 @@ class DriveUIHandoffTests(unittest.TestCase):
             exchange.handle("conferma",json.dumps({"sha256":bridge.digest(self.original.plan),
                                                  "consent":"APPROVO_VERSIONE"}).encode())
         self.assertEqual(bridge.load_archive(),{})
+
+
+    def _candidate(self, name, parent=None):
+        plan = copy.deepcopy(self.original.plan)
+        plan["proposta_id"] = name
+        plan["sostituisce_sha256"] = parent
+        return plan
+
+    def test_a_deferred_b_imported_stale_a_cannot_overwrite_even_after_restart(self):
+        self.original.persist_origin()
+        a = self._candidate("A")
+        b = self._candidate("B")
+        a_sha = exchange.receive(bridge.canonical(a))
+        self.assertEqual(exchange.receive(bridge.canonical(a)), a_sha)
+        with self.assertRaisesRegex(bridge.BridgeError, "in attesa"):
+            exchange.receive(bridge.canonical(b))
+        self.assertEqual(exchange.record_decision(bridge.canonical(
+            {"sha256": a_sha, "stato": "RINVIATA", "nota": "Riesaminare"})), "INSERITO")
+        self.assertEqual(exchange.receive(bridge.canonical(b)), bridge.digest(b))
+        events = exchange.decision_history()
+        self.assertEqual(events[0]["proposta"]["posizioni"], a["posizioni"])
+        self.assertEqual(events[0]["proposta"]["snapshot_utc"], a["snapshot_utc"])
+        source = self.sync / exchange.INCOMING_NAME
+        source.write_bytes(bridge.canonical(a) + b"\n")
+        with mock.patch.object(bridge, "_LOCAL_ORIGINS", set()):
+            self.assertEqual(exchange.receive_synced(), a_sha)
+            self.assertEqual(exchange.pending()[0], b)
+            self.assertEqual(exchange.confirm(bridge.digest(b))["stato"], "INSERITO")
+            self.assertEqual(exchange.pending()[0], b)
+            self.assertEqual(len(exchange.decision_history()), 1)
+        self.assertEqual(len(bridge.load_archive()), 1)
+
+    def test_approved_a_requires_exact_parent_for_b_and_replay_is_inert(self):
+        self.original.persist_origin()
+        a = self._candidate("A")
+        a_sha = exchange.receive(bridge.canonical(a))
+        exchange.confirm(a_sha)
+        b_unlinked = self._candidate("B-UNLINKED")
+        with self.assertRaisesRegex(bridge.BridgeError, "Revisione"):
+            exchange.receive(bridge.canonical(b_unlinked))
+        self.assertEqual(exchange.pending()[0], a)
+        b = self._candidate("B", a_sha)
+        b_sha = exchange.receive(bridge.canonical(b))
+        self.assertEqual(exchange.receive_synced(), None)
+        (self.sync / exchange.INCOMING_NAME).write_bytes(bridge.canonical(a))
+        self.assertEqual(exchange.receive_synced(), a_sha)
+        self.assertEqual(exchange.pending()[0], b)
+        self.assertEqual(exchange.confirm(b_sha)["stato"], "INSERITO")
+        self.assertEqual(len(bridge.load_archive()), 2)
+        self.assertEqual(exchange._approved_head(bridge.load_archive()), b_sha)
+
+    def test_late_stale_replay_of_decided_a_does_not_hide_current_b(self):
+        self.original.persist_origin()
+        a = self._candidate("A")
+        b = self._candidate("B")
+        sha_a = exchange.receive(bridge.canonical(a))
+        exchange.record_decision(bridge.canonical(
+            {"sha256": sha_a, "stato": "RIFIUTATA", "nota": "Superata"}))
+        exchange.receive(bridge.canonical(b))
+        (self.sync / exchange.INCOMING_NAME).write_bytes(bridge.canonical(a))
+        real_validate = exchange.validate_raw
+        def expire_only_old(raw):
+            if bridge.strict_json(raw)["proposta_id"] == "A":
+                raise bridge.BridgeError("Fotografia A scaduta")
+            return real_validate(raw)
+        with mock.patch.object(exchange, "validate_raw", side_effect=expire_only_old):
+            self.assertEqual(exchange.receive_synced(), sha_a)
+        self.assertEqual(exchange.pending()[0], b)
+        self.assertEqual(len(exchange.decision_history()), 1)
+
+    def test_deferred_parent_is_not_approved_parent(self):
+        self.original.persist_origin()
+        a = self._candidate("A")
+        a_sha = exchange.receive(bridge.canonical(a))
+        exchange.record_decision(bridge.canonical(
+            {"sha256": a_sha, "stato": "RIFIUTATA", "nota": "Motivazione"}))
+        b = self._candidate("B", a_sha)
+        with self.assertRaisesRegex(bridge.BridgeError, "Revisione"):
+            exchange.receive(bridge.canonical(b))
+        self.assertEqual(exchange.pending()[0], a)
+
+    def test_termux_no_os_link_and_interrupted_event_stage_is_inert(self):
+        self.original.persist_origin()
+        a = self._candidate("A")
+        a_sha = exchange.receive(bridge.canonical(a))
+        payload = bridge.canonical({"sha256": a_sha, "stato": "RIFIUTATA",
+                                    "nota": "Rifiuto manuale"})
+        with mock.patch.object(exchange.os, "link", side_effect=AssertionError("os.link forbidden"),
+                               create=True):
+            self.assertEqual(exchange.record_decision(payload), "INSERITO")
+        folder = bridge.PRIVATE_ROOT / bridge.INBOX / exchange.DECISION_EVENTS
+        interrupted = folder / ".kdd-event-interrupted.tmp"
+        interrupted.write_bytes(b'{"partial":')
+        interrupted.chmod(0o600)
+        history = exchange.decision_history()
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["proposta"], a)
+        with self.assertRaisesRegex(bridge.BridgeError, "già"):
+            exchange.record_decision(payload)
+        page = exchange.render_page("TOKEN")
+        self.assertIn("RIFIUTATA", page)
+        self.assertIn(a["snapshot_utc"], page)
+        self.assertEqual(len(exchange.decision_history()), 1)
+
+
+    def _write_existing_event(self, sha, state, note, timestamp):
+        folder = bridge.ensure_dir(
+            bridge.private_directory(bridge.INBOX, create=True) / exchange.DECISION_EVENTS)
+        row = {"versione_sha256": sha, "stato": state, "nota": note,
+               "creato_utc": timestamp}
+        path = folder / (bridge.digest(row) + ".json")
+        path.write_bytes(bridge.canonical(row) + b"\n")
+        path.chmod(0o600)
+        return row
+
+    def test_rt26_01_declared_result_never_certifies_market_and_legacy_remains_readable(self):
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        exchange.confirm(sha)
+        payload = lambda state, note: bridge.canonical(
+            {"sha256": sha, "stato": state, "nota": note})
+        exchange.record_decision(payload("RIESAME", "Ho consultato il quadro"))
+        with self.assertRaises(bridge.BridgeError):
+            exchange.record_decision(payload("RISULTATO_VERIFICATO", "Prova non attestata"))
+        self.assertEqual(exchange.record_decision(
+            payload("RISCONTRO_DICHIARATO", "Riferisco un esito")),"INSERITO")
+        legacy = self._write_existing_event(
+            sha, "RISULTATO_VERIFICATO", "Nota storica senza prova allegata",
+            "2026-01-01T11:00:00+00:00")
+        self.assertIn(legacy, exchange.decision_history())
+        page = exchange.render_page("TOKEN")
+        self.assertIn("RISCONTRO STORICO DICHIARATO", page)
+        self.assertIn("RISCONTRO DICHIARATO DALL", page)
+        self.assertIn("verifica su dati non attestata", page)
+        self.assertNotIn("<option value='RISULTATO_VERIFICATO'>", page)
+        self.assertNotIn("RISULTATO_VERIFICATO ·", page)
+
+    def test_rt26_02_general_decision_not_misattributed_to_each_token(self):
+        import serve
+        now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+        created = (now - dt.timedelta(minutes=5)).isoformat()
+        expiry = (now + dt.timedelta(days=1)).isoformat()
+        records = [
+            {"token": "PORTAFOGLIO", "scelta": "RIVEDERE", "motivo": "Quadro generale",
+             "creata_utc": created, "scade_utc": expiry},
+            {"token": "BTC", "scelta": "ALLEGGERIRE", "motivo": "Scelta specifica",
+             "creata_utc": now.isoformat(), "scade_utc": expiry},
+        ]
+        report = {
+            "rilevazione_utc": now.isoformat(), "stato_totale": "DISPONIBILE",
+            "totale_stimato_eur": "dato di prova", "schede_v02": [],
+            "posizioni": [
+                {"token": token, "decisione": serve.desk.decision_state(token, records, now),
+                 "valore_eur": "n.d.", "note": []}
+                for token in ("ADA", "BTC")
+            ] + [{"token":"ETH", "decisione":"Testo non riconciliabile",
+                  "valore_eur":"n.d.", "note":[]}],
+        }
+        with mock.patch.object(serve.desk, "load", return_value=report), \
+             mock.patch.object(serve.desk, "load_decisions", return_value=records):
+            html_home = serve.decision_home()
+        self.assertIn("Criterio generale PORTAFOGLIO applicato alla posizione", html_home)
+        self.assertIn("Decisione specifica del token da decisioni.jsonl", html_home)
+        self.assertIn("origine non accertata", html_home)
+        self.assertNotIn("decisione registrata autore", html_home)
+
+    def test_rt26_03_corrupt_report_does_not_disable_original_home_or_http(self):
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+        import serve
+        # Real on-disk JSON parse path; valid original HTML stays untouched.
+        (self.sync / "ultimo_report.json").write_text('{"posizioni":', encoding="utf-8")
+        (self.sync / "cruscotto.html").write_text(
+            "<html><body><nav>ORIGINALE_PATRIMONIO_SPOT_GRAFICI</nav>"
+            "<h2>1 · Decisioni e posizioni</h2></body></html>", encoding="utf-8")
+        with mock.patch.object(serve.desk, "DIR", self.sync):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+                conn.request("GET", "/", headers={"Host":"127.0.0.1:8765"})
+                resp = conn.getresponse()
+                body = resp.read().decode("utf-8")
+                conn.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+            self.assertEqual(resp.status, 200)
+            self.assertIn("ORIGINALE_PATRIMONIO_SPOT_GRAFICI", body)
+            self.assertIn("Aggiorna dati ora", body)
+            self.assertIn("/mercati/spot", body)
+            self.assertIn("report assente, incompleto o non leggibile", body)
+            # Also isolate unforeseen failures in the added overlay only.
+            with mock.patch.object(serve, "decision_home", side_effect=RuntimeError("overlay")):
+                fallback = serve.with_controls(
+                    "<h2>1 · Decisioni e posizioni</h2><p>STORICO ORIGINALE</p>")
+            self.assertIn("STORICO ORIGINALE", fallback)
+            self.assertIn("Riepilogo aggiunto non disponibile", fallback)
+            self.assertIn("Aggiorna dati ora", fallback)
+
+    def test_rt26_04_legacy_second_tie_has_no_invented_last_event(self):
+        import serve
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        exchange.confirm(sha)
+        timestamp = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+        self._write_existing_event(sha,"RIESAME","Primo record, ordine ignoto",timestamp)
+        self._write_existing_event(sha,"RISULTATO_VERIFICATO","Secondo record, ordine ignoto",timestamp)
+        history = exchange.decision_history()
+        self.assertEqual(len(history),2)
+        recent, ambiguous = exchange.latest_events(history)
+        self.assertTrue(ambiguous)
+        self.assertEqual(len(recent),2)
+        self.assertEqual(len(exchange.uncertain_event_seconds(history)),1)
+        page = exchange.render_page("TOKEN")
+        self.assertIn("ordine nel secondo non documentato",page)
+        home = serve.decision_home()
+        self.assertIn("ordine reciproco non documentato",home)
+        self.assertIn("Primo record, ordine ignoto",home)
+        self.assertIn("Secondo record, ordine ignoto",home)
+        self.assertNotIn("Ultimo evento autore",home)
+
+    def test_rt26_04_new_microsecond_order_without_digest_sort(self):
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        exchange.confirm(sha)
+        base = dt.datetime.now(dt.timezone.utc).replace(microsecond=100000)
+        first = base.isoformat(timespec="microseconds")
+        second = (base + dt.timedelta(microseconds=1)).isoformat(timespec="microseconds")
+        self._write_existing_event(sha,"RIESAME","Prima azione",first)
+        self._write_existing_event(sha,"RISCONTRO_DICHIARATO","Seconda azione",second)
+        result = exchange.decision_history()
+        self.assertEqual([row["nota"] for row in result],["Prima azione","Seconda azione"])
+        self.assertFalse(exchange.uncertain_event_seconds(result))
+        recent, ambiguous = exchange.latest_events(result)
+        self.assertFalse(ambiguous)
+        self.assertEqual(recent[0]["nota"],"Seconda azione")
+
+
+    def test_generated_gpt_javascript_node_syntax_and_decision_http(self):
+        """Check the actual /gpt HTML, invoke JS decision, then use real POST handler."""
+        import http.client
+        import subprocess
+        import threading
+        from http.server import ThreadingHTTPServer
+        import serve
+
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        server = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 1)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        def call(method, path, body=None, headers=None):
+            conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+            request_headers = {"Host": "127.0.0.1:8765"}
+            request_headers.update(headers or {})
+            try:
+                conn.request(method, path, body=body, headers=request_headers)
+                response = conn.getresponse()
+                return response.status, response.read().decode("utf-8")
+            finally:
+                conn.close()
+
+        status, page = call("GET", "/gpt")
+        self.assertEqual(status, 200)
+        self.assertIn("kddDecision(", page)
+        self.assertIn("id='kdd-decision-state'", page)
+        self.assertIn("id='kdd-decision-note'", page)
+        self.assertIn("<script>", page)
+        script = page.split("<script>", 1)[1].split("</script>", 1)[0]
+
+        syntax = subprocess.run(["node", "--check"], input=script,
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
+
+        # Execute exactly the generated script with DOM values selected by the
+        # user. A stub captures fetch without touching any external service.
+        node = """
+const fs = require('node:fs');
+const vm = require('node:vm');
+const js = fs.readFileSync(0, 'utf8');
+const sha = process.argv[1];
+let posted = null;
+const fields = {
+  'kdd-decision-state': {value: 'RINVIATA'},
+  'kdd-decision-note': {value: 'Riesame deciso dall autore'},
+  'feedback': {textContent: ''}
+};
+const context = {
+  document: {getElementById(id) {
+    if (!(id in fields)) throw Error('Campo assente: ' + id);
+    return fields[id];
+  }},
+  fetch(url, options) {
+    posted = {url, options};
+    return Promise.resolve({ok: false, text: () => Promise.resolve('prova isolata')});
+  },
+  setTimeout() {},
+  location: {reload() {}}
+};
+vm.runInNewContext(js, context);
+if (typeof context.kddDecision !== 'function') throw Error('Funzione non generata');
+context.kddDecision(sha);
+if (!posted) throw Error('Nessuna richiesta prodotta dalla decisione');
+process.stdout.write(JSON.stringify(posted));
+"""
+        invoked = subprocess.run(["node", "-e", node, sha], input=script,
+                                 text=True, capture_output=True, timeout=10)
+        self.assertEqual(invoked.returncode, 0, invoked.stderr)
+        posted = json.loads(invoked.stdout)
+        self.assertEqual(posted["url"], "/gpt/decisione")
+        self.assertEqual(posted["options"]["method"], "POST")
+        self.assertEqual(posted["options"]["headers"]["X-KDD-Token"], serve.TOKEN)
+        self.assertEqual(posted["options"]["headers"]["Content-Type"], "application/json")
+        payload = json.loads(posted["options"]["body"])
+        self.assertEqual(payload, {"sha256": sha, "stato": "RINVIATA",
+                                   "nota": "Riesame deciso dall autore"})
+        self.assertEqual(bridge.load_archive(), {})
+
+        # Replay the payload generated by JS through the actual local handler.
+        status, reply = call("POST", posted["url"], posted["options"]["body"],
+                             posted["options"]["headers"])
+        self.assertEqual(status, 200, reply)
+        self.assertIn("INSERITO", reply)
+        history = exchange.decision_history()
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["stato"], "RINVIATA")
+        self.assertEqual(history[0]["nota"], "Riesame deciso dall autore")
+        self.assertEqual(bridge.load_archive(), {})
+        status, page = call("GET", "/gpt")
+        self.assertEqual(status, 200)
+        self.assertIn("RINVIATA", page)
+        self.assertIn("Riesame deciso dall autore", page)
 
 
 if __name__ == "__main__":
