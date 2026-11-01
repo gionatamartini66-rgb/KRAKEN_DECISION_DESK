@@ -71,12 +71,13 @@ def decision_home():
         blocks.append("<p>Patrimonio: " + esc(report.get("stato_totale", "NON DISPONIBILE")) +
                       " · totale stimato EUR " + esc(report.get("totale_stimato_eur", "n.d.")) +
                       " · rilevazione " + esc(report.get("rilevazione_utc", "n.d.")) +
-                      "</p><p>Giudizi KDD e dati di posizione: nella sezione sottostante del cruscotto originale.</p>")
+                      "</p><p>Dettaglio posizioni e analisi tecniche nella sezione originale del cruscotto.</p>")
         for h in report["posizioni"]:
             if not isinstance(h, dict):
                 continue
             token = esc(h.get("token", "?"))
-            blocks.append("<article><b>" + token + "</b> · giudizio KDD: " +
+            notes = h.get("note") if isinstance(h.get("note"), list) else []
+            blocks.append("<article><b>" + token + "</b> · decisione registrata autore: " +
                           esc(h.get("decisione", "NON DISPONIBILE")) +
                           "<p>Valore EUR: " + esc(h.get("valore_eur", "n.d.")) +
                           " · valutazione tecnica KDD: " + esc("; ".join(str(n) for n in notes) if notes else h.get("errore", "Non disponibile")) + "</p></article>")
