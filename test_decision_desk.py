@@ -3909,4 +3909,122 @@ class DossierPatrimonialeG2Tests(unittest.TestCase):
         self.assertEqual(status["idoneita_analisi_patrimoniale"],"NON_IDONEA")
 
 
+
+
+class IntegratedDecisionHomeTests(unittest.TestCase):
+    """Falsifiable home composition: local report and original rendering, no private data."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = pathlib.Path(self.temp.name)
+        patcher = unittest.mock.patch.object(d, "DIR", self.root)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.now = d.NOW()
+        self.tokens = ["BTC", "ETH", "SOL", "SUI", "BNB", "ADA", "DOT",
+                       "LINK", "AVAX", "NEAR"]
+        data = {"rilevazione_utc": self.now.isoformat(timespec="seconds"),
+                "markets": {"BTC": {"prezzo_eur": 1}}, "trends": {},
+                "feed": [], "problemi_feed": []}
+        wallet = {"posizioni": [{"token": t, "quantita": None if t == "ETH" else "1"}
+                                for t in self.tokens]}
+        self.report = d.build_report(data, wallet, {}, {}, [])
+        self.report["piano_gpt"] = None
+        self.report["schede_v02"] = [{
+            "token": "ADA", "categoria": "setup in verifica",
+            "esito": "CONFIGURAZIONE_MISTA", "sintesi": "Volume da verificare",
+            "perche_selezionato": "Osservazione 1H",
+            "evidenze": ["OHLC 1H"], "criticita": ["Spread da aggiornare"],
+            "coppia_analisi": "ADA/USD",
+            "alternative": [{"pair": "ADA/USD", "pair_key": "ADAUSD"}],
+            "costi_roundtrip": []}]
+        self.report["saldo_stato"] = {
+            "origine": "KRAKEN_BALANCEEX",
+            "acquisizione_saldo_utc": (self.now - dt.timedelta(hours=4)).isoformat(),
+            "freschezza_saldo": "RECENTE"}
+        self.report["dossier_stato"] = {"stato": "PARZIALE",
+                                         "fotografia_portafoglio_sha256": "abc"}
+        (self.root / "ultimo_report.json").write_text(
+            json.dumps(self.report), encoding="utf-8")
+        dossier = {
+            "kraken_istantanea_utc": self.report["rilevazione_utc"],
+            "fotografia_portafoglio_sha256": "abc",
+            "patrimonio_4tf": {
+                "posizioni": [{
+                    "indice": i, "token": token, "coppia": "XBT/EUR" if i == 0 else None,
+                    "pair_key": "XXBTZEUR" if i == 0 else None,
+                    "asset_base": "XBT" if i == 0 else None,
+                    "valuta_quotazione": "EUR" if i == 0 else None,
+                    "stato": "PARZIALE",
+                    "timeframe": {label: {"stato": "NON_DISPONIBILE" if label == "1D" else "AGGIORNATO"}
+                                  for label in ("15m", "1H", "4H", "1D")}
+                } for i, token in enumerate(self.tokens)]
+            }}
+        (self.root / "dossier_multifonte.json").write_text(
+            json.dumps(dossier), encoding="utf-8")
+        self.proposal = {
+            "proposta_id": "fixture-001",
+            "snapshot_utc": (self.now - dt.timedelta(days=2)).isoformat(),
+            "scenario": "Valutazione storica su dieci asset",
+            "scenario_alternativo": "Ruotare solo dopo confronto",
+            "rischi_comuni": "Liquidità incerta",
+            "liquidita": "Disponibilità non verificata",
+            "revisione": "Riesame al nuovo snapshot",
+            "posizioni": [{
+                "indice": i, "token": token, "azione": "RINVIARE" if i == 1 else "MANTENERE",
+                "tesi": "Ipotesi storica " + token, "alternativa": "Alleggerire",
+                "rischi": "Rischio " + token, "invalidazione": "Nuovo contesto",
+                "riesame": "Prossima fotografia", "costi": "Non calcolati",
+                "evidenze": "Dossier storico",
+            } for i, token in enumerate(self.tokens)]}
+        from scripts import kdd_drive_exchange as exchange
+        self.mocks = [
+            unittest.mock.patch.object(exchange, "receive_synced", return_value=None),
+            unittest.mock.patch.object(exchange, "pending", return_value=(self.proposal, {})),
+            unittest.mock.patch.object(exchange.bridge, "load_archive", return_value={}),
+            unittest.mock.patch.object(exchange, "decision_history", return_value=[]),
+        ]
+        for patch in self.mocks:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def render_home(self):
+        return serve.with_controls(d.render(self.report))
+
+    def test_decision_first_real_render_and_complete_wallet(self):
+        page = self.render_home()
+        self.assertLess(page.index("id='kdd-decisioni'"), page.index("id='piano-gpt'"))
+        self.assertIn("NON APPROVATA", page)
+        self.assertIn("Valutazione storica su dieci asset", page)
+        self.assertIn("Riesame al nuovo snapshot", page)
+        self.assertIn("10 posizioni", page)
+        self.assertIn("saldo", page.lower())
+        self.assertIn("mercato", page.lower())
+        self.assertIn("ETH", page)
+        self.assertIn("Quantità non nota", page)
+        self.assertIn("PARZIALE", page)
+        self.assertIn("Visualizza tutte le posizioni", page)
+        self.assertIn("id='kdd-legacy-spot'", page)
+
+    def test_direct_catalogued_pair_links_and_missing_frame(self):
+        page = self.render_home()
+        self.assertIn("href='/grafico/spot?pair=XXBTZEUR&amp;tf=4h'", page)
+        self.assertIn("href='/analisi/spot?pair=XXBTZEUR'", page)
+        self.assertIn("href='/grafico/spot?pair=ADAUSD&amp;tf=15m'", page)
+        self.assertIn("href='/analisi/spot?pair=ADAUSD'", page)
+        self.assertIn("1D NON DISPONIBILE", page)
+        self.assertNotIn("href='/analisi/sui-mtf'", page)
+        self.assertNotIn("href='/grafico/spot?pair=ETH", page)
+
+    def test_unverified_pair_and_old_market_fail_closed(self):
+        report = dict(self.report)
+        report["rilevazione_utc"] = (self.now - dt.timedelta(days=3)).isoformat()
+        (self.root / "ultimo_report.json").write_text(json.dumps(report), encoding="utf-8")
+        page = self.render_home()
+        self.assertIn("DA AGGIORNARE", page)
+        self.assertIn("fotografia GPT", page.lower())
+        self.assertNotIn("href='/grafico/spot?pair=XXBTZEUR", page)
+        self.assertNotIn("href='/grafico/spot?pair=ADAUSD", page)
+
 if __name__=='__main__': unittest.main(verbosity=2)
