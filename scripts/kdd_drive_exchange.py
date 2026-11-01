@@ -9,11 +9,13 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import threading
 from scripts import kdd_bridge_g2 as bridge
 
 EXCHANGE_ROOT = Path("/storage/emulated/0/KDD_TEST_SAMSUNG")
 INCOMING_NAME = "proposta_portafoglio.json"
 EXPORT_NAME = re.compile(r"kdd_handoff_[0-9a-f]{64}\.json\Z")
+_DECISION_LOCK = threading.RLock()  # one KDD server, concurrent HTTP requests
 
 
 def export_bundle(bundle):
@@ -86,14 +88,35 @@ def validate_raw(raw):
     return proposal, bundle
 
 
+
+def _approved_head(approved):
+    """Use the bridge's approved version chain, never just a syntactically valid SHA."""
+    if not approved:
+        return None
+    heads = set(approved) - {
+        entry["proposta"].get("sostituisce_sha256") for entry in approved.values()
+    }
+    if len(heads) != 1:
+        raise bridge.BridgeError("Successione approvazioni ambigua: STOP")
+    return next(iter(heads))
+
+
 def receive(raw):
-    """The browser file picker gives JSON bytes; save only after validation."""
+    """Validate and import a new version without losing a still-pending choice."""
+    with _DECISION_LOCK:
+        return _receive_locked(raw)
+
+
+def _receive_locked(raw):
     proposal, _ = validate_raw(raw)
     folder = bridge.private_directory(bridge.INBOX, create=True)
     final = folder / INCOMING_NAME
     sha = bridge.digest(proposal)
-    if sha in bridge.load_archive() or any(e["versione_sha256"] == sha for e in decision_history()):
+    approved = bridge.load_archive()
+    events = decision_history()
+    if sha in approved or any(e["versione_sha256"] == sha for e in events):
         raise bridge.BridgeError("Versione già deliberata: nessuna riattivazione")
+
     if final.exists() or final.is_symlink():
         existing = pending()
         if existing is None:
@@ -101,10 +124,16 @@ def receive(raw):
         old = bridge.digest(existing[0])
         if old == sha:
             return sha
-        if not (old in bridge.load_archive() or any(
+        if not (old in approved or any(
                 e["versione_sha256"] == old and e["stato"] in ("RIFIUTATA", "RINVIATA")
-                for e in decision_history())):
+                for e in events)):
             raise bridge.BridgeError("Proposta in attesa diversa: STOP, nessuna sovrascrittura")
+
+    # A rejected/deferred draft is not an APPROVED predecessor. Only the
+    # approved chain can be referenced here, since confirm() uses that bridge.
+    if proposal["sostituisce_sha256"] != _approved_head(approved):
+        raise bridge.BridgeError("Revisione non collegata all'ultima versione approvata")
+
     stage = None
     try:
         with tempfile.NamedTemporaryFile(prefix=".kdd-proposal-", suffix=".tmp",
@@ -114,21 +143,17 @@ def receive(raw):
             f.flush()
             os.fsync(f.fileno())
         os.chmod(stage, 0o600)
-        os.replace(stage, final)  # replaces ONLY a previously unapproved inbox copy
+        os.replace(stage, final)
         stage = None
         bridge._sync_dir(folder)
     finally:
         if stage is not None:
             stage.unlink(missing_ok=True)
-    return bridge.digest(proposal)
+    return sha
 
 
 def receive_synced():
-    """Read FolderSync's inbound local file; never claim remote sync succeeded.
-
-    Invalid files remain untouched for diagnosis. A validated proposal is
-    copied into the existing private inbox, without granting consent.
-    """
+    """Read the local FolderSync file. It may remain or return after decision."""
     source = EXCHANGE_ROOT / INCOMING_NAME
     if not EXCHANGE_ROOT.is_dir() or EXCHANGE_ROOT.is_symlink():
         return None
@@ -150,20 +175,16 @@ def receive_synced():
     finally:
         os.close(fd)
     proposal, _ = validate_raw(raw)
-    current = pending()
-    if current is not None and bridge.digest(current[0]) == bridge.digest(proposal):
-        return bridge.digest(proposal)
     sha = bridge.digest(proposal)
-    if sha in bridge.load_archive() or any(e["versione_sha256"] == sha for e in decision_history()):
-        return sha
-    if current is not None:
-        old = bridge.digest(current[0])
-        if not (old in bridge.load_archive() or any(
-                e["versione_sha256"] == old and e["stato"] in ("RIFIUTATA", "RINVIATA")
-                for e in decision_history())):
-            raise bridge.BridgeError("Proposta diversa già presente: STOP, nessuna sostituzione automatica")
-    return receive(raw)
-
+    with _DECISION_LOCK:
+        current = pending()
+        if current is not None and bridge.digest(current[0]) == sha:
+            return sha
+        approved = bridge.load_archive()
+        events = decision_history()
+        if sha in approved or any(e["versione_sha256"] == sha for e in events):
+            return sha  # previous A must not replace current B
+        return _receive_locked(raw)
 
 def pending():
     try:
@@ -174,17 +195,19 @@ def pending():
     return validate_raw(raw)
 
 
-def confirm(sha):
-    item = pending()
-    if item is None:
-        raise bridge.BridgeError("Nessuna proposta in attesa")
-    proposal, bundle = item
-    if not isinstance(sha, str) or bridge.digest(proposal) != sha:
-        raise bridge.BridgeError("Versione diversa: rivedere la proposta")
-    if any(row["versione_sha256"] == sha and row["stato"] in ("RIFIUTATA", "RINVIATA") for row in decision_history()):
-        raise bridge.BridgeError("Versione gia rifiutata o rinviata: occorre nuova proposta")
-    return bridge.approved_import(proposal, bundle, sha, "APPROVO_VERSIONE")
 
+def confirm(sha):
+    with _DECISION_LOCK:
+        item = pending()
+        if item is None:
+            raise bridge.BridgeError("Nessuna proposta in attesa")
+        proposal, bundle = item
+        if not isinstance(sha, str) or bridge.digest(proposal) != sha:
+            raise bridge.BridgeError("Versione diversa: rivedere la proposta")
+        if any(row["versione_sha256"] == sha and row["stato"] in ("RIFIUTATA", "RINVIATA")
+               for row in decision_history()):
+            raise bridge.BridgeError("Versione gia rifiutata o rinviata: occorre nuova proposta")
+        return bridge.approved_import(proposal, bundle, sha, "APPROVO_VERSIONE")
 
 def latest_export():
     if EXCHANGE_ROOT.is_symlink() or not EXCHANGE_ROOT.is_dir():
@@ -200,8 +223,9 @@ DECISION_EVENTS = "decision_events"
 DECISION_STATES = {"RIFIUTATA", "RINVIATA", "ESECUZIONE_DICHIARATA", "RIESAME", "RISULTATO_VERIFICATO"}
 
 
+
 def decision_history():
-    """Read append-only human statements; not evidence of Kraken execution."""
+    """Read dated human events; an interrupted .tmp is not a committed event."""
     try:
         folder = bridge.private_directory(bridge.INBOX) / DECISION_EVENTS
         bridge._check_dir(folder)
@@ -210,60 +234,85 @@ def decision_history():
             return []
         raise
     rows = []
+    basic = {"versione_sha256", "stato", "nota", "creato_utc"}
     for path in sorted(folder.iterdir()):
+        if re.fullmatch(r"\.kdd-event-[A-Za-z0-9_-]+\.tmp", path.name):
+            if path.is_symlink() or not path.is_file():
+                raise bridge.BridgeError("Residuo decisionale non regolare")
+            continue
         if not re.fullmatch(r"[0-9a-f]{64}\.json", path.name):
             raise bridge.BridgeError("Archivio decisionale non regolare")
         record = bridge.strict_json(bridge.read_regular(path, expected_parent=folder))
-        if bridge.digest(record) != path.stem or set(record) != {"versione_sha256", "stato", "nota", "creato_utc"}:
+        keys = set(record)
+        if (bridge.digest(record) != path.stem
+                or keys not in (basic, basic | {"proposta"})
+                or record.get("stato") not in DECISION_STATES):
             raise bridge.BridgeError("Archivio decisionale alterato")
+        if "proposta" in record:
+            proposal = record["proposta"]
+            if (record["stato"] not in ("RIFIUTATA", "RINVIATA")
+                    or not isinstance(proposal, dict)
+                    or bridge.digest(proposal) != record["versione_sha256"]):
+                raise bridge.BridgeError("Collegamento proposta/evento alterato")
         rows.append(record)
     return sorted(rows, key=lambda row: (row["creato_utc"], bridge.digest(row)))
 
 
 def record_decision(raw):
-    """Record explicit dated choices without modifying existing approved archive."""
-    obj = bridge.strict_json(raw)
-    if not isinstance(obj, dict) or set(obj) != {"sha256", "stato", "nota"}:
-        raise bridge.BridgeError("Decisione non valida")
-    sha, state, note = obj["sha256"], obj["stato"], obj["nota"]
-    if not isinstance(sha, str) or not bridge.HEX.fullmatch(sha) or state not in DECISION_STATES:
-        raise bridge.BridgeError("Versione o stato non valido")
-    if not isinstance(note, str) or not note.strip() or len(note) > 1500:
-        raise bridge.BridgeError("Motivazione o evidenza obbligatoria (massimo 1500 caratteri)")
-    current = pending()
-    approved = bridge.load_archive()
-    if state in ("RIFIUTATA", "RINVIATA"):
-        if current is None or bridge.digest(current[0]) != sha or sha in approved:
-            raise bridge.BridgeError("Rifiuto/rinvio ammesso solo per proposta in attesa")
-    elif sha not in approved:
-        raise bridge.BridgeError("Dichiarazioni successive richiedono versione approvata")
-    if state == "RISULTATO_VERIFICATO" and not any(
-            row["versione_sha256"] == sha and row["stato"] == "RIESAME"
-            for row in decision_history()):
-        raise bridge.BridgeError("Risultato senza riesame precedente")
-    entry = {"versione_sha256": sha, "stato": state, "nota": note.strip(),
-             "creato_utc": bridge.checked_now(None).isoformat(timespec="seconds")}
-    folder = bridge.ensure_dir(bridge.private_directory(bridge.INBOX, create=True) / DECISION_EVENTS)
-    filename = bridge.digest(entry) + ".json"
-    target = folder / filename
-    stage = None
-    try:
-        with tempfile.NamedTemporaryFile(prefix=".kdd-event-", suffix=".tmp",
-                                         dir=folder, delete=False) as f:
-            stage = Path(f.name)
-            f.write(bridge.canonical(entry) + b"\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(stage, 0o600)
-        os.link(stage, target, follow_symlinks=False)
-        bridge._sync_dir(folder)
-        return "INSERITO"
-    except FileExistsError as exc:
-        raise bridge.BridgeError("Evento gia registrato") from exc
-    finally:
-        if stage is not None:
-            stage.unlink(missing_ok=True)
-
+    """Persist one dated human statement, distinct from an actual Kraken trade."""
+    with _DECISION_LOCK:
+        obj = bridge.strict_json(raw)
+        if not isinstance(obj, dict) or set(obj) != {"sha256", "stato", "nota"}:
+            raise bridge.BridgeError("Decisione non valida")
+        sha, state, note = obj["sha256"], obj["stato"], obj["nota"]
+        if not isinstance(sha, str) or not bridge.HEX.fullmatch(sha) or state not in DECISION_STATES:
+            raise bridge.BridgeError("Versione o stato non valido")
+        if not isinstance(note, str) or not note.strip() or len(note) > 1500:
+            raise bridge.BridgeError("Motivazione o evidenza obbligatoria (massimo 1500 caratteri)")
+        current = pending()
+        approved = bridge.load_archive()
+        events = decision_history()
+        if state in ("RIFIUTATA", "RINVIATA"):
+            if current is None or bridge.digest(current[0]) != sha or sha in approved:
+                raise bridge.BridgeError("Rifiuto/rinvio ammesso solo per proposta in attesa")
+            if any(row["versione_sha256"] == sha and row["stato"] in ("RIFIUTATA", "RINVIATA")
+                   for row in events):
+                raise bridge.BridgeError("Proposta già rifiutata o rinviata")
+        elif sha not in approved:
+            raise bridge.BridgeError("Dichiarazioni successive richiedono versione approvata")
+        if state == "RISULTATO_VERIFICATO" and not any(
+                row["versione_sha256"] == sha and row["stato"] == "RIESAME"
+                for row in events):
+            raise bridge.BridgeError("Risultato senza riesame precedente")
+        entry = {"versione_sha256": sha, "stato": state, "nota": note.strip(),
+                 "creato_utc": bridge.checked_now(None).isoformat(timespec="seconds")}
+        if state in ("RIFIUTATA", "RINVIATA"):
+            # Preserve the actual version/asset/snapshot context when B replaces A;
+            # older four-field events remain readable without invented associations.
+            entry["proposta"] = current[0]
+        folder = bridge.ensure_dir(bridge.private_directory(bridge.INBOX, create=True) / DECISION_EVENTS)
+        filename = bridge.digest(entry) + ".json"
+        target = folder / filename
+        if target.exists() or target.is_symlink():
+            raise bridge.BridgeError("Evento gia registrato")
+        stage = None
+        try:
+            with tempfile.NamedTemporaryFile(prefix=".kdd-event-", suffix=".tmp",
+                                             dir=folder, delete=False) as f:
+                stage = Path(f.name)
+                f.write(bridge.canonical(entry) + b"\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(stage, 0o600)
+            # Same-dir rename of a complete staged file works on Python Termux.
+            # In-process lock + prior existence check prevent KDD HTTP races.
+            os.rename(stage, target)
+            stage = None
+            bridge._sync_dir(folder)
+            return "INSERITO"
+        finally:
+            if stage is not None:
+                stage.unlink(missing_ok=True)
 
 def render_page(token):
     esc = lambda s: html.escape(str(s), quote=True)
@@ -309,7 +358,19 @@ def render_page(token):
         preview = preview.split("<button onclick=", 1)[0]
     try:
         events = decision_history()
-        history = "".join("<p>" + esc(x["creato_utc"]) + " · " + esc(x["stato"]) + " · " + esc(x["versione_sha256"][:12]) + " · " + esc(x["nota"]) + "</p>" for x in events)
+        approvals = bridge.load_archive()
+        def event_line(x):
+            source = x.get("proposta") or approvals.get(x["versione_sha256"], {}).get("proposta")
+            attribution = ""
+            if isinstance(source, dict):
+                tokens = ", ".join(str(p["token"]) for p in source.get("posizioni", []) if isinstance(p, dict) and "token" in p)
+                attribution = " · fotografia " + esc(source.get("snapshot_utc", "?")) + " · asset " + esc(tokens)
+            else:
+                attribution = " · dettaglio asset non ricostruibile dal record storico"
+            return ("<p>" + esc(x["creato_utc"]) + " · " + esc(x["stato"]) +
+                    " · " + esc(x["versione_sha256"][:12]) + attribution +
+                    " · " + esc(x["nota"]) + "</p>")
+        history = "".join(event_line(x) for x in events)
         archive = bridge.approved_html() + "<h3>Decisioni e riesami datati</h3>" + (history or "<p>Nessun evento registrato.</p>")
     except Exception:
         archive = "<p>Archivio non verificabile: nessuna approvazione attestata.</p>"
