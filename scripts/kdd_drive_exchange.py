@@ -324,7 +324,7 @@ Aprirlo NON lo approva.</p>
 <button onclick="kddFile()">Apri proposta</button>
 <p id="feedback" role="status"></p></section>
 <section><h2>3 · Esamina e decidi</h2>""" + preview +
-        """ + decision_form + "</section><section><h2>4 · Archivio KDD</h2>" +
+        decision_form + "</section><section><h2>4 · Archivio KDD</h2>" +
         archive + "</section>" + script + "</body></html>")
 
 
