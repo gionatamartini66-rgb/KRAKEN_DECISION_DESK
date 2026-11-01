@@ -180,9 +180,10 @@ DECISION_STATES = {"RIFIUTATA", "RINVIATA", "ESECUZIONE_DICHIARATA", "RIESAME", 
 def decision_history():
     """Read append-only human statements; not evidence of Kraken execution."""
     try:
-        folder = bridge.private_directory(DECISION_EVENTS)
+        folder = bridge.private_directory(bridge.INBOX) / DECISION_EVENTS
+        bridge._check_dir(folder)
     except bridge.BridgeError:
-        if not (bridge.PRIVATE_ROOT / DECISION_EVENTS).exists():
+        if not (bridge.PRIVATE_ROOT / bridge.INBOX / DECISION_EVENTS).exists():
             return []
         raise
     rows = []
@@ -219,7 +220,7 @@ def record_decision(raw):
         raise bridge.BridgeError("Risultato senza riesame precedente")
     entry = {"versione_sha256": sha, "stato": state, "nota": note.strip(),
              "creato_utc": bridge.checked_now(None).isoformat(timespec="seconds")}
-    folder = bridge.private_directory(DECISION_EVENTS, create=True)
+    folder = bridge.ensure_dir(bridge.private_directory(bridge.INBOX, create=True) / DECISION_EVENTS)
     status = bridge.exclusive_json(folder, bridge.digest(entry) + ".json", entry)
     return status
 
