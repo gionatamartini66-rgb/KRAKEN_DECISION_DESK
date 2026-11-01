@@ -112,6 +112,12 @@ def decision_home():
                           esc(proposal["snapshot_utc"]) + "</p><p>Scenario: " +
                           esc(proposal["scenario"]) + " · alternativa: " +
                           esc(proposal["scenario_alternativo"]) + "</p>")
+            linked_events = [e for e in events if e["versione_sha256"] == sha]
+            if linked_events:
+                latest = linked_events[-1]
+                blocks.append("<p>Ultimo evento autore · " + esc(latest["stato"]) +
+                              " · " + esc(latest["creato_utc"]) +
+                              " · " + esc(latest["nota"]) + "</p>")
             for item in proposal["posizioni"]:
                 blocks.append("<article><b>" + esc(item["token"]) + " · GPT: " +
                               esc(item["azione"]) + "</b><p>" + esc(item["tesi"]) +
