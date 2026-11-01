@@ -280,7 +280,7 @@ def decision_home():
         if important:
             priorities.append(token + ": " + ("dati incompleti" if holding.get("errore")
                                                else "ipotesi GPT " + str(gpt.get("azione"))))
-        body = ("<article><h4>" + esc(token) + "</h4><p>" + esc(qtext) +
+        body = ("<article><h4><b>" + esc(token) + "</b></h4><p>" + esc(qtext) +
                 " · " + esc(vtext) + "</p><p><b>KDD (osservazione):</b> " +
                 esc(technical) + "</p><p><b>Scelta registrata:</b> " +
                 esc(holding.get("decisione", "nessuna")) + " · " + esc(source) + "</p>")
