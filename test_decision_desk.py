@@ -4029,4 +4029,57 @@ class IntegratedDecisionHomeTests(unittest.TestCase):
         self.assertNotIn("href='/grafico/spot?pair=XXBTZEUR", page)
         self.assertNotIn("href='/grafico/spot?pair=ADAUSD", page)
 
+
+    def test_independent_balance_and_market_clocks(self):
+        page = self.render_home()
+        self.assertIn("Mercato pubblico:", page)
+        self.assertIn("RECENTE", page)
+        self.assertIn("Saldo privato:", page)
+        self.assertIn("DA AGGIORNARE", page)
+        self.assertIn("La freschezza del mercato non aggiorna i saldi", page)
+        self.assertIn("fotografia GPT", page)
+        self.assertIn("Storico: un refresh del KDD non ricalcola", page)
+
+    def test_proposal_and_scan_text_are_escaped_without_becoming_author_decisions(self):
+        self.proposal["scenario"] = "<svg onload=alert(1)>"
+        self.report["schede_v02"][0]["sintesi"] = "<script>not-a-source</script>"
+        self.report["schede_v02"][0]["esito"] = "OSSERVAZIONE KDD"
+        (self.root / "ultimo_report.json").write_text(
+            json.dumps(self.report), encoding="utf-8")
+        page = self.render_home()
+        self.assertNotIn("<svg onload=alert(1)>", page)
+        self.assertNotIn("<script>not-a-source</script>", page)
+        self.assertIn("&lt;svg onload=alert(1)&gt;", page)
+        self.assertIn("&lt;script&gt;not-a-source&lt;/script&gt;", page)
+        self.assertIn("OSSERVAZIONE KDD", page)
+        self.assertIn("nessuna proposta operativa validata e collegata", page)
+        self.assertIn("IN ATTESA DI DECISIONE", page)
+        self.assertNotIn("ORDINE ESEGUITO", page)
+
+    def test_real_local_http_home_keeps_navigation_and_integrated_order(self):
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+        (self.root / "cruscotto.html").write_text(d.render(self.report), encoding="utf-8")
+        server = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+            conn.request("GET", "/", headers={"Host": "127.0.0.1:8765"})
+            response = conn.getresponse()
+            page = response.read().decode("utf-8")
+            conn.close()
+            self.assertEqual(response.status, 200)
+            self.assertLess(page.index("id='kdd-decisioni'"), page.index("id='piano-gpt'"))
+            self.assertLess(page.index("id='kdd-decisioni'"), page.index("id='kdd-wallet-diagnostics'"))
+            self.assertIn("href='/gpt'", page)
+            self.assertIn("href='/mercati/spot'", page)
+            self.assertIn("action='/aggiorna'", page)
+            self.assertIn("id='kdd-spot-diagnostics'", page)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
 if __name__=='__main__': unittest.main(verbosity=2)
