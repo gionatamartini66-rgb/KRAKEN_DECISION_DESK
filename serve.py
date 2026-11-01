@@ -62,6 +62,52 @@ def start_refresh():
     return True
 
 
+def decision_home():
+    """Single read-only decision surface; optional Drive and GPT never block Spot."""
+    esc = lambda value: html.escape(str(value), quote=True)
+    try:
+        from scripts import kdd_drive_exchange as exchange
+        exchange.receive_synced()
+        pending = exchange.pending()
+        approved = exchange.bridge.load_archive()
+        blocks = ["<section id='kdd-decisioni'><h2>Patrimonio e decisioni</h2>"]
+        if pending:
+            proposal, bundle = pending
+            context = exchange.bridge.read_context(bundle)
+            sha = exchange.bridge.digest(proposal)
+            blocks.append("<h3>Proposta GPT ricevuta · NON APPROVATA</h3>"
+                          "<p>Versione " + esc(sha) + " · fotografia " +
+                          esc(proposal["snapshot_utc"]) + " · mercato " +
+                          esc(context["mercato"]["stato"]) + " · saldo " +
+                          esc(context["saldo"]["stato"]) + "</p>"
+                          "<p>Scenario: " + esc(proposal["scenario"]) +
+                          " · Alternativa: " + esc(proposal["scenario_alternativo"]) +
+                          " · Rischi: " + esc(proposal["rischi_comuni"]) +
+                          " · Liquidità: " + esc(proposal["liquidita"]) +
+                          " · Riesame: " + esc(proposal["revisione"]) + "</p>")
+            for item in proposal["posizioni"]:
+                blocks.append("<article><strong>" + esc(item["token"]) + " · " +
+                              esc(item["azione"]) + "</strong><p>" + esc(item["tesi"]) +
+                              "</p><details><summary>Rischi, alternative, condizioni e riesame</summary>" +
+                              "".join("<p><b>" + esc(label) + ":</b> " + esc(item[key]) + "</p>"
+                                      for key, label in (("rischi","Rischi"),("alternativa","Alternativa"),
+                                          ("invalidazione","Invalidazione"),("costi","Costi"),
+                                          ("evidenze","Evidenze"),("riesame","Riesame"))) +
+                              "</details></article>")
+            blocks.append("<p>La proposta non costituisce ordine. "
+                          "<a href='/gpt'>Approva la versione esatta o consulta l'archivio</a>.</p>")
+        else:
+            blocks.append("<p>Nessuna proposta GPT ricevuta e validata. "
+                          "FolderSync deve scaricare proposta_portafoglio.json nella cartella Kraken.</p>")
+        blocks.append("<p>Versioni approvate conservate: " + str(len(approved)) +
+                      ". Esecuzioni finanziarie non attestate.</p></section>")
+        return "".join(blocks)
+    except Exception:
+        return ("<section id='kdd-decisioni'><h2>Patrimonio e decisioni</h2>"
+                "<p>Ricezione o archivio non verificabile: STOP. "
+                "Nessuna proposta viene considerata approvata.</p></section>")
+
+
 def with_controls(page: str, result: str = "") -> str:
     """Aggiornamento senza bloccare Chrome; quando pronto aggiorna da solo la pagina."""
     running = job_snapshot()["stato"] == "in_corso"
@@ -144,7 +190,7 @@ def with_controls(page: str, result: str = "") -> str:
                                "<h2>Proposte patrimoniali GPT</h2>"
                                "<p>Archivio GPT temporaneamente non verificabile: STOP. "
                                "Nessuna proposta è stata certificata.</p></section>")
-    return page.replace(target, toolbar + js + portfolio_proposals + target, 1)
+    return page.replace(target, toolbar + js + decision_home() + portfolio_proposals + target, 1)
 
 
 def load_sui_chart(timeframe, public_kraken=None):

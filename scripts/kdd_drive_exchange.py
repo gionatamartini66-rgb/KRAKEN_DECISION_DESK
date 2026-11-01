@@ -107,6 +107,39 @@ def receive(raw):
     return bridge.digest(proposal)
 
 
+def receive_synced():
+    """Read FolderSync's inbound local file; never claim remote sync succeeded.
+
+    Invalid files remain untouched for diagnosis. A validated proposal is
+    copied into the existing private inbox, without granting consent.
+    """
+    source = EXCHANGE_ROOT / INCOMING_NAME
+    if not EXCHANGE_ROOT.is_dir() or EXCHANGE_ROOT.is_symlink():
+        return None
+    if not source.exists() and not source.is_symlink():
+        return None
+    import stat
+    info = source.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_size > bridge.MAX_BYTES:
+        raise bridge.BridgeError("Proposta FolderSync non regolare")
+    fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            raise bridge.BridgeError("Proposta FolderSync sostituita")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            raw = stream.read(bridge.MAX_BYTES + 1)
+        if len(raw) > bridge.MAX_BYTES:
+            raise bridge.BridgeError("Proposta FolderSync troppo grande")
+    finally:
+        os.close(fd)
+    proposal, _ = validate_raw(raw)
+    current = pending()
+    if current is not None and bridge.digest(current[0]) == bridge.digest(proposal):
+        return bridge.digest(proposal)
+    return receive(raw)
+
+
 def pending():
     try:
         folder = bridge.private_directory(bridge.INBOX)
@@ -139,6 +172,7 @@ def latest_export():
 def render_page(token):
     esc = lambda s: html.escape(str(s), quote=True)
     try:
+        receive_synced()
         item = pending()
         error = None
     except bridge.BridgeError as exc:
@@ -210,7 +244,7 @@ Avvia la sincronizzazione manuale per trovarlo su Drive.</p><p>""" +
         """</p><button onclick='kddSend("/gpt/prepara","","text/plain")'>
 Prepara per Drive</button></section>
 <section><h2>2 · Apri la proposta da Drive</h2><p>Dopo aver discusso con GPT,
-seleziona il file proposta_portafoglio.json dal selettore file del telefono.
+FolderSync deve scaricare proposta_portafoglio.json nella cartella Kraken del telefono. Il KDD la legge automaticamente quando apri questa pagina.
 Aprirlo NON lo approva.</p>
 <input id="gpt-json" type="file" accept=".json,application/json">
 <button onclick="kddFile()">Apri proposta</button>

@@ -127,6 +127,37 @@ class DriveUIHandoffTests(unittest.TestCase):
         self.assertEqual(state,200,message)
         self.assertEqual(len(bridge.load_archive()),1)
 
+    def test_foldersync_inbound_home_preview_without_approval(self):
+        self.original.persist_origin()
+        source=self.sync/exchange.INCOMING_NAME
+        source.write_bytes(bridge.canonical(self.original.plan)+b"\\n")
+        import serve
+        with mock.patch.object(serve,"TOKEN","SYNTHETIC"):
+            home=serve.decision_home()
+        self.assertIn("NON APPROVATA",home)
+        self.assertIn("ADA",home)
+        self.assertIn(bridge.digest(self.original.plan),home)
+        self.assertEqual(bridge.load_archive(),{})
+        self.assertEqual(bridge.digest(exchange.pending()[0]),bridge.digest(self.original.plan))
+
+    def test_foldersync_invalid_input_keeps_previous_pending(self):
+        self.original.persist_origin()
+        old=exchange.receive(bridge.canonical(self.original.plan))
+        (self.sync/exchange.INCOMING_NAME).write_bytes(b'{"schema":"invalid"}')
+        with self.assertRaises(bridge.BridgeError):
+            exchange.receive_synced()
+        self.assertEqual(bridge.digest(exchange.pending()[0]),old)
+        self.assertIn("STOP",__import__("serve").decision_home())
+
+    def test_foldersync_symlink_never_imported(self):
+        self.original.persist_origin()
+        target=self.sync/"outside.json"
+        target.write_bytes(bridge.canonical(self.original.plan))
+        (self.sync/exchange.INCOMING_NAME).symlink_to(target)
+        with self.assertRaises(bridge.BridgeError):
+            exchange.receive_synced()
+        self.assertIsNone(exchange.pending())
+
     def test_handle_rejects_implicit_consent(self):
         self.original.persist_origin()
         self.assertIn("NON approvata",exchange.handle("ricevi",bridge.canonical(self.original.plan)))
