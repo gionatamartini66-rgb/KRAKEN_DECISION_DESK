@@ -226,7 +226,52 @@ def latest_export():
 
 
 DECISION_EVENTS = "decision_events"
-DECISION_STATES = {"RIFIUTATA", "RINVIATA", "ESECUZIONE_DICHIARATA", "RIESAME", "RISULTATO_VERIFICATO"}
+# Historical RISULTATO_VERIFICATO is only a past author's assertion. It is
+# readable but must never be offered as a new independently verified result.
+DECISION_STATES = {"RIFIUTATA", "RINVIATA", "ESECUZIONE_DICHIARATA", "RIESAME",
+                   "RISCONTRO_DICHIARATO", "RISULTATO_VERIFICATO"}
+DECISION_INPUT_STATES = DECISION_STATES - {"RISULTATO_VERIFICATO"}
+
+
+def event_label(state):
+    if state == "RISULTATO_VERIFICATO":
+        return "RISCONTRO STORICO DICHIARATO (verifica su dati non attestata)"
+    if state == "RISCONTRO_DICHIARATO":
+        return "RISCONTRO DICHIARATO DALL'AUTORE (non verificato su dati)"
+    return state
+
+
+def _event_time(row):
+    return bridge.instant(row["creato_utc"])
+
+
+def _event_second(row):
+    return _event_time(row).replace(microsecond=0)
+
+
+def uncertain_event_seconds(rows):
+    """Legacy whole-second timestamps give no order within their second."""
+    groups = {}
+    for row in rows:
+        groups.setdefault(_event_second(row), []).append(row)
+    return {second for second, group in groups.items()
+            if len(group) > 1 and (
+                any("." not in x["creato_utc"][19:] for x in group)
+                or len({_event_time(x) for x in group}) != len(group))}
+
+
+def latest_events(rows):
+    """Return latest definite event, or the unordered latest-second group."""
+    if not rows:
+        return [], False
+    ordered = sorted(rows, key=_event_time)
+    latest = ordered[-1]
+    second = _event_second(latest)
+    if second in uncertain_event_seconds(ordered):
+        return [x for x in ordered if _event_second(x) == second], True
+    last_time = _event_time(latest)
+    ties = [x for x in ordered if _event_time(x) == last_time]
+    return ties, len(ties) > 1
 
 
 
@@ -261,7 +306,9 @@ def decision_history():
                     or bridge.digest(proposal) != record["versione_sha256"]):
                 raise bridge.BridgeError("Collegamento proposta/evento alterato")
         rows.append(record)
-    return sorted(rows, key=lambda row: (row["creato_utc"], bridge.digest(row)))
+    # Timestamps only: a SHA digest is not evidence of temporal order.
+    # Whole-second historical ties are labelled as unordered in the UI.
+    return sorted(rows, key=_event_time)
 
 
 def record_decision(raw):
@@ -271,7 +318,7 @@ def record_decision(raw):
         if not isinstance(obj, dict) or set(obj) != {"sha256", "stato", "nota"}:
             raise bridge.BridgeError("Decisione non valida")
         sha, state, note = obj["sha256"], obj["stato"], obj["nota"]
-        if not isinstance(sha, str) or not bridge.HEX.fullmatch(sha) or state not in DECISION_STATES:
+        if not isinstance(sha, str) or not bridge.HEX.fullmatch(sha) or state not in DECISION_INPUT_STATES:
             raise bridge.BridgeError("Versione o stato non valido")
         if not isinstance(note, str) or not note.strip() or len(note) > 1500:
             raise bridge.BridgeError("Motivazione o evidenza obbligatoria (massimo 1500 caratteri)")
@@ -286,12 +333,12 @@ def record_decision(raw):
                 raise bridge.BridgeError("Proposta già rifiutata o rinviata")
         elif sha not in approved:
             raise bridge.BridgeError("Dichiarazioni successive richiedono versione approvata")
-        if state == "RISULTATO_VERIFICATO" and not any(
+        if state == "RISCONTRO_DICHIARATO" and not any(
                 row["versione_sha256"] == sha and row["stato"] == "RIESAME"
                 for row in events):
-            raise bridge.BridgeError("Risultato senza riesame precedente")
+            raise bridge.BridgeError("Riscontro dichiarato senza riesame precedente")
         entry = {"versione_sha256": sha, "stato": state, "nota": note.strip(),
-                 "creato_utc": bridge.checked_now(None).isoformat(timespec="seconds")}
+                 "creato_utc": bridge.checked_now(None).isoformat(timespec="microseconds")}
         if state in ("RIFIUTATA", "RINVIATA"):
             # Preserve the actual version/asset/snapshot context when B replaces A;
             # older four-field events remain readable without invented associations.
@@ -365,6 +412,7 @@ def render_page(token):
     try:
         events = decision_history()
         approvals = bridge.load_archive()
+        ambiguous_seconds = uncertain_event_seconds(events)
         def event_line(x):
             source = x.get("proposta") or approvals.get(x["versione_sha256"], {}).get("proposta")
             attribution = ""
@@ -373,9 +421,11 @@ def render_page(token):
                 attribution = " · fotografia " + esc(source.get("snapshot_utc", "?")) + " · asset compresi nella proposta: " + esc(tokens)
             else:
                 attribution = " · dettaglio asset non ricostruibile dal record storico"
-            return ("<p>" + esc(x["creato_utc"]) + " · " + esc(x["stato"]) +
+            order_note = (" · ordine nel secondo non documentato"
+                          if _event_second(x) in ambiguous_seconds else "")
+            return ("<p>" + esc(x["creato_utc"]) + " · " + esc(event_label(x["stato"])) +
                     " · " + esc(x["versione_sha256"][:12]) + attribution +
-                    " · " + esc(x["nota"]) + "</p>")
+                    order_note + " · " + esc(x["nota"]) + "</p>")
         history = "".join(event_line(x) for x in events)
         archive = bridge.approved_html() + "<h3>Decisioni e riesami datati</h3>" + (history or "<p>Nessun evento registrato.</p>")
     except Exception:
@@ -401,17 +451,17 @@ function kddDecision(sha){\n const stato=document.getElementById("kdd-decision-s
     decision_form = ""
     if item is not None and not error:
         sha = bridge.digest(item[0])
-        states = (("ESECUZIONE_DICHIARATA", "RIESAME", "RISULTATO_VERIFICATO")
+        states = (("ESECUZIONE_DICHIARATA", "RIESAME", "RISCONTRO_DICHIARATO")
                   if sha in bridge.load_archive() else ("RIFIUTATA", "RINVIATA"))
         if states and not (sha not in bridge.load_archive() and any(
                 x["versione_sha256"] == sha and x["stato"] in ("RIFIUTATA", "RINVIATA")
                 for x in decision_history())):
             decision_form = ("<h3>Registra scelta o evento dell'autore</h3>"
                 "<select id='kdd-decision-state'>" +
-                "".join("<option value='" + x + "'>" + x + "</option>" for x in states) +
+                "".join("<option value='" + x + "'>" + esc(event_label(x)) + "</option>" for x in states) +
                 "</select><input id='kdd-decision-note' maxlength='1500' placeholder='Motivo, prova o riscontro' required>"
                 "<button onclick='kddDecision(" + json.dumps(sha) + ")'>Registra evento datato</button>"
-                "<p>Dichiarazione manuale non significa ordine verificato. Risultato verificato richiede riesame e prova esplicita.</p>")
+                "<p>Il riscontro è una dichiarazione dell'autore dopo il riesame, non una verifica autonoma di prezzi, ordini o risultati.</p>")
     return ("""<!doctype html><html lang="it"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KDD · GPT e Drive</title><style>
