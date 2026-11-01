@@ -134,7 +134,8 @@ def decision_home():
         report = None
     if not isinstance(report, dict) or not isinstance(report.get("posizioni"), list):
         blocks.append("<p role='status'>Quadro aggiunto non disponibile: report mancante "
-                      "o non verificabile. Il cruscotto originale resta consultabile.</p>")
+                      "o non verificabile (report assente, incompleto o non leggibile). "
+                      "Il cruscotto originale resta consultabile.</p>")
         report = None
 
     # Read historical proposals without equating reception, approval and execution.
@@ -152,15 +153,28 @@ def decision_home():
                          if e["versione_sha256"] == proposal_sha
                          and e["stato"] in ("RIFIUTATA", "RINVIATA")]
             proposal_state = ("APPROVATA · ARCHIVIO" if proposal_sha in approved else
-                              dismissed[-1] if dismissed else "NON APPROVATA")
+                              dismissed[-1] if dismissed else "NON APPROVATA · IN ATTESA DI DECISIONE")
             proposal = candidate
     except Exception:
         proposal, proposal_state = None, "ARCHIVIO NON VERIFICABILE · STOP"
 
     if report is None:
         blocks.append("<p>Proposta GPT: " + esc(proposal_state) +
-                      ". <a href='/gpt'>Apri il ponte e l'archivio</a>.</p></section>")
-        return "".join(blocks)
+                      ". <a href='/gpt'>Apri il ponte e l'archivio</a>.</p>")
+        if proposal is not None:
+            blocks.append("<p>Versione " + esc(proposal_sha) + " · fotografia GPT " +
+                          esc(proposal.get("snapshot_utc", "n.d.")) +
+                          ". Nessun giudizio attribuito a un portafoglio non leggibile.</p>")
+            related = [e for e in events if e["versione_sha256"] == proposal_sha]
+            latest, unordered = exchange.latest_events(related)
+            if unordered:
+                blocks.append("<p>Eventi più recenti nel medesimo secondo: "
+                              "ordine reciproco non documentato.</p>")
+            for e in latest:
+                blocks.append("<p>Evento autore · " +
+                              esc(exchange.event_label(e["stato"])) + " · " +
+                              esc(e["nota"]) + "</p>")
+        return "".join(blocks) + "</section>"
 
     try:
         decisions = desk.load_decisions()
