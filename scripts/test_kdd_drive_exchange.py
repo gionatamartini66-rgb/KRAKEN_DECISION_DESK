@@ -130,7 +130,7 @@ class DriveUIHandoffTests(unittest.TestCase):
     def test_foldersync_inbound_home_preview_without_approval(self):
         self.original.persist_origin()
         source=self.sync/exchange.INCOMING_NAME
-        source.write_bytes(bridge.canonical(self.original.plan)+b"\\n")
+        source.write_bytes(bridge.canonical(self.original.plan)+b"\n")
         import serve
         with mock.patch.object(serve,"TOKEN","SYNTHETIC"):
             home=serve.decision_home()
