@@ -134,7 +134,7 @@ class DriveUIHandoffTests(unittest.TestCase):
         import serve
         with mock.patch.object(serve,"TOKEN","SYNTHETIC"):
             home=serve.decision_home()
-        self.assertIn("NON APPROVATA",home)
+        self.assertIn("IN ATTESA DI DECISIONE",home)
         self.assertIn("ADA",home)
         self.assertIn(bridge.digest(self.original.plan),home)
         self.assertEqual(bridge.load_archive(),{})
