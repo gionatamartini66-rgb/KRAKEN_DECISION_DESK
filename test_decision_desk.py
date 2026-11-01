@@ -3925,7 +3925,8 @@ class IntegratedDecisionHomeTests(unittest.TestCase):
         self.tokens = ["BTC", "ETH", "SOL", "SUI", "BNB", "ADA", "DOT",
                        "LINK", "AVAX", "NEAR"]
         data = {"rilevazione_utc": self.now.isoformat(timespec="seconds"),
-                "markets": {"BTC": {"prezzo_eur": 1}}, "trends": {},
+                "markets": {"BTC": {"prezzo_eur": 1, "var_oggi_utc_pct": None,
+                                     "volume_24h_eur_stimato": 0, "spread_pct": 0}}, "trends": {},
                 "feed": [], "problemi_feed": []}
         wallet = {"posizioni": [{"token": t, "quantita": None if t == "ETH" else "1"}
                                 for t in self.tokens]}
