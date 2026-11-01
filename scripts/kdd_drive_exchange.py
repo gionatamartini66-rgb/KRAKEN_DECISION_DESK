@@ -232,8 +232,25 @@ def record_decision(raw):
     entry = {"versione_sha256": sha, "stato": state, "nota": note.strip(),
              "creato_utc": bridge.checked_now(None).isoformat(timespec="seconds")}
     folder = bridge.ensure_dir(bridge.private_directory(bridge.INBOX, create=True) / DECISION_EVENTS)
-    status = bridge.exclusive_json(folder, bridge.digest(entry) + ".json", entry)
-    return status
+    filename = bridge.digest(entry) + ".json"
+    target = folder / filename
+    stage = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix=".kdd-event-", suffix=".tmp",
+                                         dir=folder, delete=False) as f:
+            stage = Path(f.name)
+            f.write(bridge.canonical(entry) + b"\\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(stage, 0o600)
+        os.link(stage, target, follow_symlinks=False)
+        bridge._sync_dir(folder)
+        return "INSERITO"
+    except FileExistsError as exc:
+        raise bridge.BridgeError("Evento gia registrato") from exc
+    finally:
+        if stage is not None:
+            stage.unlink(missing_ok=True)
 
 
 def render_page(token):
