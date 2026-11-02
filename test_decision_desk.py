@@ -4082,4 +4082,101 @@ class IntegratedDecisionHomeTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=3)
 
+
+    def r2_origin(self):
+        """Synthetic ten-row original with real bridge packet and proposal contracts."""
+        from scripts import kdd_bridge_g2 as bridge
+        import copy
+        pkt = {"schema": "kdd_wallet_analysis_packet_v001",
+               "generato_utc": self.now.isoformat(timespec="seconds"),
+               "rilevazione_kdd_utc": self.now.isoformat(timespec="seconds"),
+               "nessun_ordine": True,
+               "saldo": {"ultima_acquisizione_utc": None,
+                         "stato": {"stato": "ORIGINE_SCONOSCIUTA"}},
+               "patrimonio": {
+                   "n_posizioni": 10, "stato_totale": "NON_DISPONIBILE",
+                   "totale_parziale": True, "totale_stimato_eur_senza_cash": None,
+                   "posizioni": [
+                       {"indice": i, "token": token, "stato_identita": "VALIDA",
+                        "quantita_spot": None if token == "ETH" else "1",
+                        "prezzo_eur": None, "valore_eur": None,
+                        "pl_indicativo_eur": None,
+                        "analisi_4tf": {"stato": "NON_DISPONIBILE",
+                                       "timeframe": {}}}
+                       for i, token in enumerate(self.tokens)]}}
+        bundle = {"schema": bridge.SCHEMA_BUNDLE,
+                  "packet": pkt, "packet_sha256": bridge.digest(pkt),
+                  "preparato_utc": self.now.isoformat(timespec="seconds")}
+        original = copy.deepcopy(self.proposal)
+        original.update({"schema": bridge.SCHEMA_PROPOSAL,
+                         "proposta_id": "R2-ORIG-TEST",
+                         "snapshot_id": bundle["packet_sha256"],
+                         "creato_utc": self.now.isoformat(timespec="seconds"),
+                         "fonti_esterne": [],
+                         "sostituisce_sha256": None})
+        return original, bundle
+
+    def test_r2_01_other_wallet_same_tokens_refuses_stale_dossier_links(self):
+        import copy
+        wallet_a = {"posizioni": [
+            {"token": t, "quantita": None if t == "ETH" else "1"}
+            for t in self.tokens]}
+        wallet_b = copy.deepcopy(wallet_a)
+        wallet_b["posizioni"][0]["quantita"] = "5"
+        hash_a = d.fotografia_portafoglio_sha256(wallet_a)
+        hash_b = d.fotografia_portafoglio_sha256(wallet_b)
+        self.assertNotEqual(hash_a, hash_b)
+        report_b = copy.deepcopy(self.report)
+        report_b["posizioni"][0]["quantita"] = "5"
+        report_b["fotografia_portafoglio_sha256"] = hash_b
+        report_b["dossier_stato"] = {
+            "stato": "NON_ALLINEATO_PATRIMONIO",
+            "fotografia_portafoglio_sha256": hash_a,
+            "idoneita_analisi_patrimoniale": "NON_IDONEA"}
+        dossier = json.loads((self.root / "dossier_multifonte.json").read_text())
+        dossier["fotografia_portafoglio_sha256"] = hash_a
+        dossier["patrimonio_4tf"]["portafoglio_sha256"] = hash_a
+        dossier["patrimonio_4tf"]["rilevazione_kraken_utc"] = report_b["rilevazione_utc"]
+        (self.root / "dossier_multifonte.json").write_text(json.dumps(dossier))
+        (self.root / "ultimo_report.json").write_text(json.dumps(report_b))
+        page = self.render_home()
+        self.assertIn("10 posizioni", page)
+        self.assertIn("NON_ALLINEATO_PATRIMONIO", page)
+        self.assertIn("dossier", page.lower())
+        self.assertNotIn("href='/grafico/spot?pair=XXBTZEUR&amp;tf=4h'", page)
+
+    def test_r2_02_origin_quantities_override_matching_symbol_order(self):
+        from scripts import kdd_drive_exchange as exchange
+        orig, bundle = self.r2_origin()
+        orig["posizioni"][0]["azione"] = "ALLEGGERIRE"
+        orig["posizioni"][0]["tesi"] = "VALUTAZIONE STORICA DA NON RIATTRIBUIRE"
+        # Current report B is a different wallet from the original KDD packet A.
+        report_b = dict(self.report)
+        report_b["posizioni"] = [dict(x) for x in self.report["posizioni"]]
+        report_b["posizioni"][0]["quantita"] = "9"
+        (self.root / "ultimo_report.json").write_text(json.dumps(report_b))
+        with unittest.mock.patch.object(exchange, "pending", return_value=(orig, bundle)):
+            page = self.render_home()
+        self.assertIn("NON APPROVATA", page)
+        self.assertIn("Valutazione storica su dieci asset", page)
+        self.assertIn("href='/gpt'", page)
+        self.assertIn("VALUTAZIONE STORICA DA NON RIATTRIBUIRE", page)
+        self.assertNotIn("ipotesi GPT ALLEGGERIRE", page)
+        self.assertNotIn("<b>GPT · NON APPROVATA · IN ATTESA DI DECISIONE:</b> ALLEGGERIRE", page)
+        self.assertIn("non riconcili", page.lower())
+
+    def test_r2_03_rest_pair_key_mismatch_is_never_a_direct_link(self):
+        import copy
+        dossier = json.loads((self.root / "dossier_multifonte.json").read_text())
+        dossier["patrimonio_4tf"]["posizioni"][0]["pair_key"] = "ETHUSD"
+        (self.root / "dossier_multifonte.json").write_text(json.dumps(dossier))
+        report = copy.deepcopy(self.report)
+        report["schede_v02"][0]["alternative"][0]["pair_key"] = "ETHUSD"
+        (self.root / "ultimo_report.json").write_text(json.dumps(report))
+        page = self.render_home()
+        self.assertIn("XBT/EUR", page)
+        self.assertNotIn("href='/grafico/spot?pair=ETHUSD", page)
+        self.assertNotIn("href='/analisi/spot?pair=ETHUSD", page)
+        self.assertIn("href='/mercati/spot'", page)
+
 if __name__=='__main__': unittest.main(verbosity=2)
