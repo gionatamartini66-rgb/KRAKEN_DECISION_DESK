@@ -4194,4 +4194,68 @@ class IntegratedDecisionHomeTests(unittest.TestCase):
         self.assertNotIn("href='/analisi/spot?pair=ETHUSD", page)
         self.assertIn("href='/mercati/spot'", page)
 
+
+    def test_r2_01_coherent_producer_hashes_preserve_valid_btc_link(self):
+        from scripts import kdd_wallet_packet_g0 as wallet
+        self.assertEqual(self.wallet_hash, wallet.portfolio_identity(self.wallet))
+        page = self.render_home()
+        self.assertIn("href='/grafico/spot?pair=XXBTZEUR&amp;tf=4h'", page)
+        self.assertIn("href='/analisi/spot?pair=XXBTZEUR'", page)
+        # Reproducing the genuine producer's independently persisted SHA on each
+        # of the report, dossier, 4TF and status is the acceptance precondition.
+
+    def test_r2_02_valid_original_packet_keeps_attributed_gpt_and_decision_state(self):
+        from scripts import kdd_bridge_g2 as bridge
+        from scripts import kdd_drive_exchange as exchange
+        orig, bundle = self.r2_origin()
+        self.assertEqual(bridge.read_context(bundle, now=self.now)["n_posizioni"], 10)
+        bridge.validate_proposal(orig, bundle, now=self.now)
+        orig["posizioni"][0]["azione"] = "ALLEGGERIRE"
+        sha = bridge.digest(orig)
+        with unittest.mock.patch.object(exchange, "pending", return_value=(orig, bundle)):
+            page = self.render_home()
+            self.assertIn("ipotesi GPT ALLEGGERIRE", page)
+            self.assertIn("Non", "Non")
+            self.assertIn("GPT · NON APPROVATA · IN ATTESA DI DECISIONE", page)
+            with unittest.mock.patch.object(exchange.bridge, "load_archive",
+                                            return_value={sha: {"proposta": orig}}):
+                approved = self.render_home()
+            self.assertIn("APPROVATA · ARCHIVIO", approved)
+            self.assertIn("ipotesi GPT ALLEGGERIRE", approved)
+            with unittest.mock.patch.object(exchange, "decision_history",
+                         return_value=[{"versione_sha256": sha, "stato": "RINVIATA",
+                                        "creato_utc": self.now.isoformat(),
+                                        "nota": "Riesame successivo"}]):
+                delayed = self.render_home()
+            self.assertIn("Proposta GPT · RINVIATA", delayed)
+            self.assertNotIn("APPROVATA · ARCHIVIO", delayed)
+
+    def test_r2_03_valid_usdc_pair_and_conflicting_alias_are_distinguished(self):
+        import copy
+        snapshot = json.loads((self.root / "ultima_rilevazione.json").read_text())
+        dossier = json.loads((self.root / "dossier_multifonte.json").read_text())
+        # An ordinary USDC Kraken pair is documented by the original scanner
+        # at the same snapshot as the wallet and four-timeframe dossier.
+        snapshot["schede_v02"].append({
+            "token": "LINK", "coppia_analisi": "LINK/USDC",
+            "alternative": [{"pair": "LINK/USDC", "pair_key": "LINKUSDC",
+                             "quote": "USDC"}]})
+        row = dossier["patrimonio_4tf"]["posizioni"][7]
+        row.update({"coppia": "LINK/USDC", "pair_key": "LINKUSDC",
+                    "asset_base": "LINK", "valuta_quotazione": "USDC"})
+        (self.root / "ultima_rilevazione.json").write_text(json.dumps(snapshot))
+        (self.root / "dossier_multifonte.json").write_text(json.dumps(dossier))
+        page = self.render_home()
+        self.assertIn("href='/grafico/spot?pair=XXBTZEUR&amp;tf=4h'", page)
+        self.assertIn("href='/grafico/spot?pair=LINKUSDC&amp;tf=4h'", page)
+        self.assertIn("href='/grafico/spot?pair=ADAUSD&amp;tf=15m'", page)
+        # Same wsname with two distinct REST keys is an ambiguous catalogue.
+        snapshot["schede_v02"][0]["alternative"].append({
+            "pair": "ADA/USD", "pair_key": "ADAETH", "quote": "USD"})
+        (self.root / "ultima_rilevazione.json").write_text(json.dumps(snapshot))
+        page_ambiguous = self.render_home()
+        self.assertNotIn("href='/grafico/spot?pair=ADAUSD", page_ambiguous)
+        self.assertNotIn("href='/grafico/spot?pair=ADAETH", page_ambiguous)
+        self.assertIn("href='/mercati/spot'", page_ambiguous)
+
 if __name__=='__main__': unittest.main(verbosity=2)
