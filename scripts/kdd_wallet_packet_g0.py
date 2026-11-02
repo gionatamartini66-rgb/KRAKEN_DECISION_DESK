@@ -556,6 +556,15 @@ def build(root: Path, now: dt.datetime | None = None) -> dict:
     positions = brief_positions(portfolio, report, snapshot, dossier,
                                 dossier_fresh, four_rows=four_rows, now=now)
     cash = cash_balances(portfolio, report)
+    # Full original JSON identity (cost basis, available balances, metadata):
+    # same canonical SHA256 domain used by decision_desk.output(). Legacy
+    # packets without this optional field remain readable, but unattributable.
+    wallet_sha = portfolio_identity(portfolio)
+    if wallet_sha is None:
+        raise PacketError("Identità completa del portafoglio non verificabile")
+    reported_sha = report.get("fotografia_portafoglio_sha256")
+    if reported_sha is not None and reported_sha != wallet_sha:
+        raise PacketError("Portafoglio originario e report discordanti")
     incomplete = any(x["prezzo_eur"] is None for x in positions) or any(x["quantita_spot"] is None for x in positions)
     total = amount(report.get("totale_stimato_eur"), "totale_stimato_eur")
     valued_sum = sum((Decimal(x["valore_eur"]) for x in positions if x["valore_eur"] is not None), Decimal(0))
@@ -584,6 +593,7 @@ def build(root: Path, now: dt.datetime | None = None) -> dict:
             "dossier": {"coerente_con_mercato": dossier_fresh,
                         "stato": "UTILIZZABILE_CON_LIMITI" if dossier_fresh else "RILEVAZIONE_DIFFERENTE_NON_ATTRIBUIRE_LIVELLI"},
             "patrimonio": {"posizioni": positions, "liquidita_spot": cash,
+                           "fotografia_portafoglio_sha256": wallet_sha,
                            "totale_stimato_eur_senza_cash": total,
                            "totale_parziale": bool(report.get("totale_parziale")) or incomplete,
                            "stato_totale": report.get("stato_totale", "NON_VERIFICATO"),
