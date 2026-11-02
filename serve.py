@@ -272,6 +272,34 @@ def decision_home():
     except Exception:
         proposal, proposal_state = None, "ARCHIVIO NON VERIFICABILE · STOP"
 
+    # Deliberation controls GPT priorities; historical events are a separate
+    # read-only timeline bound to this exact version, with no invented order
+    # inside whole-second legacy ties. This is independent of report presence.
+    author_history = ""
+    if proposal_sha is not None and proposal is not None:
+        related = [e for e in events if e["versione_sha256"] == proposal_sha]
+        if related:
+            ambiguous_seconds = exchange.uncertain_event_seconds(related)
+            historical = [
+                "<section id='kdd-author-history' aria-label='Storico degli eventi autore'>"
+                "<h3>Eventi storici dell'autore · versione " +
+                esc(proposal_sha) + "</h3>"
+                "<p>Registrazioni dichiarate dall'autore; non certificano prezzi, "
+                "risultati né ordini eseguiti.</p>"
+            ]
+            if ambiguous_seconds:
+                historical.append(
+                    "<p role='status'>Eventi con timestamp al secondo coincidente: "
+                    "ordine reciproco non documentato. Non attribuire un ultimo "
+                    "evento in base al nome del file o all'impronta.</p>")
+            for event in related:
+                historical.append(
+                    "<p>Evento autore · " + esc(exchange.event_label(event["stato"])) +
+                    " · " + esc(event["creato_utc"]) +
+                    " · " + esc(event["nota"]) + "</p>")
+            historical.append("</section>")
+            author_history = "".join(historical)
+
     if report is None:
         blocks.append("<p>Proposta GPT: " + esc(proposal_state) +
                       ". <a href='/gpt'>Apri il ponte e l'archivio</a>.</p>")
@@ -286,15 +314,7 @@ def decision_home():
                                       esc(row.get("azione", "n.d.")) + "</p>"
                                       for row in proposal["posizioni"] if isinstance(row, dict)) +
                               "</details>")
-            related = [e for e in events if e["versione_sha256"] == proposal_sha]
-            latest, unordered = exchange.latest_events(related)
-            if unordered:
-                blocks.append("<p>Eventi più recenti nel medesimo secondo: "
-                              "ordine reciproco non documentato.</p>")
-            for e in latest:
-                blocks.append("<p>Evento autore · " +
-                              esc(exchange.event_label(e["stato"])) + " · " +
-                              esc(e["nota"]) + "</p>")
+        blocks.append(author_history)
         return "".join(blocks) + "</section>"
 
     try:
@@ -387,6 +407,10 @@ def decision_home():
                                   if isinstance(row, dict)) +
                           "</details>")
             proposal = None
+
+    # Report presence must not hide post-approval author events: these are
+    # historical statements, never active GPT recommendations.
+    blocks.append(author_history)
 
     # Economic freshness is independent of document/wallet identity and
     # approval. A later market refresh never refreshes the author's GPT thesis.
