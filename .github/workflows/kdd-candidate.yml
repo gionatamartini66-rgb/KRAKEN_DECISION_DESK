@@ -5,9 +5,11 @@ on:
       - experiments/kdd-rt-i01-patrimonio-g2-20261028
       - experiments/kdd-android-transaction-g2-20261031
       - experiments/kdd-drive-ui-bridge-g2-20261031
+      - experiments/kdd-economic-context-g2-20261102
   pull_request:
     branches:
       - main
+      - governance/kdd-29-checklist-gate-20261102
 jobs:
   synthetic-regressions:
     runs-on: ubuntu-latest
