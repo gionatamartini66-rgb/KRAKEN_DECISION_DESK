@@ -232,6 +232,7 @@ def decision_home():
 
     # Read historical proposals without equating reception, approval and execution.
     proposal, proposal_state, proposal_sha, events = None, "ASSENTE", None, []
+    proposal_bundle = None
     try:
         from scripts import kdd_drive_exchange as exchange
         exchange.receive_synced()
@@ -239,7 +240,7 @@ def decision_home():
         approved = exchange.bridge.load_archive()
         events = exchange.decision_history()
         if item:
-            candidate, _bundle = item
+            candidate, proposal_bundle = item
             proposal_sha = exchange.bridge.digest(candidate)
             dismissed = [e["stato"] for e in events
                          if e["versione_sha256"] == proposal_sha
@@ -320,20 +321,14 @@ def decision_home():
                       "</h3><p>Nessuna valutazione patrimoniale attribuibile per questa home. "
                       "KDD presenta osservazioni, non decisioni GPT.</p>"
                       "<p><a href='/gpt'>Consulta o importa la proposta</a></p></article>")
-    elif (not isinstance(proposal, dict) or
-          not isinstance(proposal.get("posizioni"), list) or
-          len(proposal["posizioni"]) != len(positions) or
-          any(not isinstance(row, dict) or not isinstance(pos, dict) or
-              row.get("indice") != i or row.get("token") != pos.get("token")
-              for i, (row, pos) in enumerate(zip(proposal["posizioni"], positions)))):
-        # Version still exists, but its wallet identity cannot be assumed current.
-        blocks.append("<article><h3>Proposta GPT · " + esc(proposal_state) +
-                      "</h3><p>Versione " + esc((proposal_sha or "")[:16]) +
-                      ": identità/numero posizioni non riconciliabile con il report. "
-                      "Non attribuire giudizi ai token correnti.</p>"
-                      "<p><a href='/gpt'>Apri proposta originale</a></p></article>")
-        proposal = None
     else:
+        attributed = (
+            isinstance(proposal.get("posizioni"), list)
+            and len(proposal["posizioni"]) == len(positions)
+            and all(isinstance(row, dict) and isinstance(pos, dict)
+                    and row.get("indice") == i and row.get("token") == pos.get("token")
+                    for i, (row, pos) in enumerate(zip(proposal["posizioni"], positions)))
+            and _decision_proposal_matches(proposal, proposal_bundle, positions))
         blocks.append("<article><h3>Proposta GPT · " + esc(proposal_state) +
                       "</h3><p>Versione SHA256 " + esc(proposal_sha) +
                       " · fotografia GPT " + esc(proposal.get("snapshot_utc", "n.d.")) +
@@ -348,6 +343,19 @@ def decision_home():
                       "</p><p><b>Riesame:</b> " + esc(proposal.get("revisione", "")) +
                       "</p><p><a href='/gpt'>Apri fonte, storico e scelta dell'autore</a>. "
                       "La proposta non dimostra un ordine eseguito.</p></article>")
+        if not attributed:
+            blocks.append("<p role='status'>Proposta storica NON RICONCILIATA con le "
+                          "quantità e l'identità del patrimonio corrente: "
+                          "azioni GPT originali NON attribuite alle posizioni attuali.</p>"
+                          "<details><summary>Apri le posizioni della proposta originale "
+                          "(solo storico)</summary>" +
+                          "".join("<p>" + esc(row.get("token", "?")) + " · GPT storico: " +
+                                  esc(row.get("azione", "n.d.")) + " · " +
+                                  esc(row.get("tesi", "")) + "</p>"
+                                  for row in (proposal.get("posizioni") or [])
+                                  if isinstance(row, dict)) +
+                          "</details>")
+            proposal = None
 
     # Pair provenance belongs to the same completed snapshot and wallet digest.
     dossier = None
@@ -355,16 +363,25 @@ def decision_home():
         try:
             candidate = desk.load("dossier_multifonte.json", {})
             state_doc = report.get("dossier_stato")
-            if (isinstance(candidate, dict) and isinstance(state_doc, dict)
+            four = candidate.get("patrimonio_4tf") if isinstance(candidate, dict) else None
+            wallet_sha = report.get("fotografia_portafoglio_sha256")
+            if (isinstance(wallet_sha, str) and len(wallet_sha) == 64
+                    and isinstance(candidate, dict) and isinstance(state_doc, dict)
+                    and state_doc.get("stato") not in (
+                        "NON_ALLINEATO", "NON_ALLINEATO_PATRIMONIO",
+                        "PATRIMONIO_NON_VERIFICABILE")
                     and candidate.get("kraken_istantanea_utc") == market_time
-                    and candidate.get("fotografia_portafoglio_sha256")
-                    and candidate.get("fotografia_portafoglio_sha256") ==
-                        state_doc.get("fotografia_portafoglio_sha256")
-                    and isinstance(candidate.get("patrimonio_4tf"), dict)
-                    and len(candidate["patrimonio_4tf"].get("posizioni", [])) == len(positions)):
-                dossier = candidate["patrimonio_4tf"]["posizioni"]
+                    and isinstance(four, dict)
+                    and four.get("rilevazione_kraken_utc") == market_time
+                    and wallet_sha == candidate.get("fotografia_portafoglio_sha256")
+                    == state_doc.get("fotografia_portafoglio_sha256")
+                    == four.get("portafoglio_sha256")
+                    and isinstance(four.get("posizioni"), list)
+                    and len(four["posizioni"]) == len(positions)):
+                dossier = four["posizioni"]
         except (OSError, ValueError, KeyError, TypeError, UnicodeError):
             dossier = None
+    observed_pairs = _decision_observed_pairs(report, dossier)
 
     blocks.append("<h3>Patrimonio strategico a gestione attiva</h3>"
                   "<p>Ogni asset resta riesaminabile: mantenere, incrementare, alleggerire, "
@@ -413,7 +430,8 @@ def decision_home():
         if (isinstance(entry, dict) and entry.get("indice") == i and
                 entry.get("token") == token and
                 _decision_pair_identity(token, entry.get("coppia"),
-                                        entry.get("pair_key"), entry.get("asset_base"))):
+                                        entry.get("pair_key"), entry.get("asset_base"),
+                                        observed_pairs, entry.get("valuta_quotazione"))):
             body += ("<p><b>Coppia documentata da dossier KDD:</b> " +
                      esc(entry["coppia"]) + ". Elegibilità sul conto non verificata. " +
                      _decision_pair_links(entry["pair_key"], frames=entry.get("timeframe")) +
@@ -462,7 +480,8 @@ def decision_home():
                 matching = [alt for alt in options if isinstance(alt, dict)
                             and alt.get("pair") == pair
                             and _decision_pair_identity(token, pair, alt.get("pair_key"),
-                                                        pair.split("/", 1)[0] if isinstance(pair, str) else None)]
+                                                        pair.split("/", 1)[0] if isinstance(pair, str) else None,
+                                                        observed_pairs, alt.get("quote"))]
                 if len(matching) == 1:
                     chosen = matching[0]["pair_key"]
             if chosen:
