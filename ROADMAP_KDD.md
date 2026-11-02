@@ -8,6 +8,19 @@
 
 **Criterio reale:** fotografia datata → dossier → GPT e autore in chat → proposta motivata → ritorno nel KDD → scelta esplicita dell'autore → archivio → riesame su dati aggiornati. Ogni passaggio va provato separatamente.
 
+## 2-bis. Esito G0 di Supervisione del 02/11 — **STOP ACCETTAZIONE END-TO-END**
+
+**Rettifica probatoria della Supervisione, sollecitata dall'autore.** Il 02/11 il KDD ha effettivamente aggiornato i saldi Kraken in sola lettura, acquisito dati di mercato, costruito un handoff di 10 posizioni e trasferito manualmente su Drive un file di byte e impronta coerenti. **Questo è un PASS del trasporto informativo e dell'acquisizione; NON è PASS del circuito economico KDD ↔ GPT ↔ autore.** Ogni attestazione precedente di «circuito collaudato» deve essere letta esclusivamente per l'esatto segmento provato.
+
+1. **Cruscotto e interazione:** HTTP 200 e data nuova nella pagina sono prove di servizio, non una nuova prova visiva di uso reale da parte dell'autore dopo il refresh del 02/11. Le schermate precedenti mostravano la proposta storica. **Nuovo cruscotto + nuova proposta visualizzati e approvati dall'autore: NON PROVATI.**
+2. **Proposta economica:** il file trasferito `kdd_handoff_d287a028ade38aa74fa98c706c368b602d0b2ccc70b052327540047164efbee4.json` è un **dossier**, non una proposta GPT. Il documento `proposta_portafoglio.json` osservato su Drive è ancora del 31/10. Nessuna proposta GPT riferita alla fotografia 02/11, con confronto di alternative, sizing, ingresso/invalidazione/uscita/riesame o scarto motivato, è stata prodotta, salvata o visualizzata. **STOP proposta corrente.**
+3. **Trasferimento e automatismo:** l'autore ha dovuto aprire FolderSync e premere «Sincronizza» manualmente. Il [mandato originale conservato nel README](README.md) richiede espressamente che GPT legga il dossier sul Samsung tramite il collegamento disponibile e **scriva direttamente** nel programma; l'autore non deve trasferire file o copiare risposte. Tale flusso senza trasferimenti manuali **non è stato provato né soddisfatto**. Non confondere assenza di automazione permanente/continua — prevista come fase distinta — con l'obbligo di evitare operazioni manuali dell'autore per il singolo ciclo avviato in chat.
+4. **Proposta trascritta in chat:** mancata. La precedente risposta dell'assistente conteneva solo riepiloghi del portafoglio e dei candidati, non il testo integrale di una proposta discutibile. Nessuna decisione, pubblicazione, deliberazione o riesame dell'autore dimostrati.
+
+**Esito:** **STOP GATE ECONOMICO END-TO-END**. I PASS di refresh, creazione handoff, SHA, FolderSync e HTTP restano fatti veri ma *non equivalgono* all'esito richiesto. **Responsabilità dell'errore di accettazione: Supervisione apicale.** Non attribuire al KDD un risultato che questa sessione GPT non ha prodotto.
+
+**Rimedio prima di dichiarare GO:** leggere il dossier integro e approfondire le fonti pertinenti, proporre **in chiaro in chat** la valutazione dell'intero patrimonio e almeno una alternativa contestabile, con limiti di freschezza; definire una via diretta autorizzata **chat → Samsung/KDD** senza gesto FolderSync dell'autore per quel ciclo e senza inviare ordini; verificare la presenza della medesima versione nella home su Chrome dell'autore; distinguere eventuale consenso alla sola pubblicazione dalla deliberazione finanziaria. Se il percorso diretto è impossibile, dichiarare lo **STOP tecnico** e sottoporre alla Costruttrice il difetto delimitato, con test di accettazione concreto e revisione indipendente; non surrogare con un flusso manuale presentato come successo. Non ripetere refresh o nuovi dossier soltanto per far salire il numero dei PASS.
+
 ## 2. Stato del prodotto: codice, Samsung e prove distinti
 
 | Capacità | Stato verificato al 02/11/2026 | Limite / prossimo controllo |
