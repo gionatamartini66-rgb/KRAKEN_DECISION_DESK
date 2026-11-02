@@ -4106,6 +4106,7 @@ class IntegratedDecisionHomeTests(unittest.TestCase):
                          "stato": {"stato": "ORIGINE_SCONOSCIUTA"}},
                "patrimonio": {
                    "n_posizioni": 10, "stato_totale": "NON_DISPONIBILE",
+                   "fotografia_portafoglio_sha256": self.wallet_hash,
                    "totale_parziale": True, "totale_stimato_eur_senza_cash": None,
                    "posizioni": [
                        {"indice": i, "token": token, "stato_identita": "VALIDA",
