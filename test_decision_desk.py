@@ -4210,13 +4210,13 @@ class IntegratedDecisionHomeTests(unittest.TestCase):
         from scripts import kdd_drive_exchange as exchange
         orig, bundle = self.r2_origin()
         self.assertEqual(bridge.read_context(bundle, now=self.now)["n_posizioni"], 10)
-        bridge.validate_proposal(orig, bundle, now=self.now)
         orig["posizioni"][0]["azione"] = "ALLEGGERIRE"
+        bridge.validate_proposal(orig, bundle, now=self.now)
         sha = bridge.digest(orig)
         with unittest.mock.patch.object(exchange, "pending", return_value=(orig, bundle)):
             page = self.render_home()
             self.assertIn("ipotesi GPT ALLEGGERIRE", page)
-            self.assertIn("Non", "Non")
+            self.assertNotIn("NON RICONCILIATA", page)
             self.assertIn("GPT · NON APPROVATA · IN ATTESA DI DECISIONE", page)
             with unittest.mock.patch.object(exchange.bridge, "load_archive",
                                             return_value={sha: {"proposta": orig}}):
