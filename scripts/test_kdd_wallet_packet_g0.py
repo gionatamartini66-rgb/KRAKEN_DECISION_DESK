@@ -79,6 +79,58 @@ class WalletPacketG0Tests(unittest.TestCase):
     def pack(self,now=T):
         return p.build(self.root, now=now)
 
+    def test_economic_context_is_in_real_packet_path_and_not_a_recommendation(self):
+        packet = self.pack()
+        summary = packet["patrimonio"]["quadro_economico_per_gpt"]
+        # SXT has no EUR quote: no invented percentages.
+        self.assertEqual(summary["stato"], "NON_CALCOLABILE_INTEGRALMENTE")
+        self.assertEqual(len(summary["quote_posizioni"]), 3)
+        self.assertTrue(all(x["quota_pct"] is None for x in summary["quote_posizioni"]))
+        self.assertIsNone(summary["concentrazione_top2_pct"])
+        self.assertEqual(summary["liquidita_stato"],
+                         "PRESENTE_PER_VALUTA_MA_NON_CONVERTITA_IN_EUR")
+        self.assertFalse(summary["esempio_150_eur_necessita_liquidare_o_versare"])
+        self.assertIn("non è proposta", summary["vincoli"][0])
+
+    def test_economic_context_exact_arithmetic_no_cross_currency_fx(self):
+        positions = [{"token": "BTC", "valore_eur": "300"},
+                     {"token": "ETH", "valore_eur": "100"}]
+        zero_cash = {c: {"disponibile": "0"} for c in ("EUR", "EURC", "USD", "USDC")}
+        result = p.quadro_economico_per_gpt(positions, zero_cash, "400")
+        self.assertEqual(result["stato"], "INDICATIVO")
+        self.assertEqual([x["quota_pct"] for x in result["quote_posizioni"]],
+                         ["75.00", "25.00"])
+        self.assertEqual(result["concentrazione_top2_pct"], "100.00")
+        self.assertEqual(result["esempio_150_eur_sul_patrimonio_pct"], "37.50")
+        self.assertEqual(result["liquidita_stato"], "ZERO_RILEVATO_NELLE_QUATTRO_VALUTE")
+        self.assertTrue(result["esempio_150_eur_necessita_liquidare_o_versare"])
+        cash = {**zero_cash, "USDC": {"disponibile": "3"}}
+        result = p.quadro_economico_per_gpt(positions, cash, "400")
+        self.assertEqual(result["liquidita_stato"],
+                         "PRESENTE_PER_VALUTA_MA_NON_CONVERTITA_IN_EUR")
+        self.assertFalse(result["esempio_150_eur_necessita_liquidare_o_versare"])
+
+    def test_economic_context_fails_closed_on_forged_total_duplicate_invalid_values(self):
+        p1 = [{"token": "BTC", "valore_eur": "100"},
+              {"token": "ETH", "valore_eur": "200"}]
+        with self.assertRaisesRegex(p.PacketError, "totale discordante"):
+            p.quadro_economico_per_gpt(p1, {}, "200")
+        with self.assertRaisesRegex(p.PacketError, "duplicato"):
+            p.quadro_economico_per_gpt([p1[0], p1[0]], {}, "200")
+        with self.assertRaisesRegex(p.PacketError, "Numero non valido"):
+            p.quadro_economico_per_gpt([{"token": "BTC", "valore_eur": "-1"}], {}, "-1")
+        with self.assertRaisesRegex(p.PacketError, "Numero non valido"):
+            p.quadro_economico_per_gpt([{"token": "BTC", "valore_eur": "NaN"}], {}, "1")
+
+    def test_economic_context_zero_or_missing_total_never_divides(self):
+        row = [{"token": "BTC", "valore_eur": "0"}]
+        self.assertEqual(p.quadro_economico_per_gpt(row, {}, "0")["stato"],
+                         "NON_CALCOLABILE_INTEGRALMENTE")
+        self.assertIsNone(p.quadro_economico_per_gpt(row, {}, "0")
+                          ["esempio_150_eur_sul_patrimonio_pct"])
+        self.assertEqual(p.quadro_economico_per_gpt(row, {}, None)["stato"],
+                         "NON_CALCOLABILE_INTEGRALMENTE")
+
     def test_wallet_first_all_assets_even_if_quote_missing(self):
         obj=self.pack()
         positions=obj['patrimonio']['posizioni']
