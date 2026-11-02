@@ -4324,4 +4324,127 @@ class IntegratedDecisionHomeTests(unittest.TestCase):
         self.assertNotIn("ipotesi GPT ALLEGGERIRE", page)
         self.assertIn("fotografia GPT", page)
 
+
+class R3RealOriginIntegrationTests(unittest.TestCase):
+    """True wallet producer, bridge origin persistence, dated author event and HTML."""
+
+    def setUp(self):
+        from scripts import test_kdd_wallet_packet_g0 as fixtures
+        from scripts import kdd_bridge_g2 as bridge
+        from scripts import kdd_drive_exchange as exchange
+        self.fixture = fixtures.WalletPacketG0Tests(
+            "test_wallet_first_all_assets_even_if_quote_missing")
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.root = self.fixture.root
+        self.now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+        observed = self.now.isoformat(timespec="seconds")
+        self.fixture.report["rilevazione_utc"] = observed
+        self.fixture.snapshot["rilevazione_utc"] = observed
+        self.fixture.dossier["kraken_istantanea_utc"] = observed
+        self.fixture.portfolio["data_ora_saldo_privato_utc"] = observed
+        self.fixture.portfolio["fonte_quantita"] = (
+            "Kraken BalanceEx API privata SOLA LETTURA, " + observed)
+        self.fixture.report["fotografia_portafoglio_sha256"] = (
+            d.fotografia_portafoglio_sha256(self.fixture.portfolio))
+        self.fixture.dump()
+        for patcher in (
+            unittest.mock.patch.object(d, "DIR", self.root),
+            unittest.mock.patch.object(bridge, "PRIVATE_ROOT", self.root / "bridge-private"),
+            unittest.mock.patch.object(exchange, "EXCHANGE_ROOT", self.root / "no-sync-file"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.bridge = bridge
+        self.exchange = exchange
+        self.packet = bridge.prepare(self.root, now=self.now, _fixture=True)
+        self.assertEqual(
+            self.packet["packet"]["patrimonio"]["fotografia_portafoglio_sha256"],
+            self.fixture.report["fotografia_portafoglio_sha256"])
+        outgoing = bridge.private_directory(bridge.OUTBOX, create=True)
+        result = bridge.exclusive_json(
+            outgoing, bridge.digest(self.packet) + ".json", self.packet)
+        self.assertIn(result, ("INSERITO", "GIA_PRESENTE"))
+        bridge.verify_local_origin(self.packet)
+        source = self.packet["packet"]["patrimonio"]["posizioni"]
+        self.proposal = {
+            "schema": bridge.SCHEMA_PROPOSAL, "proposta_id": "R3-INTEGRATED-001",
+            "snapshot_id": self.packet["packet_sha256"],
+            "snapshot_utc": self.packet["packet"]["rilevazione_kdd_utc"],
+            "creato_utc": self.now.isoformat(timespec="seconds"),
+            "posizioni": [{
+                "indice": i, "token": row["token"],
+                "azione": "ALLEGGERIRE" if i == 0 else "MANTENERE",
+                "tesi": "Ipotesi dal produttore KDD " + row["token"],
+                "rischi": "Lacune e spread",
+                "alternativa": "Confronto con mantenimento",
+                "invalidazione": "Se cambiano dati o scenario",
+                "riesame": "Nuova analisi dopo snapshot",
+                "costi": "Da verificare",
+                "evidenze": "Fonte del pacchetto KDD",
+            } for i, row in enumerate(source)],
+            "scenario": "Scenario R3 di integrazione",
+            "scenario_alternativo": "Scenario opposto",
+            "rischi_comuni": "Rischio di dati incompleti",
+            "liquidita": "Solo saldo della fixture",
+            "revisione": "Nuovo snapshot",
+            "fonti_esterne": [],
+            "sostituisce_sha256": None
+        }
+        bridge.validate_proposal(self.proposal, self.packet, now=self.now)
+        self.sha = exchange.receive(bridge.canonical(self.proposal))
+
+    def html(self):
+        return serve.with_controls(
+            "<!doctype html><html><body><header><h1>KDD</h1></header>"
+            "<h2>1 · Decisioni e posizioni</h2><p>Diagnostica originale</p>"
+            "<h2>2 · Candidati da valutare</h2><p>Scanner originale</p>"
+            "<h2>3 · Macroeconomia e geopolitica</h2></body></html>")
+
+    def test_real_producer_inbox_decision_archive_and_home(self):
+        self.assertEqual(self.bridge.digest(self.exchange.pending()[0]), self.sha)
+        before = self.html()
+        self.assertIn("ipotesi GPT ALLEGGERIRE", before)
+        self.assertIn("Scenario R3 di integrazione", before)
+        self.assertIn("href='/gpt'", before)
+        self.assertLess(before.index("id='kdd-decisioni'"), before.index("id='kdd-legacy-spot'"))
+        decision = {"sha256": self.sha, "stato": "RINVIATA",
+                    "nota": "Rinviata per dati e liquidità ancora incerti"}
+        self.assertEqual(self.exchange.record_decision(
+            self.bridge.canonical(decision)), "INSERITO")
+        rows = self.exchange.decision_history()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["versione_sha256"], self.sha)
+        self.assertEqual(rows[0]["stato"], "RINVIATA")
+        after = self.html()
+        self.assertIn("Proposta GPT · RINVIATA", after)
+        self.assertIn("Rinviata per dati e liquidità ancora incerti", after)
+        self.assertIn(rows[0]["creato_utc"], after)
+        self.assertIn(self.sha, after)
+        self.assertNotIn("ipotesi GPT ALLEGGERIRE", after)
+        self.assertIn("KDD (osservazione)", after)
+        # A second legitimate version must not inherit A's human event.
+        next_proposal = dict(self.proposal, proposta_id="R3-INTEGRATED-002")
+        next_sha = self.exchange.receive(self.bridge.canonical(next_proposal))
+        self.assertNotEqual(self.sha, next_sha)
+        next_page = self.html()
+        self.assertIn("Proposta GPT · NON APPROVATA", next_page)
+        self.assertIn("ipotesi GPT ALLEGGERIRE", next_page)
+
+    def test_legacy_packet_stays_readable_but_not_attributable(self):
+        from copy import deepcopy
+        old = deepcopy(self.packet)
+        old["packet"]["patrimonio"].pop("fotografia_portafoglio_sha256")
+        old["packet_sha256"] = self.bridge.digest(old["packet"])
+        self.bridge.read_context(old, now=self.now)
+        old_proposal = dict(self.proposal,
+                            proposta_id="R3-LEGACY-001",
+                            snapshot_id=old["packet_sha256"])
+        self.bridge.validate_proposal(old_proposal, old, now=self.now)
+        # The consumer must not derive a full wallet hash from legacy quantities.
+        self.assertFalse(serve._decision_proposal_matches(
+            old_proposal, old, self.fixture.report["posizioni"],
+            self.fixture.report["fotografia_portafoglio_sha256"]))
+        self.assertEqual(self.exchange.pending()[0]["proposta_id"], "R3-INTEGRATED-001")
+
 if __name__=='__main__': unittest.main(verbosity=2)
