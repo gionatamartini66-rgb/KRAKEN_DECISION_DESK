@@ -217,7 +217,12 @@ def _decision_proposal_matches(proposal, bundle, positions, current_wallet_sha):
             current_qty = wallet.amount(current.get("quantita"), "quantita")
         except (wallet.PacketError, ValueError, TypeError):
             return False
-        if original_qty != current_qty:
+        # wallet.amount is a finite decimal *string* and retains harmless
+        # scale differences such as "4.20" vs "4.2". Never compare strings.
+        from decimal import Decimal
+        if ((original_qty is None) != (current_qty is None)
+                or (original_qty is not None
+                    and Decimal(original_qty) != Decimal(current_qty))):
             return False
     return True
 
