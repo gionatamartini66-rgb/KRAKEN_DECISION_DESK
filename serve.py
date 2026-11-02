@@ -108,18 +108,110 @@ def _decision_pair_links(key, *, frames=None):
     return " · ".join(links)
 
 
-def _decision_pair_identity(token, pair, key, base):
-    """Validate source labels; the chart route rechecks current Kraken AssetPairs."""
+def _decision_pair_identity(token, pair, key, base, observed_pairs=None, quote=None):
+    """Require an exact persisted Kraken REST-key <-> wsname binding, not key syntax.
+
+    Observations originate in AssetPairs-checked KDD market/4TF acquisition.
+    The graph route independently checks live AssetPairs and OHLC identity.
+    """
+    import patrimonio_4tf as four
     if (not isinstance(pair, str) or not SPOT_NAME_RE.fullmatch(pair)
             or not isinstance(key, str) or not SPOT_KEY_RE.fullmatch(key)
-            or not isinstance(token, str)):
+            or not isinstance(token, str) or not isinstance(base, str)
+            or not isinstance(observed_pairs, dict)):
         return False
-    actual, quote = pair.split("/", 1)
-    canonical = lambda v: {"XBT": "BTC", "XXBT": "BTC", "XDG": "DOGE",
-                           "XXDG": "DOGE"}.get(v, v)
-    return (canonical(actual) == canonical(token)
-            and canonical(base) == canonical(actual)
-            and quote in ("EUR", "USD", "USDC"))
+    actual, quoted = pair.split("/", 1)
+    return (four.canonical_base(actual) == four.canonical_base(token)
+            and four.canonical_base(base) == four.canonical_base(actual)
+            and quoted in ("EUR", "USD", "USDC")
+            and (quote is None or quote == quoted)
+            and observed_pairs.get(key) == pair)
+
+
+def _decision_observed_pairs(report, dossier=None):
+    """Reconcile exact keys from already persisted, same-snapshot KDD evidence.
+
+    No fresh Kraken calls on home reads. Ambiguous REST keys or wsname aliases
+    suppress direct links; the generic catalog is still available.
+    """
+    try:
+        snapshot = desk.load("ultima_rilevazione.json", {})
+    except (OSError, ValueError, UnicodeError):
+        return {}
+    if (not isinstance(snapshot, dict)
+            or snapshot.get("rilevazione_utc") != report.get("rilevazione_utc")):
+        return {}
+    found = {}
+    invalid_keys = set()
+    names = {}
+    def accept(key, name):
+        if (not isinstance(key, str) or not SPOT_KEY_RE.fullmatch(key)
+                or not isinstance(name, str) or not SPOT_NAME_RE.fullmatch(name)):
+            return
+        if key in found and found[key] != name:
+            invalid_keys.add(key)
+        if name in names and names[name] != key:
+            invalid_keys.add(key)
+            invalid_keys.add(names[name])
+        found[key] = name
+        names[name] = key
+    markets = snapshot.get("markets")
+    if isinstance(markets, dict):
+        for row in markets.values():
+            if isinstance(row, dict):
+                accept(row.get("pair_key"), row.get("pair"))
+    cards = snapshot.get("schede_v02")
+    if isinstance(cards, list):
+        for row in cards:
+            if isinstance(row, dict) and isinstance(row.get("alternative"), list):
+                for alt in row["alternative"]:
+                    if isinstance(alt, dict):
+                        accept(alt.get("pair_key"), alt.get("pair"))
+    # Each acquired 4TF frame has its own verified Kraken pair identity.
+    # Do not trust the top-level 4TF label alone as a second certificate.
+    if isinstance(dossier, list):
+        for row in dossier:
+            frames = row.get("timeframe") if isinstance(row, dict) else None
+            if isinstance(frames, dict):
+                for frame in frames.values():
+                    if isinstance(frame, dict) and frame.get("stato") in ("AGGIORNATO", "SCADUTO"):
+                        accept(frame.get("pair_key"), frame.get("coppia"))
+    return {key: name for key, name in found.items() if key not in invalid_keys}
+
+
+def _decision_proposal_matches(proposal, bundle, positions):
+    """Use the original KDD packet quantities, not snapshot_id as a wallet SHA."""
+    from scripts import kdd_bridge_g2 as bridge
+    from scripts import kdd_wallet_packet_g0 as wallet
+    if not isinstance(bundle, dict) or not isinstance(proposal, dict):
+        return False
+    packet = bundle.get("packet")
+    if (bundle.get("schema") != bridge.SCHEMA_BUNDLE
+            or not isinstance(packet, dict) or packet.get("schema") != wallet.SCHEMA
+            or not isinstance(bundle.get("packet_sha256"), str)
+            or bridge.digest(packet) != bundle["packet_sha256"]
+            or proposal.get("snapshot_id") != bundle["packet_sha256"]
+            or proposal.get("snapshot_utc") != packet.get("rilevazione_kdd_utc")):
+        return False
+    original = packet.get("patrimonio")
+    rows = original.get("posizioni") if isinstance(original, dict) else None
+    if (not isinstance(rows, list) or len(rows) != len(positions)
+            or original.get("n_posizioni") != len(rows)):
+        return False
+    for i, (old, current) in enumerate(zip(rows, positions)):
+        if (not isinstance(old, dict) or not isinstance(current, dict)
+                or old.get("indice") != i
+                or old.get("token") != current.get("token")
+                or old.get("stato_identita") != "VALIDA"):
+            return False
+        try:
+            original_qty = wallet.amount(old.get("quantita_spot"), "quantita")
+            current_qty = wallet.amount(current.get("quantita"), "quantita")
+        except (wallet.PacketError, ValueError, TypeError):
+            return False
+        if original_qty != current_qty:
+            return False
+    return True
 
 
 def decision_home():
