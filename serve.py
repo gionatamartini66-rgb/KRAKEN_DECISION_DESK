@@ -179,7 +179,7 @@ def _decision_observed_pairs(report, dossier=None):
     return {key: name for key, name in found.items() if key not in invalid_keys}
 
 
-def _decision_proposal_matches(proposal, bundle, positions):
+def _decision_proposal_matches(proposal, bundle, positions, current_wallet_sha):
     """Use the original KDD packet quantities, not snapshot_id as a wallet SHA."""
     from scripts import kdd_bridge_g2 as bridge
     from scripts import kdd_wallet_packet_g0 as wallet
@@ -195,6 +195,14 @@ def _decision_proposal_matches(proposal, bundle, positions):
         return False
     original = packet.get("patrimonio")
     rows = original.get("posizioni") if isinstance(original, dict) else None
+    # The full source-wallet identity is optional in the old v001 packet.
+    # Missing legacy evidence cannot be fabricated from quantities or a packet SHA.
+    source_sha = (original.get("fotografia_portafoglio_sha256")
+                  if isinstance(original, dict) else None)
+    if (not isinstance(source_sha, str) or len(source_sha) != 64
+            or any(ch not in "0123456789abcdef" for ch in source_sha)
+            or source_sha != current_wallet_sha):
+        return False
     if (not isinstance(rows, list) or len(rows) != len(positions)
             or original.get("n_posizioni") != len(rows)):
         return False
@@ -209,7 +217,12 @@ def _decision_proposal_matches(proposal, bundle, positions):
             current_qty = wallet.amount(current.get("quantita"), "quantita")
         except (wallet.PacketError, ValueError, TypeError):
             return False
-        if original_qty != current_qty:
+        # wallet.amount is a finite decimal *string* and retains harmless
+        # scale differences such as "4.20" vs "4.2". Never compare strings.
+        from decimal import Decimal
+        if ((original_qty is None) != (current_qty is None)
+                or (original_qty is not None
+                    and Decimal(original_qty) != Decimal(current_qty))):
             return False
     return True
 
@@ -232,7 +245,7 @@ def decision_home():
 
     # Read historical proposals without equating reception, approval and execution.
     proposal, proposal_state, proposal_sha, events = None, "ASSENTE", None, []
-    proposal_bundle = None
+    proposal_bundle, author_events, author_ambiguous = None, [], False
     try:
         from scripts import kdd_drive_exchange as exchange
         exchange.receive_synced()
@@ -242,11 +255,19 @@ def decision_home():
         if item:
             candidate, proposal_bundle = item
             proposal_sha = exchange.bridge.digest(candidate)
-            dismissed = [e["stato"] for e in events
-                         if e["versione_sha256"] == proposal_sha
-                         and e["stato"] in ("RIFIUTATA", "RINVIATA")]
-            proposal_state = ("APPROVATA · ARCHIVIO" if proposal_sha in approved else
-                              dismissed[-1] if dismissed else "NON APPROVATA · IN ATTESA DI DECISIONE")
+            matching = [e for e in events if e["versione_sha256"] == proposal_sha
+                        and e["stato"] in ("RIFIUTATA", "RINVIATA")]
+            author_events, author_ambiguous = exchange.latest_events(matching)
+            if author_ambiguous:
+                proposal_state = "DELIBERAZIONE NON ORDINABILE · STOP"
+            elif proposal_sha in approved and matching:
+                proposal_state = "STATO DELIBERATIVO CONTRADDITTORIO · STOP"
+            elif matching:
+                proposal_state = author_events[-1]["stato"]
+            elif proposal_sha in approved:
+                proposal_state = "APPROVATA · ARCHIVIO"
+            else:
+                proposal_state = "NON APPROVATA · IN ATTESA DI DECISIONE"
             proposal = candidate
     except Exception:
         proposal, proposal_state = None, "ARCHIVIO NON VERIFICABILE · STOP"
@@ -328,7 +349,9 @@ def decision_home():
             and all(isinstance(row, dict) and isinstance(pos, dict)
                     and row.get("indice") == i and row.get("token") == pos.get("token")
                     for i, (row, pos) in enumerate(zip(proposal["posizioni"], positions)))
-            and _decision_proposal_matches(proposal, proposal_bundle, positions))
+            and _decision_proposal_matches(
+                proposal, proposal_bundle, positions,
+                report.get("fotografia_portafoglio_sha256")))
         blocks.append("<article><h3>Proposta GPT · " + esc(proposal_state) +
                       "</h3><p>Versione SHA256 " + esc(proposal_sha) +
                       " · fotografia GPT " + esc(proposal.get("snapshot_utc", "n.d.")) +
@@ -343,6 +366,14 @@ def decision_home():
                       "</p><p><b>Riesame:</b> " + esc(proposal.get("revisione", "")) +
                       "</p><p><a href='/gpt'>Apri fonte, storico e scelta dell'autore</a>. "
                       "La proposta non dimostra un ordine eseguito.</p></article>")
+        if author_events:
+            blocks.append("<p><b>Deliberazione dell'autore su questa versione:</b> " +
+                          ("ordine reciproco degli eventi non documentato. "
+                           if author_ambiguous else "") +
+                          "; ".join(esc(e["stato"]) + " · " +
+                                    esc(e["creato_utc"]) + " · " + esc(e["nota"])
+                                    for e in author_events) +
+                          ". Nessuna operazione eseguita deducibile.</p>")
         if not attributed:
             blocks.append("<p role='status'>Proposta storica NON RICONCILIATA con le "
                           "quantità e l'identità del patrimonio corrente: "
@@ -356,6 +387,19 @@ def decision_home():
                                   if isinstance(row, dict)) +
                           "</details>")
             proposal = None
+
+    # Economic freshness is independent of document/wallet identity and
+    # approval. A later market refresh never refreshes the author's GPT thesis.
+    proposal_current = bool(
+        proposal is not None and proposal_state in
+        ("NON APPROVATA · IN ATTESA DI DECISIONE", "APPROVATA · ARCHIVIO")
+        and report.get("rilevazione_utc") == proposal.get("snapshot_utc")
+        and _decision_age(report.get("rilevazione_utc"), now=now) == "RECENTE"
+        and _decision_age(proposal.get("snapshot_utc"), now=now) == "RECENTE")
+    if proposal is not None and not proposal_current:
+        blocks.append("<p role='status'>La proposta resta attribuibile allo stesso "
+                      "patrimonio ma NON È UNA PRIORITÀ GPT CORRENTE: "
+                      "fotografia di mercato o deliberazione da riesaminare.</p>")
 
     # Pair provenance belongs to the same completed snapshot and wallet digest.
     dossier = None
@@ -405,8 +449,9 @@ def decision_home():
         technical = "; ".join(str(x) for x in technical) if isinstance(technical, list) and technical else holding.get("errore", "Nessuna conclusione tecnica documentata")
         source = _decision_origin(token, holding.get("decisione"), decisions, observed)
         gpt = proposal["posizioni"][i] if proposal else None
-        important = bool(holding.get("errore")) or (gpt is not None and
-                    gpt.get("azione") not in ("MANTENERE", "RINVIARE"))
+        important = bool(holding.get("errore")) or (
+            proposal_current and gpt is not None and
+            gpt.get("azione") not in ("MANTENERE", "RINVIARE"))
         if important:
             priorities.append(token + ": " + ("dati incompleti" if holding.get("errore")
                                                else "ipotesi GPT " + str(gpt.get("azione"))))
