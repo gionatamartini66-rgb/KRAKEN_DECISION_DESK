@@ -4259,4 +4259,68 @@ class IntegratedDecisionHomeTests(unittest.TestCase):
         self.assertNotIn("href='/grafico/spot?pair=ADAETH", page_ambiguous)
         self.assertIn("href='/mercati/spot'", page_ambiguous)
 
+
+    def test_r3_01_rejected_deferred_are_not_active_gpt_priorities(self):
+        from scripts import kdd_drive_exchange as exchange
+        from scripts import kdd_bridge_g2 as bridge
+        proposal, bundle = self.r2_origin()
+        proposal["posizioni"][0]["azione"] = "ALLEGGERIRE"
+        sha = bridge.digest(proposal)
+        with unittest.mock.patch.object(exchange, "pending", return_value=(proposal, bundle)):
+            for state in ("RIFIUTATA", "RINVIATA"):
+                event = {"versione_sha256": sha, "stato": state,
+                         "creato_utc": self.now.isoformat(), "nota": "Motivo concreto di " + state}
+                with self.subTest(state=state), unittest.mock.patch.object(
+                        exchange, "decision_history", return_value=[event]):
+                    page = self.render_home()
+                    self.assertIn("Proposta GPT · " + state, page)
+                    self.assertIn("Motivo concreto di " + state, page)
+                    self.assertNotIn("ipotesi GPT ALLEGGERIRE", page)
+                    self.assertIn("href='/gpt'", page)
+
+    def test_r3_02_same_token_quantity_different_cost_is_historical_only(self):
+        import copy
+        from scripts import kdd_drive_exchange as exchange
+        proposal, bundle = self.r2_origin()
+        proposal["posizioni"][0]["azione"] = "ALLEGGERIRE"
+        wallet_b = copy.deepcopy(self.wallet)
+        wallet_b["posizioni"][0]["costo_medio_eur"] = 3.75
+        report = copy.deepcopy(self.report)
+        report["fotografia_portafoglio_sha256"] = d.fotografia_portafoglio_sha256(wallet_b)
+        (self.root / "ultimo_report.json").write_text(json.dumps(report))
+        with unittest.mock.patch.object(exchange, "pending", return_value=(proposal, bundle)):
+            page = self.render_home()
+        self.assertIn("Valutazione storica su dieci asset", page)
+        self.assertIn("NON RICONCILIATA", page)
+        self.assertNotIn("ipotesi GPT ALLEGGERIRE", page)
+
+    def test_r3_02_same_quantities_changed_liquidity_is_historical_only(self):
+        import copy
+        from scripts import kdd_drive_exchange as exchange
+        proposal, bundle = self.r2_origin()
+        proposal["posizioni"][0]["azione"] = "ALLEGGERIRE"
+        wallet_b = copy.deepcopy(self.wallet)
+        wallet_b["liquidita_spot_api"] = {"USDC": {"quantita": "999"}}
+        report = copy.deepcopy(self.report)
+        report["fotografia_portafoglio_sha256"] = d.fotografia_portafoglio_sha256(wallet_b)
+        (self.root / "ultimo_report.json").write_text(json.dumps(report))
+        with unittest.mock.patch.object(exchange, "pending", return_value=(proposal, bundle)):
+            page = self.render_home()
+        self.assertIn("NON RICONCILIATA", page)
+        self.assertNotIn("ipotesi GPT ALLEGGERIRE", page)
+
+    def test_r3_02_new_market_snapshot_is_not_current_gpt_priority(self):
+        import copy
+        from scripts import kdd_drive_exchange as exchange
+        proposal, bundle = self.r2_origin()
+        proposal["posizioni"][0]["azione"] = "ALLEGGERIRE"
+        report = copy.deepcopy(self.report)
+        report["rilevazione_utc"] = (self.now + dt.timedelta(seconds=1)).isoformat(timespec="seconds")
+        (self.root / "ultimo_report.json").write_text(json.dumps(report))
+        with unittest.mock.patch.object(exchange, "pending", return_value=(proposal, bundle)):
+            page = self.render_home()
+        self.assertIn("Valutazione storica su dieci asset", page)
+        self.assertNotIn("ipotesi GPT ALLEGGERIRE", page)
+        self.assertIn("fotografia GPT", page)
+
 if __name__=='__main__': unittest.main(verbosity=2)
