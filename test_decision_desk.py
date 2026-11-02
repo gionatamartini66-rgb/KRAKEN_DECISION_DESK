@@ -4329,6 +4329,13 @@ class R3RealOriginIntegrationTests(unittest.TestCase):
     """True wallet producer, bridge origin persistence, dated author event and HTML."""
 
     def setUp(self):
+        # The existing script fixture imports its producer as a top-level module.
+        # Reuse that original fixture unmodified, with its normal script path.
+        import sys
+        scripts_path = str(pathlib.Path(__file__).parent / "scripts")
+        if scripts_path not in sys.path:
+            sys.path.insert(0, scripts_path)
+            self.addCleanup(sys.path.remove, scripts_path)
         from scripts import test_kdd_wallet_packet_g0 as fixtures
         from scripts import kdd_bridge_g2 as bridge
         from scripts import kdd_drive_exchange as exchange
