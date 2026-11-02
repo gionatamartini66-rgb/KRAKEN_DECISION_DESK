@@ -115,8 +115,15 @@ class WalletPacketG0Tests(unittest.TestCase):
               {"token": "ETH", "valore_eur": "200"}]
         with self.assertRaisesRegex(p.PacketError, "totale discordante"):
             p.quadro_economico_per_gpt(p1, {}, "200")
-        with self.assertRaisesRegex(p.PacketError, "duplicato"):
-            p.quadro_economico_per_gpt([p1[0], p1[0]], {}, "200")
+        duplicate = p.quadro_economico_per_gpt([p1[0], p1[0]], {}, "200")
+        self.assertEqual(duplicate["stato"], "NON_CALCOLABILE_INTEGRALMENTE")
+        self.assertEqual(len(duplicate["quote_posizioni"]), 2)
+        self.assertTrue(all(x["quota_pct"] is None for x in duplicate["quote_posizioni"]))
+        unknown = p.quadro_economico_per_gpt(
+            [{"token": None, "stato_identita": "IDENTITA_NON_VALIDA", "valore_eur": None}],
+            {}, None)
+        self.assertEqual(unknown["quote_posizioni"][0]["token"], None)
+        self.assertEqual(unknown["stato"], "NON_CALCOLABILE_INTEGRALMENTE")
         with self.assertRaisesRegex(p.PacketError, "Numero non valido"):
             p.quadro_economico_per_gpt([{"token": "BTC", "valore_eur": "-1"}], {}, "-1")
         with self.assertRaisesRegex(p.PacketError, "Numero non valido"):
