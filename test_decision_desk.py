@@ -4413,6 +4413,13 @@ class R3RealOriginIntegrationTests(unittest.TestCase):
 
     def test_real_producer_inbox_decision_archive_and_home(self):
         self.assertEqual(self.bridge.digest(self.exchange.pending()[0]), self.sha)
+        self.assertTrue(
+            serve._decision_proposal_matches(
+                self.proposal, self.packet, self.fixture.report["posizioni"],
+                self.fixture.report["fotografia_portafoglio_sha256"]),
+            [(row["token"], row["quantita_spot"], current.get("quantita"), row.get("stato_identita"))
+             for row, current in zip(self.packet["packet"]["patrimonio"]["posizioni"],
+                                     self.fixture.report["posizioni"])])
         before = self.html()
         self.assertIn("ipotesi GPT ALLEGGERIRE", before)
         self.assertIn("Scenario R3 di integrazione", before)
