@@ -3931,6 +3931,9 @@ class IntegratedDecisionHomeTests(unittest.TestCase):
         wallet = {"posizioni": [{"token": t, "quantita": None if t == "ETH" else "1"}
                                 for t in self.tokens]}
         self.report = d.build_report(data, wallet, {}, {}, [])
+        self.wallet = wallet
+        self.wallet_hash = d.fotografia_portafoglio_sha256(wallet)
+        self.report["fotografia_portafoglio_sha256"] = self.wallet_hash
         self.report["piano_gpt"] = None
         self.report["schede_v02"] = [{
             "token": "ADA", "categoria": "setup in verifica",
@@ -3946,13 +3949,15 @@ class IntegratedDecisionHomeTests(unittest.TestCase):
             "acquisizione_saldo_utc": (self.now - dt.timedelta(hours=4)).isoformat(),
             "freschezza_saldo": "RECENTE"}
         self.report["dossier_stato"] = {"stato": "PARZIALE",
-                                         "fotografia_portafoglio_sha256": "abc"}
+                                         "fotografia_portafoglio_sha256": self.wallet_hash}
         (self.root / "ultimo_report.json").write_text(
             json.dumps(self.report), encoding="utf-8")
         dossier = {
             "kraken_istantanea_utc": self.report["rilevazione_utc"],
-            "fotografia_portafoglio_sha256": "abc",
+            "fotografia_portafoglio_sha256": self.wallet_hash,
             "patrimonio_4tf": {
+                "portafoglio_sha256": self.wallet_hash,
+                "rilevazione_kraken_utc": self.report["rilevazione_utc"],
                 "posizioni": [{
                     "indice": i, "token": token, "coppia": "XBT/EUR" if i == 0 else None,
                     "pair_key": "XXBTZEUR" if i == 0 else None,
@@ -3965,6 +3970,12 @@ class IntegratedDecisionHomeTests(unittest.TestCase):
             }}
         (self.root / "dossier_multifonte.json").write_text(
             json.dumps(dossier), encoding="utf-8")
+        snapshot = {"rilevazione_utc": self.report["rilevazione_utc"],
+                    "markets": {"BTC": {"token": "BTC", "pair": "XBT/EUR",
+                                         "pair_key": "XXBTZEUR", "prezzo_eur": 1}},
+                    "schede_v02": self.report["schede_v02"]}
+        (self.root / "ultima_rilevazione.json").write_text(
+            json.dumps(snapshot), encoding="utf-8")
         self.proposal = {
             "proposta_id": "fixture-001",
             "snapshot_utc": (self.now - dt.timedelta(days=2)).isoformat(),
@@ -4154,6 +4165,10 @@ class IntegratedDecisionHomeTests(unittest.TestCase):
         report_b = dict(self.report)
         report_b["posizioni"] = [dict(x) for x in self.report["posizioni"]]
         report_b["posizioni"][0]["quantita"] = "9"
+        wallet_b = {"posizioni": [{"token": t, "quantita": "9" if i == 0 else
+                                    (None if t == "ETH" else "1")}
+                                    for i, t in enumerate(self.tokens)]}
+        report_b["fotografia_portafoglio_sha256"] = d.fotografia_portafoglio_sha256(wallet_b)
         (self.root / "ultimo_report.json").write_text(json.dumps(report_b))
         with unittest.mock.patch.object(exchange, "pending", return_value=(orig, bundle)):
             page = self.render_home()
