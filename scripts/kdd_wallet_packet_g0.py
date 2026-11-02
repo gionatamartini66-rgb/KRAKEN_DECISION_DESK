@@ -528,6 +528,85 @@ def cash_balances(portfolio: dict, report: dict) -> dict:
     return result
 
 
+def quadro_economico_per_gpt(positions: list, cash: dict, total) -> dict:
+    """Pure, non-prescriptive arithmetic for KDD-02/04/05/23.
+
+    No trading recommendation, no fee assumptions and no cross-currency sum.
+    Values remain private inside the same opt-in packet as the original wallet.
+    """
+    if not isinstance(positions, list) or not isinstance(cash, dict):
+        raise PacketError("Quadro economico: input non strutturato")
+    total_value = amount(total, "totale patrimonio")
+    denom = Decimal(total_value) if total_value is not None else None
+    entries = []
+    tokens_seen = set()
+    for pos in positions:
+        if not isinstance(pos, dict):
+            raise PacketError("Quadro economico: posizione non strutturata")
+        token = safe_symbol(pos.get("token"))
+        if token in tokens_seen:
+            raise PacketError("Quadro economico: asset duplicato")
+        tokens_seen.add(token)
+        value = amount(pos.get("valore_eur"), "valore posizione")
+        entries.append((token, Decimal(value) if value is not None else None))
+
+    complete = bool(denom is not None and denom > 0
+                    and entries and all(value is not None for _, value in entries))
+    quote = []
+    if complete:
+        observed = sum((v for _, v in entries), Decimal(0))
+        if abs(observed - denom) > Decimal("0.01"):
+            raise PacketError("Quadro economico: totale discordante")
+    for token, value in entries:
+        pct = ((value * Decimal(100) / denom).quantize(Decimal("0.01"))
+               if complete else None)
+        quote.append({"token": token, "quota_pct": format(pct, "f") if pct is not None else None})
+    top = sorted((v for _, v in entries if v is not None), reverse=True) if complete else []
+    pct_top2 = (sum(top[:2], Decimal(0)) * 100 / denom).quantize(Decimal("0.01")) if top else None
+    pct_top3 = (sum(top[:3], Decimal(0)) * 100 / denom).quantize(Decimal("0.01")) if top else None
+    scenario_150 = (Decimal(150) * 100 / denom).quantize(Decimal("0.01")) if complete else None
+
+    currencies = ("EUR", "EURC", "USD", "USDC")
+    available = []
+    for symbol in currencies:
+        block = cash.get(symbol)
+        if not isinstance(block, dict):
+            available = []
+            break
+        value = amount(block.get("disponibile"), "liquidita disponibile")
+        if value is None:
+            available = []
+            break
+        available.append(Decimal(value))
+    if len(available) != len(currencies):
+        cash_status = "NON_VERIFICATA"
+    elif not any(available):
+        cash_status = "ZERO_RILEVATO_NELLE_QUATTRO_VALUTE"
+    else:
+        cash_status = "PRESENTE_PER_VALUTA_MA_NON_CONVERTITA_IN_EUR"
+
+    return {
+        "stato": "INDICATIVO" if complete else "NON_CALCOLABILE_INTEGRALMENTE",
+        "base": "valore_eur_posizioni_senza_liquidita",
+        "quote_posizioni": quote,
+        "concentrazione_top2_pct": format(pct_top2, "f") if pct_top2 is not None else None,
+        "concentrazione_top3_pct": format(pct_top3, "f") if pct_top3 is not None else None,
+        "liquidita_stato": cash_status,
+        "esempio_150_eur_sul_patrimonio_pct": (format(scenario_150, "f")
+                                               if scenario_150 is not None else None),
+        "esempio_150_eur_necessita_liquidare_o_versare": (
+            cash_status == "ZERO_RILEVATO_NELLE_QUATTRO_VALUTE"),
+        "vincoli": [
+            "Calcolo descrittivo: non è proposta di vendita, acquisto o conversione.",
+            "Valori indicativi della fotografia, non prezzi eseguibili.",
+            "Nessun P/L reale senza movimenti e costo storico verificati.",
+            "USD, EUR, EURC e USDC non sommati senza quotazioni e costi attuali.",
+            "Ogni alternativa deve considerare fee, spread, liquidità e scelta dell'autore."
+        ]
+    }
+
+
+
 def build(root: Path, now: dt.datetime | None = None) -> dict:
     """Compose with explicit stale flags. No external calls, writes or auto-approval."""
     now = now or dt.datetime.now(UTC)
@@ -593,6 +672,7 @@ def build(root: Path, now: dt.datetime | None = None) -> dict:
             "dossier": {"coerente_con_mercato": dossier_fresh,
                         "stato": "UTILIZZABILE_CON_LIMITI" if dossier_fresh else "RILEVAZIONE_DIFFERENTE_NON_ATTRIBUIRE_LIVELLI"},
             "patrimonio": {"posizioni": positions, "liquidita_spot": cash,
+                           "quadro_economico_per_gpt": quadro_economico_per_gpt(positions, cash, total),
                            "fotografia_portafoglio_sha256": wallet_sha,
                            "totale_stimato_eur_senza_cash": total,
                            "totale_parziale": bool(report.get("totale_parziale")) or incomplete,
