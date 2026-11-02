@@ -4347,6 +4347,9 @@ class R3RealOriginIntegrationTests(unittest.TestCase):
         self.now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
         observed = self.now.isoformat(timespec="seconds")
         self.fixture.report["rilevazione_utc"] = observed
+        # The original G0 fixture omitted the unvalued SXT quantity in the
+        # report, although production build_report records it. Preserve it here.
+        self.fixture.report["posizioni"][2]["quantita"] = "5"
         self.fixture.snapshot["rilevazione_utc"] = observed
         self.fixture.dossier["kraken_istantanea_utc"] = observed
         self.fixture.portfolio["data_ora_saldo_privato_utc"] = observed
