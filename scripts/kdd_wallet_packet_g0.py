@@ -540,17 +540,23 @@ def quadro_economico_per_gpt(positions: list, cash: dict, total) -> dict:
     denom = Decimal(total_value) if total_value is not None else None
     entries = []
     tokens_seen = set()
+    identities_valid = True
     for pos in positions:
         if not isinstance(pos, dict):
             raise PacketError("Quadro economico: posizione non strutturata")
-        token = safe_symbol(pos.get("token"))
-        if token in tokens_seen:
-            raise PacketError("Quadro economico: asset duplicato")
-        tokens_seen.add(token)
+        token = pos.get("token")
+        # Producer intentionally preserves unknown and duplicate wallet identities
+        # by row index. Never remove them or fabricate a portfolio distribution.
+        if (not isinstance(token, str) or not SYMBOL.fullmatch(token)
+                or pos.get("stato_identita", "VALIDA") != "VALIDA"
+                or token in tokens_seen):
+            identities_valid = False
+        else:
+            tokens_seen.add(token)
         value = amount(pos.get("valore_eur"), "valore posizione")
         entries.append((token, Decimal(value) if value is not None else None))
 
-    complete = bool(denom is not None and denom > 0
+    complete = bool(denom is not None and denom > 0 and identities_valid
                     and entries and all(value is not None for _, value in entries))
     quote = []
     if complete:
