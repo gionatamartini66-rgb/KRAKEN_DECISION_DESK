@@ -570,6 +570,12 @@ def read_context(bundle, *, now=None, expected_sha256=None):
     if not isinstance(section, dict) or not isinstance(section.get("posizioni"), list):
         raise BridgeError("Patrimonio non strutturato")
     rows = section["posizioni"]
+    # Optional, backwards-compatible identity on new packets only. It hashes
+    # the *source wallet JSON*, not this packet, proposal or market timestamp.
+    wallet_sha = section.get("fotografia_portafoglio_sha256")
+    if wallet_sha is not None and (
+            not isinstance(wallet_sha, str) or not HEX.fullmatch(wallet_sha)):
+        raise BridgeError("Impronta patrimoniale originaria non valida")
     if pkt.get("nessun_ordine") is not True:
         raise BridgeError("Pacchetto non di sola analisi")
     if len(rows) != section.get("n_posizioni") or not rows:
