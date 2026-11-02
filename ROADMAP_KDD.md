@@ -31,6 +31,17 @@
 
 **Regola di chiusura e aggiornamento per qualsiasi operatore:** ogni PR G2 collega esplicitamente uno o più ID di questa checklist, riporta mandato e prove e **aggiorna nella stessa PR la riga interessata** (anche se lo stato non cambia, aggiorna il fatto/lacuna con una prova pertinente). Solo una prova in ambiente congruente, una decisione esplicita dell'autore e un riferimento verificabile `PROVA:` + `GO-AUTORE:` nella riga consentono `COMPLETO` e [x]. Nessun operatore può segnare completo per conto proprio. Se la prova fallisce, si conserva lo stato precedente e si registra il limite, senza promuovere i PASS sintetici. La variazione del solo titolo di una PR o l'aggiunta di un diario generico non aggiorna questa checklist. Le priorità non si deducono dall'ordine delle righe: **solo l'autore le decide**. I candidati non integrati non diventano funzioni di produzione.
 
+**Quattro campi obbligatori nella descrizione di ogni PR** (uno o più ID realmente modificati; nessuno equivale al GO del proprietario):
+
+```text
+ROADMAP-IDS: KDD-XX
+MANDATO-AUTORE: [riferimento al mandato ricevuto, non inventato]
+PROVE: [diff, test/Red Team e prova sul dispositivo se pertinente]
+GO-MERGE: PENDENTE - SERVE DECISIONE ESPLICITA DELL'AUTORE
+```
+
+Chi riceve un mandato lo collega alle righe pertinenti, aggiorna solo quelle con fatti verificabili e deposita le prove nella PR. La CI respinge ID incoerenti o assenza di modifica alla checklist; il GO di merge/deploy resta separato. Se il mandato non è riconducibile ad alcun ID, **STOP e richiesta di decisione dell'autore**, non creazione autonoma di un trentesimo punto.
+
 **Situazione iniziale:** 0/29 requisiti formalmente chiusi dall'autore in questo registro; KDD-01 ha una prova tecnica di acquisizione e richiede soltanto una chiusura esplicita se l'autore la ritiene sufficiente. Questo numero non cancella i risultati già verificati. Il controllo automatico in CI può verificare struttura e tracciamento della PR, **non la verità finanziaria delle prove né il GO dell'autore**; la protezione effettiva dei merge in `main` richiede una regola GitHub attiva e verificata.
 
 | Casella / ID immutabile | Requisito dell'autore | Stato di completamento | Fatto verificato (fotografia 02/11) | Lavoro ancora da svolgere |
