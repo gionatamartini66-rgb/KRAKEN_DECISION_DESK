@@ -437,7 +437,12 @@ def decision_home():
                      _decision_pair_links(entry["pair_key"], frames=entry.get("timeframe")) +
                      "</p>")
         else:
-            body += "<p>Coppia e grafici diretti: identità non riconciliata con il dossier corrente.</p>"
+            declared = (entry.get("coppia") if isinstance(entry, dict)
+                        and isinstance(entry.get("coppia"), str) else None)
+            body += ("<p>Coppia e grafici diretti: identità non riconciliata "
+                     "con il dossier corrente." +
+                     (" Coppia dichiarata NON CONFERMATA: " + esc(declared) + "."
+                      if declared else "") + "</p>")
         rows.append(body + "</article>")
     if priorities:
         blocks.append("<p><b>Attenzioni da esaminare (non ordini):</b> " +
