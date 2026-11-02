@@ -4463,5 +4463,44 @@ class R3RealOriginIntegrationTests(unittest.TestCase):
             old_proposal, old, self.fixture.report["posizioni"],
             self.fixture.report["fotografia_portafoglio_sha256"]))
         self.assertEqual(self.exchange.pending()[0]["proposta_id"], "R3-INTEGRATED-001")
+        # Actually register the old bundle as a separate persisted KDD original,
+        # then replace a manually deferred new version without changing either.
+        self.exchange.record_decision(self.bridge.canonical({
+            "sha256": self.sha, "stato": "RINVIATA",
+            "nota": "Chiudo la nuova versione per leggere il legacy"}))
+        originals = self.bridge.private_directory(self.bridge.OUTBOX, create=True)
+        self.bridge.exclusive_json(originals, self.bridge.digest(old) + ".json", old)
+        self.bridge.verify_local_origin(old)
+        self.exchange.receive(self.bridge.canonical(old_proposal))
+        self.assertEqual(self.exchange.pending()[0]["proposta_id"], "R3-LEGACY-001")
+        page = self.html()
+        self.assertIn("Scenario R3 di integrazione", page)
+        self.assertIn("NON RICONCILIATA", page)
+        self.assertIn("href='/gpt'", page)
+        self.assertNotIn("ipotesi GPT ALLEGGERIRE", page)
+
+
+    def test_real_producer_cost_and_available_balance_change_suppresses_gpt(self):
+        import copy
+        for mutation in ("costo_medio_eur", "disponibile_spot", "liquidita_spot_api"):
+            with self.subTest(mutation=mutation):
+                original = copy.deepcopy(self.fixture.portfolio)
+                if mutation == "liquidita_spot_api":
+                    self.fixture.portfolio["liquidita_spot_api"]["USDC"]["disponibile"] = "999"
+                else:
+                    self.fixture.portfolio["posizioni"][0][mutation] = (
+                        "0.75" if mutation == "costo_medio_eur" else "0.5")
+                self.fixture.report["fotografia_portafoglio_sha256"] = (
+                    d.fotografia_portafoglio_sha256(self.fixture.portfolio))
+                self.fixture.dump()
+                html = self.html()
+                self.assertIn("Proposta storica NON RICONCILIATA", html)
+                self.assertNotIn("ipotesi GPT ALLEGGERIRE", html)
+                self.fixture.portfolio = original
+                self.fixture.report["fotografia_portafoglio_sha256"] = (
+                    d.fotografia_portafoglio_sha256(self.fixture.portfolio))
+                self.fixture.dump()
+        good = self.html()
+        self.assertIn("ipotesi GPT ALLEGGERIRE", good)
 
 if __name__=='__main__': unittest.main(verbosity=2)
