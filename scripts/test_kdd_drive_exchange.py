@@ -422,6 +422,139 @@ class DriveUIHandoffTests(unittest.TestCase):
         self.assertIn("Secondo record, ordine ignoto",home)
         self.assertNotIn("Ultimo evento autore",home)
 
+    def _postflight_home_with_report(self):
+        """Use a physically present, well-formed report and genuine home rendering."""
+        import serve
+        report = {
+            "rilevazione_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "stato_totale": "PARZIALE",
+            "totale_stimato_eur": None,
+            "posizioni": [
+                {"token": row["token"], "quantita": row["quantita_spot"],
+                 "valore_eur": None, "note": [], "decisione": "NESSUNA DECISIONE"}
+                for row in self.original.bundle["packet"]["patrimonio"]["posizioni"]
+            ],
+            "schede_v02": []
+        }
+        (self.sync / "ultimo_report.json").write_text(
+            json.dumps(report), encoding="utf-8")
+        source = ("<!doctype html><html><body><header><h1>KDD</h1></header>"
+                  "<h2>1 · Decisioni e posizioni</h2><p>ORIGINALE LEGACY</p>"
+                  "<h2>2 · Candidati da valutare</h2><p>SCANNER</p>"
+                  "<h2>3 · Macroeconomia e geopolitica</h2></body></html>")
+        with mock.patch.object(serve.desk, "DIR", self.sync):
+            direct = serve.decision_home()
+            integrated = serve.with_controls(source)
+        self.assertIn("id='kdd-decisioni'", integrated)
+        self.assertIn("ORIGINALE LEGACY", integrated)
+        return direct, integrated
+
+    def test_postflight_legacy_second_tie_with_present_report(self):
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        exchange.confirm(sha)
+        second = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+        self._write_existing_event(sha, "RIESAME", "RIESAME a tempo indistinguibile", second)
+        self._write_existing_event(sha, "RISULTATO_VERIFICATO",
+                                   "RISULTATO legacy solo dichiarato", second)
+        before = exchange.decision_history()
+        recent, ambiguous = exchange.latest_events(before)
+        self.assertTrue(ambiguous)
+        self.assertEqual(len(recent), 2)
+        for page in self._postflight_home_with_report():
+            self.assertIn("ordine reciproco non documentato", page)
+            self.assertIn("RIESAME a tempo indistinguibile", page)
+            self.assertIn("RISULTATO legacy solo dichiarato", page)
+            self.assertIn("RISCONTRO STORICO DICHIARATO", page)
+            self.assertIn("verifica su dati non attestata", page)
+            self.assertNotIn("Ultimo evento autore", page)
+            self.assertNotIn("ORDINE ESEGUITO", page)
+        self.assertEqual(exchange.decision_history(), before)
+        self.assertEqual(bridge.digest(exchange.pending()[0]), sha)
+
+    def test_postflight_microsecond_events_are_ordered_and_visible_with_report(self):
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        exchange.confirm(sha)
+        base = dt.datetime.now(dt.timezone.utc).replace(microsecond=100000)
+        self._write_existing_event(sha, "RIESAME", "Riesame microsecondi", base.isoformat(timespec="microseconds"))
+        self._write_existing_event(sha, "RISCONTRO_DICHIARATO", "Riscontro microsecondi",
+                                   (base + dt.timedelta(microseconds=1)).isoformat(timespec="microseconds"))
+        for page in self._postflight_home_with_report():
+            self.assertIn("Riesame microsecondi", page)
+            self.assertIn("Riscontro microsecondi", page)
+            self.assertLess(page.index("Riesame microsecondi"),
+                            page.index("Riscontro microsecondi"))
+            self.assertNotIn("ordine reciproco non documentato", page)
+            self.assertIn("RISCONTRO DICHIARATO DALL", page)
+            self.assertNotIn("ORDINE ESEGUITO", page)
+
+    def test_postflight_events_are_scoped_to_exact_proposal_version(self):
+        self.original.persist_origin()
+        sha_a = exchange.receive(bridge.canonical(self.original.plan))
+        exchange.confirm(sha_a)
+        self._write_existing_event(
+            sha_a, "RIESAME", "SOLO VERSIONE A: riesame storico",
+            dt.datetime.now(dt.timezone.utc).isoformat())
+        old_page, old_integrated = self._postflight_home_with_report()
+        self.assertIn("SOLO VERSIONE A", old_page)
+        self.assertIn("APPROVATA", old_page)
+        self.assertNotIn("ORDINE ESEGUITO", old_integrated)
+        newer = copy.deepcopy(self.original.plan)
+        newer["proposta_id"] = "VERSIONE-B-POSTFLIGHT"
+        newer["sostituisce_sha256"] = sha_a
+        sha_b = exchange.receive(bridge.canonical(newer))
+        self.assertNotEqual(sha_a, sha_b)
+        for page in self._postflight_home_with_report():
+            self.assertIn("NON APPROVATA", page)
+            self.assertNotIn("SOLO VERSIONE A", page)
+            self.assertIn("href='/gpt'", page)
+
+    def test_postflight_real_http_home_with_report_and_legacy_tie(self):
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+        import serve
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        exchange.confirm(sha)
+        stamp = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+        self._write_existing_event(sha, "RIESAME", "HTTP: due eventi stesso secondo", stamp)
+        self._write_existing_event(sha, "RISULTATO_VERIFICATO",
+                                   "HTTP: risultato dichiarato legacy", stamp)
+        # The report is written by the same genuine helper used for direct and
+        # composed HTML; HTTP then reads the real files, not mocked loader data.
+        self._postflight_home_with_report()
+        (self.sync / "cruscotto.html").write_text(
+            "<!doctype html><html><body><header><h1>KDD</h1></header>"
+            "<h2>1 · Decisioni e posizioni</h2><p>ORIGINAL CONTROL</p>"
+            "<h2>2 · Candidati da valutare</h2><p>SCANNER</p>"
+            "<h2>3 · Macroeconomia e geopolitica</h2></body></html>", encoding="utf-8")
+        with mock.patch.object(serve.desk, "DIR", self.sync):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+                conn.request("GET", "/", headers={"Host": "127.0.0.1:8765"})
+                response = conn.getresponse()
+                body = response.read().decode("utf-8")
+                conn.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+        self.assertEqual(response.status, 200)
+        self.assertIn("ORIGINAL CONTROL", body)
+        self.assertIn("ordine reciproco non documentato", body)
+        self.assertIn("HTTP: due eventi stesso secondo", body)
+        self.assertIn("HTTP: risultato dichiarato legacy", body)
+        self.assertIn("RISCONTRO STORICO DICHIARATO", body)
+        self.assertIn("verifica su dati non attestata", body)
+        self.assertIn("href='/mercati/spot'", body)
+        self.assertIn("href='/gpt'", body)
+        self.assertEqual(len(exchange.decision_history()), 2)
+
     def test_rt26_04_new_microsecond_order_without_digest_sort(self):
         self.original.persist_origin()
         sha = exchange.receive(bridge.canonical(self.original.plan))
