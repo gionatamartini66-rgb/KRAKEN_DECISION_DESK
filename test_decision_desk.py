@@ -4122,6 +4122,7 @@ class IntegratedDecisionHomeTests(unittest.TestCase):
         original.update({"schema": bridge.SCHEMA_PROPOSAL,
                          "proposta_id": "R2-ORIG-TEST",
                          "snapshot_id": bundle["packet_sha256"],
+                         "snapshot_utc": pkt["rilevazione_kdd_utc"],
                          "creato_utc": self.now.isoformat(timespec="seconds"),
                          "fonti_esterne": [],
                          "sostituisce_sha256": None})
