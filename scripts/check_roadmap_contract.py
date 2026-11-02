@@ -22,9 +22,9 @@ ALLOWED = frozenset({
 TABLE_HEADER = ("| Casella / ID immutabile | Requisito dell'autore | "
                 "Stato di completamento | Fatto verificato (fotografia 02/11) | "
                 "Lavoro ancora da svolgere |")
-ROW = re.compile(r"^\\|\\s*- \\[([ x])\\] (KDD-\\d{2})\\s*\\|\\s*(.*?)\\s*"
-                 r"\\|\\s*([A-Z_]+)\\s*\\|\\s*(.*?)\\s*\\|\\s*(.*?)\\s*\\|$")
-REFERENCE = re.compile(r"\\bKDD-\\d{2}\\b")
+ROW = re.compile(r"^\|\s*- \[([ x])\] (KDD-\d{2})\s*\|\s*(.*?)\s*"
+                 r"\|\s*([A-Z_]+)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|$")
+REFERENCE = re.compile(r"\bKDD-\d{2}\b")
 LEGACY_HEAD = "| Capacità richiesta dall'autore | Stato 02/11, fatto osservabile | Lacuna materiale |"
 ARCHIVE_MARKER = "## README OPERATIVO ESTESO — TESTO ORIGINALE, 17–22 OTTOBRE 2026"
 
@@ -69,9 +69,9 @@ def parse(text: str) -> dict[str, tuple[str, str, str, str, str]]:
         if state == "COMPLETO":
             if "PROVA:" not in evidence or "GO-AUTORE:" not in evidence:
                 raise GateError(f"{ident}: chiusura senza prova e GO dell'autore")
-            if not re.search(r"PROVA:\\s*\\S.{10,}", evidence):
+            if not re.search(r"PROVA:\s*\S.{10,}", evidence):
                 raise GateError(f"{ident}: PROVA priva di riferimento verificabile")
-            if not re.search(r"GO-AUTORE:\\s*\\S.{8,}", evidence):
+            if not re.search(r"GO-AUTORE:\s*\S.{8,}", evidence):
                 raise GateError(f"{ident}: GO-AUTORE privo di riferimento verificabile")
         result[ident] = (checked, label.strip(), state, evidence.strip(), gap.strip())
     if len(result) != 29:
@@ -104,7 +104,7 @@ def git(*args: str) -> str:
 
 
 def field(body: str, name: str) -> str:
-    vals = re.findall(rf"(?m)^{re.escape(name)}:\\s*(.+)\\s*$", body)
+    vals = re.findall(rf"(?m)^{re.escape(name)}:\s*(.+)\s*$", body)
     if len(vals) != 1 or len(vals[0].strip()) < 9:
         raise GateError(f"PR: campo obbligatorio {name} assente/ambiguo")
     return vals[0].strip()
