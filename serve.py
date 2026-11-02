@@ -82,50 +82,170 @@ def _decision_origin(token, displayed, records, observed_at):
         return unknown
 
 
+def _decision_age(value, *, now=None, minutes=30):
+    """Recheck each clock on page read, never inherit another source's freshness."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    try:
+        observed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if observed.tzinfo is None:
+            raise ValueError("Missing UTC offset")
+        delta = (now - observed).total_seconds() / 60
+        return "RECENTE" if -2 <= delta <= minutes else "DA AGGIORNARE"
+    except (TypeError, AttributeError, ValueError, OverflowError):
+        return "ORA NON VERIFICABILE"
+
+
+def _decision_pair_links(key, *, frames=None):
+    """Direct links only after an actual catalogued pair identity is documented."""
+    esc = lambda v: html.escape(str(v), quote=True)
+    links = ["<a href='/analisi/spot?pair=" + esc(key) +
+             "'>Confronta 15m / 1H / 4H / 1D</a>"]
+    for label, tf in (("15m", "15m"), ("1H", "1h"), ("4H", "4h"), ("1D", "1d")):
+        state = (frames.get(label, {}).get("stato") if isinstance(frames, dict)
+                 and isinstance(frames.get(label), dict) else "NON DOCUMENTATO")
+        links.append("<a href='/grafico/spot?pair=" + esc(key) + "&amp;tf=" +
+                     tf + "'>" + label + "</a> " + esc(state))
+    return " · ".join(links)
+
+
+def _decision_pair_identity(token, pair, key, base, observed_pairs=None, quote=None):
+    """Require an exact persisted Kraken REST-key <-> wsname binding, not key syntax.
+
+    Observations originate in AssetPairs-checked KDD market/4TF acquisition.
+    The graph route independently checks live AssetPairs and OHLC identity.
+    """
+    import patrimonio_4tf as four
+    if (not isinstance(pair, str) or not SPOT_NAME_RE.fullmatch(pair)
+            or not isinstance(key, str) or not SPOT_KEY_RE.fullmatch(key)
+            or not isinstance(token, str) or not isinstance(base, str)
+            or not isinstance(observed_pairs, dict)):
+        return False
+    actual, quoted = pair.split("/", 1)
+    return (four.canonical_base(actual) == four.canonical_base(token)
+            and four.canonical_base(base) == four.canonical_base(actual)
+            and quoted in ("EUR", "USD", "USDC")
+            and (quote is None or quote == quoted)
+            and observed_pairs.get(key) == pair)
+
+
+def _decision_observed_pairs(report, dossier=None):
+    """Reconcile exact keys from already persisted, same-snapshot KDD evidence.
+
+    No fresh Kraken calls on home reads. Ambiguous REST keys or wsname aliases
+    suppress direct links; the generic catalog is still available.
+    """
+    try:
+        snapshot = desk.load("ultima_rilevazione.json", {})
+    except (OSError, ValueError, UnicodeError):
+        return {}
+    if (not isinstance(snapshot, dict)
+            or snapshot.get("rilevazione_utc") != report.get("rilevazione_utc")):
+        return {}
+    found = {}
+    invalid_keys = set()
+    names = {}
+    def accept(key, name):
+        if (not isinstance(key, str) or not SPOT_KEY_RE.fullmatch(key)
+                or not isinstance(name, str) or not SPOT_NAME_RE.fullmatch(name)):
+            return
+        if key in found and found[key] != name:
+            invalid_keys.add(key)
+        if name in names and names[name] != key:
+            invalid_keys.add(key)
+            invalid_keys.add(names[name])
+        found[key] = name
+        names[name] = key
+    markets = snapshot.get("markets")
+    if isinstance(markets, dict):
+        for row in markets.values():
+            if isinstance(row, dict):
+                accept(row.get("pair_key"), row.get("pair"))
+    cards = snapshot.get("schede_v02")
+    if isinstance(cards, list):
+        for row in cards:
+            if isinstance(row, dict) and isinstance(row.get("alternative"), list):
+                for alt in row["alternative"]:
+                    if isinstance(alt, dict):
+                        accept(alt.get("pair_key"), alt.get("pair"))
+    # Each acquired 4TF frame has its own verified Kraken pair identity.
+    # Do not trust the top-level 4TF label alone as a second certificate.
+    if isinstance(dossier, list):
+        for row in dossier:
+            frames = row.get("timeframe") if isinstance(row, dict) else None
+            if isinstance(frames, dict):
+                for frame in frames.values():
+                    if isinstance(frame, dict) and frame.get("stato") in ("AGGIORNATO", "SCADUTO"):
+                        accept(frame.get("pair_key"), frame.get("coppia"))
+    return {key: name for key, name in found.items() if key not in invalid_keys}
+
+
+def _decision_proposal_matches(proposal, bundle, positions, current_wallet_sha):
+    """Use the original KDD packet quantities, not snapshot_id as a wallet SHA."""
+    from scripts import kdd_bridge_g2 as bridge
+    from scripts import kdd_wallet_packet_g0 as wallet
+    if not isinstance(bundle, dict) or not isinstance(proposal, dict):
+        return False
+    packet = bundle.get("packet")
+    if (bundle.get("schema") != bridge.SCHEMA_BUNDLE
+            or not isinstance(packet, dict) or packet.get("schema") != wallet.SCHEMA
+            or not isinstance(bundle.get("packet_sha256"), str)
+            or bridge.digest(packet) != bundle["packet_sha256"]
+            or proposal.get("snapshot_id") != bundle["packet_sha256"]
+            or proposal.get("snapshot_utc") != packet.get("rilevazione_kdd_utc")):
+        return False
+    original = packet.get("patrimonio")
+    rows = original.get("posizioni") if isinstance(original, dict) else None
+    # The full source-wallet identity is optional in the old v001 packet.
+    # Missing legacy evidence cannot be fabricated from quantities or a packet SHA.
+    source_sha = (original.get("fotografia_portafoglio_sha256")
+                  if isinstance(original, dict) else None)
+    if (not isinstance(source_sha, str) or len(source_sha) != 64
+            or any(ch not in "0123456789abcdef" for ch in source_sha)
+            or source_sha != current_wallet_sha):
+        return False
+    if (not isinstance(rows, list) or len(rows) != len(positions)
+            or original.get("n_posizioni") != len(rows)):
+        return False
+    for i, (old, current) in enumerate(zip(rows, positions)):
+        if (not isinstance(old, dict) or not isinstance(current, dict)
+                or old.get("indice") != i
+                or old.get("token") != current.get("token")
+                or old.get("stato_identita") != "VALIDA"):
+            return False
+        try:
+            original_qty = wallet.amount(old.get("quantita_spot"), "quantita")
+            current_qty = wallet.amount(current.get("quantita"), "quantita")
+        except (wallet.PacketError, ValueError, TypeError):
+            return False
+        # wallet.amount is a finite decimal *string* and retains harmless
+        # scale differences such as "4.20" vs "4.2". Never compare strings.
+        from decimal import Decimal
+        if ((original_qty is None) != (current_qty is None)
+                or (original_qty is not None
+                    and Decimal(original_qty) != Decimal(current_qty))):
+            return False
+    return True
+
+
 def decision_home():
-    """Decision-first projection of the existing KDD report and bridge."""
+    """Decision-first composition of the existing KDD report and GPT archive."""
     esc = lambda value: html.escape(str(value), quote=True)
-    blocks = ["<section id='kdd-decisioni'><h2>Quadro decisionale · patrimonio e Spot</h2>"]
+    now = dt.datetime.now(dt.timezone.utc)
+    blocks = ["<section id='kdd-decisioni' aria-label='Quadro decisionale integrato'>"
+              "<h2>Quadro decisionale · patrimonio e Spot</h2>"]
     try:
         report = desk.load("ultimo_report.json", {})
     except (OSError, ValueError, UnicodeError):
-        report = None  # incomplete report must not take the original HTML offline
-    records, observed_at = [], None
-    if isinstance(report, dict) and isinstance(report.get("posizioni"), list):
-        try:
-            records = desk.load_decisions()
-            observed_at = dt.datetime.fromisoformat(report["rilevazione_utc"])
-        except (OSError, ValueError, KeyError, TypeError, UnicodeError):
-            records, observed_at = [], None
-        blocks.append("<p>Patrimonio: " + esc(report.get("stato_totale", "NON DISPONIBILE")) +
-                      " · totale stimato EUR " + esc(report.get("totale_stimato_eur", "n.d.")) +
-                      " · rilevazione " + esc(report.get("rilevazione_utc", "n.d.")) +
-                      "</p><p>Dettaglio posizioni e analisi tecniche nella sezione originale del cruscotto.</p>")
-        for h in report["posizioni"]:
-            if not isinstance(h, dict):
-                continue
-            token = esc(h.get("token", "?"))
-            notes = h.get("note") if isinstance(h.get("note"), list) else []
-            blocks.append("<article><b>" + token + "</b> · " +
-                          esc(_decision_origin(h.get("token"), h.get("decisione"), records, observed_at)) +
-                          ": " + esc(h.get("decisione", "NON DISPONIBILE")) +
-                          "<p>Valore EUR: " + esc(h.get("valore_eur", "n.d.")) +
-                          " · valutazione tecnica KDD: " + esc("; ".join(str(n) for n in notes) if notes else h.get("errore", "Non disponibile")) + "</p></article>")
-        opportunities = report.get("schede_v02", [])
-        if isinstance(opportunities, list):
-            blocks.append("<h3>Opportunità Spot selezionate dal KDD</h3>")
-            for x in opportunities[:4]:
-                if not isinstance(x, dict):
-                    continue
-                blocks.append("<article><b>" + esc(x.get("token", "?")) +
-                              "</b> · " + esc(x.get("esito", "NON VALUTATO")) +
-                              "<p>" + esc(x.get("sintesi", "")) + "</p></article>")
-        blocks.append("<p><a href='/mercati/spot'>Coppie Spot e grafici 15m / 1H / 4H / 1D</a></p>")
-    else:
-        blocks.append("<p>Quadro decisionale aggiunto temporaneamente non disponibile: "
-                      "report assente, incompleto o non leggibile. "
-                      "Il cruscotto originale, Spot e i grafici restano consultabili. "
-                      "Nessun saldo o giudizio inventato.</p>")
+        report = None
+    if not isinstance(report, dict) or not isinstance(report.get("posizioni"), list):
+        blocks.append("<p role='status'>Quadro aggiunto non disponibile: report mancante "
+                      "o non verificabile (report assente, incompleto o non leggibile). "
+                      "Il cruscotto originale resta consultabile.</p>")
+        report = None
+
+    # Read historical proposals without equating reception, approval and execution.
+    proposal, proposal_state, proposal_sha, events = None, "ASSENTE", None, []
+    proposal_bundle, author_events, author_ambiguous = None, [], False
     try:
         from scripts import kdd_drive_exchange as exchange
         exchange.receive_synced()
@@ -133,43 +253,324 @@ def decision_home():
         approved = exchange.bridge.load_archive()
         events = exchange.decision_history()
         if item:
-            proposal, bundle = item
-            sha = exchange.bridge.digest(proposal)
-            is_approved = sha in approved
-            dismissed = any(e["versione_sha256"] == sha and e["stato"] in ("RIFIUTATA", "RINVIATA") for e in events)
-            blocks.append("<h3>Proposta GPT · " +
-                          ("VERSIONE APPROVATA" if is_approved else ("RIFIUTATA / RINVIATA" if dismissed else "IN ATTESA DI DECISIONE")) +
-                          "</h3><p>SHA256 " + esc(sha) + " · fotografia " +
-                          esc(proposal["snapshot_utc"]) + "</p><p>Scenario: " +
-                          esc(proposal["scenario"]) + " · alternativa: " +
-                          esc(proposal["scenario_alternativo"]) + "</p>")
-            linked_events = [e for e in events if e["versione_sha256"] == sha]
-            if linked_events:
-                recent, unordered = exchange.latest_events(linked_events)
-                if unordered:
-                    blocks.append("<p>Eventi più recenti nel medesimo secondo: "
-                                  "ordine reciproco non documentato.</p>")
-                for event in recent:
-                    blocks.append("<p>" + ("Evento autore" if unordered else "Ultimo evento autore") +
-                                  " · " + esc(exchange.event_label(event["stato"])) +
-                                  " · " + esc(event["creato_utc"]) +
-                                  " · " + esc(event["nota"]) + "</p>")
-            for item in proposal["posizioni"]:
-                blocks.append("<article><b>" + esc(item["token"]) + " · GPT: " +
-                              esc(item["azione"]) + "</b><p>" + esc(item["tesi"]) +
-                              "</p><details><summary>Alternativa, rischi e riesame</summary><p>" +
-                              esc(item["alternativa"]) + "</p><p>" + esc(item["rischi"]) +
-                              "</p><p>" + esc(item["riesame"]) + "</p></details></article>")
-        else:
-            blocks.append("<p>Proposta GPT: nessuna versione ricevuta.</p>")
-        blocks.append("<p>Eventi autore datati: " + str(len(events)) + " · versioni approvate: " + str(len(approved)) + "</p>")
-        blocks.append("<p>Versioni approvate in archivio: " + str(len(approved)) +
-                      ". Approvazione non equivale a esecuzione manuale né a risultato verificato.</p>"
-                      "<p><a href='/gpt'>Esamina proposta, decidi e consulta storico</a></p>")
+            candidate, proposal_bundle = item
+            proposal_sha = exchange.bridge.digest(candidate)
+            matching = [e for e in events if e["versione_sha256"] == proposal_sha
+                        and e["stato"] in ("RIFIUTATA", "RINVIATA")]
+            author_events, author_ambiguous = exchange.latest_events(matching)
+            if author_ambiguous:
+                proposal_state = "DELIBERAZIONE NON ORDINABILE · STOP"
+            elif proposal_sha in approved and matching:
+                proposal_state = "STATO DELIBERATIVO CONTRADDITTORIO · STOP"
+            elif matching:
+                proposal_state = author_events[-1]["stato"]
+            elif proposal_sha in approved:
+                proposal_state = "APPROVATA · ARCHIVIO"
+            else:
+                proposal_state = "NON APPROVATA · IN ATTESA DI DECISIONE"
+            proposal = candidate
     except Exception:
-        blocks.append("<p>Bridge GPT non verificabile: STOP. Patrimonio e Spot restano consultabili.</p>")
-    return "".join(blocks) + "</section>"
+        proposal, proposal_state = None, "ARCHIVIO NON VERIFICABILE · STOP"
 
+    if report is None:
+        blocks.append("<p>Proposta GPT: " + esc(proposal_state) +
+                      ". <a href='/gpt'>Apri il ponte e l'archivio</a>.</p>")
+        if proposal is not None:
+            blocks.append("<p>Versione " + esc(proposal_sha) + " · fotografia GPT " +
+                          esc(proposal.get("snapshot_utc", "n.d.")) +
+                          ". Nessun giudizio attribuito a un portafoglio non leggibile.</p>")
+            if isinstance(proposal.get("posizioni"), list):
+                blocks.append("<details><summary>Posizioni della proposta storica "
+                              "(non riconciliate col report corrente)</summary>" +
+                              "".join("<p>" + esc(row.get("token", "?")) + " · GPT: " +
+                                      esc(row.get("azione", "n.d.")) + "</p>"
+                                      for row in proposal["posizioni"] if isinstance(row, dict)) +
+                              "</details>")
+            related = [e for e in events if e["versione_sha256"] == proposal_sha]
+            latest, unordered = exchange.latest_events(related)
+            if unordered:
+                blocks.append("<p>Eventi più recenti nel medesimo secondo: "
+                              "ordine reciproco non documentato.</p>")
+            for e in latest:
+                blocks.append("<p>Evento autore · " +
+                              esc(exchange.event_label(e["stato"])) + " · " +
+                              esc(e["nota"]) + "</p>")
+        return "".join(blocks) + "</section>"
+
+    try:
+        decisions = desk.load_decisions()
+        observed = dt.datetime.fromisoformat(report["rilevazione_utc"])
+    except (OSError, ValueError, KeyError, TypeError, UnicodeError):
+        decisions, observed = [], None
+    positions = report["posizioni"]
+    complete = report.get("posizioni_valorizzate")
+    incomplete = report.get("posizioni_incomplete")
+    state = report.get("stato_totale", "NON VERIFICATO")
+    numeric_total = report.get("totale_stimato_eur")
+    valued = (isinstance(numeric_total, (int, float)) and not isinstance(numeric_total, bool)
+              and math.isfinite(numeric_total) and state in ("PARZIALE", "COMPLETO")
+              and isinstance(complete, int) and complete > 0)
+    total = desk.fmt(numeric_total) + " €" if valued else "non disponibile"
+    market_time = report.get("rilevazione_utc")
+    market_fresh = _decision_age(market_time, now=now)
+    balance = report.get("saldo_stato")
+    balance = balance if isinstance(balance, dict) else {}
+    balance_time = balance.get("acquisizione_saldo_utc")
+    balance_fresh = _decision_age(balance_time, now=now)
+    blocks.append("<p>Patrimonio: " + esc(state) + " · " +
+                  str(len(positions)) + " posizioni" +
+                  " · valorizzate " + esc(complete if isinstance(complete, int) else "n.d.") +
+                  " · incomplete " + esc(incomplete if isinstance(incomplete, int) else "n.d.") +
+                  " · totale indicativo EUR " + esc(total) +
+                  (" (parziale, NON intero patrimonio)" if state == "PARZIALE" else "") +
+                  "</p>")
+    blocks.append("<p><b>Mercato pubblico:</b> fotografia " + esc(market_time or "assente") +
+                  " · " + esc(market_fresh) + ".</p><p><b>Saldo privato:</b> fonte " +
+                  esc(balance.get("origine", "non documentata")) + " · acquisizione " +
+                  esc(balance_time or "assente") + " · " + esc(balance_fresh) +
+                  ". La freschezza del mercato non aggiorna i saldi.</p>")
+    dossier_state = report.get("dossier_stato")
+    if isinstance(dossier_state, dict):
+        blocks.append("<p><b>Copertura dossier GPT:</b> " +
+                      esc(dossier_state.get("stato", "NON VERIFICABILE")) +
+                      " · idoneità " +
+                      esc(dossier_state.get("idoneita_analisi_patrimoniale", "NON ACCERTATA")) +
+                      ".</p>")
+
+    if proposal is None:
+        blocks.append("<article><h3>Proposta GPT · " + esc(proposal_state) +
+                      "</h3><p>Nessuna valutazione patrimoniale attribuibile per questa home. "
+                      "KDD presenta osservazioni, non decisioni GPT.</p>"
+                      "<p><a href='/gpt'>Consulta o importa la proposta</a></p></article>")
+    else:
+        attributed = (
+            isinstance(proposal.get("posizioni"), list)
+            and len(proposal["posizioni"]) == len(positions)
+            and all(isinstance(row, dict) and isinstance(pos, dict)
+                    and row.get("indice") == i and row.get("token") == pos.get("token")
+                    for i, (row, pos) in enumerate(zip(proposal["posizioni"], positions)))
+            and _decision_proposal_matches(
+                proposal, proposal_bundle, positions,
+                report.get("fotografia_portafoglio_sha256")))
+        blocks.append("<article><h3>Proposta GPT · " + esc(proposal_state) +
+                      "</h3><p>Versione SHA256 " + esc(proposal_sha) +
+                      " · fotografia GPT " + esc(proposal.get("snapshot_utc", "n.d.")) +
+                      " · " + esc(_decision_age(proposal.get("snapshot_utc"), now=now)) +
+                      ". Storico: un refresh del KDD non ricalcola il ragionamento GPT.</p>"
+                      "<p><b>Scenario:</b> " + esc(proposal.get("scenario", "")) +
+                      "</p><p><b>Alternativa:</b> " +
+                      esc(proposal.get("scenario_alternativo", "")) +
+                      "</p><p><b>Rischi:</b> " + esc(proposal.get("rischi_comuni", "")) +
+                      "</p><p><b>Liquidità/limiti:</b> " +
+                      esc(proposal.get("liquidita", "")) +
+                      "</p><p><b>Riesame:</b> " + esc(proposal.get("revisione", "")) +
+                      "</p><p><a href='/gpt'>Apri fonte, storico e scelta dell'autore</a>. "
+                      "La proposta non dimostra un ordine eseguito.</p></article>")
+        if author_events:
+            blocks.append("<p><b>Deliberazione dell'autore su questa versione:</b> " +
+                          ("ordine reciproco degli eventi non documentato. "
+                           if author_ambiguous else "") +
+                          "; ".join(esc(e["stato"]) + " · " +
+                                    esc(e["creato_utc"]) + " · " + esc(e["nota"])
+                                    for e in author_events) +
+                          ". Nessuna operazione eseguita deducibile.</p>")
+        if not attributed:
+            blocks.append("<p role='status'>Proposta storica NON RICONCILIATA con le "
+                          "quantità e l'identità del patrimonio corrente: "
+                          "azioni GPT originali NON attribuite alle posizioni attuali.</p>"
+                          "<details><summary>Apri le posizioni della proposta originale "
+                          "(solo storico)</summary>" +
+                          "".join("<p>" + esc(row.get("token", "?")) + " · GPT storico: " +
+                                  esc(row.get("azione", "n.d.")) + " · " +
+                                  esc(row.get("tesi", "")) + "</p>"
+                                  for row in (proposal.get("posizioni") or [])
+                                  if isinstance(row, dict)) +
+                          "</details>")
+            proposal = None
+
+    # Economic freshness is independent of document/wallet identity and
+    # approval. A later market refresh never refreshes the author's GPT thesis.
+    proposal_current = bool(
+        proposal is not None and proposal_state in
+        ("NON APPROVATA · IN ATTESA DI DECISIONE", "APPROVATA · ARCHIVIO")
+        and report.get("rilevazione_utc") == proposal.get("snapshot_utc")
+        and _decision_age(report.get("rilevazione_utc"), now=now) == "RECENTE"
+        and _decision_age(proposal.get("snapshot_utc"), now=now) == "RECENTE")
+    if proposal is not None and not proposal_current:
+        blocks.append("<p role='status'>La proposta resta attribuibile allo stesso "
+                      "patrimonio ma NON È UNA PRIORITÀ GPT CORRENTE: "
+                      "fotografia di mercato o deliberazione da riesaminare.</p>")
+
+    # Pair provenance belongs to the same completed snapshot and wallet digest.
+    dossier = None
+    if market_fresh == "RECENTE":
+        try:
+            candidate = desk.load("dossier_multifonte.json", {})
+            state_doc = report.get("dossier_stato")
+            four = candidate.get("patrimonio_4tf") if isinstance(candidate, dict) else None
+            wallet_sha = report.get("fotografia_portafoglio_sha256")
+            if (isinstance(wallet_sha, str) and len(wallet_sha) == 64
+                    and isinstance(candidate, dict) and isinstance(state_doc, dict)
+                    and state_doc.get("stato") not in (
+                        "NON_ALLINEATO", "NON_ALLINEATO_PATRIMONIO",
+                        "PATRIMONIO_NON_VERIFICABILE")
+                    and candidate.get("kraken_istantanea_utc") == market_time
+                    and isinstance(four, dict)
+                    and four.get("rilevazione_kraken_utc") == market_time
+                    and wallet_sha == candidate.get("fotografia_portafoglio_sha256")
+                    == state_doc.get("fotografia_portafoglio_sha256")
+                    == four.get("portafoglio_sha256")
+                    and isinstance(four.get("posizioni"), list)
+                    and len(four["posizioni"]) == len(positions)):
+                dossier = four["posizioni"]
+        except (OSError, ValueError, KeyError, TypeError, UnicodeError):
+            dossier = None
+    observed_pairs = _decision_observed_pairs(report, dossier)
+
+    blocks.append("<h3>Patrimonio strategico a gestione attiva</h3>"
+                  "<p>Ogni asset resta riesaminabile: mantenere, incrementare, alleggerire, "
+                  "uscire, ruotare oppure rinviare richiede ragioni e condizioni. "
+                  "La valutazione KDD è distinta dal giudizio GPT e dalla scelta dell'autore.</p>")
+    priorities = []
+    rows = []
+    for i, holding in enumerate(positions):
+        if not isinstance(holding, dict):
+            rows.append("<article>Posizione " + str(i+1) +
+                        ": struttura non valida; quantità e giudizio non attribuibili.</article>")
+            continue
+        token = str(holding.get("token", "?"))
+        quantity = holding.get("quantita")
+        qtext = "Quantità non nota" if quantity is None else "Quantità: " + str(quantity)
+        value = holding.get("valore_eur")
+        vtext = (desk.fmt(value) + " €" if isinstance(value, (int, float))
+                 and not isinstance(value, bool) and math.isfinite(value)
+                 else "valore indicativo non disponibile")
+        technical = holding.get("note")
+        technical = "; ".join(str(x) for x in technical) if isinstance(technical, list) and technical else holding.get("errore", "Nessuna conclusione tecnica documentata")
+        source = _decision_origin(token, holding.get("decisione"), decisions, observed)
+        gpt = proposal["posizioni"][i] if proposal else None
+        important = bool(holding.get("errore")) or (
+            proposal_current and gpt is not None and
+            gpt.get("azione") not in ("MANTENERE", "RINVIARE"))
+        if important:
+            priorities.append(token + ": " + ("dati incompleti" if holding.get("errore")
+                                               else "ipotesi GPT " + str(gpt.get("azione"))))
+        body = ("<article><h4><b>" + esc(token) + "</b></h4><p>" + esc(qtext) +
+                " · " + esc(vtext) + "</p><p><b>KDD (osservazione):</b> " +
+                esc(technical) + "</p><p><b>Scelta registrata:</b> " +
+                esc(holding.get("decisione", "nessuna")) + " · " + esc(source) + "</p>")
+        if gpt:
+            body += ("<p><b>GPT · " + esc(proposal_state) + ":</b> " +
+                     esc(gpt.get("azione")) + " — " + esc(gpt.get("tesi")) +
+                     "</p><p><b>Alternativa:</b> " + esc(gpt.get("alternativa")) +
+                     " · <b>Rischi:</b> " + esc(gpt.get("rischi")) +
+                     "</p><p><b>Invalidazione:</b> " + esc(gpt.get("invalidazione")) +
+                     " · <b>Riesame:</b> " + esc(gpt.get("riesame")) +
+                     "</p><p><b>Evidenze dichiarate GPT:</b> " +
+                     esc(gpt.get("evidenze")) + " · <b>Costi dichiarati GPT:</b> " +
+                     esc(gpt.get("costi")) + "</p>")
+        else:
+            body += "<p>GPT: nessuna valutazione collegabile a questa posizione.</p>"
+        entry = dossier[i] if dossier else None
+        if (isinstance(entry, dict) and entry.get("indice") == i and
+                entry.get("token") == token and
+                _decision_pair_identity(token, entry.get("coppia"),
+                                        entry.get("pair_key"), entry.get("asset_base"),
+                                        observed_pairs, entry.get("valuta_quotazione"))):
+            body += ("<p><b>Coppia documentata da dossier KDD:</b> " +
+                     esc(entry["coppia"]) + ". Elegibilità sul conto non verificata. " +
+                     _decision_pair_links(entry["pair_key"], frames=entry.get("timeframe")) +
+                     "</p>")
+        else:
+            declared = (entry.get("coppia") if isinstance(entry, dict)
+                        and isinstance(entry.get("coppia"), str) else None)
+            body += ("<p>Coppia e grafici diretti: identità non riconciliata "
+                     "con il dossier corrente." +
+                     (" Coppia dichiarata NON CONFERMATA: " + esc(declared) + "."
+                      if declared else "") + "</p>")
+        rows.append(body + "</article>")
+    if priorities:
+        blocks.append("<p><b>Attenzioni da esaminare (non ordini):</b> " +
+                      esc("; ".join(priorities[:3])) +
+                      (" · altre nel patrimonio completo" if len(priorities) > 3 else "") +
+                      ".</p>")
+    else:
+        blocks.append("<p>Nessuna priorità deducibile da questi dati: "
+                      "non equivale a una decisione di mantenere tutto il patrimonio.</p>")
+    blocks.append("<details id='kdd-all-positions'><summary>Visualizza tutte le posizioni (" +
+                  str(len(positions)) + ") e le alternative</summary>" +
+                  "".join(rows) + "</details>")
+
+    blocks.append("<h3>Opportunità operative Spot · segnalazioni KDD</h3>")
+    candidates = report.get("schede_v02")
+    if not isinstance(candidates, list) or not candidates:
+        blocks.append("<p>Nessuna opportunità tecnica documentata in questo report. "
+                      "Occorre confrontare mercato e alternative; non è una decisione automatica di attesa.</p>")
+    else:
+        shown = 0
+        old_plan = report.get("piano_gpt")
+        for item in candidates:
+            if shown >= 3:
+                break
+            if not isinstance(item, dict):
+                continue
+            shown += 1
+            token = str(item.get("token", "?"))
+            body = ("<article><h4>" + esc(token) + " · KDD: " +
+                    esc(item.get("esito", "NON VALUTATO")) + "</h4><p>" +
+                    esc(item.get("perche_selezionato", "Selezione non motivata")) +
+                    " · " + esc(item.get("sintesi", "")) +
+                    "</p><p>Alternativa tecnica e criticità: " +
+                    esc("; ".join(str(x) for x in (item.get("criticita") or [])) or
+                        "Confronto da verificare nel dossier") + ".</p>")
+            pair = item.get("coppia_analisi")
+            options = item.get("alternative")
+            chosen = None
+            if market_fresh == "RECENTE" and isinstance(options, list):
+                matching = [alt for alt in options if isinstance(alt, dict)
+                            and alt.get("pair") == pair
+                            and _decision_pair_identity(token, pair, alt.get("pair_key"),
+                                                        pair.split("/", 1)[0] if isinstance(pair, str) else None,
+                                                        observed_pairs, alt.get("quote"))]
+                if len(matching) == 1:
+                    chosen = matching[0]["pair_key"]
+            if chosen:
+                body += ("<p><b>Coppia Kraken esaminata:</b> " + esc(pair) +
+                         " · " + _decision_pair_links(chosen) + "</p>")
+            else:
+                body += "<p>Coppia di approfondimento non verificabile su questo snapshot: apri il catalogo.</p>"
+            alternatives = [alt.get("pair") for alt in (options or [])
+                            if isinstance(alt, dict) and alt.get("pair") != pair] if isinstance(options, list) else []
+            body += ("<p>Altre coppie da confrontare: " +
+                     esc(", ".join(str(x) for x in alternatives) or "non documentate") +
+                     ". La negoziabilità del conto non è attestata.</p>")
+            costs = item.get("costi_roundtrip")
+            body += ("<p>Costi: " +
+                     ("simulazioni KDD nel dettaglio originale; non provano fill"
+                      if isinstance(costs, list) and costs else "nessun costo utilizzabile documentato") +
+                     ".</p>")
+            if (isinstance(old_plan, dict) and "errore" not in old_plan
+                    and old_plan.get("mercato") == "SPOT"
+                    and old_plan.get("token") == token and old_plan.get("coppia") == pair):
+                body += ("<p><b>GPT · vecchio piano Spot singolo-token:</b> " +
+                         esc(old_plan.get("azione")) + " · " +
+                         esc(old_plan.get("tesi")) + "</p><p>Ingresso: " +
+                         esc(old_plan.get("condizione_ingresso")) +
+                         " · invalidazione: " + esc(old_plan.get("condizione_invalidazione")) +
+                         " · uscita: " + esc(old_plan.get("condizione_uscita")) +
+                         " · capitale: " + esc(old_plan.get("capitale")) +
+                         " · riesame: " + esc(old_plan.get("revisione")) +
+                         ". Fotografia GPT " + esc(old_plan.get("snapshot_kraken_utc")) +
+                         " · " + esc(_decision_age(old_plan.get("snapshot_kraken_utc"), now=now)) +
+                         ".</p>")
+            else:
+                body += ("<p><b>GPT:</b> nessuna proposta operativa validata e collegata "
+                         "a questa coppia. Lo scanner non indica un acquisto, "
+                         "un ingresso, un importo o un ordine.</p>")
+            blocks.append(body + "</article>")
+    blocks.append("<p><a href='/mercati/spot'>Esplora il catalogo completo Kraken Spot</a>"
+                  " · <a href='/gpt'>Discuti le ipotesi in ChatGPT e consulta decisioni/storico</a>.</p>")
+    return "".join(blocks) + "</section>"
 
 def with_controls(page: str, result: str = "") -> str:
     """Aggiornamento senza bloccare Chrome; quando pronto aggiorna da solo la pagina."""
@@ -260,7 +661,38 @@ def with_controls(page: str, result: str = "") -> str:
         decision_panel = ("<section id='kdd-decisioni' role='status'><h2>Quadro decisionale</h2>"
                           "<p>Riepilogo aggiunto non disponibile. "
                           "Patrimonio originale, Spot, grafici e aggiornamento restano accessibili.</p></section>")
-    return page.replace(target, toolbar + js + decision_panel + portfolio_proposals + target, 1)
+    if target not in page:
+        # Unexpected legacy markup: do not discard the original HTML/navigation.
+        return page.replace("</body>", toolbar + js + decision_panel + portfolio_proposals + "</body>", 1)
+    before, after = page.split(target, 1)
+    if "</header>" not in before:
+        return before + toolbar + js + decision_panel + portfolio_proposals + target + after
+    header, legacy = before.split("</header>", 1)
+    # Keep existing Spot plan and archives intact but secondary. Their script
+    # freshness callbacks continue running; no archive or contract is rewritten.
+    old_spot = ("<details id='kdd-legacy-spot'><summary>Apri precedenti piani Spot "
+                "singolo-token e verifiche storiche</summary>" + legacy +
+                "</details>")
+    portfolio = portfolio_proposals
+    archive = ("<details id='kdd-approved-archive'><summary>Apri archivio proposte "
+               "patrimoniali approvate</summary>" + portfolio + "</details>")
+    part2 = "<h2>2 · Candidati da valutare</h2>"
+    part3 = "<h2>3 · Macroeconomia e geopolitica</h2>"
+    if part2 in after and part3 in after:
+        old_wallet, remaining = after.split(part2, 1)
+        old_scan, last = remaining.split(part3, 1)
+        diagnostics = (
+            "<details id='kdd-wallet-diagnostics'><summary>Apri patrimonio originale "
+            "e diagnostica dettagliata</summary>" + target + old_wallet + "</details>"
+            "<details id='kdd-spot-diagnostics'><summary>Apri schede scanner, "
+            "costi e dati tecnici completi</summary>" + part2 + old_scan + "</details>" +
+            part3 + last)
+    else:
+        # Source markup changed: retain it verbatim rather than moving sections
+        # by unverified text boundaries.
+        diagnostics = target + after
+    return (header + "</header>" + toolbar + js + decision_panel +
+            old_spot + archive + diagnostics)
 
 
 def load_sui_chart(timeframe, public_kraken=None):
