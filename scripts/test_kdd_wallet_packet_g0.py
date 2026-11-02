@@ -88,8 +88,9 @@ class WalletPacketG0Tests(unittest.TestCase):
         self.assertTrue(all(x["quota_pct"] is None for x in summary["quote_posizioni"]))
         self.assertIsNone(summary["concentrazione_top2_pct"])
         self.assertEqual(summary["liquidita_stato"],
-                         "PRESENTE_PER_VALUTA_MA_NON_CONVERTITA_IN_EUR")
-        self.assertFalse(summary["esempio_150_eur_necessita_liquidare_o_versare"])
+                         "PRESENTE_PER_VALUTA_EQUIVALENZA_EUR_NON_ATTESTATA")
+        self.assertEqual(summary["esempio_150_finanziamento_stato"],
+                         "NON_DETERMINABILE_SENZA_CAMBIO_SPREAD_E_COSTI")
         self.assertIn("non è proposta", summary["vincoli"][0])
 
     def test_economic_context_exact_arithmetic_no_cross_currency_fx(self):
@@ -103,12 +104,14 @@ class WalletPacketG0Tests(unittest.TestCase):
         self.assertEqual(result["concentrazione_top2_pct"], "100.00")
         self.assertEqual(result["esempio_150_eur_sul_patrimonio_pct"], "37.50")
         self.assertEqual(result["liquidita_stato"], "ZERO_RILEVATO_NELLE_QUATTRO_VALUTE")
-        self.assertTrue(result["esempio_150_eur_necessita_liquidare_o_versare"])
+        self.assertEqual(result["esempio_150_finanziamento_stato"],
+                         "NESSUNA_LIQUIDITA_SULLE_QUATTRO_VALUTE_VERIFICARE_FONTI")
         cash = {**zero_cash, "USDC": {"disponibile": "3"}}
         result = p.quadro_economico_per_gpt(positions, cash, "400")
         self.assertEqual(result["liquidita_stato"],
-                         "PRESENTE_PER_VALUTA_MA_NON_CONVERTITA_IN_EUR")
-        self.assertFalse(result["esempio_150_eur_necessita_liquidare_o_versare"])
+                         "PRESENTE_PER_VALUTA_EQUIVALENZA_EUR_NON_ATTESTATA")
+        self.assertEqual(result["esempio_150_finanziamento_stato"],
+                         "NON_DETERMINABILE_SENZA_CAMBIO_SPREAD_E_COSTI")
 
     def test_economic_context_fails_closed_on_forged_total_duplicate_invalid_values(self):
         p1 = [{"token": "BTC", "valore_eur": "100"},
