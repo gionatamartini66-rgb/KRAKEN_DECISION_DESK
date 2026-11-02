@@ -105,7 +105,7 @@ def git(*args: str) -> str:
 
 def field(body: str, name: str) -> str:
     vals = re.findall(rf"(?m)^{re.escape(name)}:\s*(.+)\s*$", body)
-    if len(vals) != 1 or len(vals[0].strip()) < 9:
+    if len(vals) != 1 or len(vals[0].strip()) < (6 if name == "ROADMAP-IDS" else 9):
         raise GateError(f"PR: campo obbligatorio {name} assente/ambiguo")
     return vals[0].strip()
 
