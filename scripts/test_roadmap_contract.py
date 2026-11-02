@@ -50,7 +50,7 @@ class RoadmapContractTests(unittest.TestCase):
         item = next(line for line in self.content.splitlines() if "KDD-01 |" in line)
         changed = (item.replace("- [ ]", "- [x]")
                        .replace("| PRESENTE_DA_ACCETTARE |", "| COMPLETO |")
-                       .replace("| **E**:", "| PROVA: PR #21 + refresh reale 02/11; GO-AUTORE: decisione-autore-ref-123 | **E**:", 1))
+                       .replace("**E**:", "PROVA: PR #21 + refresh reale 02/11; GO-AUTORE: decisione-autore-ref-123; **E**:", 1))
         self.assertEqual(contract.parse(self.content.replace(item, changed, 1))
                          ["KDD-01"][2], "COMPLETO")
 
