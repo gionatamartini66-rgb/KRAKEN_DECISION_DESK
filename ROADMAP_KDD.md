@@ -67,7 +67,7 @@
 
 **Fonti storiche/limiti:** il disegno [NAVIGATORE_ONCHAIN_V001](NAVIGATORE_ONCHAIN_V001.md), la [PR #14](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/14) e i rapporti Red Team documentano P08/P09, confini di fiducia e fonti non attestate; [GIUDIZIO_DELTA_SPOT_G0_G2](GIUDIZIO_DELTA_SPOT_G0_G2.md) conclude uso limitato dopo A/B 0/4; [PR #21](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/21) e [PR #25](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/25) hanno integrato funzioni patrimoniali/ponte, senza sostituire il motore di ricerca economica. Un merge o test sintetico non converte in live una fonte non integrata.
 
-**Conclusione di direzione:** non aprire un altro giro di correzioni al solo handoff, non fabbricare una proposta povera per chiudere il gate. Prima recuperare i pezzi già costruiti e i blocchi reali da PR/rapporti; poi progettare **un unico motore di evidenza economica** con entrate affidabili (identità → fonti e tempi → confronto fra scenari → contributo incrementale → GPT in chat → dashboard) e una verifica E2E diretta senza gesti Android imposti all'autore. Salvaguardare quanto funziona e non promuovere automaticamente i rami sperimentali. Interventi applicativi G2 richiedono mandato delimitato, prove su sorgenti autentici, Red Team indipendente e GO dell'autore per merge/deploy.
+**Rilievo tecnico sui requisiti KDD-17–24 e KDD-29 (non priorità dell'autore):** la ricognizione segnala frammentazione dell'evidenza economica e ritorno informativo manuale. L'ipotesi di unificare identità → fonti/tempi → scenari → GPT in chat → dashboard è una proposta da valutare, non una nuova architettura autorizzata, né un ordine di avviare lavori. Recuperare e valutare le PR sperimentali senza promuoverle automaticamente; qualsiasi intervento G2 richiede mandato delimitato su ID, prove autentiche, Red Team e GO distinto dell'autore per merge/deploy.
 
 ## 2. Stato del prodotto: codice, Samsung e prove distinti
 
@@ -89,7 +89,7 @@
 
 **Stato al 02/11 dopo GO al refresh e all'handoff:** la home nuova è integrata, installata e visibile. Il Samsung ha acquisito saldo privato alle **17:43:33 UTC** e dati pubblici alle **17:45:00 UTC**, e ha ricostruito report e dossier sul medesimo snapshot; 10/10 posizioni valorizzate e 10/10 4TF, impronte patrimoniali concordi, T0 immutato, home HTTP 200 con nuova data. Il dossier rimane **PARZIALE / NON_IDONEA** per fondamentali non verificati su HYPE, TRX, NEAR, ADA. Il **nuovo handoff del 02/11** è stato pubblicato nella cartella Android con consenso dell'autore, sincronizzato manualmente in Drive e letto in chat il 02/11; integrità verificata contro il Samsung. La vecchia proposta di ottobre rimane conservata e non approvata. Non presumere che un file in trasferimento sia già disponibile.
 
-**Prossimo gate unico: una decisione contestabile sul patrimonio intero fondata su una nuova fotografia.**
+**Gate economico ancora aperto, relativo a KDD-23, KDD-24, KDD-26 e KDD-29:** prova di decisione contestabile sul patrimonio intero, con fotografia adeguatamente fresca. La presenza del gate non stabilisce la priorità di sviluppo e non sostituisce il GO dell'autore.
 
 **Semantica T0 chiarita dall'autore il 02/11:** il riferimento congelato del 19/10 è un **punto zero economico convenzionale**, non un costo di acquisto reale. Consente il confronto del paniere visibile dal 19/10 a quantità fisse; non consente da solo di calcolare rendimenti effettivi su tutto il patrimonio, in particolare perché ONDO e SXT non erano visibili nella fotografia e i movimenti successivi non sono ricostruiti. **Non spostare né modificare il T0.** La nuova fotografia completa del 02/11 (10/10 posizioni e valorizzazioni, mercato 17:45 UTC) può essere congelata separatamente quale **secondo riferimento operativo**, con data e fonte proprie; questa seconda registrazione non è ancora stata creata. Nel dossier privato GPT includere i confronti e i dati storici pertinenti, segnalando i limiti; non trasferire automaticamente il file originale T0 o i backup, e mai le credenziali.
 
@@ -106,19 +106,19 @@
 
 **T0 e secondo riferimento:** il benchmark del 19/10 resta immutabile e confrontabile come paniere a quantità fisse; il pacchetto originario del 02/11, persistito nella outbox privata con identità verificata e timestamp di mercato, costituisce un secondo riferimento operativo datato. Non si inventano prezzi d'acquisto reali, rendimento fiscale o operazioni dalla differenza fra quantità visualizzate e API. Il confronto economico e i valori privati restano nel canale privato e non in GitHub.
 
-## 4. Valore decisionale dopo il collegamento centrale
+## 4. Rimandi ai requisiti economici (non una seconda roadmap)
 
-1. **Patrimonio completo:** per ogni asset valutare mantenere, incrementare, alleggerire, uscire, ruotare e confrontare alternative, distinguendo dati confermati e lacune; quattro timeframe per le posizioni realmente analizzate, non un solo pilota.
-2. **Opportunità Spot:** universo Kraken navigabile, approfondimento mirato, segnali tecnici qualificati, liquidità, order book, fee e percorso di conversione; Binance e altre fonti sono confronti, non volumi sommabili senza base comune.
-3. **Futures:** integrare in modo coerente la componente operativa long/short e i dati di rischio su strumenti derivati. È una parte del prodotto da progettare quando si apre il relativo lavoro; **non** un divieto permanente né una funzione da dichiarare già installata.
-4. **Contesto esterno:** completare on-chain, tokenomics, unlock, fondamentali, macro e news solo quando cambiano materialmente il giudizio e la loro provenienza è controllabile. [PR #14](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/14) non è pronta da fondere automaticamente.
-5. **Caso economico iniziale, non ordine:** esaminare l'eventuale costituzione di liquidità operativa per circa **150 EUR equivalenti in USDC**, verificando costi, saldo attuale, cambio e alternativa di non convertire.
+1. **KDD-02/04/08 — Patrimonio completo:** per ogni asset valutare mantenere, incrementare, alleggerire, uscire, ruotare e confrontare alternative, distinguendo dati confermati e lacune; quattro timeframe per le posizioni realmente analizzate, non un solo pilota.
+2. **KDD-06/07/10/12/13 — Opportunità Spot:** universo Kraken navigabile, approfondimento mirato, segnali tecnici qualificati, liquidità, order book, fee e percorso di conversione; Binance e altre fonti sono confronti, non volumi sommabili senza base comune.
+3. **KDD-15/16/28 — Futures:** integrare in modo coerente la componente operativa long/short e i dati di rischio su strumenti derivati. È una parte del prodotto da progettare quando si apre il relativo lavoro; **non** un divieto permanente né una funzione da dichiarare già installata.
+4. **KDD-17/18/19/20/21 — Contesto esterno:** completare on-chain, tokenomics, unlock, fondamentali, macro e news solo quando cambiano materialmente il giudizio e la loro provenienza è controllabile. [PR #14](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/14) non è pronta da fondere automaticamente.
+5. **KDD-05 — Caso economico da valutare, non ordine:** esaminare l'eventuale costituzione di liquidità operativa per circa **150 EUR equivalenti in USDC**, verificando costi, saldo attuale, cambio e alternativa di non convertire.
 
 La qualità si misura sulla **decisione contestabile e riesaminabile**, non sul numero di filtri, indicatori, test o rapporti.
 
 ## 5. Regola di aggiornamento della Roadmap
 
-Quando cambia lo stato materiale, **sostituire** l'affermazione superata e indicare prova, data, commit, autorizzazione e prossimo passo. La storia completa resta nei commit, nelle PR e nell'archivio datato del [README](README.md); non appendere nuovi resoconti a questa pagina.
+Quando cambia lo stato materiale di uno dei 29 requisiti, **aggiornare la sua riga KDD-XX nella checklist**, sostituendo l'affermazione superata e indicando prova, data, commit e GO dell'autore se si chiede la chiusura. Nessuna appendice e nessuna roadmap concorrente. La storia completa resta nei commit, nelle PR e nell'archivio datato del [README](README.md); non appendere nuovi resoconti a questa pagina.
 
 Ogni passaggio è distinto: **proposto → sviluppato su ramo → provato indipendentemente → integrato → installato → osservato sul Samsung → utilizzato nel circuito decisionale**. Se una prova manca, indicarlo; se uno schema o una fonte non sono disponibili, non inventarli.
 
