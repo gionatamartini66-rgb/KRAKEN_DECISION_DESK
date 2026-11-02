@@ -589,7 +589,7 @@ def quadro_economico_per_gpt(positions: list, cash: dict, total) -> dict:
     elif not any(available):
         cash_status = "ZERO_RILEVATO_NELLE_QUATTRO_VALUTE"
     else:
-        cash_status = "PRESENTE_PER_VALUTA_MA_NON_CONVERTITA_IN_EUR"
+        cash_status = "PRESENTE_PER_VALUTA_EQUIVALENZA_EUR_NON_ATTESTATA"
 
     return {
         "stato": "INDICATIVO" if complete else "NON_CALCOLABILE_INTEGRALMENTE",
@@ -600,8 +600,12 @@ def quadro_economico_per_gpt(positions: list, cash: dict, total) -> dict:
         "liquidita_stato": cash_status,
         "esempio_150_eur_sul_patrimonio_pct": (format(scenario_150, "f")
                                                if scenario_150 is not None else None),
-        "esempio_150_eur_necessita_liquidare_o_versare": (
-            cash_status == "ZERO_RILEVATO_NELLE_QUATTRO_VALUTE"),
+        "esempio_150_finanziamento_stato": (
+            "NESSUNA_LIQUIDITA_SULLE_QUATTRO_VALUTE_VERIFICARE_FONTI"
+            if cash_status == "ZERO_RILEVATO_NELLE_QUATTRO_VALUTE" else
+            "NON_DETERMINABILE_SENZA_CAMBIO_SPREAD_E_COSTI"
+            if cash_status == "PRESENTE_PER_VALUTA_EQUIVALENZA_EUR_NON_ATTESTATA" else
+            "NON_VERIFICATO"),
         "vincoli": [
             "Calcolo descrittivo: non è proposta di vendita, acquisto o conversione.",
             "Valori indicativi della fotografia, non prezzi eseguibili.",
