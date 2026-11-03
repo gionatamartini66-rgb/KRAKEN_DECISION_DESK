@@ -224,7 +224,8 @@ def stima_vendita_book_150(bids, disponibile_base, *, target_eur="150", fee_ipot
     Solo stima di liquidita, usando una fee ASSUNTA e non il livello reale del conto.
     Il book può cambiare prima del fill; non legge né crea ordini.
     """
-    from decimal import Decimal, InvalidOperation
+    from decimal import Decimal, InvalidOperation, localcontext
+    from fractions import Fraction
     def dec(value):
         if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
             raise ValueError("Book: valore non numerico")
@@ -235,22 +236,31 @@ def stima_vendita_book_150(bids, disponibile_base, *, target_eur="150", fee_ipot
         if not v.is_finite():
             raise ValueError("Book: numero non finito")
         return v
-    available = dec(disponibile_base)
-    target = dec(target_eur)
-    fee = dec(fee_ipotesi)
+    def as_fraction(value):
+        # Decimal context rounding at target/(1-fee) can produce 149.9999…
+        # even when the mathematically required net is exactly 150.
+        return Fraction(dec(value))
+    def shown(value):
+        with localcontext() as context:
+            context.prec = 50
+            return format(Decimal(value.numerator) / Decimal(value.denominator), "f")
+
+    available = as_fraction(disponibile_base)
+    target = as_fraction(target_eur)
+    fee = as_fraction(fee_ipotesi)
     if available < 0 or target <= 0 or fee < 0 or fee >= 1:
         raise ValueError("Book: quantita, obiettivo o fee non validi")
     if not isinstance(bids, list) or not 1 <= len(bids) <= 500:
         raise ValueError("Book: profondita assente o fuori limite")
     remaining = available
-    qty = Decimal(0)
-    gross = Decimal(0)
+    qty = Fraction(0)
+    gross = Fraction(0)
     last_price = None
     levels_used = 0
     for row in bids:
         if not isinstance(row, (list, tuple)) or len(row) < 2:
             raise ValueError("Book: livello non valido")
-        price, size = dec(row[0]), dec(row[1])
+        price, size = as_fraction(row[0]), as_fraction(row[1])
         if price <= 0 or size <= 0 or (last_price is not None and price >= last_price):
             raise ValueError("Book: bid non valido, duplicato o fuori ordine")
         last_price = price
@@ -273,12 +283,12 @@ def stima_vendita_book_150(bids, disponibile_base, *, target_eur="150", fee_ipot
         state = "PROFONDITA_BOOK_INSUFFICIENTE"
     return {
         "stato": state,
-        "obiettivo_netto_eur": format(target, "f"),
-        "quantita_base_teorica": format(qty, "f"),
-        "proventi_lordi_stimati_eur": format(gross, "f"),
-        "fee_ipotetica_eur": format(gross * fee, "f"),
-        "proventi_netto_fee_ipotesi_eur": format(net, "f"),
-        "fee_ipotetica_pct": format(fee * 100, "f"),
+        "obiettivo_netto_eur": shown(target),
+        "quantita_base_teorica": shown(qty),
+        "proventi_lordi_stimati_eur": shown(gross),
+        "fee_ipotetica_eur": shown(gross * fee),
+        "proventi_netto_fee_ipotesi_eur": shown(net),
+        "fee_ipotetica_pct": shown(fee * 100),
         "livelli_bid_utilizzati": levels_used,
         "nessun_fill_attestato": True,
         "limite": ("Fee NON verificata per il conto; prezzo e profondita book mutano, "
