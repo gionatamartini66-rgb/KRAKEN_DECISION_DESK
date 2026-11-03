@@ -129,6 +129,23 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual((self.live / 'README.md').read_text(), self.old_readme)
         self.assertEqual(synthetic.read_bytes(), evidence)
 
+    def test_rt1_f4_book_test_is_deployed_and_executed_in_pre_and_postflight(self):
+        import subprocess
+        name = "scripts/test_kdd_funding_book_g2.py"
+        self.assertIn(name, kdd.PACKET_FILES)
+        self.assertIn(name, kdd.FILES)
+        self.assertTrue((self.root / name).is_file())
+        actual = []
+        def capture(args, *, cwd, timeout=120):
+            actual.append((tuple(args), str(cwd)))
+            return subprocess.CompletedProcess(args, 0, "", "OK")
+        with patch.object(kdd, "capability_preflight"), \
+             patch.object(kdd, "command", side_effect=capture):
+            kdd.isolated_test(self.root)
+        self.assertTrue(any(
+            "test_kdd_funding_book_g2.py" in args
+            for args, _ in actual), actual)
+
     def test_no_change_is_noop(self):
         (self.root / 'serve.py').write_text((self.live / 'serve.py').read_text())
         with contextlib.redirect_stdout(io.StringIO()) as stream:
