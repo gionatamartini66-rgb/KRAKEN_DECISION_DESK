@@ -162,6 +162,13 @@ def check_pr(base: str, head: str, body: str, *, pr_number: str | None = None) -
             if now[key][2] == "COMPLETO" and (key not in before or before[key][2] != "COMPLETO"):
                 raise GateError(f"{key}: chiusura nuova non attestata nella baseline della Supervisione")
     else:
+        # RT-INT-A/B: a technical change cannot amend any canonical document,
+        # even when the README's historical archive remains byte-identical.
+        protected = files & {"README.md", "ROADMAP_KDD.md",
+                             "GOVERNO_KDD.md", "SUBENTRO_SUPERVISIONE_APICALE.md"}
+        if protected:
+            raise GateError("PR tecnica: modifica vietata a documenti canonici: "
+                            + ", ".join(sorted(protected)))
         if mode != "TECNICA-SENZA-MODIFICA" or changed or current != preceding:
             raise GateError("PR tecnica: ROADMAP canonica da lasciare identica alla base")
         if not files or not (files - {"README.md", "ROADMAP_KDD.md", "GOVERNO_KDD.md"}):
