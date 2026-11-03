@@ -236,5 +236,60 @@ class FundingBookTests(unittest.TestCase):
         self.assertEqual(result["alternativa_senza_operazione"]["azione"], "NON_CONVERTIRE_ORA")
 
 
+    def test_rt1_real_producer_dossier_packet_and_gpt_bridge(self):
+        """Actual source JSON -> verified AssetPairs -> Depth -> dossier -> GPT packet."""
+        import dossier_trade
+        import copy
+        from scripts import test_kdd_wallet_packet_g0 as fixtures
+        fixture = fixtures.WalletPacketG0Tests(
+            "test_wallet_first_all_assets_even_if_quote_missing")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        asset_pairs = {
+            "ADAEUR": {"wsname": "ADA/EUR", "status": "online", "altname": "ADAEUR"},
+            "XETHZEUR": {"wsname": "ETH/EUR", "status": "online", "altname": "ETHEUR"}}
+        source = dict(fixture.snapshot, _verified_asset_pairs=asset_pairs)
+        calls = []
+        def depth(endpoint, **kwargs):
+            self.assertEqual(endpoint, "Depth")
+            calls.append(kwargs["pair"])
+            price = "2000" if kwargs["pair"] == "XETHZEUR" else "1"
+            return {kwargs["pair"]: {"bids": [[price, "2", T.timestamp()]]}}
+        with mock.patch.object(dossier_trade.desk, "NOW", return_value=T), \
+             mock.patch.object(dossier_trade.time, "sleep"):
+            funding = dossier_trade.finanziamento_150_book(
+                source, fixture.portfolio, saldo_recente=True, kraken_client=depth)
+        self.assertEqual(set(calls), {"XETHZEUR", "ADAEUR"})
+        self.assertEqual(funding["righe"][1]["stato"], "BOOK_PUBBLICO_OSSERVATO")
+        self.assertEqual(funding["righe"][0]["stato"], "BOOK_PUBBLICO_OSSERVATO")
+        self.assertLess(
+            float(funding["righe"][0]["stima"]["proventi_netto_fee_ipotesi_eur"]), 150)
+        fixture.dossier["finanziamento_150_book_pubblico"] = funding
+        fixture.dossier["fotografia_portafoglio_sha256"] = p.portfolio_identity(fixture.portfolio)
+        fixture.report["fotografia_portafoglio_sha256"] = p.portfolio_identity(fixture.portfolio)
+        fixture.dump()
+        packet = p.build(fixture.root, now=T)
+        self.assertEqual(packet["patrimonio"]["book_pubblico_150"]["stato"],
+                         "STIMA_BOOK_CON_FEE_IPOTETICA")
+        prepared = bridge.prepare(fixture.root, now=T, _fixture=True)
+        context = bridge.read_context(prepared, now=T)
+        self.assertEqual(context["book_150_alla_lettura"]["stato"],
+                         "RECENTE_SOLO_FEE_IPOTETICA")
+        late = bridge.read_context(prepared, now=T + dt.timedelta(minutes=7))
+        self.assertNotEqual(late["book_150_alla_lettura"]["stato"],
+                            "RECENTE_SOLO_FEE_IPOTETICA")
+        self.assertTrue(packet["nessun_ordine"])
+        wrong = copy.deepcopy(source)
+        wrong["_verified_asset_pairs"]["XETHZEUR"]["wsname"] = "XBT/EUR"
+        calls.clear()
+        with mock.patch.object(dossier_trade.desk, "NOW", return_value=T), \
+             mock.patch.object(dossier_trade.time, "sleep"):
+            bad = dossier_trade.finanziamento_150_book(
+                wrong, fixture.portfolio, saldo_recente=True, kraken_client=depth)
+        self.assertNotIn("XETHZEUR", calls)
+        self.assertNotEqual(bad["righe"][1]["stato"], "BOOK_PUBBLICO_OSSERVATO")
+
+
+
 if __name__ == "__main__":
     unittest.main()
