@@ -218,8 +218,10 @@ def finanziamento_150_book(source, portfolio, *, saldo_recente, kraken_client=No
             continue
         try:
             amount = Decimal(str(x.get("disponibile_spot")))
+            held = Decimal(str(x.get("quantita")))
             price = Decimal(str(market.get("prezzo_eur")))
-            if not amount.is_finite() or not price.is_finite() or amount < 0 or price <= 0:
+            if (not amount.is_finite() or not held.is_finite() or not price.is_finite()
+                    or amount < 0 or held < 0 or amount > held or price <= 0):
                 continue
         except (TypeError, ValueError, InvalidOperation):
             continue
@@ -246,6 +248,7 @@ def finanziamento_150_book(source, portfolio, *, saldo_recente, kraken_client=No
             result[i] = {"indice": i, "token": token, "stato": "BOOK_PUBBLICO_OSSERVATO",
                          "pair": pair, "pair_key": pair_key,
                          "osservato_utc": desk.NOW().isoformat(timespec="seconds"),
+                         "bids_osservati": depth.get("bids"),
                          "stima": estimate}
         except Exception as exc:
             result[i]["stato"] = "BOOK_NON_VERIFICATO"
