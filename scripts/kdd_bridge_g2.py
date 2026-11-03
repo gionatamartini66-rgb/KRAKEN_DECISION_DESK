@@ -568,7 +568,9 @@ def stato_book_150_alla_lettura(packet, now, *, mercato_stato=None, saldo_stato=
             delta = (now-seen).total_seconds()
         except (BridgeError, TypeError, ValueError):
             return {"stato": "NON_VERIFICABILE", "book_recenti": 0, "book_scaduti": 0}
-        if delta < -120:
+        # Even a 1-second future book is not an ordinarily recent observation.
+        # Clock skew cannot be converted into freshness of an order book.
+        if delta < 0:
             return {"stato": "OROLOGIO_INCOERENTE", "book_recenti": 0, "book_scaduti": 0}
         if delta <= 300:
             recent += 1
