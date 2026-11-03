@@ -541,7 +541,7 @@ def alternative_liquidazione_150_lorda(positions: list, total, *,
     current = mercato_stato == "RECENTE" and saldo_stato == "RECENTE"
     scenarios = []
     for i, row in enumerate(positions):
-        if not isinstance(row, dict) or row.get("indice") != i:
+        if not isinstance(row, dict) or row.get("indice", i) != i:
             raise PacketError("Alternativa 150: posizione o ordine incoerenti")
         token = row.get("token")
         item = {"indice": i, "token": token,
