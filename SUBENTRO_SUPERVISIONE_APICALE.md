@@ -1,4 +1,10 @@
 # KDD — MANDATO INTEGRALE DI SUBENTRO DELLA SUPERVISIONE APICALE
+> **NOTA DI ATTUALIZZAZIONE — 03/11/2026, senza modificare il mandato del 28 ottobre.** Le sezioni storiche che indicano la PR #21 e i suoi SHA come prima attività descrivono lo stato **del 28/10**, non quello corrente. Per chi subentra oggi: leggere fino a EOF il presente mandato, [README](README.md) con mandato originale, [GOVERNO](GOVERNO_KDD.md) e soprattutto la [ROADMAP](ROADMAP_KDD.md), ora con tutti i 29 requisiti e le loro dipendenze. Non chiedere all'autore di ricostruire la storia già conservata nel repo.
+>
+> **Stato di riferimento verificato 03/11:** Samsung applicativo su `ba17ced6d51aedcb9ee19900f906f0127c912d57` (PR #30); PR #31 HEAD `8d8319073cf9b5edf9bb0f679e0f249dfd7882db`, DRAFT/non integrata; PR #32 HEAD `a7c412f47c242fde9d11addfd2e2cdf18abd77e3`, DRAFT/non integrata, in attesa di Red Team G0 indipendente. Quattro job CI #32 positivi **non** equivalgono a Red Team. Non ricominciare da #21 e non aprire metagovernance. Priorità dipendente dai risultati RT: KDD-24/25/23 (GPT-chat → Samsung e proposta leggibile senza passaggi manuali), poi deliberazione e riesame KDD-26/29, insieme alle lacune economiche realmente necessarie.
+>
+> **Ruoli per incarico dell'autore 03/11:** esclusivamente la **Supervisione** aggiorna README e ROADMAP; la **Costruttrice** sviluppa software su rami G2 nel perimetro affidato; il **Red Team G0** legge e falsifica su copie isolate, senza scrivere il repository. Solo l'autore dà GO distinti per merge, deploy e ordini. Un testo consegnato a un'altra chat non dimostra che quella chat abbia operato. Questa nota non conferisce automaticamente a una futura chat le letture e le verifiche già fatte da un'altra.
+
 **Incarico:** KDD-SUP-SUBENTRO-INTEGRALE-EOF-20261028
 **Data:** 28 ottobre 2026
 **Autorità:** autore e titolare del Kraken Decision Desk
