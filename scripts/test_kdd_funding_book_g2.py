@@ -129,7 +129,8 @@ class FundingBookTests(unittest.TestCase):
                           "BOOK_PUBBLICO_OSSERVATO",
                           "BOOK_PUBBLICO_OSSERVATO"])
         self.assertEqual(out["richieste_depth"], 3)
-        self.assertEqual(out["righe"][2]["stima"]["proventi_netto_fee_ipotesi_eur"], "9.920")
+        from decimal import Decimal
+        self.assertEqual(Decimal(out["righe"][2]["stima"]["proventi_netto_fee_ipotesi_eur"]), Decimal("9.92"))
         def mismatched(endpoint, **kwargs):
             return {"WRONG_PAIR": {"bids": [["70000", "1", 1]]}}
         bad = dossier_trade.finanziamento_150_book(
