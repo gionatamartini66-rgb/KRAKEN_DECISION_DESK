@@ -24,7 +24,7 @@ class FundingBookTests(unittest.TestCase):
         calls = []
         def fake(endpoint, **kwargs):
             calls.append((endpoint, kwargs["pair"], kwargs["count"]))
-            return {"OPAQUE_KEY": {"bids": [["70000" if kwargs["pair"] == "XXBTZEUR"
+            return {kwargs["pair"]: {"bids": [["70000" if kwargs["pair"] == "XXBTZEUR"
                                              else "2000", "0.5", 1]]}}
         with mock.patch.object(dossier_trade.desk, "NOW", return_value=T),\
              mock.patch.object(dossier_trade.time, "sleep"):
@@ -38,6 +38,12 @@ class FundingBookTests(unittest.TestCase):
                           "BOOK_PUBBLICO_OSSERVATO",
                           "SOTTO_150_LORDI_SU_PREZZO_INDICATIVO"])
         self.assertEqual(out["richieste_depth"], 2)
+        def mismatched(endpoint, **kwargs):
+            return {"WRONG_PAIR": {"bids": [["70000", "1", 1]]}}
+        bad = dossier_trade.finanziamento_150_book(
+            source, portfolio, saldo_recente=True, kraken_client=mismatched)
+        self.assertEqual(bad["righe"][0]["stato"], "BOOK_NON_VERIFICATO")
+        self.assertEqual(bad["righe"][1]["stato"], "BOOK_NON_VERIFICATO")
         out_stale = dossier_trade.finanziamento_150_book(
             source, portfolio, saldo_recente=False, kraken_client=fake)
         self.assertEqual(out_stale["richieste_depth"], 0)
