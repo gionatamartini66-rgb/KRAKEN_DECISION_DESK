@@ -684,13 +684,19 @@ def book_150_per_gpt(dossier, positions, wallet_sha, snapshot_utc, now):
             row.update({"stima": {"stato": str(estimate.get("stato"))[:80],
                                   "quantita_base_teorica": qty,
                                   "lordo_eur": gross, "netto_fee_ipotetica_eur": net,
-                                  "fee_taker_ipotizzata_pct": "0.8"},
+                                  "fee_taker_ipotizzata_pct": "0.8",
+                                  "sotto_riferimento_non_esclusa": (
+                                      Decimal("0") < Decimal(net) < Decimal("150")),
+                                  "usdc_effettivamente_disponibili_da_vendita": None},
                         "osservato_utc": item.get("osservato_utc"),
                         "freschezza": ("RECENTE_ALLA_COMPOSIZIONE"
                                        if (now-observed).total_seconds() <= 300 else "SCADUTO")})
         output.append(row)
     return {"stato": "STIMA_BOOK_CON_FEE_IPOTETICA", "righe": output,
-            "limite": "Non è un preventivo: fee reale, minimi, bid eseguibile e account non verificati; rivalutare freschezza alla lettura."}
+            "limite": ("Non è un preventivo: anche le stime nette inferiori al riferimento "
+                       "di circa 150 USDC sono alternative da confrontare, non ordini esclusi. "
+                       "Importi EUR indicativi non diventano USDC disponibili senza conversione, "
+                       "fee, minimi e negoziabilità verificati; rivalutare il book alla lettura.")}
 
 
 def quadro_economico_per_gpt(positions: list, cash: dict, total, *, mercato_stato=None, saldo_stato=None) -> dict:
