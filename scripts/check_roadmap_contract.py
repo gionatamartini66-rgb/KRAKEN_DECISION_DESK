@@ -12,13 +12,14 @@ import re
 import subprocess
 import sys
 
-# Fixed *titles*, taken in order from the 02/11/2026 inventory in ROADMAP_KDD.
-# Change requires an explicit new mandate from the author, not refactoring.
-TITLES = ["Kraken BalanceEx read-only, 10 posizioni","Patrimonio strategico gestito asset per asset","T0 convenzionale e registrazione dei movimenti","Analisi concentrazione e allocazione patrimonio","Liquidità USDC e scenari per almeno 150 EUR equivalenti","Kraken Spot: catalogo e scelta coppie","Scanner opportunità in diversi regimi","Quattro timeframe per ogni posizione","Grafici reali 15m/1H/4H/1D","EMA20/50, pivot, swing S/R","Figure candlestick nel contesto","Book Kraken, spread, profondità, costi FX","Benchmark Binance Spot","Delta spot, esecuzioni Kraken Trades","OI e CVD derivati","Funding, liquidazioni, heatmap, whale trades, Volume Profile","Identità asset, contract, chain e dati on-chain","Tokenomics, supply, unlock, vesting, diluizione","Metriche DeFi (TVL, fees/revenue), DEX liquidity/bridge","Notizie specifiche ai token e fonti primarie","Macroeconomia, geopolitica e scenari","Riconoscimento dei regimi di mercato","GPT interpretazione in chat, intero portafoglio","Catena diretta GPT-chat → Samsung → browser","Proposta unica in cima, comprensibile su mobile","Approvazione, eventi storici e riesame","Aggiornamento ricorrente, sorveglianza, alert","Futures long/short, margine, funding e rischio collaterale","Effettiva utilità economica e qualità della proposta"]
+# Fixed *current* titles as approved on 03/11/2026 in main ROADMAP_KDD.
+# Historical inventories remain historical; only Supervisione may alter titles.
+TITLES = ["Kraken BalanceEx read-only, 10 posizioni","Patrimonio strategico gestito asset per asset","T0 convenzionale e registrazione dei movimenti","Analisi concentrazione e allocazione patrimonio","Liquidità operativa indicativa di circa 150 USDC, finanziamento e alternative","Kraken Spot: catalogo e scelta coppie","Scanner opportunità in diversi regimi","Quattro timeframe per ogni posizione","Grafici reali 15m/1H/4H/1D","EMA20/50, pivot, swing S/R","Figure candlestick nel contesto","Book Kraken, spread, profondità, costi FX","Benchmark Binance Spot","Delta spot, esecuzioni Kraken Trades","OI e CVD derivati","Funding, liquidazioni, heatmap, whale trades, Volume Profile","Identità asset, contract, chain e dati on-chain","Tokenomics, supply, unlock, vesting, diluizione","Metriche DeFi (TVL, fees/revenue), DEX liquidity/bridge","Notizie specifiche ai token e fonti primarie","Macroeconomia, geopolitica e scenari","Riconoscimento dei regimi di mercato","GPT interpretazione in chat, intero portafoglio","Catena diretta GPT-chat → Samsung → browser","Proposta unica in cima, comprensibile su mobile","Approvazione, eventi storici e riesame","Aggiornamento ricorrente, sorveglianza, alert","Futures long/short, margine, funding e rischio collaterale","Effettiva utilità economica e qualità della proposta"]
 ALLOWED = frozenset({
     "PRESENTE_DA_ACCETTARE", "PARZIALE", "DA_REALIZZARE",
     "SPERIMENTALE", "USO_LIMITATO", "NON_DIMOSTRATO", "COMPLETO"
 })
+LEGACY_KDD05 = "Liquidità USDC e scenari per almeno 150 EUR equivalenti"  # Only pre-checklist archived baseline
 TABLE_HEADER = ("| Casella / ID immutabile | Requisito dell'autore | "
                 "Stato di completamento | Fatto verificato (fotografia 02/11) | "
                 "Lavoro ancora da svolgere |")
@@ -92,7 +93,7 @@ def original_inventory(text: str) -> None:
         raise GateError("Inventario originale non ha 29 requisiti")
     for n, line in enumerate(lines[2:]):
         cols = [x.strip() for x in line.strip().strip("|").split("|")]
-        if len(cols) != 3 or plain(cols[0]) != TITLES[n]:
+        if len(cols) != 3 or plain(cols[0]) != (LEGACY_KDD05 if n == 4 else TITLES[n]):
             raise GateError(f"Inventario originale alterato in riga {n + 1}")
 
 
@@ -110,8 +111,14 @@ def field(body: str, name: str) -> str:
     return vals[0].strip()
 
 
-def check_pr(base: str, head: str, body: str) -> dict:
-    """Enforce 29 IDs AND a meaningful per-ID roadmap update on each G2 PR."""
+def check_pr(base: str, head: str, body: str, *, pr_number: str | None = None) -> dict:
+    """Trace approved documentary edits OR an independently registered technical PR.
+
+    The author/Supervisione owns the canonical ROADMAP; merely declaring an ID
+    in a PR does not authorize the developer to rewrite it. Technical PRs need
+    a byte-identical baseline ROADMAP, an exact Git blob fingerprint and a
+    repository PR link already registered in that protected baseline.
+    """
     if not re.fullmatch(r"[a-f0-9]{40}", base) or not re.fullmatch(r"[a-f0-9]{40}", head):
         raise GateError("PR: riferimenti Git SHA esatti richiesti")
     current = git("show", f"{head}:ROADMAP_KDD.md")
@@ -122,33 +129,59 @@ def check_pr(base: str, head: str, body: str) -> dict:
         changed = {k for k in now if now[k] != before[k]}
     else:
         original_inventory(preceding)
+        before = {}
         changed = set(now)
+
     files = set(git("diff", "--name-only", base, head).splitlines())
-    if "ROADMAP_KDD.md" not in files or not changed:
-        raise GateError("PR senza aggiornamento concreto di almeno una riga ROADMAP")
-    ids_field = field(body, "ROADMAP-IDS")
-    ids = [x.strip() for x in ids_field.split(",")]
-    if len(set(ids)) != len(ids) or not ids or any(x not in now for x in ids):
+    ids = [x.strip() for x in field(body, "ROADMAP-IDS").split(",")]
+    if not ids or len(ids) != len(set(ids)) or any(x not in now for x in ids):
         raise GateError("ROADMAP-IDS: identificativi duplicati, inesistenti o malformati")
-    if set(ids) != changed:
-        raise GateError("ROADMAP-IDS differenti dalle righe realmente modificate: "
-                        f"dichiarate={sorted(ids)}, modificate={sorted(changed)}")
     field(body, "MANDATO-AUTORE")
     field(body, "PROVE")
     merge_status = field(body, "GO-MERGE")
     if merge_status not in ("PENDENTE - SERVE DECISIONE ESPLICITA DELL'AUTORE",
                             "RICHIESTO - NON EQUIVALE AD AUTORIZZAZIONE"):
-        raise GateError("GO-MERGE deve restare pendente nella PR; il controllo non può dare GO")
+        raise GateError("GO-MERGE deve restare pendente nella PR; non è autorizzazione")
     if "GOVERNO_KDD.md" in files:
-        raise GateError("PR modifica il GOVERNO: STOP; richiede specifico mandato dell'autore")
+        raise GateError("PR modifica il GOVERNO: serve mandato della Supervisione")
     if "README.md" in files:
         old_readme = git("show", f"{base}:README.md")
         new_readme = git("show", f"{head}:README.md")
         if (ARCHIVE_MARKER not in old_readme or ARCHIVE_MARKER not in new_readme
                 or old_readme.split(ARCHIVE_MARKER, 1)[1]
                 != new_readme.split(ARCHIVE_MARKER, 1)[1]):
-            raise GateError("Il mandato originale conservato nel README è stato modificato")
-    return {"changed_ids": sorted(changed), "files": sorted(files)}
+            raise GateError("L'inventario storico del README è stato modificato")
+
+    mode = field(body, "ROADMAP-MODALITA")
+    if "ROADMAP_KDD.md" in files:
+        if mode != "DOCUMENTALE" or not changed or set(ids) != changed:
+            raise GateError("ROADMAP modificata: servono righe reali e ID esattamente corrispondenti")
+        # A PR authored by a developer cannot manufacture the author's GO in
+        # the same branch. A completed row must already be authorized in base.
+        for key in changed:
+            if now[key][2] == "COMPLETO" and (key not in before or before[key][2] != "COMPLETO"):
+                raise GateError(f"{key}: chiusura nuova non attestata nella baseline della Supervisione")
+    else:
+        if mode != "TECNICA-SENZA-MODIFICA" or changed or current != preceding:
+            raise GateError("PR tecnica: ROADMAP canonica da lasciare identica alla base")
+        if not files or not (files - {"README.md", "ROADMAP_KDD.md", "GOVERNO_KDD.md"}):
+            raise GateError("PR tecnica senza diff verificabile fuori dai documenti canonici")
+        # Mandatory independent, immutable source of supervisory registration:
+        # check the ACTUAL baseline blob and PR link, not an assertion in body.
+        number = pr_number if pr_number is not None else os.environ.get("KDD_PR_NUMBER", "")
+        if not isinstance(number, str) or not re.fullmatch(r"[1-9][0-9]*", number):
+            raise GateError("Numero PR non attestato dall'evento GitHub")
+        register = field(body, "SUPERVISIONE-REGISTRO")
+        blob = git("rev-parse", f"{base}:ROADMAP_KDD.md").strip()
+        expected = f"ROADMAP_KDD.md@{blob}; PR #{number}"
+        if register != expected:
+            raise GateError("Registrazione Supervisione senza SHA della ROADMAP canonica di base")
+        link = (f"[PR #{number}]"
+                f"(https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/{number})")
+        if link not in preceding or "Candidati e gate" not in preceding:
+            raise GateError("La PR tecnica non è registrata nella ROADMAP della Supervisione")
+    return {"changed_ids": sorted(changed), "declared_ids": sorted(ids),
+            "mode": mode, "files": sorted(files)}
 
 
 def main() -> int:
@@ -164,8 +197,9 @@ def main() -> int:
             check = check_pr(
                 os.environ.get("KDD_BASE_SHA", ""),
                 os.environ.get("KDD_HEAD_SHA", ""),
-                os.environ.get("KDD_PR_BODY", ""))
-            print(f"PR tracciata a {', '.join(check['changed_ids'])}; "
+                os.environ.get("KDD_PR_BODY", ""),
+                pr_number=os.environ.get("KDD_PR_NUMBER", ""))
+            print(f"PR {check['mode']} tracciata a {', '.join(check['declared_ids'])}; "
                   f"{len(check['files'])} file modificati. GO-MERGE resta umano.")
     except (GateError, OSError, UnicodeError) as exc:
         print(f"STOP GOVERNO ROADMAP: {exc}", file=sys.stderr)

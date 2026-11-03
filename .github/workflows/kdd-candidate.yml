@@ -79,6 +79,7 @@ jobs:
           KDD_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           KDD_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           KDD_PR_BODY: ${{ github.event.pull_request.body }}
+          KDD_PR_NUMBER: ${{ github.event.pull_request.number }}
         run: python -B scripts/check_roadmap_contract.py --check-pr
       - name: Positive and adversarial guard tests
         run: python -B -m unittest -q scripts.test_roadmap_contract

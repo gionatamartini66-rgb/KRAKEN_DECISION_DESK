@@ -71,7 +71,7 @@ class RoadmapContractTests(unittest.TestCase):
         body = ("ROADMAP-IDS: KDD-03\n"
                 "MANDATO-AUTORE: intervento tracciato su KDD-03\n"
                 "PROVE: collegamento al collaudo e al diff completo\n"
-                "GO-MERGE: PENDENTE - SERVE DECISIONE ESPLICITA DELL'AUTORE\n")
+                "GO-MERGE: PENDENTE - SERVE DECISIONE ESPLICITA DELL'AUTORE\n"\n                "ROADMAP-MODALITA: DOCUMENTALE\n")
         with patch.object(contract, "git", side_effect=fake_git):
             self.assertEqual(contract.check_pr(base, head, body)["changed_ids"], ["KDD-03"])
             with self.assertRaises(contract.GateError):
@@ -95,10 +95,88 @@ class RoadmapContractTests(unittest.TestCase):
         body = ("ROADMAP-IDS: KDD-05\n"
                 "MANDATO-AUTORE: intervento circoscritto su KDD-05\n"
                 "PROVE: verifica indipendente repertoriata per questo lavoro\n"
-                "GO-MERGE: PENDENTE - SERVE DECISIONE ESPLICITA DELL'AUTORE\n")
+                "GO-MERGE: PENDENTE - SERVE DECISIONE ESPLICITA DELL'AUTORE\n"\n                "ROADMAP-MODALITA: DOCUMENTALE\n")
         with patch.object(contract, "git", side_effect=fake_git):
             with self.assertRaises(contract.GateError):
                 contract.check_pr(base, head, body)
+
+
+    def test_canonical_kdd05_title_and_all_29_unchanged(self):
+        rows = contract.parse(self.content)
+        self.assertEqual(len(rows), 29)
+        self.assertEqual(
+            contract.plain(rows["KDD-05"][1]),
+            "Liquidità operativa indicativa di circa 150 USDC, finanziamento e alternative")
+        self.assertEqual(
+            [contract.plain(row[1]) for row in rows.values()], contract.TITLES)
+        old = self.content.replace(
+            "Liquidità operativa indicativa di circa 150 USDC, finanziamento e alternative",
+            "Liquidità USDC e scenari per almeno 150 EUR equivalenti", 1)
+        with self.assertRaises(contract.GateError):
+            contract.parse(old)
+
+    def _technical_gate(self, *, base_text=None, head_text=None, changed_files="serve.py\n",
+                        mode="TECNICA-SENZA-MODIFICA", register=True,
+                        ids="KDD-05", mandate=True, go=True, ref_number="31"):
+        base, head = "a" * 40, "b" * 40
+        before = self.content if base_text is None else base_text
+        after = self.content if head_text is None else head_text
+        blob = "c" * 40
+        def fake_git(*args):
+            table = {
+                ("show", f"{base}:ROADMAP_KDD.md"): before,
+                ("show", f"{head}:ROADMAP_KDD.md"): after,
+                ("diff", "--name-only", base, head): changed_files,
+                ("rev-parse", f"{base}:ROADMAP_KDD.md"): blob + "\n"}
+            return table[args]
+        parts = [
+            f"ROADMAP-IDS: {ids}",
+            "MANDATO-AUTORE: mandato reale riferito al lavoro autorizzato" if mandate
+            else "SENZA-MANDATO: riferimento mancante",
+            "PROVE: test e confronto GitHub verificabile",
+            "GO-MERGE: PENDENTE - SERVE DECISIONE ESPLICITA DELL'AUTORE"
+            if go else "GO-MERGE: AUTORIZZATO DAL PROGRAMMA",
+            f"ROADMAP-MODALITA: {mode}"]
+        if register:
+            parts.append(f"SUPERVISIONE-REGISTRO: ROADMAP_KDD.md@{blob}; PR #{ref_number}")
+        with patch.object(contract, "git", side_effect=fake_git):
+            return contract.check_pr(base, head, "\n".join(parts) + "\n", pr_number="31")
+
+    def test_technical_pr_with_independent_supervision_registration_passes(self):
+        result = self._technical_gate()
+        self.assertEqual(result["mode"], "TECNICA-SENZA-MODIFICA")
+        self.assertEqual(result["changed_ids"], [])
+        self.assertEqual(result["declared_ids"], ["KDD-05"])
+
+    def test_technical_pr_missing_registration_mandate_and_invalid_ids_stop(self):
+        for params in ({"register": False}, {"ref_number": "32"},
+                       {"mandate": False}, {"ids": "KDD-99"},
+                       {"ids": "KDD-05, KDD-05"}, {"go": False},
+                       {"changed_files": ""}):
+            with self.subTest(params=params), self.assertRaises(contract.GateError):
+                self._technical_gate(**params)
+
+    def test_fake_roadmap_modification_and_unregistered_pr_stop(self):
+        with self.assertRaises(contract.GateError):
+            self._technical_gate(mode="DOCUMENTALE")
+        with self.assertRaises(contract.GateError):
+            self._technical_gate(changed_files="ROADMAP_KDD.md\nserve.py\n")
+        # A claim in the PR description cannot manufacture supervisor evidence.
+        changed = self.content.replace("[PR #31]", "[PR #999]", 1)
+        with self.assertRaises(contract.GateError):
+            self._technical_gate(base_text=changed, head_text=changed)
+
+    def test_branch_cannot_invent_new_completo_even_with_fake_go_marker(self):
+        before = self.content
+        line = next(x for x in before.splitlines() if "KDD-01 |" in x)
+        completed = (line.replace("- [ ]", "- [x]")
+                         .replace("| PRESENTE_DA_ACCETTARE |", "| COMPLETO |")
+                         .replace("**E**:", "PROVA: result-verified-123; GO-AUTORE: fake-author-decision-123; **E**:", 1))
+        after = before.replace(line, completed, 1)
+        with self.assertRaises(contract.GateError):
+            self._technical_gate(
+                head_text=after, changed_files="ROADMAP_KDD.md\n",
+                mode="DOCUMENTALE", ids="KDD-01")
 
 
 if __name__ == "__main__":
