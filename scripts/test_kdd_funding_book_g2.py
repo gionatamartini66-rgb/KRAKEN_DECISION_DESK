@@ -165,5 +165,69 @@ class FundingBookTests(unittest.TestCase):
                                              fee_ipotesi="1")
 
 
+    def test_rt1_f1_exact_decimal_reaches_target_and_flexible_smaller_case(self):
+        import costi_spot
+        from decimal import Decimal
+        exact = costi_spot.stima_vendita_book_150(
+            [["14.27305907", "100"]], "100", target_eur="150", fee_ipotesi="0.008")
+        self.assertEqual(exact["stato"], "150_NETTI_SOLO_CON_FEE_IPOTETICA_E_BOOK_FOTOGRAFATO")
+        self.assertGreaterEqual(Decimal(exact["proventi_netto_fee_ipotesi_eur"]), Decimal("150"))
+        smaller = costi_spot.stima_vendita_book_150(
+            [["1", "140"]], "140", target_eur="150", fee_ipotesi="0.008")
+        self.assertNotEqual(smaller["stato"], "150_NETTI_SOLO_CON_FEE_IPOTETICA_E_BOOK_FOTOGRAFATO")
+        self.assertEqual(Decimal(smaller["proventi_netto_fee_ipotesi_eur"]), Decimal("138.880"))
+
+    def test_rt1_f2_wrong_rest_key_is_rejected_before_depth(self):
+        import dossier_trade
+        pairs = {
+            "XXBTZEUR": {"wsname": "XBT/EUR", "status": "online", "altname": "XBTEUR"},
+            "XETHZEUR": {"wsname": "ETH/EUR", "status": "online", "altname": "ETHEUR"}}
+        source = {"rilevazione_utc": T.isoformat(), "_verified_asset_pairs": pairs,
+                  "markets": {"BTC": {"token": "BTC", "pair": "XBT/EUR",
+                                       "pair_key": "XETHZEUR", "prezzo_eur": "70000"}}}
+        portfolio = {"posizioni": [{"token": "BTC", "quantita": "0.01",
+                                     "disponibile_spot": "0.01"}]}
+        calls = []
+        def fake(endpoint, **kwargs):
+            calls.append((endpoint, kwargs))
+            return {"XETHZEUR": {"bids": [["2000", "1", 1]]}}
+        with mock.patch.object(dossier_trade.desk, "NOW", return_value=T), \
+             mock.patch.object(dossier_trade.time, "sleep"):
+            out = dossier_trade.finanziamento_150_book(
+                source, portfolio, saldo_recente=True, kraken_client=fake)
+        self.assertEqual(out["richieste_depth"], 0)
+        self.assertNotEqual(out["righe"][0]["stato"], "BOOK_PUBBLICO_OSSERVATO")
+        self.assertEqual(calls, [])
+
+    def test_rt1_f3_future_book_is_not_recent(self):
+        row = {"stato": "BOOK_PUBBLICO_OSSERVATO",
+               "osservato_utc": (T + dt.timedelta(seconds=90)).isoformat()}
+        pkt = {"patrimonio": {"book_pubblico_150": {
+            "stato": "STIMA_BOOK_CON_FEE_IPOTETICA", "righe": [row]}}}
+        out = bridge.stato_book_150_alla_lettura(
+            pkt, T, mercato_stato="RECENTE", saldo_stato="RECENTE")
+        self.assertNotEqual(out["stato"], "RECENTE_SOLO_FEE_IPOTETICA")
+        self.assertEqual(out["stato"], "OROLOGIO_INCOERENTE")
+
+    def test_rt1_f7_both_invested_and_total_portfolio_denominators(self):
+        from decimal import Decimal
+        positions = [
+            {"indice": 0, "token": "ETH", "stato_identita": "VALIDA",
+             "prezzo_eur": "1000", "quantita_spot": "2", "disponibile_spot": "2",
+             "valore_eur": "2000",
+             "fonte_prezzo_eur": {"token": "ETH", "pair": "ETH/EUR", "valuta": "EUR"}},
+            {"indice": 1, "token": "BTC", "stato_identita": "VALIDA",
+             "prezzo_eur": "800", "quantita_spot": "1", "disponibile_spot": "1",
+             "valore_eur": "800",
+             "fonte_prezzo_eur": {"token": "BTC", "pair": "XBT/EUR", "valuta": "EUR"}}]
+        result = p.alternative_liquidazione_150_lorda(
+            positions, "2800", mercato_stato="RECENTE", saldo_stato="RECENTE")
+        eth = result["alternative"][0]
+        self.assertEqual(Decimal(eth["peso_asset_post_alleggerimento_pct"]), Decimal("69.81"))
+        self.assertEqual(Decimal(eth["peso_asset_su_intero_patrimonio_pct"]), Decimal("66.07"))
+        self.assertEqual(Decimal(eth["liquidita_teorica_ricavata_eur"]), Decimal("150"))
+        self.assertEqual(result["alternativa_senza_operazione"]["azione"], "NON_CONVERTIRE_ORA")
+
+
 if __name__ == "__main__":
     unittest.main()
