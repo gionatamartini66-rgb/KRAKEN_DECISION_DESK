@@ -11,6 +11,29 @@ T = dt.datetime(2026, 10, 25, 18, 0, tzinfo=UTC)
 
 
 class FundingBookTests(unittest.TestCase):
+    def test_recent_book_does_not_override_stale_market_or_balance(self):
+        from scripts import kdd_bridge_g2 as bridge
+        packet = {"patrimonio": {"book_pubblico_150": {
+            "stato": "STIMA_BOOK_CON_FEE_IPOTETICA",
+            "righe": [{"indice": 0, "token": "BTC",
+                       "stato": "BOOK_PUBBLICO_OSSERVATO",
+                       "osservato_utc": T.isoformat()}]}}}
+        fresh = bridge.stato_book_150_alla_lettura(
+            packet, T, mercato_stato="RECENTE", saldo_stato="RECENTE")
+        self.assertEqual(fresh["stato"], "RECENTE_SOLO_FEE_IPOTETICA")
+        for market, balance in (("RECENTE", "DA_AGGIORNARE"),
+                                ("DA_AGGIORNARE", "RECENTE"),
+                                ("DA_AGGIORNARE", "DA_AGGIORNARE")):
+            with self.subTest(market=market, balance=balance):
+                result = bridge.stato_book_150_alla_lettura(
+                    packet, T, mercato_stato=market, saldo_stato=balance)
+                self.assertEqual(result["stato"], "DATI_BASE_NON_RECENTI")
+        old = bridge.stato_book_150_alla_lettura(
+            packet, T + dt.timedelta(minutes=6),
+            mercato_stato="RECENTE", saldo_stato="RECENTE")
+        self.assertEqual(old["stato"], "SCADUTO")
+
+
     def test_bridge_rechecks_book_age_at_read(self):
         packet = {"patrimonio": {"book_pubblico_150": {
             "stato": "STIMA_BOOK_CON_FEE_IPOTETICA",
