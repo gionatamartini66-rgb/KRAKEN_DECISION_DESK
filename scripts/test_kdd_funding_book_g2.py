@@ -39,8 +39,11 @@ class FundingBookTests(unittest.TestCase):
             "stato": "STIMA_BOOK_CON_FEE_IPOTETICA",
             "righe": [{"stato": "BOOK_PUBBLICO_OSSERVATO",
                        "osservato_utc": T.isoformat()}]}}}
-        fresh = bridge.stato_book_150_alla_lettura(packet, T)
-        old = bridge.stato_book_150_alla_lettura(packet, T+dt.timedelta(minutes=6))
+        fresh = bridge.stato_book_150_alla_lettura(
+            packet, T, mercato_stato="RECENTE", saldo_stato="RECENTE")
+        old = bridge.stato_book_150_alla_lettura(
+            packet, T+dt.timedelta(minutes=6),
+            mercato_stato="RECENTE", saldo_stato="RECENTE")
         self.assertEqual(fresh["stato"], "RECENTE_SOLO_FEE_IPOTETICA")
         self.assertEqual(old["stato"], "SCADUTO")
         self.assertEqual(old["book_scaduti"], 1)
