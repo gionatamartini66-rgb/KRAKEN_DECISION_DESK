@@ -548,7 +548,12 @@ def alternative_liquidazione_150_lorda(positions: list, total, *,
                 "esito": "NON_VERIFICABILE", "capienza_lorda_fotografia": None,
                 "massimo_lordo_indicativo_eur": None,
                 "quantita_teorica_150_lordi": None,
-                "peso_asset_post_alleggerimento_pct": None}
+                "peso_asset_post_alleggerimento_pct": None,
+                "peso_asset_su_investiti_residui_pct": None,
+                "peso_asset_su_intero_patrimonio_pct": None,
+                "liquidita_teorica_ricavata_eur": None,
+                "equivalente_usdc_effettivo": None,
+                "fee_verificate": False}
         if row.get("stato_identita") != "VALIDA":
             item["esito"] = "IDENTITA_NON_VERIFICATA"
             scenarios.append(item)
@@ -578,14 +583,26 @@ def alternative_liquidazione_150_lorda(positions: list, total, *,
         item["capienza_lorda_fotografia"] = maximum >= target
         item["esito"] = ("SOGLIA_LORDA_POTENZIALE" if maximum >= target
                          else "SOTTO_SOGLIA_LORDA")
-        if maximum >= target:
-            # The source price is indicative, NOT a live executable bid.
-            item["quantita_teorica_150_lordi"] = format(target / price, "f")
-            if base is not None and base > target and valued >= target:
-                remaining = valued - target
-                denominator = base - target
-                share = (remaining * 100 / denominator).quantize(Decimal("0.01"))
-                item["peso_asset_post_alleggerimento_pct"] = format(share, "f")
+        if maximum > 0:
+            # A flexible illustrative reduction: retain alternatives below
+            # EUR 150 instead of discarding them; the real aim is around
+            # 150 USDC and EUR->USDC conversion/fees are NOT attested.
+            example_gross = min(maximum, target)
+            item["liquidita_teorica_ricavata_eur"] = format(example_gross, "f")
+            item["quantita_teorica_importo_esempio"] = format(example_gross / price, "f")
+            if maximum >= target:
+                item["quantita_teorica_150_lordi"] = format(target / price, "f")
+            if base is not None and base > 0 and valued >= example_gross:
+                remaining = valued - example_gross
+                total_share = (remaining * 100 / base).quantize(Decimal("0.01"))
+                item["peso_asset_su_intero_patrimonio_pct"] = format(total_share, "f")
+                if base > example_gross:
+                    invested_share = (
+                        remaining * 100 / (base - example_gross)).quantize(Decimal("0.01"))
+                    # Preserve the old field for historical packet consumers,
+                    # explicitly label its invested-only denominator.
+                    item["peso_asset_post_alleggerimento_pct"] = format(invested_share, "f")
+                    item["peso_asset_su_investiti_residui_pct"] = format(invested_share, "f")
         scenarios.append(item)
     return {
         "obiettivo_lordo_eur": "150",
