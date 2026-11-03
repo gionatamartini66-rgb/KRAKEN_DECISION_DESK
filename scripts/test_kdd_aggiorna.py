@@ -42,7 +42,7 @@ class UpdateTests(unittest.TestCase):
             (directory / 'test_decision_desk.py').write_text(TEST_BODY)
             for name in kdd.PACKET_FILES:
                 origin = Path(__file__).resolve().parents[1] / name
-                if name.endswith(('test_kdd_portfolio_4tf.py', 'test_kdd_bridge_g2.py', 'test_kdd_android_transaction_g2.py', 'test_kdd_drive_exchange.py', 'kdd_android_regressions.py')):
+                if name.endswith(('test_kdd_portfolio_4tf.py', 'test_kdd_bridge_g2.py', 'test_kdd_android_transaction_g2.py', 'test_kdd_drive_exchange.py', 'test_kdd_funding_book_g2.py', 'kdd_android_regressions.py')):
                     # The updater's synthetic source tree intentionally uses
                     # placeholder application code. Its staging test verifies
                     # packaging only; real E2E runs separately on true KDD.
