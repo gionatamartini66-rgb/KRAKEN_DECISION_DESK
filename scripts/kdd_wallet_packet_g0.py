@@ -648,7 +648,19 @@ def book_150_per_gpt(dossier, positions, wallet_sha, snapshot_utc, now):
                 free = amount(position.get("disponibile_spot"), "book: saldo disponibile")
             except PacketError:
                 return fallback
-            if None in (qty, gross, net, free) or Decimal(qty) > Decimal(free):
+            held = amount(position.get("quantita_spot"), "book: quantita posseduta")
+            if (None in (qty, gross, net, free, held) or Decimal(qty) > Decimal(free)
+                    or Decimal(free) > Decimal(held)):
+                return fallback
+            # Recompute from the actual retained bid levels; a self-declared
+            # positive estimate in the dossier is not sufficient evidence.
+            import costi_spot
+            try:
+                recreated = costi_spot.stima_vendita_book_150(
+                    item.get("bids_osservati"), free, target_eur="150", fee_ipotesi="0.008")
+            except (ValueError, TypeError, ArithmeticError):
+                return fallback
+            if estimate != recreated:
                 return fallback
             row.update({"stima": {"stato": str(estimate.get("stato"))[:80],
                                   "quantita_base_teorica": qty,
