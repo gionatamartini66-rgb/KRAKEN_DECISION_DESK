@@ -288,7 +288,7 @@ def stima_vendita_book_150(bids, disponibile_base, *, target_eur="150", fee_ipot
         "proventi_lordi_stimati_eur": shown(gross),
         "fee_ipotetica_eur": shown(gross * fee),
         "proventi_netto_fee_ipotesi_eur": shown(net),
-        "fee_ipotetica_pct": shown(fee * 100),
+        "fee_ipotetica_pct": format(dec(fee_ipotesi) * Decimal(100), "f"),
         "livelli_bid_utilizzati": levels_used,
         "nessun_fill_attestato": True,
         "limite": ("Fee NON verificata per il conto; prezzo e profondita book mutano, "
