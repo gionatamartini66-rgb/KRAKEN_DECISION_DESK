@@ -18,9 +18,9 @@ class FundingBookTests(unittest.TestCase):
                               "SOL": {"token": "SOL", "pair": "SOL/EUR",
                                       "pair_key": "SOLEUR", "prezzo_eur": "20"}}}
         portfolio = {"posizioni": [
-            {"token": "BTC", "disponibile_spot": "0.003"},
-            {"token": "ETH", "disponibile_spot": "0.1"},
-            {"token": "SOL", "disponibile_spot": "1"}]}
+            {"token": "BTC", "quantita": "0.003", "disponibile_spot": "0.003"},
+            {"token": "ETH", "quantita": "0.1", "disponibile_spot": "0.1"},
+            {"token": "SOL", "quantita": "1", "disponibile_spot": "1"}]}
         calls = []
         def fake(endpoint, **kwargs):
             calls.append((endpoint, kwargs["pair"], kwargs["count"]))
