@@ -528,6 +528,268 @@ def cash_balances(portfolio: dict, report: dict) -> dict:
     return result
 
 
+def alternative_liquidazione_150_lorda(positions: list, total, *,
+                                    mercato_stato=None, saldo_stato=None) -> dict:
+    """KDD-05: confronta TUTTE le posizioni come possibili fonti di 150 EUR lordi.
+
+    Non usa il prezzo bid, il book, le fee del conto o la precisione di ordine:
+    nessun risultato attesta un netto di 150 EUR o un'esecuzione possibile.
+    """
+    target = Decimal("150")
+    total_text = amount(total, "patrimonio in EUR")
+    base = Decimal(total_text) if total_text is not None else None
+    current = mercato_stato == "RECENTE" and saldo_stato == "RECENTE"
+    scenarios = []
+    for i, row in enumerate(positions):
+        if not isinstance(row, dict) or row.get("indice", i) != i:
+            raise PacketError("Alternativa 150: posizione o ordine incoerenti")
+        token = row.get("token")
+        item = {"indice": i, "token": token,
+                "esito": "NON_VERIFICABILE", "capienza_lorda_fotografia": None,
+                "massimo_lordo_indicativo_eur": None,
+                "quantita_teorica_150_lordi": None,
+                "peso_asset_post_alleggerimento_pct": None,
+                "peso_asset_su_investiti_residui_pct": None,
+                "peso_asset_su_intero_patrimonio_pct": None,
+                "liquidita_teorica_ricavata_eur": None,
+                "equivalente_usdc_effettivo": None,
+                "fee_verificate": False}
+        if row.get("stato_identita") != "VALIDA":
+            item["esito"] = "IDENTITA_NON_VERIFICATA"
+            scenarios.append(item)
+            continue
+        price_text = amount(row.get("prezzo_eur"), "prezzo EUR")
+        held_text = amount(row.get("quantita_spot"), "quantita posseduta")
+        free_text = amount(row.get("disponibile_spot"), "quantita disponibile")
+        valued_text = amount(row.get("valore_eur"), "valore posizione")
+        source = row.get("fonte_prezzo_eur")
+        if (price_text is None or held_text is None or free_text is None
+                or valued_text is None or not isinstance(source, dict)
+                or source.get("valuta") != "EUR"
+                or source.get("token") != token
+                or not isinstance(source.get("pair"), str)
+                or source["pair"].split("/")[-1] != "EUR"
+                or canonical_wallet_alias(source["pair"].split("/")[0])
+                   != canonical_wallet_alias(token)):
+            scenarios.append(item)
+            continue
+        price, held, free = Decimal(price_text), Decimal(held_text), Decimal(free_text)
+        valued = Decimal(valued_text)
+        if price <= 0 or free > held:
+            scenarios.append(item)
+            continue
+        maximum = free * price
+        item["massimo_lordo_indicativo_eur"] = format(maximum, "f")
+        item["capienza_lorda_fotografia"] = maximum >= target
+        item["esito"] = ("SOGLIA_LORDA_POTENZIALE" if maximum >= target
+                         else "SOTTO_SOGLIA_LORDA")
+        if maximum > 0:
+            # A flexible illustrative reduction: retain alternatives below
+            # EUR 150 instead of discarding them; the real aim is around
+            # 150 USDC and EUR->USDC conversion/fees are NOT attested.
+            example_gross = min(maximum, target)
+            item["liquidita_teorica_ricavata_eur"] = format(example_gross, "f")
+            item["quantita_teorica_importo_esempio"] = format(example_gross / price, "f")
+            if maximum >= target:
+                item["quantita_teorica_150_lordi"] = format(target / price, "f")
+            if base is not None and base > 0 and valued >= example_gross:
+                remaining = valued - example_gross
+                total_share = (remaining * 100 / base).quantize(Decimal("0.01"))
+                item["peso_asset_su_intero_patrimonio_pct"] = format(total_share, "f")
+                if base > example_gross:
+                    invested_share = (
+                        remaining * 100 / (base - example_gross)).quantize(Decimal("0.01"))
+                    # Preserve the old field for historical packet consumers,
+                    # explicitly label its invested-only denominator.
+                    item["peso_asset_post_alleggerimento_pct"] = format(invested_share, "f")
+                    item["peso_asset_su_investiti_residui_pct"] = format(invested_share, "f")
+        scenarios.append(item)
+    return {
+        "obiettivo_lordo_eur": "150",
+        "freschezza_fotografia": ("RECENTE_ALLA_COMPOSIZIONE" if current
+                                 else "NON_RECENTE_O_NON_ATTESTATA"),
+        "n_posizioni_esaminate": len(scenarios),
+        "n_fonti_potenziali_lorde": sum(
+            row["capienza_lorda_fotografia"] is True for row in scenarios),
+        "alternative": scenarios,
+        "alternativa_senza_operazione": {
+            "azione": "NON_CONVERTIRE_ORA",
+            "effetto": "Nessuna vendita né nuovo capitale creato; valutare un versamento o attendere"},
+        "limite": ("Il prezzo EUR è indicativo e non è un bid. Mancano book, "
+                   "fee reali, spread, minimi, precisione quantità e verifica della "
+                   "negoziabilità del conto. Anche SOGLIA_LORDA_POTENZIALE "
+                   "non certifica che arrivino 150 EUR netti."),
+    }
+
+
+
+def book_150_per_gpt(dossier, positions, wallet_sha, snapshot_utc, now):
+    """Valida origine, righe, coppia e ora della stima book prima di esporla a GPT."""
+    fallback = {"stato": "NON_ATTESTATO", "righe": [],
+                "limite": "Nessun confronto book verificato per la fotografia corrente."}
+    raw = dossier.get("finanziamento_150_book_pubblico")
+    if (not isinstance(raw, dict) or dossier.get("fotografia_portafoglio_sha256") != wallet_sha
+            or raw.get("rilevazione_mercato_utc") != snapshot_utc):
+        return fallback
+    items = raw.get("righe")
+    if not isinstance(items, list) or len(items) != len(positions):
+        return fallback
+    output = []
+    for i, (item, position) in enumerate(zip(items, positions)):
+        if (not isinstance(item, dict) or item.get("indice") != i
+                or item.get("token") != position.get("token")):
+            return fallback
+        row = {"indice": i, "token": position.get("token"), "stato": item.get("stato")}
+        if item.get("stato") == "BOOK_PUBBLICO_OSSERVATO":
+            origin = position.get("fonte_prezzo_eur")
+            if (not isinstance(origin, dict) or origin.get("pair") != item.get("pair")
+                    or origin.get("pair_key") != item.get("pair_key")
+                    or position.get("stato_identita") != "VALIDA"):
+                return fallback
+            try:
+                observed = when(item.get("osservato_utc"), "osservazione book")
+                snap = when(snapshot_utc, "fotografia book")
+            except PacketError:
+                return fallback
+            if observed < snap - dt.timedelta(minutes=2) or observed > now:
+                # A future observation is not economically fresh, regardless
+                # of whether local clock skew would fit an ordinary tolerance.
+                return fallback
+            estimate = item.get("stima")
+            if not isinstance(estimate, dict) or estimate.get("nessun_fill_attestato") is not True:
+                return fallback
+            if estimate.get("fee_ipotetica_pct") != "0.800":
+                return fallback
+            try:
+                qty = amount(estimate.get("quantita_base_teorica"), "book: quantità")
+                gross = amount(estimate.get("proventi_lordi_stimati_eur"), "book: lordo")
+                net = amount(estimate.get("proventi_netto_fee_ipotesi_eur"), "book: netto")
+                free = amount(position.get("disponibile_spot"), "book: saldo disponibile")
+            except PacketError:
+                return fallback
+            held = amount(position.get("quantita_spot"), "book: quantita posseduta")
+            if (None in (qty, gross, net, free, held) or Decimal(qty) > Decimal(free)
+                    or Decimal(free) > Decimal(held)):
+                return fallback
+            # Recompute from the actual retained bid levels; a self-declared
+            # positive estimate in the dossier is not sufficient evidence.
+            import costi_spot
+            try:
+                recreated = costi_spot.stima_vendita_book_150(
+                    item.get("bids_osservati"), free, target_eur="150", fee_ipotesi="0.008")
+            except (ValueError, TypeError, ArithmeticError):
+                return fallback
+            if estimate != recreated:
+                return fallback
+            row.update({"stima": {"stato": str(estimate.get("stato"))[:80],
+                                  "quantita_base_teorica": qty,
+                                  "lordo_eur": gross, "netto_fee_ipotetica_eur": net,
+                                  "fee_taker_ipotizzata_pct": "0.8",
+                                  "sotto_riferimento_non_esclusa": (
+                                      Decimal("0") < Decimal(net) < Decimal("150")),
+                                  "usdc_effettivamente_disponibili_da_vendita": None},
+                        "osservato_utc": item.get("osservato_utc"),
+                        "freschezza": ("RECENTE_ALLA_COMPOSIZIONE"
+                                       if (now-observed).total_seconds() <= 300 else "SCADUTO")})
+        output.append(row)
+    return {"stato": "STIMA_BOOK_CON_FEE_IPOTETICA", "righe": output,
+            "limite": ("Non è un preventivo: anche le stime nette inferiori al riferimento "
+                       "di circa 150 USDC sono alternative da confrontare, non ordini esclusi. "
+                       "Importi EUR indicativi non diventano USDC disponibili senza conversione, "
+                       "fee, minimi e negoziabilità verificati; rivalutare il book alla lettura.")}
+
+
+def quadro_economico_per_gpt(positions: list, cash: dict, total, *, mercato_stato=None, saldo_stato=None) -> dict:
+    """Pure, non-prescriptive arithmetic for KDD-02/04/05/23.
+
+    No trading recommendation, no fee assumptions and no cross-currency sum.
+    Values remain private inside the same opt-in packet as the original wallet.
+    """
+    if not isinstance(positions, list) or not isinstance(cash, dict):
+        raise PacketError("Quadro economico: input non strutturato")
+    total_value = amount(total, "totale patrimonio")
+    denom = Decimal(total_value) if total_value is not None else None
+    entries = []
+    tokens_seen = set()
+    identities_valid = True
+    for pos in positions:
+        if not isinstance(pos, dict):
+            raise PacketError("Quadro economico: posizione non strutturata")
+        token = pos.get("token")
+        # Producer intentionally preserves unknown and duplicate wallet identities
+        # by row index. Never remove them or fabricate a portfolio distribution.
+        if (not isinstance(token, str) or not SYMBOL.fullmatch(token)
+                or pos.get("stato_identita", "VALIDA") != "VALIDA"
+                or token in tokens_seen):
+            identities_valid = False
+        else:
+            tokens_seen.add(token)
+        value = amount(pos.get("valore_eur"), "valore posizione")
+        entries.append((token, Decimal(value) if value is not None else None))
+
+    complete = bool(denom is not None and denom > 0 and identities_valid
+                    and entries and all(value is not None for _, value in entries))
+    quote = []
+    if complete:
+        observed = sum((v for _, v in entries), Decimal(0))
+        if abs(observed - denom) > Decimal("0.01"):
+            raise PacketError("Quadro economico: totale discordante")
+    for token, value in entries:
+        pct = ((value * Decimal(100) / denom).quantize(Decimal("0.01"))
+               if complete else None)
+        quote.append({"token": token, "quota_pct": format(pct, "f") if pct is not None else None})
+    top = sorted((v for _, v in entries if v is not None), reverse=True) if complete else []
+    pct_top2 = (sum(top[:2], Decimal(0)) * 100 / denom).quantize(Decimal("0.01")) if top else None
+    pct_top3 = (sum(top[:3], Decimal(0)) * 100 / denom).quantize(Decimal("0.01")) if top else None
+    scenario_150 = (Decimal(150) * 100 / denom).quantize(Decimal("0.01")) if complete else None
+
+    currencies = ("EUR", "EURC", "USD", "USDC")
+    available = []
+    for symbol in currencies:
+        block = cash.get(symbol)
+        if not isinstance(block, dict):
+            available = []
+            break
+        value = amount(block.get("disponibile"), "liquidita disponibile")
+        if value is None:
+            available = []
+            break
+        available.append(Decimal(value))
+    if len(available) != len(currencies):
+        cash_status = "NON_VERIFICATA"
+    elif not any(available):
+        cash_status = "ZERO_RILEVATO_NELLE_QUATTRO_VALUTE"
+    else:
+        cash_status = "PRESENTE_PER_VALUTA_EQUIVALENZA_EUR_NON_ATTESTATA"
+
+    return {
+        "stato": "INDICATIVO" if complete else "NON_CALCOLABILE_INTEGRALMENTE",
+        "base": "valore_eur_posizioni_senza_liquidita",
+        "alternative_liberazione_150_lordi": alternative_liquidazione_150_lorda(
+            positions, total, mercato_stato=mercato_stato, saldo_stato=saldo_stato),
+        "quote_posizioni": quote,
+        "concentrazione_top2_pct": format(pct_top2, "f") if pct_top2 is not None else None,
+        "concentrazione_top3_pct": format(pct_top3, "f") if pct_top3 is not None else None,
+        "liquidita_stato": cash_status,
+        "esempio_150_eur_sul_patrimonio_pct": (format(scenario_150, "f")
+                                               if scenario_150 is not None else None),
+        "esempio_150_finanziamento_stato": (
+            "NESSUNA_LIQUIDITA_SULLE_QUATTRO_VALUTE_VERIFICARE_FONTI"
+            if cash_status == "ZERO_RILEVATO_NELLE_QUATTRO_VALUTE" else
+            "NON_DETERMINABILE_SENZA_CAMBIO_SPREAD_E_COSTI"
+            if cash_status == "PRESENTE_PER_VALUTA_EQUIVALENZA_EUR_NON_ATTESTATA" else
+            "NON_VERIFICATO"),
+        "vincoli": [
+            "Calcolo descrittivo: non è proposta di vendita, acquisto o conversione.",
+            "Valori indicativi della fotografia, non prezzi eseguibili.",
+            "Nessun P/L reale senza movimenti e costo storico verificati.",
+            "USD, EUR, EURC e USDC non sommati senza quotazioni e costi attuali.",
+            "Ogni alternativa deve considerare fee, spread, liquidità e scelta dell'autore."
+        ]
+    }
+
+
+
 def build(root: Path, now: dt.datetime | None = None) -> dict:
     """Compose with explicit stale flags. No external calls, writes or auto-approval."""
     now = now or dt.datetime.now(UTC)
@@ -581,6 +843,8 @@ def build(root: Path, now: dt.datetime | None = None) -> dict:
         raise PacketError("Totale numerico senza posizioni valorizzate")
     elif abs(valued_sum - Decimal(total)) > Decimal("0.01"):
         raise PacketError("Totale stimato non coincide con posizioni")
+    book_for_gpt = book_150_per_gpt(
+        dossier, positions, wallet_sha, snapshot["rilevazione_utc"], now)
     return {"schema": SCHEMA, "tipo": "PACCHETTO_PATRIMONIALE_PRIVATO",
             "generato_utc": now.isoformat(timespec="seconds"),
             "rilevazione_kdd_utc": s_time.isoformat(timespec="seconds"),
@@ -593,6 +857,11 @@ def build(root: Path, now: dt.datetime | None = None) -> dict:
             "dossier": {"coerente_con_mercato": dossier_fresh,
                         "stato": "UTILIZZABILE_CON_LIMITI" if dossier_fresh else "RILEVAZIONE_DIFFERENTE_NON_ATTRIBUIRE_LIVELLI"},
             "patrimonio": {"posizioni": positions, "liquidita_spot": cash,
+                           "book_pubblico_150": book_for_gpt,
+                           "quadro_economico_per_gpt": quadro_economico_per_gpt(
+                               positions, cash, total,
+                               mercato_stato=status_market["stato"],
+                               saldo_stato=status_saldo["stato"]),
                            "fotografia_portafoglio_sha256": wallet_sha,
                            "totale_stimato_eur_senza_cash": total,
                            "totale_parziale": bool(report.get("totale_parziale")) or incomplete,

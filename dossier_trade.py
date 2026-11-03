@@ -185,6 +185,110 @@ def global_context():
             "aggiornato_sorgente_utc":d.get("updated_at"), "copertura":"Mercato crypto aggregato CoinGecko, non liquidità Kraken."}
 
 
+def finanziamento_150_book(source, portfolio, *, saldo_recente, kraken_client=None,
+                             max_calls=4):
+    """KDD-05/12: pubblica profondita bid su asset posseduti, fee solo ipotetica.
+
+    Usa la fotografia Kraken; non controlla negoziabilita/fee del conto e non ordina.
+    """
+    from decimal import Decimal, InvalidOperation
+    import costi_spot
+    if kraken_client is None:
+        kraken_client = desk.kraken
+    rows = portfolio.get("posizioni") if isinstance(portfolio, dict) else None
+    markets = source.get("markets") if isinstance(source, dict) else None
+    if not isinstance(rows, list) or not isinstance(markets, dict):
+        return {"stato": "NON_VERIFICABILE", "righe": [], "richieste_depth": 0}
+    result = [{"indice": i, "token": x.get("token") if isinstance(x, dict) else None,
+               "stato": "NON_VERIFICABILE"} for i, x in enumerate(rows)]
+    if not saldo_recente:
+        return {"stato": "SALDO_NON_RECENTE", "righe": result, "richieste_depth": 0}
+    # AssetPairs was already downloaded during this refresh. Never infer a REST
+    # identifier from the printed wsname or the Depth response's own key.
+    # Missing/colliding metadata fails closed; no extra network request.
+    try:
+        import serve
+        raw_pairs = source.get("_verified_asset_pairs")
+        catalog = serve.spot_catalog(lambda _: raw_pairs)
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError, AttributeError):
+        catalog = {}
+    eligible = []
+    for i, x in enumerate(rows):
+        if not isinstance(x, dict) or not isinstance(x.get("token"), str):
+            continue
+        token = x["token"]
+        market = markets.get(token)
+        if (not isinstance(market, dict) or market.get("token") != token
+                or not isinstance(market.get("pair"), str)
+                or not market["pair"].endswith("/EUR")
+                or desk.canonical(market["pair"].split("/")[0]) != desk.canonical(token)
+                or not isinstance(market.get("pair_key"), str)
+                or not market["pair_key"].isalnum()):
+            continue
+        try:
+            import patrimonio_4tf
+            metadata = catalog.get(market["pair_key"])
+            if (not isinstance(metadata, dict)
+                    or metadata.get("pair") != market["pair"]
+                    or metadata.get("quote") != "EUR"
+                    or patrimonio_4tf.canonical_base(metadata.get("base"))
+                       != patrimonio_4tf.canonical_base(token)):
+                result[i]["stato"] = "IDENTITA_BOOK_NON_VERIFICABILE"
+                continue
+        except (TypeError, AttributeError, ValueError, KeyError):
+            result[i]["stato"] = "IDENTITA_BOOK_NON_VERIFICABILE"
+            continue
+        try:
+            amount = Decimal(str(x.get("disponibile_spot")))
+            held = Decimal(str(x.get("quantita")))
+            price = Decimal(str(market.get("prezzo_eur")))
+            if (not amount.is_finite() or not held.is_finite() or not price.is_finite()
+                    or amount < 0 or held < 0 or amount > held or price <= 0):
+                continue
+        except (TypeError, ValueError, InvalidOperation):
+            continue
+        # About 150 USDC is a flexible aim, NOT a 150-EUR cutoff.
+        # Every positive available EUR-value may provide an alternative;
+        # examine the largest capacities first within the existing call cap.
+        maximum = price * amount
+        result[i]["massimo_lordo_indicativo_eur"] = format(maximum, "f")
+        if maximum > 0:
+            eligible.append((maximum, i, token, market["pair"], market["pair_key"], str(amount)))
+            result[i]["stato"] = "IN_ATTESA_BOOK"
+        else:
+            result[i]["stato"] = "NESSUNA_DISPONIBILITA_SPOT"
+    eligible.sort(key=lambda row: row[0], reverse=True)
+    called = 0
+    for _, i, token, pair, pair_key, available in eligible:
+        if called >= max_calls:
+            result[i]["stato"] = "RINVIATO_LIMITE_RICHIESTE"
+            continue
+        called += 1
+        try:
+            raw = kraken_client("Depth", pair=pair_key, count=25)
+            if not isinstance(raw, dict) or set(raw) != {pair_key}:
+                raise ValueError("Identita book Kraken diversa dalla coppia richiesta")
+            depth = raw[pair_key]
+            if not isinstance(depth, dict):
+                raise ValueError("Book Kraken non strutturato")
+            estimate = costi_spot.stima_vendita_book_150(
+                depth.get("bids"), available, target_eur="150", fee_ipotesi="0.008")
+            result[i] = {"indice": i, "token": token, "stato": "BOOK_PUBBLICO_OSSERVATO",
+                         "pair": pair, "pair_key": pair_key,
+                         "osservato_utc": desk.NOW().isoformat(timespec="seconds"),
+                         "bids_osservati": depth.get("bids"),
+                         "stima": estimate}
+        except Exception as exc:
+            result[i]["stato"] = "BOOK_NON_VERIFICATO"
+            result[i]["motivo"] = type(exc).__name__
+        if called < min(len(eligible), max_calls):
+            time.sleep(1)
+    return {"stato": "OSSERVAZIONE_PARZIALE_SENZA_FEE_REALI",
+            "rilevazione_mercato_utc": source.get("rilevazione_utc"),
+            "righe": result, "richieste_depth": called,
+            "limite": "Fee 0,8% ipotizzata; book mobile e minimi/negoziabilita del conto ignoti."}
+
+
 def collect(source=None, *, asset_pairs=None):
     """Prepara il dossier sullo snapshot appena acquisito, senza iniziare un'analisi GPT."""
     now=desk.NOW()
@@ -264,12 +368,16 @@ def collect(source=None, *, asset_pairs=None):
     analisi_patrimonio = patrimonio_4tf.collect(
         portafoglio, source, asset_pairs=asset_pairs,
         now=now, old_4h=quattro_ore)
+    finanziamento_book = finanziamento_150_book(
+        dict(source, _verified_asset_pairs=asset_pairs), portafoglio,
+        saldo_recente=qualita.get("saldo_recente_verificato", False))
     dossier={
         "schema":3,"creato_utc":desk.NOW().isoformat(timespec="seconds"),
         "kraken_istantanea_utc":source["rilevazione_utc"],"eta_kraken_minuti_al_dossier":round(age,2),
         "regime":{"trend_eur":source.get("trends",{}),"btc_spot_eur":source.get("markets",{}).get("BTC")},
         "candidati":candidates,"grafici_4h":quattro_ore,
         "patrimonio_4tf":analisi_patrimonio,
+        "finanziamento_150_book_pubblico":finanziamento_book,
         "ricerca_setup":source.get("ricerca_setup",{}),
         "fonti_esterne":external,
         "contesto_derivati_btc":derivatives,

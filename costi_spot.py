@@ -216,3 +216,82 @@ def compare_modes(token_pair, book, starting_currency, amount_eur, eur_per_quote
                             "scenario": name, "errore": str(exc),
                             "esecuzione_condizionale": inbound=="maker" or outbound=="maker"})
     return outputs
+
+
+def stima_vendita_book_150(bids, disponibile_base, *, target_eur="150", fee_ipotesi="0.008"):
+    """KDD-05/12: quantita minima teorica da vendere sui bid Kraken fotografati.
+
+    Solo stima di liquidita, usando una fee ASSUNTA e non il livello reale del conto.
+    Il book può cambiare prima del fill; non legge né crea ordini.
+    """
+    from decimal import Decimal, InvalidOperation, localcontext
+    from fractions import Fraction
+    def dec(value):
+        if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+            raise ValueError("Book: valore non numerico")
+        try:
+            v = Decimal(str(value))
+        except InvalidOperation as exc:
+            raise ValueError("Book: valore non numerico") from exc
+        if not v.is_finite():
+            raise ValueError("Book: numero non finito")
+        return v
+    def as_fraction(value):
+        # Decimal context rounding at target/(1-fee) can produce 149.9999…
+        # even when the mathematically required net is exactly 150.
+        return Fraction(dec(value))
+    def shown(value):
+        with localcontext() as context:
+            context.prec = 50
+            return format(Decimal(value.numerator) / Decimal(value.denominator), "f")
+
+    available = as_fraction(disponibile_base)
+    target = as_fraction(target_eur)
+    fee = as_fraction(fee_ipotesi)
+    if available < 0 or target <= 0 or fee < 0 or fee >= 1:
+        raise ValueError("Book: quantita, obiettivo o fee non validi")
+    if not isinstance(bids, list) or not 1 <= len(bids) <= 500:
+        raise ValueError("Book: profondita assente o fuori limite")
+    remaining = available
+    qty = Fraction(0)
+    gross = Fraction(0)
+    last_price = None
+    levels_used = 0
+    for row in bids:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            raise ValueError("Book: livello non valido")
+        price, size = as_fraction(row[0]), as_fraction(row[1])
+        if price <= 0 or size <= 0 or (last_price is not None and price >= last_price):
+            raise ValueError("Book: bid non valido, duplicato o fuori ordine")
+        last_price = price
+        if remaining <= 0 or gross * (1 - fee) >= target:
+            continue
+        missing_gross = target / (1 - fee) - gross
+        take = min(remaining, size, missing_gross / price)
+        if take > 0:
+            qty += take
+            gross += take * price
+            remaining -= take
+            levels_used += 1
+    net = gross * (1 - fee)
+    reaches = net >= target
+    if reaches:
+        state = "150_NETTI_SOLO_CON_FEE_IPOTETICA_E_BOOK_FOTOGRAFATO"
+    elif remaining <= 0:
+        state = "SALDO_DISPONIBILE_INSUFFICIENTE"
+    else:
+        state = "PROFONDITA_BOOK_INSUFFICIENTE"
+    return {
+        "stato": state,
+        "obiettivo_netto_eur": shown(target),
+        "quantita_base_teorica": shown(qty),
+        "proventi_lordi_stimati_eur": shown(gross),
+        "fee_ipotetica_eur": shown(gross * fee),
+        "proventi_netto_fee_ipotesi_eur": shown(net),
+        "fee_ipotetica_pct": format(dec(fee_ipotesi) * Decimal(100), "f"),
+        "livelli_bid_utilizzati": levels_used,
+        "nessun_fill_attestato": True,
+        "limite": ("Fee NON verificata per il conto; prezzo e profondita book mutano, "
+                   "minimi e precisione ordine da controllare, nessuna negoziabilita "
+                   "personale o risultato di vendita attestato."),
+    }

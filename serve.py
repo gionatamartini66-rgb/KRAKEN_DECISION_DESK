@@ -905,7 +905,13 @@ def spot_catalog(public_kraken=None):
     # *whole* catalog, including non-online REST keys. A synthetic collision
     # must never let candles of B be labelled with A's selected pair.
     owner = {}
+    wsname_owner = {}
     for key, meta in out.items():
+        # A Kraken wsname must have a single REST-key owner. Distinct
+        # altnames do not disambiguate two keys claiming the same book.
+        previous_wsname = wsname_owner.setdefault(meta["pair"], key)
+        if previous_wsname != key:
+            raise KrakenMarketDataUnavailable("Identità Kraken REST/wsname ambigua")
         for symbol in (key, meta["altname"]):
             if symbol is None:
                 continue
