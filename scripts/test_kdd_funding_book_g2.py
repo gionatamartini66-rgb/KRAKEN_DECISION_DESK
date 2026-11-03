@@ -271,6 +271,10 @@ class FundingBookTests(unittest.TestCase):
         packet = p.build(fixture.root, now=T)
         self.assertEqual(packet["patrimonio"]["book_pubblico_150"]["stato"],
                          "STIMA_BOOK_CON_FEE_IPOTETICA")
+        alternative = packet["patrimonio"]["book_pubblico_150"]["righe"][0]["stima"]
+        self.assertTrue(alternative["sotto_riferimento_non_esclusa"])
+        self.assertIsNone(alternative["usdc_effettivamente_disponibili_da_vendita"])
+        self.assertGreater(float(alternative["netto_fee_ipotetica_eur"]), 0)
         prepared = bridge.prepare(fixture.root, now=T, _fixture=True)
         context = bridge.read_context(prepared, now=T)
         self.assertEqual(context["book_150_alla_lettura"]["stato"],
