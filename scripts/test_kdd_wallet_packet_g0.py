@@ -141,6 +141,36 @@ class WalletPacketG0Tests(unittest.TestCase):
         self.assertEqual(p.quadro_economico_per_gpt(row, {}, None)["stato"],
                          "NON_CALCOLABILE_INTEGRALMENTE")
 
+    def test_book_150_kraken_bids_and_hypothetical_fee(self):
+        import costi_spot
+        rows = [["2000", "0.05", 1], ["1990", "0.20", 1]]
+        quote = costi_spot.stima_vendita_book_150(
+            rows, "0.2", target_eur="150", fee_ipotesi="0.008")
+        self.assertEqual(quote["stato"],
+                         "150_NETTI_SOLO_CON_FEE_IPOTETICA_E_BOOK_FOTOGRAFATO")
+        self.assertEqual(quote["livelli_bid_utilizzati"], 2)
+        self.assertTrue(quote["nessun_fill_attestato"])
+        self.assertEqual(quote["fee_ipotetica_pct"], "0.800")
+        self.assertIn("Fee NON verificata", quote["limite"])
+
+    def test_book_150_partial_depth_balance_and_adversarial_rejections(self):
+        import costi_spot
+        rows = [["2000", "0.01", 1], ["1900", "0.01", 1]]
+        quote = costi_spot.stima_vendita_book_150(rows, "1")
+        self.assertEqual(quote["stato"], "PROFONDITA_BOOK_INSUFFICIENTE")
+        quote = costi_spot.stima_vendita_book_150(
+            [["2000", "1", 1]], "0.01")
+        self.assertEqual(quote["stato"], "SALDO_DISPONIBILE_INSUFFICIENTE")
+        for bids in ([["2000", "0.2"], ["2001", "0.3"]],
+                     [["2000", "-1"]], [["NaN", "1"]],
+                     [["2000", "0.1"], ["2000", "1"]], []):
+            with self.subTest(bids=bids):
+                with self.assertRaises(ValueError):
+                    costi_spot.stima_vendita_book_150(bids, "1")
+        with self.assertRaises(ValueError):
+            costi_spot.stima_vendita_book_150([["1000", "1"]], "1",
+                                             fee_ipotesi="1")
+
     def test_real_funding_alternatives_150_use_available_not_owned(self):
         positions = [
             {"indice": 0, "token": "BTC", "stato_identita": "VALIDA",
