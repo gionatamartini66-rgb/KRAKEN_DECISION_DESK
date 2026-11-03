@@ -1,5 +1,7 @@
 """Independent KDD-05/12 public order-book tests. No private balances or network."""
 import datetime as dt
+import json
+from scripts import kdd_wallet_packet_g0 as p
 import unittest
 from unittest import mock
 
@@ -8,6 +10,46 @@ T = dt.datetime(2026, 10, 25, 18, 0, tzinfo=UTC)
 
 
 class FundingBookTests(unittest.TestCase):
+    def test_book_packet_rejects_wrong_wallet_pair_and_stale_time(self):
+        first = {"indice": 0, "token": "ADA", "stato_identita": "VALIDA",
+                 "quantita_spot": "200", "disponibile_spot": "200",
+                 "fonte_prezzo_eur": {"pair": "ADA/EUR", "pair_key": "ADAEUR"}}
+        second = {"indice": 1, "token": "ETH", "stato_identita": "VALIDA",
+                  "quantita_spot": "1", "disponibile_spot": "1",
+                  "fonte_prezzo_eur": {"pair": "ETH/EUR", "pair_key": "XETHZEUR"}}
+        import costi_spot
+        bids = [["2000", "0.5", 1]]
+        estimate = costi_spot.stima_vendita_book_150(bids, "1")
+        record = {"indice": 1, "token": "ETH", "stato": "BOOK_PUBBLICO_OSSERVATO",
+                  "pair": "ETH/EUR", "pair_key": "XETHZEUR",
+                  "osservato_utc": T.isoformat(), "bids_osservati": bids,
+                  "stima": estimate}
+        dossier = {"fotografia_portafoglio_sha256": "hash123",
+                   "finanziamento_150_book_pubblico": {
+                       "rilevazione_mercato_utc": T.isoformat(),
+                       "righe": [{"indice": 0, "token": "ADA",
+                                  "stato": "SOTTO_150_LORDI_SU_PREZZO_INDICATIVO"}, record]}}
+        self.assertEqual(p.book_150_per_gpt(
+            dossier, [first, second], "hash123", T.isoformat(), T)["stato"],
+            "STIMA_BOOK_CON_FEE_IPOTETICA")
+        self.assertEqual(p.book_150_per_gpt(
+            dossier, [first, second], "another", T.isoformat(), T)["stato"],
+            "NON_ATTESTATO")
+        tampered = json.loads(json.dumps(dossier))
+        tampered["finanziamento_150_book_pubblico"]["righe"][1]["pair"] = "BTC/EUR"
+        self.assertEqual(p.book_150_per_gpt(
+            tampered, [first, second], "hash123", T.isoformat(), T)["stato"],
+            "NON_ATTESTATO")
+        tampered_net = json.loads(json.dumps(dossier))
+        tampered_net["finanziamento_150_book_pubblico"]["righe"][1]["stima"]["proventi_netto_fee_ipotesi_eur"] = "999"
+        self.assertEqual(p.book_150_per_gpt(
+            tampered_net, [first, second], "hash123", T.isoformat(), T)["stato"],
+            "NON_ATTESTATO")
+        late = p.book_150_per_gpt(
+            dossier, [first, second], "hash123", T.isoformat(),
+            T + dt.timedelta(minutes=7))
+        self.assertEqual(late["righe"][1]["freschezza"], "SCADUTO")
+
     def test_book_acquisition_two_owned_assets_only_and_bounded_calls(self):
         import dossier_trade
         source = {"rilevazione_utc": T.isoformat(),
