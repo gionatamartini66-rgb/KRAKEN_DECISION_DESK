@@ -37,6 +37,7 @@ PACKET_FILES = (
     'scripts/kdd_android_regressions.py',
     'scripts/test_kdd_wallet_packet_g0.py',
     'scripts/test_kdd_portfolio_4tf.py',
+    'scripts/test_kdd_funding_book_g2.py',
 )
 VENDOR_FILES = (
     'vendor/lightweight-charts-5.2.1.js',
@@ -269,8 +270,10 @@ def isolated_test(staging: Path) -> None:
     # The wallet packet is now part of the deployed application and must be
     # tested in precisely the same preflight/postflight transaction.
     packet_test = staging / 'scripts' / 'test_kdd_wallet_packet_g0.py'
-    if not packet_test.is_file() or not (staging / 'scripts/test_kdd_portfolio_4tf.py').is_file():
-        raise SafetyError('test del pacchetto e 4TF mancanti nello staging')
+    if (not packet_test.is_file()
+            or not (staging / 'scripts/test_kdd_portfolio_4tf.py').is_file()
+            or not (staging / 'scripts/test_kdd_funding_book_g2.py').is_file()):
+        raise SafetyError('test del pacchetto, 4TF o book mancanti nello staging')
     if packet_test.exists():
         # The legacy packet fixture intentionally imports kdd_wallet_packet_g0
         # as a top-level module. unittest discovery with -s scripts supplies
@@ -278,6 +281,7 @@ def isolated_test(staging: Path) -> None:
         for pattern in ('test_kdd_wallet_packet_g0.py',
                         'test_kdd_portfolio_4tf.py',
                         'test_kdd_android_transaction_g2.py',
+                        'test_kdd_funding_book_g2.py',
                         'test_kdd_drive_exchange.py'):
             proc = command([sys.executable, '-B', '-m', 'unittest', 'discover',
                             '-s', 'scripts', '-p', pattern, '-q'], cwd=staging)
