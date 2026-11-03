@@ -28,6 +28,8 @@ jobs:
         run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_drive_exchange
       - name: Unchanged R5 invariant tests against Android candidate (mapped, no skips)
         run: PYTHONPATH=.:scripts python -B scripts/kdd_android_regressions.py
+      - name: Public Kraken order-book funding scenarios (separate from Termux packaging fixture)
+        run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_funding_book_g2
       - name: Existing safe updater tests
         run: python -B scripts/test_kdd_aggiorna.py
 
