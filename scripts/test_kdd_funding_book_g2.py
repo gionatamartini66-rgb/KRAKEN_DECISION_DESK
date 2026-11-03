@@ -206,6 +206,86 @@ class FundingBookTests(unittest.TestCase):
         self.assertNotEqual(out["righe"][0]["stato"], "BOOK_PUBBLICO_OSSERVATO")
         self.assertEqual(calls, [])
 
+    def test_rt2_f2_duplicate_wsname_rejected_before_depth_and_gpt(self):
+        """Two different REST keys share XBT/EUR despite distinct altname."""
+        import serve
+        import dossier_trade
+        pairs = {
+            "XXBTZEUR": {"wsname": "XBT/EUR", "status": "online", "altname": "XBTEUR"},
+            "XETHZEUR": {"wsname": "XBT/EUR", "status": "online", "altname": "ETHEUR"}}
+        source = {"rilevazione_utc": T.isoformat(), "_verified_asset_pairs": pairs,
+                  "markets": {"BTC": {"token": "BTC", "pair": "XBT/EUR",
+                                       "pair_key": "XXBTZEUR", "prezzo_eur": "70000"}}}
+        portfolio = {"posizioni": [{"token": "BTC", "quantita": "0.01",
+                                     "disponibile_spot": "0.01"}]}
+        calls = []
+        def depth(endpoint, **kwargs):
+            calls.append((endpoint, kwargs["pair"]))
+            return {kwargs["pair"]: {"bids": [["70000", "0.1", T.timestamp()]]}}
+        for rows in (pairs, dict(reversed(list(pairs.items())))):
+            with self.subTest(order=list(rows)):
+                with self.assertRaises(serve.KrakenMarketDataUnavailable):
+                    serve.spot_catalog(lambda _: rows)
+                calls.clear()
+                with mock.patch.object(dossier_trade.desk, "NOW", return_value=T), \
+                     mock.patch.object(dossier_trade.time, "sleep"):
+                    funding = dossier_trade.finanziamento_150_book(
+                        dict(source, _verified_asset_pairs=rows), portfolio,
+                        saldo_recente=True, kraken_client=depth)
+                with self.subTest(consumer="producer"):
+                    self.assertEqual(calls, [], "Ambiguous REST/wsname must never request Depth")
+                    self.assertNotEqual(funding["righe"][0]["stato"], "BOOK_PUBBLICO_OSSERVATO")
+                position = {"indice": 0, "token": "BTC", "stato_identita": "VALIDA",
+                            "quantita_spot": "0.01", "disponibile_spot": "0.01",
+                            "fonte_prezzo_eur": {"pair": "XBT/EUR", "pair_key": "XXBTZEUR"}}
+                dossier = {"fotografia_portafoglio_sha256": "synthetic-digest",
+                           "finanziamento_150_book_pubblico": funding}
+                packet_book = p.book_150_per_gpt(
+                    dossier, [position], "synthetic-digest", T.isoformat(), T)
+                read = bridge.stato_book_150_alla_lettura(
+                    {"patrimonio": {"book_pubblico_150": packet_book}}, T,
+                    mercato_stato="RECENTE", saldo_stato="RECENTE")
+                with self.subTest(consumer="GPT"):
+                    self.assertFalse(any("stima" in row for row in packet_book["righe"]))
+                    self.assertNotEqual(read["stato"], "RECENTE_SOLO_FEE_IPOTETICA")
+
+    def test_rt2_f2_valid_kraken_btc_xbt_alias_keeps_depth_and_gpt(self):
+        import serve
+        import dossier_trade
+        pairs = {
+            "XXBTZEUR": {"wsname": "XBT/EUR", "status": "online", "altname": "XBTEUR"},
+            "XETHZEUR": {"wsname": "ETH/EUR", "status": "online", "altname": "ETHEUR"}}
+        catalog = serve.spot_catalog(lambda _: pairs)
+        self.assertEqual(catalog["XXBTZEUR"]["pair"], "XBT/EUR")
+        source = {"rilevazione_utc": T.isoformat(), "_verified_asset_pairs": pairs,
+                  "markets": {"BTC": {"token": "BTC", "pair": "XBT/EUR",
+                                       "pair_key": "XXBTZEUR", "prezzo_eur": "70000"}}}
+        portfolio = {"posizioni": [{"token": "BTC", "quantita": "0.01",
+                                     "disponibile_spot": "0.01"}]}
+        calls = []
+        def depth(endpoint, **kwargs):
+            calls.append((endpoint, kwargs["pair"]))
+            return {kwargs["pair"]: {"bids": [["70000", "0.1", T.timestamp()]]}}
+        with mock.patch.object(dossier_trade.desk, "NOW", return_value=T), \
+             mock.patch.object(dossier_trade.time, "sleep"):
+            funding = dossier_trade.finanziamento_150_book(
+                source, portfolio, saldo_recente=True, kraken_client=depth)
+        self.assertEqual(calls, [("Depth", "XXBTZEUR")])
+        self.assertEqual(funding["righe"][0]["stato"], "BOOK_PUBBLICO_OSSERVATO")
+        position = {"indice": 0, "token": "BTC", "stato_identita": "VALIDA",
+                    "quantita_spot": "0.01", "disponibile_spot": "0.01",
+                    "fonte_prezzo_eur": {"pair": "XBT/EUR", "pair_key": "XXBTZEUR"}}
+        dossier = {"fotografia_portafoglio_sha256": "synthetic-digest",
+                   "finanziamento_150_book_pubblico": funding}
+        packet_book = p.book_150_per_gpt(
+            dossier, [position], "synthetic-digest", T.isoformat(), T)
+        self.assertEqual(packet_book["righe"][0]["stato"], "BOOK_PUBBLICO_OSSERVATO")
+        self.assertIn("netto_fee_ipotetica_eur", packet_book["righe"][0]["stima"])
+        self.assertEqual(bridge.stato_book_150_alla_lettura(
+            {"patrimonio": {"book_pubblico_150": packet_book}}, T,
+            mercato_stato="RECENTE", saldo_stato="RECENTE")["stato"],
+            "RECENTE_SOLO_FEE_IPOTETICA")
+
     def test_rt1_f3_future_book_is_not_recent(self):
         row = {"stato": "BOOK_PUBBLICO_OSSERVATO",
                "osservato_utc": (T + dt.timedelta(seconds=90)).isoformat()}
