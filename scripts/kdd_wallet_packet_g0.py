@@ -528,7 +528,80 @@ def cash_balances(portfolio: dict, report: dict) -> dict:
     return result
 
 
-def quadro_economico_per_gpt(positions: list, cash: dict, total) -> dict:
+def alternative_liquidazione_150_lorda(positions: list, total, *,
+                                    mercato_stato=None, saldo_stato=None) -> dict:
+    """KDD-05: confronta TUTTE le posizioni come possibili fonti di 150 EUR lordi.
+
+    Non usa il prezzo bid, il book, le fee del conto o la precisione di ordine:
+    nessun risultato attesta un netto di 150 EUR o un'esecuzione possibile.
+    """
+    target = Decimal("150")
+    total_text = amount(total, "patrimonio in EUR")
+    base = Decimal(total_text) if total_text is not None else None
+    current = mercato_stato == "RECENTE" and saldo_stato == "RECENTE"
+    scenarios = []
+    for i, row in enumerate(positions):
+        if not isinstance(row, dict) or row.get("indice") != i:
+            raise PacketError("Alternativa 150: posizione o ordine incoerenti")
+        token = row.get("token")
+        item = {"indice": i, "token": token,
+                "esito": "NON_VERIFICABILE", "capienza_lorda_fotografia": None,
+                "massimo_lordo_indicativo_eur": None,
+                "quantita_teorica_150_lordi": None,
+                "peso_asset_post_alleggerimento_pct": None}
+        if row.get("stato_identita") != "VALIDA":
+            item["esito"] = "IDENTITA_NON_VERIFICATA"
+            scenarios.append(item)
+            continue
+        price_text = amount(row.get("prezzo_eur"), "prezzo EUR")
+        held_text = amount(row.get("quantita_spot"), "quantita posseduta")
+        free_text = amount(row.get("disponibile_spot"), "quantita disponibile")
+        valued_text = amount(row.get("valore_eur"), "valore posizione")
+        source = row.get("fonte_prezzo_eur")
+        if (price_text is None or held_text is None or free_text is None
+                or valued_text is None or not isinstance(source, dict)
+                or source.get("valuta") != "EUR"):
+            scenarios.append(item)
+            continue
+        price, held, free = Decimal(price_text), Decimal(held_text), Decimal(free_text)
+        valued = Decimal(valued_text)
+        if price <= 0 or free > held:
+            scenarios.append(item)
+            continue
+        maximum = free * price
+        item["massimo_lordo_indicativo_eur"] = format(maximum, "f")
+        item["capienza_lorda_fotografia"] = maximum >= target
+        item["esito"] = ("SOGLIA_LORDA_POTENZIALE" if maximum >= target
+                         else "SOTTO_SOGLIA_LORDA")
+        if maximum >= target:
+            # The source price is indicative, NOT a live executable bid.
+            item["quantita_teorica_150_lordi"] = format(target / price, "f")
+            if base is not None and base > target and valued >= target:
+                remaining = valued - target
+                denominator = base - target
+                share = (remaining * 100 / denominator).quantize(Decimal("0.01"))
+                item["peso_asset_post_alleggerimento_pct"] = format(share, "f")
+        scenarios.append(item)
+    return {
+        "obiettivo_lordo_eur": "150",
+        "freschezza_fotografia": ("RECENTE_ALLA_COMPOSIZIONE" if current
+                                 else "NON_RECENTE_O_NON_ATTESTATA"),
+        "n_posizioni_esaminate": len(scenarios),
+        "n_fonti_potenziali_lorde": sum(
+            row["capienza_lorda_fotografia"] is True for row in scenarios),
+        "alternative": scenarios,
+        "alternativa_senza_operazione": {
+            "azione": "NON_CONVERTIRE_ORA",
+            "effetto": "Nessuna vendita né nuovo capitale creato; valutare un versamento o attendere"},
+        "limite": ("Il prezzo EUR è indicativo e non è un bid. Mancano book, "
+                   "fee reali, spread, minimi, precisione quantità e verifica della "
+                   "negoziabilità del conto. Anche SOGLIA_LORDA_POTENZIALE "
+                   "non certifica che arrivino 150 EUR netti."),
+    }
+
+
+
+def quadro_economico_per_gpt(positions: list, cash: dict, total, *, mercato_stato=None, saldo_stato=None) -> dict:
     """Pure, non-prescriptive arithmetic for KDD-02/04/05/23.
 
     No trading recommendation, no fee assumptions and no cross-currency sum.
@@ -594,6 +667,8 @@ def quadro_economico_per_gpt(positions: list, cash: dict, total) -> dict:
     return {
         "stato": "INDICATIVO" if complete else "NON_CALCOLABILE_INTEGRALMENTE",
         "base": "valore_eur_posizioni_senza_liquidita",
+        "alternative_liberazione_150_lordi": alternative_liquidazione_150_lorda(
+            positions, total, mercato_stato=mercato_stato, saldo_stato=saldo_stato),
         "quote_posizioni": quote,
         "concentrazione_top2_pct": format(pct_top2, "f") if pct_top2 is not None else None,
         "concentrazione_top3_pct": format(pct_top3, "f") if pct_top3 is not None else None,
@@ -682,7 +757,10 @@ def build(root: Path, now: dt.datetime | None = None) -> dict:
             "dossier": {"coerente_con_mercato": dossier_fresh,
                         "stato": "UTILIZZABILE_CON_LIMITI" if dossier_fresh else "RILEVAZIONE_DIFFERENTE_NON_ATTRIBUIRE_LIVELLI"},
             "patrimonio": {"posizioni": positions, "liquidita_spot": cash,
-                           "quadro_economico_per_gpt": quadro_economico_per_gpt(positions, cash, total),
+                           "quadro_economico_per_gpt": quadro_economico_per_gpt(
+                               positions, cash, total,
+                               mercato_stato=status_market["stato"],
+                               saldo_stato=status_saldo["stato"]),
                            "fotografia_portafoglio_sha256": wallet_sha,
                            "totale_stimato_eur_senza_cash": total,
                            "totale_parziale": bool(report.get("totale_parziale")) or incomplete,
