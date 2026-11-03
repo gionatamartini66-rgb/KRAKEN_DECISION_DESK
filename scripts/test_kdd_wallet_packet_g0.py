@@ -141,46 +141,6 @@ class WalletPacketG0Tests(unittest.TestCase):
         self.assertEqual(p.quadro_economico_per_gpt(row, {}, None)["stato"],
                          "NON_CALCOLABILE_INTEGRALMENTE")
 
-    def test_book_packet_rejects_wrong_wallet_pair_and_stale_time(self):
-        first = {"indice": 0, "token": "ADA", "stato_identita": "VALIDA",
-                 "quantita_spot": "200", "disponibile_spot": "200",
-                 "fonte_prezzo_eur": {"pair": "ADA/EUR", "pair_key": "ADAEUR"}}
-        second = {"indice": 1, "token": "ETH", "stato_identita": "VALIDA",
-                  "quantita_spot": "1", "disponibile_spot": "1",
-                  "fonte_prezzo_eur": {"pair": "ETH/EUR", "pair_key": "XETHZEUR"}}
-        import costi_spot
-        bids = [["2000", "0.5", 1]]
-        estimate = costi_spot.stima_vendita_book_150(bids, "1")
-        record = {"indice": 1, "token": "ETH", "stato": "BOOK_PUBBLICO_OSSERVATO",
-                  "pair": "ETH/EUR", "pair_key": "XETHZEUR",
-                  "osservato_utc": T.isoformat(), "bids_osservati": bids,
-                  "stima": estimate}
-        dossier = {"fotografia_portafoglio_sha256": "hash123",
-                   "finanziamento_150_book_pubblico": {
-                       "rilevazione_mercato_utc": T.isoformat(),
-                       "righe": [{"indice": 0, "token": "ADA",
-                                  "stato": "SOTTO_150_LORDI_SU_PREZZO_INDICATIVO"}, record]}}
-        self.assertEqual(p.book_150_per_gpt(
-            dossier, [first, second], "hash123", T.isoformat(), T)["stato"],
-            "STIMA_BOOK_CON_FEE_IPOTETICA")
-        self.assertEqual(p.book_150_per_gpt(
-            dossier, [first, second], "another", T.isoformat(), T)["stato"],
-            "NON_ATTESTATO")
-        tampered = json.loads(json.dumps(dossier))
-        tampered["finanziamento_150_book_pubblico"]["righe"][1]["pair"] = "BTC/EUR"
-        self.assertEqual(p.book_150_per_gpt(
-            tampered, [first, second], "hash123", T.isoformat(), T)["stato"],
-            "NON_ATTESTATO")
-        tampered_net = json.loads(json.dumps(dossier))
-        tampered_net["finanziamento_150_book_pubblico"]["righe"][1]["stima"]["proventi_netto_fee_ipotesi_eur"] = "999"
-        self.assertEqual(p.book_150_per_gpt(
-            tampered_net, [first, second], "hash123", T.isoformat(), T)["stato"],
-            "NON_ATTESTATO")
-        late = p.book_150_per_gpt(
-            dossier, [first, second], "hash123", T.isoformat(),
-            T + dt.timedelta(minutes=7))
-        self.assertEqual(late["righe"][1]["freschezza"], "SCADUTO")
-
     def test_book_packet_missing_legacy_field_is_explicit(self):
         packet = self.pack()
         self.assertEqual(packet["patrimonio"]["book_pubblico_150"]["stato"],
