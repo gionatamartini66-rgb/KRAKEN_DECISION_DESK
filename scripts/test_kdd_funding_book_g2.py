@@ -2,6 +2,7 @@
 import datetime as dt
 import json
 from scripts import kdd_wallet_packet_g0 as p
+from scripts import kdd_bridge_g2 as bridge
 import unittest
 from unittest import mock
 
@@ -10,6 +11,23 @@ T = dt.datetime(2026, 10, 25, 18, 0, tzinfo=UTC)
 
 
 class FundingBookTests(unittest.TestCase):
+    def test_bridge_rechecks_book_age_at_read(self):
+        packet = {"patrimonio": {"book_pubblico_150": {
+            "stato": "STIMA_BOOK_CON_FEE_IPOTETICA",
+            "righe": [{"stato": "BOOK_PUBBLICO_OSSERVATO",
+                       "osservato_utc": T.isoformat()}]}}}
+        fresh = bridge.stato_book_150_alla_lettura(packet, T)
+        old = bridge.stato_book_150_alla_lettura(packet, T+dt.timedelta(minutes=6))
+        self.assertEqual(fresh["stato"], "RECENTE_SOLO_FEE_IPOTETICA")
+        self.assertEqual(old["stato"], "SCADUTO")
+        self.assertEqual(old["book_scaduti"], 1)
+        self.assertEqual(bridge.stato_book_150_alla_lettura(
+            {"patrimonio": {}}, T)["stato"], "NON_ATTESTATO")
+        malformed = json.loads(json.dumps(packet))
+        malformed["patrimonio"]["book_pubblico_150"]["righe"][0]["osservato_utc"] = "no"
+        self.assertEqual(bridge.stato_book_150_alla_lettura(
+            malformed, T)["stato"], "NON_VERIFICABILE")
+
     def test_book_packet_rejects_wrong_wallet_pair_and_stale_time(self):
         first = {"indice": 0, "token": "ADA", "stato_identita": "VALIDA",
                  "quantita_spot": "200", "disponibile_spot": "200",
