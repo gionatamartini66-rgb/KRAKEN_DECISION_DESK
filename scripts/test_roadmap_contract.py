@@ -125,7 +125,9 @@ class RoadmapContractTests(unittest.TestCase):
 
     def _technical_gate(self, *, base_text=None, head_text=None, changed_files="serve.py\n",
                         mode="TECNICA-SENZA-MODIFICA", register=True,
-                        ids="KDD-05", mandate=True, go=True, ref_number="31"):
+                        ids="KDD-05", mandate=True, go=True, ref_number="31",
+                        readme_before=None, readme_after=None,
+                        subentro_before=None, subentro_after=None):
         base, head = "a" * 40, "b" * 40
         before = self.content if base_text is None else base_text
         after = self.content if head_text is None else head_text
@@ -135,7 +137,11 @@ class RoadmapContractTests(unittest.TestCase):
                 ("show", f"{base}:ROADMAP_KDD.md"): before,
                 ("show", f"{head}:ROADMAP_KDD.md"): after,
                 ("diff", "--name-only", base, head): changed_files,
-                ("rev-parse", f"{base}:ROADMAP_KDD.md"): blob + "\n"}
+                ("rev-parse", f"{base}:ROADMAP_KDD.md"): blob + "\n",
+                ("show", f"{base}:README.md"): readme_before,
+                ("show", f"{head}:README.md"): readme_after,
+                ("show", f"{base}:SUBENTRO_SUPERVISIONE_APICALE.md"): subentro_before,
+                ("show", f"{head}:SUBENTRO_SUPERVISIONE_APICALE.md"): subentro_after}
             return table[args]
         parts = [
             f"ROADMAP-IDS: {ids}",
@@ -173,6 +179,29 @@ class RoadmapContractTests(unittest.TestCase):
         changed = self.content.replace("[PR #31]", "[PR #999]", 1)
         with self.assertRaises(contract.GateError):
             self._technical_gate(base_text=changed, head_text=changed)
+
+    def test_rt_int_a_operational_readme_mutation_rejected_for_technical_pr(self):
+        """README history remains byte-identical, but operational guidance changes."""
+        archive = contract.ARCHIVE_MARKER + "\nARCHIVIO STORICO IDENTICO\n"
+        before = "# Istruzioni operative\nSolo supervisione modifica il governo.\n" + archive
+        after = "# Istruzioni operative\nLa costruttrice può decidere i GO.\n" + archive
+        self.assertEqual(before.split(contract.ARCHIVE_MARKER)[1],
+                         after.split(contract.ARCHIVE_MARKER)[1])
+        self.assertNotEqual(before, after)
+        with self.assertRaises(contract.GateError):
+            self._technical_gate(
+                changed_files="README.md\nserve.py\n",
+                readme_before=before, readme_after=after)
+
+    def test_rt_int_b_subentro_mutation_rejected_for_technical_pr(self):
+        """A technical PR must not rewrite the Supervisione's handoff mandate."""
+        before = "La Supervisione apicale decide il GO e conserva la Roadmap.\n"
+        after = "La Costruttrice decide il GO e conserva la Roadmap.\n"
+        self.assertNotEqual(before, after)
+        with self.assertRaises(contract.GateError):
+            self._technical_gate(
+                changed_files="SUBENTRO_SUPERVISIONE_APICALE.md\nserve.py\n",
+                subentro_before=before, subentro_after=after)
 
     def test_branch_cannot_invent_new_completo_even_with_fake_go_marker(self):
         before = self.content
