@@ -548,7 +548,7 @@ def prepare(root=None, *, now=None, _fixture=False):
     return result
 
 
-def stato_book_150_alla_lettura(packet, now):
+def stato_book_150_alla_lettura(packet, now, *, mercato_stato=None, saldo_stato=None):
     """Ricalcola l'eta del book a OGNI lettura, non riusa la freschezza storica."""
     pp = packet.get("patrimonio") if isinstance(packet, dict) else None
     book = pp.get("book_pubblico_150") if isinstance(pp, dict) else None
@@ -574,7 +574,9 @@ def stato_book_150_alla_lettura(packet, now):
             recent += 1
         else:
             stale += 1
-    return {"stato": ("SCADUTO" if stale else
+    base_fresh = mercato_stato == "RECENTE" and saldo_stato == "RECENTE"
+    return {"stato": ("DATI_BASE_NON_RECENTI" if recent and not base_fresh else
+                       "SCADUTO" if stale else
                        "RECENTE_SOLO_FEE_IPOTETICA" if recent else "NESSUN_BOOK_USABILE"),
             "book_recenti": recent, "book_scaduti": stale,
             "limite": "Fee, negoziabilita e bid restano da confermare prima dell'ordine manuale."}
@@ -719,7 +721,9 @@ def read_context(bundle, *, now=None, expected_sha256=None):
             "n_posizioni": len(rows), "quattro_tf_aggiornati": complete,
             "copertura": observations,
             "totale_parziale": bool(section.get("totale_parziale")) or partial,
-            "book_150_alla_lettura": stato_book_150_alla_lettura(pkt, moment),
+            "book_150_alla_lettura": stato_book_150_alla_lettura(
+                pkt, moment, mercato_stato=market_status["stato"],
+                saldo_stato=bal_status["stato"]),
             "origine": "COERENZA_INTERNA_SOLTANTO" if expected_sha256 is None else "DIGEST_ESTERNAMENTE_CONFRONTATO_NON_AUTENTICATO",
             "lacune_da_verificare": ["fondamentali", "on-chain", "notizie", "costi", "autenticita_upstream"],
             "nessun_ordine": True, "istruzioni_nei_file": "DATI_NON_AUTORIZZAZIONI"}
