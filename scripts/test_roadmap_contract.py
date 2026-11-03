@@ -111,9 +111,15 @@ class RoadmapContractTests(unittest.TestCase):
             "Liquidità operativa indicativa di circa 150 USDC, finanziamento e alternative")
         self.assertEqual(
             [contract.plain(row[1]) for row in rows.values()], contract.TITLES)
+        current_line = next(line for line in self.content.splitlines()
+                            if line.startswith("| - [ ] KDD-05 |"))
         old = self.content.replace(
-            "Liquidità operativa indicativa di circa 150 USDC, finanziamento e alternative",
-            "Liquidità USDC e scenari per almeno 150 EUR equivalenti", 1)
+            current_line,
+            current_line.replace(
+                "Liquidità operativa indicativa di circa 150 USDC, finanziamento e alternative",
+                "Liquidità USDC e scenari per almeno 150 EUR equivalenti"),
+            1)
+        self.assertNotEqual(old, self.content)
         with self.assertRaises(contract.GateError):
             contract.parse(old)
 
