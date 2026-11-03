@@ -606,6 +606,62 @@ def alternative_liquidazione_150_lorda(positions: list, total, *,
 
 
 
+def book_150_per_gpt(dossier, positions, wallet_sha, snapshot_utc, now):
+    """Valida origine, righe, coppia e ora della stima book prima di esporla a GPT."""
+    fallback = {"stato": "NON_ATTESTATO", "righe": [],
+                "limite": "Nessun confronto book verificato per la fotografia corrente."}
+    raw = dossier.get("finanziamento_150_book_pubblico")
+    if (not isinstance(raw, dict) or dossier.get("fotografia_portafoglio_sha256") != wallet_sha
+            or raw.get("rilevazione_mercato_utc") != snapshot_utc):
+        return fallback
+    items = raw.get("righe")
+    if not isinstance(items, list) or len(items) != len(positions):
+        return fallback
+    output = []
+    for i, (item, position) in enumerate(zip(items, positions)):
+        if (not isinstance(item, dict) or item.get("indice") != i
+                or item.get("token") != position.get("token")):
+            return fallback
+        row = {"indice": i, "token": position.get("token"), "stato": item.get("stato")}
+        if item.get("stato") == "BOOK_PUBBLICO_OSSERVATO":
+            origin = position.get("fonte_prezzo_eur")
+            if (not isinstance(origin, dict) or origin.get("pair") != item.get("pair")
+                    or origin.get("pair_key") != item.get("pair_key")
+                    or position.get("stato_identita") != "VALIDA"):
+                return fallback
+            try:
+                observed = when(item.get("osservato_utc"), "osservazione book")
+                snap = when(snapshot_utc, "fotografia book")
+            except PacketError:
+                return fallback
+            if observed < snap - dt.timedelta(minutes=2) or observed > now + dt.timedelta(minutes=2):
+                return fallback
+            estimate = item.get("stima")
+            if not isinstance(estimate, dict) or estimate.get("nessun_fill_attestato") is not True:
+                return fallback
+            if estimate.get("fee_ipotetica_pct") != "0.800":
+                return fallback
+            try:
+                qty = amount(estimate.get("quantita_base_teorica"), "book: quantità")
+                gross = amount(estimate.get("proventi_lordi_stimati_eur"), "book: lordo")
+                net = amount(estimate.get("proventi_netto_fee_ipotesi_eur"), "book: netto")
+                free = amount(position.get("disponibile_spot"), "book: saldo disponibile")
+            except PacketError:
+                return fallback
+            if None in (qty, gross, net, free) or Decimal(qty) > Decimal(free):
+                return fallback
+            row.update({"stima": {"stato": str(estimate.get("stato"))[:80],
+                                  "quantita_base_teorica": qty,
+                                  "lordo_eur": gross, "netto_fee_ipotetica_eur": net,
+                                  "fee_taker_ipotizzata_pct": "0.8"},
+                        "osservato_utc": item.get("osservato_utc"),
+                        "freschezza": ("RECENTE_ALLA_COMPOSIZIONE"
+                                       if (now-observed).total_seconds() <= 300 else "SCADUTO")})
+        output.append(row)
+    return {"stato": "STIMA_BOOK_CON_FEE_IPOTETICA", "righe": output,
+            "limite": "Non è un preventivo: fee reale, minimi, bid eseguibile e account non verificati; rivalutare freschezza alla lettura."}
+
+
 def quadro_economico_per_gpt(positions: list, cash: dict, total, *, mercato_stato=None, saldo_stato=None) -> dict:
     """Pure, non-prescriptive arithmetic for KDD-02/04/05/23.
 
@@ -750,6 +806,8 @@ def build(root: Path, now: dt.datetime | None = None) -> dict:
         raise PacketError("Totale numerico senza posizioni valorizzate")
     elif abs(valued_sum - Decimal(total)) > Decimal("0.01"):
         raise PacketError("Totale stimato non coincide con posizioni")
+    book_for_gpt = book_150_per_gpt(
+        dossier, positions, wallet_sha, snapshot["rilevazione_utc"], now)
     return {"schema": SCHEMA, "tipo": "PACCHETTO_PATRIMONIALE_PRIVATO",
             "generato_utc": now.isoformat(timespec="seconds"),
             "rilevazione_kdd_utc": s_time.isoformat(timespec="seconds"),
@@ -762,6 +820,7 @@ def build(root: Path, now: dt.datetime | None = None) -> dict:
             "dossier": {"coerente_con_mercato": dossier_fresh,
                         "stato": "UTILIZZABILE_CON_LIMITI" if dossier_fresh else "RILEVAZIONE_DIFFERENTE_NON_ATTRIBUIRE_LIVELLI"},
             "patrimonio": {"posizioni": positions, "liquidita_spot": cash,
+                           "book_pubblico_150": book_for_gpt,
                            "quadro_economico_per_gpt": quadro_economico_per_gpt(
                                positions, cash, total,
                                mercato_stato=status_market["stato"],
