@@ -71,7 +71,8 @@ class RoadmapContractTests(unittest.TestCase):
         body = ("ROADMAP-IDS: KDD-03\n"
                 "MANDATO-AUTORE: intervento tracciato su KDD-03\n"
                 "PROVE: collegamento al collaudo e al diff completo\n"
-                "GO-MERGE: PENDENTE - SERVE DECISIONE ESPLICITA DELL'AUTORE\n"\n                "ROADMAP-MODALITA: DOCUMENTALE\n")
+                "GO-MERGE: PENDENTE - SERVE DECISIONE ESPLICITA DELL'AUTORE\n"
+                "ROADMAP-MODALITA: DOCUMENTALE\n")
         with patch.object(contract, "git", side_effect=fake_git):
             self.assertEqual(contract.check_pr(base, head, body)["changed_ids"], ["KDD-03"])
             with self.assertRaises(contract.GateError):
@@ -95,7 +96,8 @@ class RoadmapContractTests(unittest.TestCase):
         body = ("ROADMAP-IDS: KDD-05\n"
                 "MANDATO-AUTORE: intervento circoscritto su KDD-05\n"
                 "PROVE: verifica indipendente repertoriata per questo lavoro\n"
-                "GO-MERGE: PENDENTE - SERVE DECISIONE ESPLICITA DELL'AUTORE\n"\n                "ROADMAP-MODALITA: DOCUMENTALE\n")
+                "GO-MERGE: PENDENTE - SERVE DECISIONE ESPLICITA DELL'AUTORE\n"
+                "ROADMAP-MODALITA: DOCUMENTALE\n")
         with patch.object(contract, "git", side_effect=fake_git):
             with self.assertRaises(contract.GateError):
                 contract.check_pr(base, head, body)
