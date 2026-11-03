@@ -103,6 +103,10 @@ class FundingBookTests(unittest.TestCase):
                                       "pair_key": "XETHZEUR", "prezzo_eur": "2000"},
                               "SOL": {"token": "SOL", "pair": "SOL/EUR",
                                       "pair_key": "SOLEUR", "prezzo_eur": "20"}}}
+        source["_verified_asset_pairs"] = {
+            "XXBTZEUR": {"wsname": "XBT/EUR", "altname": "XBTEUR", "status": "online"},
+            "XETHZEUR": {"wsname": "ETH/EUR", "altname": "ETHEUR", "status": "online"},
+            "SOLEUR": {"wsname": "SOL/EUR", "altname": "SOLEUR", "status": "online"}}
         portfolio = {"posizioni": [
             {"token": "BTC", "quantita": "0.003", "disponibile_spot": "0.003"},
             {"token": "ETH", "quantita": "0.1", "disponibile_spot": "0.1"},
@@ -111,19 +115,21 @@ class FundingBookTests(unittest.TestCase):
         def fake(endpoint, **kwargs):
             calls.append((endpoint, kwargs["pair"], kwargs["count"]))
             return {kwargs["pair"]: {"bids": [["70000" if kwargs["pair"] == "XXBTZEUR"
-                                             else "2000", "0.5", 1]]}}
+                                             else "2000" if kwargs["pair"] == "XETHZEUR"
+                                             else "20", "0.5", 1]]}}
         with mock.patch.object(dossier_trade.desk, "NOW", return_value=T),\
              mock.patch.object(dossier_trade.time, "sleep"):
             out = dossier_trade.finanziamento_150_book(
                 source, portfolio, saldo_recente=True, kraken_client=fake)
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(set(x[1] for x in calls), {"XXBTZEUR", "XETHZEUR"})
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(set(x[1] for x in calls), {"XXBTZEUR", "XETHZEUR", "SOLEUR"})
         self.assertTrue(all(x[0] == "Depth" and x[2] == 25 for x in calls))
         self.assertEqual([x["stato"] for x in out["righe"]],
                          ["BOOK_PUBBLICO_OSSERVATO",
                           "BOOK_PUBBLICO_OSSERVATO",
-                          "SOTTO_150_LORDI_SU_PREZZO_INDICATIVO"])
-        self.assertEqual(out["richieste_depth"], 2)
+                          "BOOK_PUBBLICO_OSSERVATO"])
+        self.assertEqual(out["richieste_depth"], 3)
+        self.assertEqual(out["righe"][2]["stima"]["proventi_netto_fee_ipotesi_eur"], "9.920")
         def mismatched(endpoint, **kwargs):
             return {"WRONG_PAIR": {"bids": [["70000", "1", 1]]}}
         bad = dossier_trade.finanziamento_150_book(
