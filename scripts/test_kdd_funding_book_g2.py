@@ -224,8 +224,6 @@ class FundingBookTests(unittest.TestCase):
             return {kwargs["pair"]: {"bids": [["70000", "0.1", T.timestamp()]]}}
         for rows in (pairs, dict(reversed(list(pairs.items())))):
             with self.subTest(order=list(rows)):
-                with self.assertRaises(serve.KrakenMarketDataUnavailable):
-                    serve.spot_catalog(lambda _: rows)
                 calls.clear()
                 with mock.patch.object(dossier_trade.desk, "NOW", return_value=T), \
                      mock.patch.object(dossier_trade.time, "sleep"):
@@ -248,6 +246,9 @@ class FundingBookTests(unittest.TestCase):
                 with self.subTest(consumer="GPT"):
                     self.assertFalse(any("stima" in row for row in packet_book["righe"]))
                     self.assertNotEqual(read["stato"], "RECENTE_SOLO_FEE_IPOTETICA")
+                with self.subTest(consumer="catalog"):
+                    with self.assertRaises(serve.KrakenMarketDataUnavailable):
+                        serve.spot_catalog(lambda _: rows)
 
     def test_rt2_f2_valid_kraken_btc_xbt_alias_keeps_depth_and_gpt(self):
         import serve
