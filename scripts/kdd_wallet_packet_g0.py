@@ -564,7 +564,8 @@ def alternative_liquidazione_150_lorda(positions: list, total, *,
                 or source.get("token") != token
                 or not isinstance(source.get("pair"), str)
                 or source["pair"].split("/")[-1] != "EUR"
-                or source["pair"].split("/")[0] != token):
+                or canonical_wallet_alias(source["pair"].split("/")[0])
+                   != canonical_wallet_alias(token)):
             scenarios.append(item)
             continue
         price, held, free = Decimal(price_text), Decimal(held_text), Decimal(free_text)
