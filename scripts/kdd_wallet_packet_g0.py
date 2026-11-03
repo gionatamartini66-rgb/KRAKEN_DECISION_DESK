@@ -651,7 +651,9 @@ def book_150_per_gpt(dossier, positions, wallet_sha, snapshot_utc, now):
                 snap = when(snapshot_utc, "fotografia book")
             except PacketError:
                 return fallback
-            if observed < snap - dt.timedelta(minutes=2) or observed > now + dt.timedelta(minutes=2):
+            if observed < snap - dt.timedelta(minutes=2) or observed > now:
+                # A future observation is not economically fresh, regardless
+                # of whether local clock skew would fit an ordinary tolerance.
                 return fallback
             estimate = item.get("stima")
             if not isinstance(estimate, dict) or estimate.get("nessun_fill_attestato") is not True:
