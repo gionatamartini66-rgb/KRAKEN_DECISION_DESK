@@ -58,3 +58,28 @@ jobs:
           python-version: "3.13"
       - name: G2 Android transaction independent discriminators (Linux synthetic)
         run: PYTHONPATH=.:scripts python -B -m unittest -v scripts.test_kdd_android_transaction_g2
+
+  roadmap-contract:
+    name: roadmap-contract
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Validate all 29 identities and status/checkbox consistency
+        run: python -B scripts/check_roadmap_contract.py
+      - name: Validate actual PR diff, mandate, evidence and matching roadmap rows
+        env:
+          KDD_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          KDD_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          KDD_PR_BODY: ${{ github.event.pull_request.body }}
+          KDD_PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python -B scripts/check_roadmap_contract.py --check-pr
+      - name: Positive and adversarial guard tests
+        run: python -B -m unittest -q scripts.test_roadmap_contract
