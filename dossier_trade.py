@@ -212,6 +212,7 @@ def finanziamento_150_book(source, portfolio, *, saldo_recente, kraken_client=No
         if (not isinstance(market, dict) or market.get("token") != token
                 or not isinstance(market.get("pair"), str)
                 or not market["pair"].endswith("/EUR")
+                or desk.canonical(market["pair"].split("/")[0]) != desk.canonical(token)
                 or not isinstance(market.get("pair_key"), str)
                 or not market["pair_key"].isalnum()):
             continue
@@ -235,9 +236,9 @@ def finanziamento_150_book(source, portfolio, *, saldo_recente, kraken_client=No
         called += 1
         try:
             raw = kraken_client("Depth", pair=pair_key, count=25)
-            if not isinstance(raw, dict) or len(raw) != 1:
-                raise ValueError("Risposta Kraken book ambigua")
-            depth = next(iter(raw.values()))
+            if not isinstance(raw, dict) or set(raw) != {pair_key}:
+                raise ValueError("Identita book Kraken diversa dalla coppia richiesta")
+            depth = raw[pair_key]
             if not isinstance(depth, dict):
                 raise ValueError("Book Kraken non strutturato")
             estimate = costi_spot.stima_vendita_book_150(
