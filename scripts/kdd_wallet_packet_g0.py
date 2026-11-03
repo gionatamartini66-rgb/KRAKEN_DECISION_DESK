@@ -560,7 +560,11 @@ def alternative_liquidazione_150_lorda(positions: list, total, *,
         source = row.get("fonte_prezzo_eur")
         if (price_text is None or held_text is None or free_text is None
                 or valued_text is None or not isinstance(source, dict)
-                or source.get("valuta") != "EUR"):
+                or source.get("valuta") != "EUR"
+                or source.get("token") != token
+                or not isinstance(source.get("pair"), str)
+                or source["pair"].split("/")[-1] != "EUR"
+                or source["pair"].split("/")[0] != token):
             scenarios.append(item)
             continue
         price, held, free = Decimal(price_text), Decimal(held_text), Decimal(free_text)
