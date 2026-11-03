@@ -203,6 +203,15 @@ def finanziamento_150_book(source, portfolio, *, saldo_recente, kraken_client=No
                "stato": "NON_VERIFICABILE"} for i, x in enumerate(rows)]
     if not saldo_recente:
         return {"stato": "SALDO_NON_RECENTE", "righe": result, "richieste_depth": 0}
+    # AssetPairs was already downloaded during this refresh. Never infer a REST
+    # identifier from the printed wsname or the Depth response's own key.
+    # Missing/colliding metadata fails closed; no extra network request.
+    try:
+        import serve
+        raw_pairs = source.get("_verified_asset_pairs")
+        catalog = serve.spot_catalog(lambda _: raw_pairs)
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError, AttributeError):
+        catalog = {}
     eligible = []
     for i, x in enumerate(rows):
         if not isinstance(x, dict) or not isinstance(x.get("token"), str):
@@ -217,6 +226,19 @@ def finanziamento_150_book(source, portfolio, *, saldo_recente, kraken_client=No
                 or not market["pair_key"].isalnum()):
             continue
         try:
+            import patrimonio_4tf
+            metadata = catalog.get(market["pair_key"])
+            if (not isinstance(metadata, dict)
+                    or metadata.get("pair") != market["pair"]
+                    or metadata.get("quote") != "EUR"
+                    or patrimonio_4tf.canonical_base(metadata.get("base"))
+                       != patrimonio_4tf.canonical_base(token)):
+                result[i]["stato"] = "IDENTITA_BOOK_NON_VERIFICABILE"
+                continue
+        except (TypeError, AttributeError, ValueError, KeyError):
+            result[i]["stato"] = "IDENTITA_BOOK_NON_VERIFICABILE"
+            continue
+        try:
             amount = Decimal(str(x.get("disponibile_spot")))
             held = Decimal(str(x.get("quantita")))
             price = Decimal(str(market.get("prezzo_eur")))
@@ -225,10 +247,16 @@ def finanziamento_150_book(source, portfolio, *, saldo_recente, kraken_client=No
                 continue
         except (TypeError, ValueError, InvalidOperation):
             continue
-        result[i]["stato"] = "SOTTO_150_LORDI_SU_PREZZO_INDICATIVO"
-        if price * amount >= Decimal("150"):
-            eligible.append((price * amount, i, token, market["pair"], market["pair_key"], str(amount)))
+        # About 150 USDC is a flexible aim, NOT a 150-EUR cutoff.
+        # Every positive available EUR-value may provide an alternative;
+        # examine the largest capacities first within the existing call cap.
+        maximum = price * amount
+        result[i]["massimo_lordo_indicativo_eur"] = format(maximum, "f")
+        if maximum > 0:
+            eligible.append((maximum, i, token, market["pair"], market["pair_key"], str(amount)))
             result[i]["stato"] = "IN_ATTESA_BOOK"
+        else:
+            result[i]["stato"] = "NESSUNA_DISPONIBILITA_SPOT"
     eligible.sort(key=lambda row: row[0], reverse=True)
     called = 0
     for _, i, token, pair, pair_key, available in eligible:
@@ -341,7 +369,8 @@ def collect(source=None, *, asset_pairs=None):
         portafoglio, source, asset_pairs=asset_pairs,
         now=now, old_4h=quattro_ore)
     finanziamento_book = finanziamento_150_book(
-        source, portafoglio, saldo_recente=qualita.get("saldo_recente_verificato", False))
+        dict(source, _verified_asset_pairs=asset_pairs), portafoglio,
+        saldo_recente=qualita.get("saldo_recente_verificato", False))
     dossier={
         "schema":3,"creato_utc":desk.NOW().isoformat(timespec="seconds"),
         "kraken_istantanea_utc":source["rilevazione_utc"],"eta_kraken_minuti_al_dossier":round(age,2),
