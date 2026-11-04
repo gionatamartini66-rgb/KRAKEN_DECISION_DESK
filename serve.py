@@ -252,9 +252,10 @@ def decision_home():
         try:
             exchange.receive_synced()
         except exchange.bridge.BridgeError as exc:
-            # Report broken FolderSync input without masking a valid direct
-            # chat receipt already present in the private KDD inbox.
-            legacy_sync_error = str(exc)
+            # A private STOP raised during sync ingestion is not itself
+            # a FolderSync error. The following private read exposes it.
+            if not str(exc).startswith("STOP PERSISTENZA PRIVATA:"):
+                legacy_sync_error = str(exc)
         item = exchange.pending()
         approved = exchange.bridge.load_archive()
         events = exchange.decision_history()
@@ -275,8 +276,15 @@ def decision_home():
             else:
                 proposal_state = "NON APPROVATA · IN ATTESA DI DECISIONE"
             proposal = candidate
-    except Exception:
-        proposal, proposal_state = None, "ARCHIVIO NON VERIFICABILE · STOP"
+    except Exception as exc:
+        # The private incoming read is optional to the Spot home, but never
+        # optional to diagnostic truth: an unreadable private file is not
+        # an absent proposal. Keep it separate from any FolderSync STOP.
+        proposal, proposal_state = None, (
+            "STOP PERSISTENZA PRIVATA · proposta non leggibile o non verificabile"
+            if isinstance(exc, ValueError)
+            and str(exc).startswith("STOP PERSISTENZA PRIVATA:")
+            else "ARCHIVIO NON VERIFICABILE · STOP")
 
     # Deliberation controls GPT priorities; historical events are a separate
     # read-only timeline bound to this exact version, with no invented order

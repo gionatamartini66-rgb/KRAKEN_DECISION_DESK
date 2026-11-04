@@ -1040,5 +1040,291 @@ process.stdout.write(JSON.stringify(posted));
         self.assertEqual(bridge.load_archive(), {})
 
 
+    def _rt2_private_ready(self):
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        private = bridge.private_directory(bridge.INBOX) / exchange.INCOMING_NAME
+        self.assertTrue(private.is_file())
+        self.assertEqual(bridge.digest(exchange.pending()[0]), sha)
+        self.assertEqual(bridge.load_archive(), {})
+        return sha, private
+
+    def _rt2_http_gets(self):
+        """Actual localhost HTTP handler with synthetic original page, no live KDD."""
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+        import serve
+
+        (self.sync / "cruscotto.html").write_text(
+            "<html><body><h2>1 · Decisioni e posizioni</h2>"
+            "<p>ORIGINAL-SPOT-AVAILABLE</p></body></html>", encoding="utf-8")
+        with mock.patch.object(serve.desk, "DIR", self.sync):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                out = {}
+                for endpoint in ("/", "/gpt"):
+                    conn = http.client.HTTPConnection(
+                        "127.0.0.1", server.server_port, timeout=5)
+                    conn.request("GET", endpoint,
+                                 headers={"Host": "127.0.0.1:8765"})
+                    reply = conn.getresponse()
+                    status, body = reply.status, reply.read().decode("utf-8")
+                    conn.close()
+                    self.assertEqual(status, 200, endpoint)
+                    out[endpoint] = body
+                self.assertIn("ORIGINAL-SPOT-AVAILABLE", out["/"])
+                return out
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+    def _rt2_assert_private_stop(self, *, http=False, foldersync=False):
+        """An unreadable private file is never a legitimate None."""
+        import serve
+        with self.assertRaisesRegex(bridge.BridgeError, "STOP PERSISTENZA PRIVATA"):
+            exchange.pending()
+        home = serve.decision_home()
+        gpt = exchange.render_page("SYNTHETIC")
+        for ui in (home, gpt):
+            self.assertIn("STOP PERSISTENZA PRIVATA", ui)
+            self.assertNotIn("Proposta GPT: ASSENTE", ui)
+            self.assertNotIn("Nessuna proposta ricevuta", ui)
+            self.assertNotIn("NON APPROVATA", ui)
+            if foldersync:
+                self.assertIn("STOP FolderSync legacy", ui)
+        if http:
+            for ui in self._rt2_http_gets().values():
+                self.assertIn("STOP PERSISTENZA PRIVATA", ui)
+                self.assertNotIn("Nessuna proposta ricevuta", ui)
+                if foldersync:
+                    self.assertIn("STOP FolderSync legacy", ui)
+
+    def test_rt2_a_absence_verified_with_missing_inbox_and_missing_file(self):
+        import serve
+        self.assertIsNone(exchange.pending())
+        self.assertIn("Proposta GPT: ASSENTE", serve.decision_home())
+        self.assertIn("Nessuna proposta ricevuta", exchange.render_page("TOKEN"))
+        folder = bridge.private_directory(bridge.INBOX, create=True)
+        self.assertFalse((folder / exchange.INCOMING_NAME).exists())
+        self.assertIsNone(exchange.pending())
+        self.assertIn("Proposta GPT: ASSENTE", serve.decision_home())
+        self.assertIn("Nessuna proposta ricevuta", exchange.render_page("TOKEN"))
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt2_b_valid_proposal_same_sha_in_http_no_approval(self):
+        sha, _ = self._rt2_private_ready()
+        pages = self._rt2_http_gets()
+        for text in pages.values():
+            self.assertIn(sha, text)
+            self.assertIn("NON APPROVATA", text)
+            self.assertNotIn("STOP PERSISTENZA PRIVATA", text)
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt2_c_private_eio_os_open_fstat_stat_read_bytes(self):
+        import errno
+        import os
+
+        sha, private = self._rt2_private_ready()
+        st = private.stat()
+        real_open, real_fstat = os.open, os.fstat
+        real_stat, real_fdopen = os.stat, os.fdopen
+
+        def failing_open(path, *args, **kwargs):
+            if Path(path) == private:
+                raise OSError(errno.EIO, "synthetic private open")
+            return real_open(path, *args, **kwargs)
+
+        def failing_fstat(fd, *args, **kwargs):
+            actual = real_fstat(fd, *args, **kwargs)
+            if (actual.st_ino, actual.st_dev) == (st.st_ino, st.st_dev):
+                raise OSError(errno.EIO, "synthetic private fstat")
+            return actual
+
+        def failing_stat(path, *args, **kwargs):
+            if Path(path) == private:
+                raise OSError(errno.EIO, "synthetic private stat")
+            return real_stat(path, *args, **kwargs)
+
+        class FailingReader:
+            def __init__(self, original):
+                self.original = original
+            def __enter__(self):
+                self.original.__enter__()
+                return self
+            def __exit__(self, *args):
+                return self.original.__exit__(*args)
+            def fileno(self):
+                return self.original.fileno()
+            def read(self, *args):
+                raise OSError(errno.EIO, "synthetic private read bytes")
+
+        def failing_fdopen(fd, *args, **kwargs):
+            file = real_fdopen(fd, *args, **kwargs)
+            info = real_fstat(file.fileno())
+            if (info.st_ino, info.st_dev) == (st.st_ino, st.st_dev):
+                return FailingReader(file)
+            return file
+
+        for name, function in (("open", failing_open),
+                               ("fstat", failing_fstat),
+                               ("stat", failing_stat),
+                               ("fdopen", failing_fdopen)):
+            with self.subTest(fault=name), mock.patch.object(bridge.os, name,
+                                                               side_effect=function):
+                self._rt2_assert_private_stop(http=(name == "open"))
+        self.assertEqual(bridge.digest(exchange.pending()[0]), sha)
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt2_c_private_inbox_directory_eio_and_inaccessible(self):
+        import errno
+        import os
+        self._rt2_private_ready()
+        folder = bridge.PRIVATE_ROOT / bridge.INBOX
+        real_open = os.open
+        def failing_open(path, *args, **kwargs):
+            if Path(path) == folder:
+                raise OSError(errno.EIO, "synthetic private directory EIO")
+            return real_open(path, *args, **kwargs)
+        with mock.patch.object(bridge.os, "open", side_effect=failing_open):
+            self._rt2_assert_private_stop()
+        mode = folder.stat().st_mode & 0o777
+        try:
+            folder.chmod(0o755)
+            self._rt2_assert_private_stop()
+        finally:
+            folder.chmod(mode)
+
+    def test_rt2_e_simultaneous_foldersync_and_private_eio(self):
+        import errno
+        import os
+        self._rt2_private_ready()
+        private = bridge.PRIVATE_ROOT / bridge.INBOX / exchange.INCOMING_NAME
+        shared = self.sync / exchange.INCOMING_NAME
+        shared.write_text("synthetic", encoding="utf-8")
+        real_open = os.open
+        def failing_open(path, *args, **kwargs):
+            if Path(path) in (private, shared):
+                raise OSError(errno.EIO, "synthetic transport/private EIO")
+            return real_open(path, *args, **kwargs)
+        with mock.patch.object(bridge.os, "open", side_effect=failing_open):
+            self._rt2_assert_private_stop(http=True, foldersync=True)
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt2_f_corrupt_symlink_permissions_owner_inode_replacement(self):
+        import os
+        self._rt2_private_ready()
+        private = bridge.PRIVATE_ROOT / bridge.INBOX / exchange.INCOMING_NAME
+        raw = private.read_bytes()
+        original = private.stat()
+        original_fstat, original_stat = os.fstat, os.stat
+
+        def put_back():
+            if private.exists() or private.is_symlink():
+                private.unlink()
+            private.write_bytes(raw)
+            private.chmod(0o600)
+
+        try:
+            private.write_bytes(b'{"bad":')
+            self._rt2_assert_private_stop()
+            put_back()
+            private.chmod(0o644)
+            self._rt2_assert_private_stop()
+            put_back()
+            target = self.original.home / "synthetic-target.json"
+            target.write_bytes(raw)
+            private.unlink()
+            private.symlink_to(target)
+            self._rt2_assert_private_stop()
+            put_back()
+
+            def wrong_owner(fd, *args, **kwargs):
+                st = original_fstat(fd, *args, **kwargs)
+                if (st.st_ino, st.st_dev) == (private.stat().st_ino, private.stat().st_dev):
+                    values = list(st)
+                    values[4] += 1
+                    return os.stat_result(values)
+                return st
+            with mock.patch.object(bridge.os, "fstat", side_effect=wrong_owner):
+                self._rt2_assert_private_stop()
+
+            def wrong_inode(path, *args, **kwargs):
+                st = original_stat(path, *args, **kwargs)
+                if Path(path) == private:
+                    values = list(st)
+                    values[1] += 1
+                    return os.stat_result(values)
+                return st
+            with mock.patch.object(bridge.os, "stat", side_effect=wrong_inode):
+                self._rt2_assert_private_stop()
+
+            real_reader = bridge.read_regular
+            def vanish(path, *args, **kwargs):
+                if Path(path) != private:
+                    return real_reader(path, *args, **kwargs)
+                private.unlink()  # disappearance BETWEEN verified lstat and open
+                try:
+                    return real_reader(path, *args, **kwargs)
+                finally:
+                    private.write_bytes(raw)
+                    private.chmod(0o600)  # synthetic fixture for next HTTP read
+            with mock.patch.object(bridge, "read_regular", side_effect=vanish):
+                self._rt2_assert_private_stop()
+            put_back()
+            self.assertEqual(bridge.digest(exchange.pending()[0]),
+                             bridge.digest(self.original.plan))
+        finally:
+            put_back()
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt2_e_valid_shared_input_with_private_eio_is_only_private_stop(self):
+        import errno
+        import os
+        self._rt2_private_ready()
+        shared = self.sync / exchange.INCOMING_NAME
+        shared.write_bytes(bridge.canonical(self.original.plan))
+        private = bridge.PRIVATE_ROOT / bridge.INBOX / exchange.INCOMING_NAME
+        real_open = os.open
+
+        def private_fault(path, *args, **kwargs):
+            if Path(path) == private:
+                raise OSError(errno.EIO, "private read only")
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch.object(bridge.os, "open", side_effect=private_fault):
+            # A valid shared packet reaches the private read; this is NOT
+            # a FolderSync EIO and must not fabricate two failed channels.
+            self._rt2_assert_private_stop(http=True, foldersync=False)
+            for page in self._rt2_http_gets().values():
+                self.assertNotIn("STOP FolderSync legacy", page)
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt2_f_transient_eio_does_not_claim_absence_then_recovers(self):
+        import errno
+        import os
+        sha, private = self._rt2_private_ready()
+        real_open = os.open
+        attempts = [0]
+        def one_failure(path, *args, **kwargs):
+            if Path(path) == private and attempts[0] == 0:
+                attempts[0] += 1
+                raise OSError(errno.EIO, "transient synthetic EIO")
+            return real_open(path, *args, **kwargs)
+        with mock.patch.object(bridge.os, "open", side_effect=one_failure):
+            with self.assertRaisesRegex(bridge.BridgeError, "STOP PERSISTENZA PRIVATA"):
+                exchange.pending()
+            self.assertEqual(bridge.digest(exchange.pending()[0]), sha)
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt2_h_interprocess_incompatible_versions_still_serialized(self):
+        # Independent processes and forced scheduling window: previous RT33-01
+        # adversarial test must remain green on this exact HEAD.
+        self.test_rt33_01_two_independent_processes_cannot_both_publish()
+
+
 if __name__ == "__main__":
     unittest.main()

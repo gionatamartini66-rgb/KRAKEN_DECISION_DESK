@@ -225,13 +225,57 @@ def receive_synced():
             return sha
         return _receive_locked(raw)
 
+_PRIVATE_STOP = "STOP PERSISTENZA PRIVATA: proposta non leggibile o non verificabile"
+
+
+def _missing_private_inbox():
+    """Identify only genuinely absent, otherwise securely verified, directory chains.
+
+    The bridge's reader translates ENOENT and EIO to the same BridgeError.
+    Check each *existing* ancestor using its own descriptor-based verifier;
+    absence is legitimate only at a proven missing component. Broken,
+    inaccessible, replaced or symlinked components must raise STOP.
+    """
+    root = bridge.PRIVATE_ROOT
+    chain = (Path.home() / ".local", Path.home() / ".local" / "state",
+             root.parent, root, root / bridge.INBOX)
+    for path in chain:
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return True
+        # Any other OSError, including EACCES and EIO, stays a STOP.
+        bridge._check_dir(path, owner_only=path in
+                          (root.parent, root, root / bridge.INBOX))
+    return False
+
+
 def pending():
+    """None means VERIFIED ABSENCE, never an unreadable private proposal."""
     try:
-        folder = bridge.private_directory(bridge.INBOX)
-        raw = bridge.read_regular(folder / INCOMING_NAME, expected_parent=folder)
-    except bridge.BridgeError:
-        return None
-    return validate_raw(raw)
+        try:
+            folder = bridge.private_directory(bridge.INBOX)
+        except bridge.BridgeError:
+            if _missing_private_inbox():
+                return None
+            raise
+
+        path = folder / INCOMING_NAME
+        verified_folder = bridge._check_dir(folder)
+        # lstat confirms absence without following symlinks. A file that
+        # disappears after lstat still produces STOP in read_regular().
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            # ENOENT may instead mean the *parent* disappeared or changed.
+            # Only an unchanged verified private directory permits ABSENT.
+            if bridge._check_dir(folder) != verified_folder:
+                raise bridge.BridgeError("Inbox privata cambiata durante la lettura")
+            return None
+        raw = bridge.read_regular(path, expected_parent=folder)
+        return validate_raw(raw)
+    except (bridge.BridgeError, OSError) as exc:
+        raise bridge.BridgeError(_PRIVATE_STOP) from exc
 
 
 
@@ -410,9 +454,11 @@ def render_page(token):
     try:
         receive_synced()
     except bridge.BridgeError as exc:
-        # Legacy sync is an independent transport; it cannot hide a valid
-        # privately received chat proposal. Still show its STOP explicitly.
-        sync_error = str(exc)
+        # A private-read STOP can propagate through receive_synced() while
+        # validating an otherwise readable shared input. It is NOT evidence
+        # of FolderSync failure. pending() below reports it independently.
+        if not str(exc).startswith(_PRIVATE_STOP):
+            sync_error = str(exc)
     try:
         item = pending()
         error = None
