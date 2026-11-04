@@ -3997,6 +3997,9 @@ class IntegratedDecisionHomeTests(unittest.TestCase):
             unittest.mock.patch.object(exchange, "pending", return_value=(self.proposal, {})),
             unittest.mock.patch.object(exchange.bridge, "load_archive", return_value={}),
             unittest.mock.patch.object(exchange, "decision_history", return_value=[]),
+            # HTML-only fixture: all approval state is synthetic; the actual
+            # continuity validator remains active in the real-persistence tests.
+            unittest.mock.patch.object(exchange, "_checked_approvals", return_value={}),
         ]
         for patch in self.mocks:
             patch.start()
@@ -4219,8 +4222,13 @@ class IntegratedDecisionHomeTests(unittest.TestCase):
             self.assertIn("ipotesi GPT ALLEGGERIRE", page)
             self.assertNotIn("NON RICONCILIATA", page)
             self.assertIn("GPT · NON APPROVATA · IN ATTESA DI DECISIONE", page)
+            # This HTML-only subcase explicitly simulates a *different*
+            # already-approved state. Keep both synthetic archive readers
+            # aligned for this scope; restore the default empty state on exit.
             with unittest.mock.patch.object(exchange.bridge, "load_archive",
-                                            return_value={sha: {"proposta": orig}}):
+                                            return_value={sha: {"proposta": orig}}), (
+                 unittest.mock.patch.object(exchange, "_checked_approvals",
+                                            return_value={sha: {"proposta": orig}})):
                 approved = self.render_home()
             self.assertIn("APPROVATA · ARCHIVIO", approved)
             self.assertIn("ipotesi GPT ALLEGGERIRE", approved)
@@ -4367,6 +4375,12 @@ class R3RealOriginIntegrationTests(unittest.TestCase):
             self.addCleanup(patcher.stop)
         self.bridge = bridge
         self.exchange = exchange
+        # Explicit enrollment ONLY inside this isolated, new synthetic bridge
+        # before any private outbox data are written. Never automatic in KDD.
+        exchange.initialize_decision_continuity(
+            mode="NEW",
+            acknowledgement="INIZIALIZZO_NUOVO_STORICO"
+        )
         self.packet = bridge.prepare(self.root, now=self.now, _fixture=True)
         self.assertEqual(
             self.packet["packet"]["patrimonio"]["fotografia_portafoglio_sha256"],
