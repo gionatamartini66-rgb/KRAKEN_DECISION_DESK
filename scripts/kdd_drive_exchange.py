@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
 import tempfile
 import threading
@@ -19,6 +20,242 @@ EXCHANGE_ROOT = Path("/storage/emulated/0/KDD_TEST_SAMSUNG")
 INCOMING_NAME = "proposta_portafoglio.json"
 EXPORT_NAME = re.compile(r"kdd_handoff_[0-9a-f]{64}\.json\Z")
 _DECISION_LOCK = threading.RLock()  # coordinates threads; flock coordinates processes
+
+
+class ExchangeError(bridge.BridgeError):
+    domain = "validation"
+
+
+class FolderSyncError(ExchangeError):
+    domain = "foldersync"
+
+
+class PrivatePersistenceError(ExchangeError):
+    domain = "private"
+
+
+class ProposalValidationError(ExchangeError):
+    domain = "validation"
+
+
+class DecisionContinuityError(PrivatePersistenceError):
+    """A missing/ambiguous chain is NOT an empty history."""
+    domain = "private"
+
+
+_ENROLLMENT = ".decision-enrollment-v001.json"
+_WITNESSES = "decision_witnesses"
+_WITNESS_SCHEMA = "kdd_decision_witness_v001"
+_ENROLLMENT_SCHEMA = "kdd_decision_enrollment_v001"
+_RESTORE_STOP = "STOP DECISIONI — RIPRISTINO NECESSARIO"
+
+
+def _witness_dir():
+    root = bridge.PRIVATE_ROOT
+    bridge._check_dir(root)
+    directory = root / _WITNESSES
+    bridge._check_dir(directory)
+    return directory
+
+
+def _read_witnesses():
+    """Durable, independent evidence of EVERY committed-or-attempted decision."""
+    root = bridge.PRIVATE_ROOT
+    bridge._check_dir(root)
+    if any(re.fullmatch(r"\.decision-enrollment-.*\.tmp", p.name)
+           for p in root.iterdir()):
+        raise bridge.BridgeError("Staging iscrizione non riconciliato")
+    enrollment = bridge.strict_json(bridge.read_regular(
+        root / _ENROLLMENT, expected_parent=root))
+    if (set(enrollment) != {"schema", "nonce", "events", "approvals"}
+            or enrollment["schema"] != _ENROLLMENT_SCHEMA
+            or not isinstance(enrollment["nonce"], str)
+            or not re.fullmatch(r"[0-9a-f]{32}", enrollment["nonce"])
+            or not all(isinstance(enrollment[k], list)
+                       and enrollment[k] == sorted(set(enrollment[k]))
+                       and all(isinstance(v, str) and bridge.HEX.fullmatch(v)
+                               for v in enrollment[k])
+                       for k in ("events", "approvals"))):
+        raise bridge.BridgeError("Iscrizione continuità non valida")
+    directory = _witness_dir()
+    witnessed_events, witnessed_approvals = {}, set()
+    for item in directory.iterdir():
+        match = re.fullmatch(r"([ea])-([0-9a-f]{64})\.json", item.name)
+        if match is None:
+            raise bridge.BridgeError("Residuo di continuità non verificabile")
+        kind, sha = match.groups()
+        proof = bridge.strict_json(bridge.read_regular(
+            item, expected_parent=directory))
+        if (set(proof) != {"schema", "kind", "sha", "record"}
+                or proof["schema"] != _WITNESS_SCHEMA
+                or proof["kind"] != kind or proof["sha"] != sha):
+            raise bridge.BridgeError("Testimonianza di continuità alterata")
+        if kind == "e":
+            if not isinstance(proof["record"], dict) or bridge.digest(proof["record"]) != sha:
+                raise bridge.BridgeError("Impronta evento non valida")
+            witnessed_events[sha] = proof["record"]
+        else:
+            if proof["record"] != {"versione_sha256": sha}:
+                raise bridge.BridgeError("Impronta approvazione non valida")
+            witnessed_approvals.add(sha)
+    if (set(enrollment["events"]) != set(witnessed_events)
+            or set(enrollment["approvals"]) != witnessed_approvals):
+        raise bridge.BridgeError("Impronte di continuità mancanti o mutate")
+    return witnessed_events, witnessed_approvals
+
+
+def _enrollment_add(kind, sha):
+    """Durably reserve history in the independent enrollment BEFORE witness.
+
+    A dropped witness plus a dropped history file must still disagree with
+    the persisted enrollment's monotone expected identifiers.
+    """
+    root = bridge.PRIVATE_ROOT
+    bridge._check_dir(root)
+    marker = root / _ENROLLMENT
+    enrollment = bridge.strict_json(bridge.read_regular(
+        marker, expected_parent=root))
+    field = "events" if kind == "e" else "approvals"
+    if (set(enrollment) != {"schema", "nonce", "events", "approvals"}
+            or not isinstance(enrollment.get(field), list)
+            or sha in enrollment[field]):
+        raise DecisionContinuityError(_RESTORE_STOP)
+    enrollment[field] = sorted([*enrollment[field], sha])
+    stage = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix=".decision-enrollment-",
+                                         suffix=".tmp", dir=root, delete=False) as stream:
+            stage = Path(stream.name)
+            stream.write(bridge.canonical(enrollment) + b"\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(stage, 0o600)
+        os.replace(stage, marker)
+        stage = None
+        bridge._sync_dir(root)
+    except (bridge.BridgeError, OSError) as exc:
+        raise bridge.PublicationUncertain(
+            "PUBBLICAZIONE_INCERTA: iscrizione decisioni") from exc
+    finally:
+        if stage is not None:
+            stage.unlink(missing_ok=True)
+
+
+def _verify_continuity():
+    """Any missing witness OR missing original record is STOP, never empty."""
+    try:
+        witnessed_events, witnessed_approvals = _read_witnesses()
+        events = _history_unchecked()
+        approvals = _approvals_unchecked()
+        actual_events = {bridge.digest(row): row for row in events}
+        if (actual_events != witnessed_events
+                or set(approvals) != witnessed_approvals):
+            raise bridge.BridgeError("Storia deliberazioni discontinua")
+        return events, approvals
+    except (bridge.BridgeError, OSError, TypeError, KeyError) as exc:
+        # Diagnostic specificity is display-only. Domain routing uses types.
+        label = str(exc)
+        suffix = (" | " + label if label.startswith((
+            "STOP ARCHIVIO DECISIONI:", "STOP ARCHIVIO APPROVAZIONI:")) else "")
+        raise DecisionContinuityError(_RESTORE_STOP + suffix) from exc
+
+
+def _write_witness(kind, sha, record, *, enrolling=False):
+    """Write-ahead immutable evidence, fsynced BEFORE event/approval commit.
+
+    A crash between this write and destination commit leaves a detectable
+    unresolved witness; no subsequent decision may silently bypass it.
+    """
+    if kind not in ("e", "a") or not bridge.HEX.fullmatch(sha):
+        raise bridge.BridgeError("Testimonianza non valida")
+    if not enrolling:
+        _enrollment_add(kind, sha)
+    directory = _witness_dir()
+    final = directory / (kind + "-" + sha + ".json")
+    obj = {"schema": _WITNESS_SCHEMA, "kind": kind, "sha": sha,
+           "record": record if kind == "e" else {"versione_sha256": sha}}
+    raw = bridge.canonical(obj) + b"\n"
+    try:
+        fd = os.open(final, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        bridge._sync_dir(directory)
+    except OSError as exc:
+        raise bridge.PublicationUncertain(
+            "PUBBLICAZIONE_INCERTA: testimonianza decisionale") from exc
+    except bridge.BridgeError as exc:
+        raise DecisionContinuityError(_RESTORE_STOP) from exc
+
+
+def _continuity_snapshot(events, approvals):
+    return bridge.digest({
+        "eventi": sorted(bridge.digest(x) for x in events),
+        "approvazioni": sorted(approvals),
+    })
+
+
+def initialize_decision_continuity(*, mode, acknowledgement, expected_sha256=None):
+    """EXPLICIT local enrollment or audited migration. Never called on reads.
+
+    New: requires author acknowledgement and pristine observed inputs.
+    Migration: requires independently checked expected state SHA; any
+    missing-old-evidence possibility must be resolved by operator audit.
+    This function is never run on the live Samsung by a test or import.
+    """
+    if mode not in ("NEW", "RECONCILE"):
+        raise DecisionContinuityError(_RESTORE_STOP)
+    literal = ("INIZIALIZZO_NUOVO_STORICO" if mode == "NEW"
+               else "RICONCILIO_STORICO_PRECEDENTE")
+    if acknowledgement != literal:
+        raise DecisionContinuityError(_RESTORE_STOP)
+    with _DECISION_LOCK:
+        inbox = bridge.private_directory(bridge.INBOX, create=True)
+        with bridge._archive_write_lock(inbox):
+            root = bridge.PRIVATE_ROOT
+            if bridge._path_present(root / _ENROLLMENT) or bridge._path_present(root / _WITNESSES):
+                raise DecisionContinuityError(_RESTORE_STOP)
+            events = _history_unchecked()
+            approvals = _approvals_unchecked()
+            out = root / bridge.OUTBOX
+            if mode == "NEW":
+                if events or approvals or bridge._path_present(inbox / INCOMING_NAME):
+                    raise DecisionContinuityError(_RESTORE_STOP)
+                if bridge._path_present(out):
+                    bridge._check_dir(out)
+                    if any(out.iterdir()):
+                        raise DecisionContinuityError(_RESTORE_STOP)
+            elif (not isinstance(expected_sha256, str)
+                    or expected_sha256 != _continuity_snapshot(events, approvals)):
+                raise DecisionContinuityError(_RESTORE_STOP)
+            witnesses = bridge.ensure_dir(root / _WITNESSES)
+            for entry in events:
+                _write_witness("e", bridge.digest(entry), entry, enrolling=True)
+            for version in approvals:
+                _write_witness("a", version, None, enrolling=True)
+            # Enrollment is written LAST. Partial migration is not "new".
+            enrollment = root / _ENROLLMENT
+            data = bridge.canonical({
+                "schema": _ENROLLMENT_SCHEMA,
+                "nonce": secrets.token_hex(16),
+                "events": sorted(bridge.digest(entry) for entry in events),
+                "approvals": sorted(approvals),
+            }) + b"\n"
+            try:
+                fd = os.open(enrollment, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                             getattr(os, "O_NOFOLLOW", 0), 0o600)
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                bridge._sync_dir(root)
+            except OSError as exc:
+                raise bridge.PublicationUncertain(
+                    "PUBBLICAZIONE_INCERTA: inizializzazione storico") from exc
+            _verify_continuity()
+            return {"modo": mode, "eventi": len(events), "approvazioni": len(approvals)}
 
 
 @contextlib.contextmanager
@@ -32,6 +269,7 @@ def _decision_writer():
     with _DECISION_LOCK:
         inbox = bridge.private_directory(bridge.INBOX, create=True)
         with bridge._archive_write_lock(inbox):
+            _verify_continuity()
             yield
 
 
@@ -91,29 +329,40 @@ def prepare_export():
 
 
 def find_origin(proposal):
+    """Origin is private KDD evidence, never part of FolderSync transport."""
     snapshot = proposal.get("snapshot_id") if isinstance(proposal, dict) else None
     if not isinstance(snapshot, str) or not bridge.HEX.fullmatch(snapshot):
-        raise bridge.BridgeError("Identita della fotografia non valida")
-    outgoing = bridge.private_directory(bridge.OUTBOX)
-    matches = []
-    for path in outgoing.iterdir():
-        if path.name.startswith(".kdd-event-") and path.name.endswith(".tmp"):
-            continue
-        if not re.fullmatch(r"[0-9a-f]{64}\.json", path.name):
-            continue
-        bundle = bridge.strict_json(bridge.read_regular(path, expected_parent=outgoing))
-        if bundle.get("packet_sha256") == snapshot:
-            bridge.verify_local_origin(bundle)
-            matches.append(bundle)
-    if len(matches) != 1:
-        raise bridge.BridgeError("Fotografia KDD originaria assente o ambigua")
-    return matches[0]
+        raise ProposalValidationError("Identita della fotografia non valida")
+    try:
+        outgoing = bridge.private_directory(bridge.OUTBOX)
+        matches = []
+        for path in outgoing.iterdir():
+            if path.name.startswith(".kdd-event-") and path.name.endswith(".tmp"):
+                continue
+            if not re.fullmatch(r"[0-9a-f]{64}\.json", path.name):
+                continue
+            bundle = bridge.strict_json(bridge.read_regular(path, expected_parent=outgoing))
+            if bundle.get("packet_sha256") == snapshot:
+                bridge.verify_local_origin(bundle)
+                matches.append(bundle)
+        if len(matches) != 1:
+            raise bridge.BridgeError("Fotografia KDD originaria assente o ambigua")
+        return matches[0]
+    except (bridge.BridgeError, OSError) as exc:
+        raise PrivatePersistenceError(
+            "STOP PERSISTENZA PRIVATA: origine KDD non verificabile") from exc
 
 
 def validate_raw(raw):
-    proposal = bridge.strict_json(raw)
+    try:
+        proposal = bridge.strict_json(raw)
+    except bridge.BridgeError as exc:
+        raise ProposalValidationError("STOP VALIDAZIONE: documento non valido") from exc
     bundle = find_origin(proposal)
-    bridge.validate_proposal(proposal, bundle)
+    try:
+        bridge.validate_proposal(proposal, bundle)
+    except bridge.BridgeError as exc:
+        raise ProposalValidationError("STOP VALIDAZIONE: proposta incompatibile") from exc
     return proposal, bundle
 
 
@@ -144,13 +393,10 @@ def _private_file_identity(path):
     return (info.st_dev, info.st_ino)
 
 
-def _checked_approvals():
-    """Never mistake an unreadable approval archive for an empty consent chain.
+def _approvals_unchecked():
+    """Strict archive reader for continuity reconciliation; no recursion."""
+    # Never mistake an unreadable approval archive for an empty consent chain.
 
-    The shared bridge reader retains its historical consumer contract; gate
-    decision writes here with an independently verified directory and
-    comparison between committed filename set and returned versions.
-    """
     try:
         try:
             folder = bridge.private_directory(bridge.ARCHIVE)
@@ -169,6 +415,10 @@ def _checked_approvals():
         return versions
     except (OSError, bridge.BridgeError) as exc:
         raise bridge.BridgeError("STOP ARCHIVIO APPROVAZIONI: stato non verificabile") from exc
+
+
+def _checked_approvals():
+    return _verify_continuity()[1]
 
 
 def receive(raw):
@@ -281,10 +531,15 @@ def receive_synced():
         finally:
             os.close(fd)
     except OSError as exc:
-        raise bridge.BridgeError("FolderSync: errore di lettura filesystem; STOP") from exc
+        raise FolderSyncError("STOP FolderSync: errore filesystem condiviso") from exc
+    except bridge.BridgeError as exc:
+        raise FolderSyncError("STOP FolderSync: file condiviso non verificabile") from exc
     # A known, already decided version may be stale when FolderSync copies it
     # back. Recognize its exact content digest before freshness validation.
-    proposal = bridge.strict_json(raw)
+    try:
+        proposal = bridge.strict_json(raw)
+    except bridge.BridgeError as exc:
+        raise ProposalValidationError("STOP VALIDAZIONE: proposta ricevuta malformata") from exc
     sha = bridge.digest(proposal)
     with _decision_writer():
         approved = _checked_approvals()
@@ -322,6 +577,7 @@ def _missing_private_inbox():
 
 def pending():
     """None means VERIFIED ABSENCE, never an unreadable private proposal."""
+    _verify_continuity()
     try:
         try:
             folder = bridge.private_directory(bridge.INBOX)
@@ -343,10 +599,14 @@ def pending():
                 raise bridge.BridgeError("Inbox privata cambiata durante la lettura")
             return None
         raw = bridge.read_regular(path, expected_parent=folder)
-        return validate_raw(raw)
     except (bridge.BridgeError, OSError) as exc:
-        raise bridge.BridgeError(_PRIVATE_STOP) from exc
-
+        raise PrivatePersistenceError(_PRIVATE_STOP) from exc
+    try:
+        return validate_raw(raw)
+    except (ProposalValidationError, PrivatePersistenceError) as exc:
+        # This is an *already persisted private* document, not an inbound
+        # candidate. A corrupted/ownerless local draft belongs to private.
+        raise PrivatePersistenceError(_PRIVATE_STOP) from exc
 
 
 def confirm(sha):
@@ -360,6 +620,9 @@ def confirm(sha):
         if any(row["versione_sha256"] == sha and row["stato"] in ("RIFIUTATA", "RINVIATA")
                for row in decision_history()):
             raise bridge.BridgeError("Versione gia rifiutata o rinviata: occorre nuova proposta")
+        approved = _checked_approvals()
+        if sha not in approved:
+            _write_witness("a", sha, None)
         return bridge.approved_import(proposal, bundle, sha, "APPROVO_VERSIONE")
 
 def latest_export():
@@ -426,8 +689,8 @@ def latest_events(rows):
 
 
 
-def decision_history():
-    """No event history may be described as empty after an access failure."""
+def _history_unchecked():
+    """Strict low-level event reader for continuity checks; no recursion."""
     try:
         try:
             parent = bridge.private_directory(bridge.INBOX)
@@ -470,6 +733,10 @@ def decision_history():
         raise bridge.BridgeError("STOP ARCHIVIO DECISIONI: storia non verificabile") from exc
 
 
+def decision_history():
+    return _verify_continuity()[0]
+
+
 def record_decision(raw):
     """Persist one dated human statement, distinct from an actual Kraken trade."""
     with _decision_writer():
@@ -504,6 +771,8 @@ def record_decision(raw):
             entry["proposta"] = current[0]
         folder = bridge.ensure_dir(bridge.private_directory(bridge.INBOX, create=True) / DECISION_EVENTS)
         filename = bridge.digest(entry) + ".json"
+        # A witness exists and is fsynced BEFORE the first event write.
+        _write_witness("e", bridge.digest(entry), entry)
         target = folder / filename
         if bridge._path_present(target):
             raise bridge.BridgeError("Evento gia registrato")
@@ -537,17 +806,17 @@ def record_decision(raw):
 
 def render_page(token):
     esc = lambda s: html.escape(str(s), quote=True)
-    sync_error = None
+    sync_error = private_sync_error = validation_error = None
     try:
         receive_synced()
-    except bridge.BridgeError as exc:
-        # A private-read STOP can propagate through receive_synced() while
-        # validating an otherwise readable shared input. It is NOT evidence
-        # of FolderSync failure. pending() below reports it independently.
-        if not str(exc).startswith((
-                _PRIVATE_STOP, "STOP ARCHIVIO DECISIONI:",
-                "STOP ARCHIVIO APPROVAZIONI:")):
-            sync_error = str(exc)
+    except FolderSyncError as exc:
+        sync_error = str(exc)
+    except PrivatePersistenceError as exc:
+        private_sync_error = str(exc)
+    except ProposalValidationError as exc:
+        validation_error = str(exc)
+    except bridge.BridgeError:
+        validation_error = "STOP VALIDAZIONE: ricezione KDD non verificabile"
     try:
         item = pending()
         if item is not None:
@@ -561,7 +830,14 @@ def render_page(token):
     if error:
         preview = "<p class='warn'>STOP: " + esc(error) + "</p>"
     elif item is None:
-        preview = "<p>Nessuna proposta ricevuta dalla chat o da Drive.</p>"
+        if private_sync_error:
+            preview = "<p class='warn'>STOP PERSISTENZA PRIVATA: ricezione non verificabile.</p>"
+        elif validation_error:
+            preview = "<p class='warn'>STOP VALIDAZIONE: documento non attribuibile.</p>"
+        elif sync_error:
+            preview = "<p class='warn'>STOP FolderSync: ingresso non verificabile.</p>"
+        else:
+            preview = "<p>Nessuna proposta ricevuta dalla chat o da Drive.</p>"
     else:
         proposal, bundle = item
         state = bridge.read_context(bundle)
@@ -593,6 +869,12 @@ def render_page(token):
     if sync_error:
         preview = ("<p class='warn'>STOP FolderSync legacy: "
                    + esc(sync_error) + "</p>" + preview)
+    if private_sync_error:
+        preview = ("<p class='warn'>STOP PERSISTENZA PRIVATA: "
+                   + esc(private_sync_error) + "</p>" + preview)
+    if validation_error:
+        preview = ("<p class='warn'>STOP VALIDAZIONE: "
+                   + esc(validation_error) + "</p>" + preview)
     if item is not None and not error and (already_approved or declined):
         preview = preview.split("<button onclick=", 1)[0]
     try:
@@ -748,12 +1030,26 @@ def main(argv=None):
         description="Ingresso diretto chat -> KDD, senza FolderSync né approvazione")
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("prepara-chat")
+    fresh = sub.add_parser("inizializza-storico")
+    fresh.add_argument("--consenso", required=True)
+    migrate = sub.add_parser("riconcilia-storico")
+    migrate.add_argument("--consenso", required=True)
+    migrate.add_argument("--expected-sha256", required=True)
     incoming = sub.add_parser("ricevi-chat")
     incoming.add_argument("--file-sha256", required=True)
     incoming.add_argument("--proposta-sha256", required=True)
     incoming.add_argument("--consenso-pubblicazione", required=True)
     args = parser.parse_args(argv)
     try:
+        if args.action in ("inizializza-storico", "riconcilia-storico"):
+            mode = "NEW" if args.action == "inizializza-storico" else "RECONCILE"
+            result = initialize_decision_continuity(
+                mode=mode, acknowledgement=args.consenso,
+                expected_sha256=getattr(args, "expected_sha256", None))
+            print("CONTINUITA DECISIONI ISCRITTA |", result["modo"],
+                  "| eventi:", result["eventi"],
+                  "| approvazioni:", result["approvazioni"])
+            return 0
         if args.action == "prepara-chat":
             path, origin_sha, snapshot_sha = prepare_chat()
             print("KDD -> CHAT: FOTOGRAFIA PRIVATA PRONTA | file:", path)

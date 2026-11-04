@@ -20,6 +20,11 @@ class DriveUIHandoffTests(unittest.TestCase):
         original.setUp()
         self.addCleanup(original.doCleanups)
         self.original=original
+        # Explicit first-install enrollment of this freshly isolated synthetic
+        # fixture; production never auto-enrolls or migrates existing history.
+        if hasattr(exchange, "initialize_decision_continuity"):
+            exchange.initialize_decision_continuity(
+                mode="NEW", acknowledgement="INIZIALIZZO_NUOVO_STORICO")
         self.sync=Path(tempfile.mkdtemp(prefix="kdd-drive-ui-",dir=original.home))
         p=mock.patch.object(exchange,"EXCHANGE_ROOT",self.sync)
         p.start()
@@ -308,6 +313,9 @@ class DriveUIHandoffTests(unittest.TestCase):
         row = {"versione_sha256": sha, "stato": state, "nota": note,
                "creato_utc": timestamp}
         path = folder / (bridge.digest(row) + ".json")
+        # Reproduce the existing *committed* historical record with its
+        # durability witness, rather than forging an unregistered event.
+        exchange._write_witness("e", bridge.digest(row), row)
         path.write_bytes(bridge.canonical(row) + b"\n")
         path.chmod(0o600)
         return row
@@ -866,11 +874,13 @@ process.stdout.write(JSON.stringify(posted));
             file_sha, plan_sha, "PUBBLICA_VERSIONE_" + plan_sha), plan_sha)
         (self.sync / exchange.INCOMING_NAME).write_bytes(b'{"broken":')
         home = serve.decision_home()
-        self.assertIn("STOP FolderSync legacy", home)
+        # The shared file was read successfully but contains malformed JSON:
+        # VALIDAZIONE, never a transport EIO attributed to FolderSync.
+        self.assertIn("STOP VALIDAZIONE", home)
         self.assertIn("IN ATTESA DI DECISIONE", home)
         self.assertIn(plan_sha, home)
         page = exchange.render_page("SYNTHETIC")
-        self.assertIn("STOP FolderSync legacy", page)
+        self.assertIn("STOP VALIDAZIONE", page)
         self.assertIn("NON APPROVATA", page)
         self.assertIn(plan_sha, page)
         self.assertEqual(bridge.load_archive(), {})
@@ -1085,12 +1095,13 @@ process.stdout.write(JSON.stringify(posted));
     def _rt2_assert_private_stop(self, *, http=False, foldersync=False):
         """An unreadable private file is never a legitimate None."""
         import serve
-        with self.assertRaisesRegex(bridge.BridgeError, "STOP PERSISTENZA PRIVATA"):
+        with self.assertRaisesRegex(bridge.BridgeError, r"STOP (?:PERSISTENZA PRIVATA|DECISIONI)"):
             exchange.pending()
         home = serve.decision_home()
         gpt = exchange.render_page("SYNTHETIC")
         for ui in (home, gpt):
-            self.assertIn("STOP PERSISTENZA PRIVATA", ui)
+            self.assertTrue(
+                "STOP PERSISTENZA PRIVATA" in ui or "STOP DECISIONI" in ui, ui)
             self.assertNotIn("Proposta GPT: ASSENTE", ui)
             self.assertNotIn("Nessuna proposta ricevuta", ui)
             self.assertNotIn("NON APPROVATA", ui)
@@ -1098,7 +1109,8 @@ process.stdout.write(JSON.stringify(posted));
                 self.assertIn("STOP FolderSync legacy", ui)
         if http:
             for ui in self._rt2_http_gets().values():
-                self.assertIn("STOP PERSISTENZA PRIVATA", ui)
+                self.assertTrue(
+                "STOP PERSISTENZA PRIVATA" in ui or "STOP DECISIONI" in ui, ui)
                 self.assertNotIn("Nessuna proposta ricevuta", ui)
                 if foldersync:
                     self.assertIn("STOP FolderSync legacy", ui)
@@ -1528,7 +1540,11 @@ process.stdout.write(JSON.stringify(posted));
                 mock.patch.object(exchange.os, "lstat", side_effect=bad_lstat)):
             with self.assertRaises(bridge.BridgeError):
                 exchange.record_decision(payload)
-        self.assertEqual(exchange.decision_history(), [])
+        # Write-ahead witness survived the failed destination check:
+        # the transaction is uncertain and cannot become an empty history.
+        with self.assertRaisesRegex(exchange.DecisionContinuityError,
+                                    "STOP DECISIONI"):
+            exchange.decision_history()
         self.assertEqual(bridge.load_archive(), {})
 
     def test_rt33_rt3_race_two_processes_and_author_chain_still_safe(self):
@@ -1572,7 +1588,7 @@ process.stdout.write(JSON.stringify(posted));
             return real_stat(path, *args, **kwargs)
         with mock.patch.object(exchange.os, "stat", side_effect=fail):
             pages = self._rt2_http_gets()
-            self.assertIn("ARCHIVIO NON VERIFICABILE", pages["/"])
+            self.assertIn("STOP DECISIONI", pages["/"])
             self.assertIn("STOP ARCHIVIO DECISIONI", pages["/gpt"])
             for content in pages.values():
                 self.assertNotIn("APPROVATA · ARCHIVIO", content)
@@ -1689,6 +1705,290 @@ process.stdout.write(JSON.stringify(posted));
         self.assertEqual(final.read_bytes(), original_bytes)
         self.assertEqual(bridge.digest(exchange.pending()[0]), sha_a)
         self.assertEqual(bridge.load_archive(), {})
+
+
+    def _rt4_fork_confirm(self, sha):
+        import multiprocessing as mp
+        ctx = mp.get_context("fork")
+        out = ctx.Queue()
+        def worker():
+            try:
+                exchange.confirm(sha)
+                out.put(("SUCCESS", ""))
+            except bridge.BridgeError as exc:
+                out.put(("STOP", str(exc)))
+        proc = ctx.Process(target=worker)
+        proc.start()
+        try:
+            state, detail = out.get(timeout=10)
+            proc.join(timeout=10)
+            self.assertEqual(proc.exitcode, 0)
+            return state, detail
+        finally:
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=3)
+            out.close()
+            out.join_thread()
+
+    def _rt4_lost_event_history(self, state):
+        self.original.persist_origin()
+        a = self._candidate("RT4-A-" + state)
+        sha = exchange.receive(bridge.canonical(a))
+        exchange.record_decision(bridge.canonical({
+            "sha256": sha, "stato": state, "nota": "Scelta autore prima di perdita"}))
+        folder = bridge.PRIVATE_ROOT / bridge.INBOX / exchange.DECISION_EVENTS
+        saved = folder.with_name("decision_events_hidden_rt4")
+        folder.rename(saved)  # real directory disappearance, not a patch
+        result, message = self._rt4_fork_confirm(sha)
+        self.assertEqual(result, "STOP", message)
+        self.assertIn("STOP DECISIONI", message)
+        self.assertEqual(bridge.load_archive(), {})
+        folder.mkdir(mode=0o700)  # apparently clean but missing the history
+        result, message = self._rt4_fork_confirm(sha)
+        self.assertEqual(result, "STOP", message)
+        self.assertIn("STOP DECISIONI", message)
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt4_d1_rinviata_history_removed_restart_must_stop(self):
+        self._rt4_lost_event_history("RINVIATA")
+
+    def test_rt4_d1_rifiutata_history_removed_restart_must_stop(self):
+        self._rt4_lost_event_history("RIFIUTATA")
+
+    def test_rt4_d1_approved_archive_removed_then_empty_must_stop(self):
+        self.original.persist_origin()
+        a = self._candidate("RT4-APPROVED-A")
+        sha = exchange.receive(bridge.canonical(a))
+        self.assertEqual(exchange.confirm(sha)["stato"], "INSERITO")
+        # Synthetic next-session state: completed approval no longer occupies
+        # the incoming slot, so only historical continuity can block B.
+        (bridge.PRIVATE_ROOT / bridge.INBOX / exchange.INCOMING_NAME).unlink()
+        original = bridge.PRIVATE_ROOT / bridge.ARCHIVE
+        original.rename(original.with_name("approvals_hidden_rt4"))
+        with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+            exchange.receive(bridge.canonical(self._candidate("RT4-B")))
+        original.mkdir(mode=0o700)
+        with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+            exchange.record_decision(bridge.canonical({
+                "sha256": sha, "stato":"RIESAME", "nota":"Non consentire perdita"}))
+
+    def test_rt4_d1_deleted_witness_and_history_still_detected_by_anchor(self):
+        import shutil
+        self.original.persist_origin()
+        a = self._candidate("RT4-DOUBLE-DELETE")
+        sha = exchange.receive(bridge.canonical(a))
+        exchange.record_decision(bridge.canonical({
+            "sha256":sha, "stato":"RINVIATA", "nota":"Doppia cancellazione"}))
+        eventdir = bridge.PRIVATE_ROOT / bridge.INBOX / exchange.DECISION_EVENTS
+        shutil.rmtree(eventdir)
+        for f in (bridge.PRIVATE_ROOT / exchange._WITNESSES).glob("e-*.json"):
+            f.unlink()
+        with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+            exchange.confirm(sha)
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt4_d1_fresh_enrolled_reboot_and_transient_failure(self):
+        import errno
+        import os
+        self.assertEqual(exchange.decision_history(), [])
+        self.assertEqual(exchange._checked_approvals(), {})
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        root = bridge.PRIVATE_ROOT
+        real_open = os.open
+        enrollment = root / exchange._ENROLLMENT
+        def fault(path, *args, **kwargs):
+            if Path(path) == enrollment:
+                raise OSError(errno.EIO, "Transient enrollment EIO")
+            return real_open(path, *args, **kwargs)
+        with mock.patch.object(exchange.os, "open", side_effect=fault):
+            with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+                exchange.confirm(sha)
+        self.assertEqual(exchange.confirm(sha)["stato"], "INSERITO")
+        self.assertEqual(exchange._checked_approvals().keys(), {sha})
+        with self.assertRaises(bridge.BridgeError):
+            exchange.initialize_decision_continuity(
+                mode="NEW", acknowledgement="INIZIALIZZO_NUOVO_STORICO")
+
+    def test_rt4_d1_legacy_requires_explicit_reconciliation(self):
+        self.original.persist_origin()
+        a = self._candidate("RT4-LEGACY-A")
+        sha = exchange.receive(bridge.canonical(a))
+        exchange.record_decision(bridge.canonical({
+            "sha256":sha, "stato":"RINVIATA", "nota":"Legacy evidence"}))
+        root = bridge.PRIVATE_ROOT
+        (root / exchange._ENROLLMENT).rename(root / "saved-enrollment.old")
+        (root / exchange._WITNESSES).rename(root / "saved-witnesses.old")
+        with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+            exchange.confirm(sha)
+        with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+            exchange.initialize_decision_continuity(
+                mode="NEW", acknowledgement="INIZIALIZZO_NUOVO_STORICO")
+        with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+            exchange.initialize_decision_continuity(
+                mode="RECONCILE",
+                acknowledgement="RICONCILIO_STORICO_PRECEDENTE",
+                expected_sha256="0"*64)
+        # Only after an *independent* evidence check in a test fixture:
+        expected = exchange._continuity_snapshot(
+            exchange._history_unchecked(), exchange._approvals_unchecked())
+        result = exchange.initialize_decision_continuity(
+            mode="RECONCILE", acknowledgement="RICONCILIO_STORICO_PRECEDENTE",
+            expected_sha256=expected)
+        self.assertEqual(result["eventi"], 1)
+        with self.assertRaises(bridge.BridgeError):
+            exchange.confirm(sha)
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt4_d3_valid_foldersync_private_outbox_eio_is_private_domain(self):
+        import errno
+        import os
+        self.original.persist_origin()
+        shared = self.sync / exchange.INCOMING_NAME
+        shared.write_bytes(bridge.canonical(self.original.plan))
+        outbox = bridge.PRIVATE_ROOT / bridge.OUTBOX
+        real_open = os.open
+        def fault(path, *args, **kwargs):
+            if Path(path) == outbox:
+                raise OSError(errno.EIO, "Synthetic outbox EIO")
+            return real_open(path, *args, **kwargs)
+        with mock.patch.object(exchange.os, "open", side_effect=fault):
+            with self.assertRaises(bridge.BridgeError) as caught:
+                exchange.receive_synced()
+            self.assertEqual(getattr(caught.exception, "domain", None), "private")
+            pages = self._rt2_http_gets()
+            for body in pages.values():
+                self.assertIn("STOP PERSISTENZA PRIVATA", body)
+                self.assertNotIn("STOP FolderSync legacy", body)
+                self.assertNotIn("Proposta GPT: ASSENTE", body)
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt4_d3_valid_shared_origin_missing_bad_mode_corrupt_is_private(self):
+        import shutil
+        self.original.persist_origin()
+        (self.sync / exchange.INCOMING_NAME).write_bytes(
+            bridge.canonical(self.original.plan))
+        outbox = bridge.PRIVATE_ROOT / bridge.OUTBOX
+        source = outbox / (bridge.digest(self.original.bundle) + ".json")
+        for fault in ("mode", "corrupt", "absent"):
+            with self.subTest(fault=fault):
+                if fault == "mode":
+                    source.chmod(0o644)
+                elif fault == "corrupt":
+                    source.chmod(0o600)
+                    source.write_bytes(b'{"broken":')
+                else:
+                    shutil.rmtree(outbox)
+                try:
+                    with self.assertRaises(bridge.BridgeError) as caught:
+                        exchange.receive_synced()
+                    self.assertEqual(getattr(caught.exception, "domain", None), "private")
+                    html = exchange.render_page("TEST")
+                    self.assertIn("STOP PERSISTENZA PRIVATA", html)
+                    self.assertNotIn("STOP FolderSync legacy", html)
+                finally:
+                    outbox.mkdir(mode=0o700, exist_ok=True)
+                    source.write_bytes(bridge.canonical(self.original.bundle) + b"\n")
+                    source.chmod(0o600)
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt4_d3_separate_and_joint_errors_typed_no_fake_absence(self):
+        import errno
+        import os
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        source = self.sync / exchange.INCOMING_NAME
+        source.write_bytes(bridge.canonical(self.original.plan))
+        outbox = bridge.PRIVATE_ROOT / bridge.OUTBOX
+        real_open = os.open
+        def faults(path, *args, **kwargs):
+            if Path(path) in (source, outbox):
+                raise OSError(errno.EIO, "Synthetic FS/private EIO")
+            return real_open(path, *args, **kwargs)
+        with mock.patch.object(exchange.os, "open", side_effect=faults):
+            pages = self._rt2_http_gets()
+            for content in pages.values():
+                self.assertIn("STOP FolderSync legacy", content)
+                self.assertIn("STOP PERSISTENZA PRIVATA", content)
+                self.assertNotIn("NON APPROVATA", content)
+        self.assertEqual(bridge.load_archive(), {})
+
+        def only_folder(path, *args, **kwargs):
+            if Path(path) == source:
+                raise OSError(errno.EIO, "Shared EIO")
+            return real_open(path, *args, **kwargs)
+        with mock.patch.object(exchange.os, "open", side_effect=only_folder):
+            pages = self._rt2_http_gets()
+            for content in pages.values():
+                self.assertIn("STOP FolderSync legacy", content)
+                self.assertIn(sha, content)
+                self.assertIn("NON APPROVATA", content)
+                self.assertNotIn("STOP PERSISTENZA PRIVATA", content)
+
+    def test_rt4_d3_valid_folder_invalid_json_is_validation_domain(self):
+        self.original.persist_origin()
+        (self.sync / exchange.INCOMING_NAME).write_bytes(b'{invalid')
+        with self.assertRaises(bridge.BridgeError) as caught:
+            exchange.receive_synced()
+        self.assertEqual(getattr(caught.exception, "domain", None), "validation")
+        pages = self._rt2_http_gets()
+        for content in pages.values():
+            self.assertIn("STOP VALIDAZIONE", content)
+            self.assertNotIn("STOP FolderSync legacy", content)
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt4_h_interprocess_lock_and_uncertain_commit_regressions(self):
+        self.test_rt33_01_two_independent_processes_cannot_both_publish()
+
+
+    def test_rt4_d1_enrollment_missing_is_not_a_new_install(self):
+        self.original.persist_origin()
+        a = self._candidate("RT4-ALL-PROOFS-LOST")
+        sha = exchange.receive(bridge.canonical(a))
+        exchange.record_decision(bridge.canonical({
+            "sha256":sha, "stato":"RINVIATA", "nota":"Mancano prove"}))
+        import shutil
+        root = bridge.PRIVATE_ROOT
+        (root / exchange._ENROLLMENT).unlink()
+        shutil.rmtree(root / exchange._WITNESSES)
+        shutil.rmtree(root / bridge.INBOX / exchange.DECISION_EVENTS)
+        with self.assertRaisesRegex(exchange.DecisionContinuityError,
+                                    "STOP DECISIONI"):
+            exchange.confirm(sha)
+        with self.assertRaisesRegex(exchange.DecisionContinuityError,
+                                    "STOP DECISIONI"):
+            exchange.receive(bridge.canonical(self._candidate("RT4-LOST-B")))
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt4_d1_unfinished_witness_transaction_stops_authority(self):
+        import errno
+        import os
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        marker = bridge.PRIVATE_ROOT / exchange._ENROLLMENT
+        real_replace = os.replace
+        payload = bridge.canonical({"sha256": sha, "stato":"RINVIATA",
+                                    "nota":"Riserva prima di commit"})
+        def replace_then_error(source, target):
+            real_replace(source, target)
+            if Path(target) == marker:
+                raise OSError(errno.EIO, "Synthetic EIO after enrollment replace")
+        with mock.patch.object(exchange.os, "replace", side_effect=replace_then_error):
+            with self.assertRaises(bridge.PublicationUncertain):
+                exchange.record_decision(payload)
+        with self.assertRaisesRegex(exchange.DecisionContinuityError,
+                                    "STOP DECISIONI"):
+            exchange.confirm(sha)
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt4_d1_committed_approval_reloaded_in_fork(self):
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        self.assertEqual(exchange.confirm(sha)["stato"], "INSERITO")
+        status, detail = self._rt4_fork_confirm(sha)
+        self.assertEqual(status, "SUCCESS", detail)  # idempotent, no new order
+        self.assertEqual(set(exchange._checked_approvals()), {sha})
 
 
 if __name__ == "__main__":

@@ -246,20 +246,21 @@ def decision_home():
     # Read historical proposals without equating reception, approval and execution.
     proposal, proposal_state, proposal_sha, events = None, "ASSENTE", None, []
     proposal_bundle, author_events, author_ambiguous = None, [], False
-    legacy_sync_error = None
+    legacy_sync_error = sync_private_error = sync_validation_error = None
     try:
         from scripts import kdd_drive_exchange as exchange
         try:
             exchange.receive_synced()
-        except exchange.bridge.BridgeError as exc:
-            # A private STOP raised during sync ingestion is not itself
-            # a FolderSync error. The following private read exposes it.
-            if not str(exc).startswith((
-                    "STOP PERSISTENZA PRIVATA:", "STOP ARCHIVIO DECISIONI:",
-                    "STOP ARCHIVIO APPROVAZIONI:")):
-                legacy_sync_error = str(exc)
+        except exchange.FolderSyncError as exc:
+            legacy_sync_error = str(exc)
+        except exchange.PrivatePersistenceError as exc:
+            sync_private_error = str(exc)
+        except exchange.ProposalValidationError as exc:
+            sync_validation_error = str(exc)
+        except exchange.bridge.BridgeError:
+            sync_validation_error = "STOP VALIDAZIONE: ricezione KDD non verificabile"
         item = exchange.pending()
-        approved = exchange.bridge.load_archive()
+        approved = exchange._checked_approvals()
         events = exchange.decision_history()
         if item:
             candidate, proposal_bundle = item
@@ -283,9 +284,7 @@ def decision_home():
         # optional to diagnostic truth: an unreadable private file is not
         # an absent proposal. Keep it separate from any FolderSync STOP.
         proposal, proposal_state = None, (
-            "STOP PERSISTENZA PRIVATA · proposta non leggibile o non verificabile"
-            if isinstance(exc, ValueError)
-            and str(exc).startswith("STOP PERSISTENZA PRIVATA:")
+            str(exc) if isinstance(exc, exchange.PrivatePersistenceError)
             else "ARCHIVIO NON VERIFICABILE · STOP")
 
     # Deliberation controls GPT priorities; historical events are a separate
@@ -316,9 +315,22 @@ def decision_home():
             historical.append("</section>")
             author_history = "".join(historical)
 
+    if proposal is None and proposal_state == "ASSENTE":
+        if sync_private_error:
+            proposal_state = "STOP PERSISTENZA PRIVATA · ricezione non verificabile"
+        elif sync_validation_error:
+            proposal_state = "STOP VALIDAZIONE · proposta ricevuta non verificabile"
+        elif legacy_sync_error:
+            proposal_state = "STOP FolderSync · ingresso non verificabile"
     if legacy_sync_error:
         blocks.append("<p role='status'>STOP FolderSync legacy: "
                       + esc(legacy_sync_error) + ". Proposta privata conservata.</p>")
+    if sync_private_error:
+        blocks.append("<p role='status'>STOP PERSISTENZA PRIVATA: "
+                      + esc(sync_private_error) + "</p>")
+    if sync_validation_error:
+        blocks.append("<p role='status'>STOP VALIDAZIONE: "
+                      + esc(sync_validation_error) + "</p>")
 
     if report is None:
         blocks.append("<p>Proposta GPT: " + esc(proposal_state) +
