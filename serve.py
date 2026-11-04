@@ -259,7 +259,7 @@ def decision_home():
                     "STOP ARCHIVIO APPROVAZIONI:")):
                 legacy_sync_error = str(exc)
         item = exchange.pending()
-        approved = exchange._checked_approvals()
+        approved = exchange.bridge.load_archive()
         events = exchange.decision_history()
         if item:
             candidate, proposal_bundle = item
