@@ -1460,12 +1460,14 @@ process.stdout.write(JSON.stringify(posted));
         self.original.persist_origin()
         sha = exchange.receive(bridge.canonical(self.original.plan))
         root = self.sync
-        real_lstat = os.lstat
+        real_lstat = Path.lstat
         def broken(path, *args, **kwargs):
             if Path(path) == root:
                 raise OSError(errno.EIO, "FolderSync root EIO")
             return real_lstat(path, *args, **kwargs)
-        with mock.patch.object(exchange.os, "lstat", side_effect=broken):
+        # Mock the exact Path API used by receive_synced across Python 3.12/3.14:
+        # its internal os.stat/os.lstat dispatch is platform-dependent.
+        with mock.patch.object(Path, "lstat", autospec=True, side_effect=broken):
             with self.assertRaisesRegex(bridge.BridgeError, "FolderSync"):
                 exchange.receive_synced()
             for page in (serve.decision_home(), exchange.render_page("TOKEN")):
