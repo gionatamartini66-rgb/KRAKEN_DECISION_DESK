@@ -672,5 +672,126 @@ process.stdout.write(JSON.stringify(posted));
         self.assertIn("Riesame deciso dall autore", page)
 
 
+    def _chat_stage(self, proposal):
+        """Exact bytes sent by a chat transport, stored only in private Termux."""
+        import hashlib
+        raw = bridge.canonical(proposal) + b"\n"
+        file_sha = hashlib.sha256(raw).hexdigest()
+        folder = bridge.private_directory(bridge.INBOX, create=True)
+        path = folder / (".chat-" + file_sha + ".json")
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        return path, file_sha, bridge.digest(proposal)
+
+    def test_direct_chat_remote_receipt_appears_on_existing_home_without_approval(self):
+        import serve
+        from contextlib import redirect_stdout
+        import io
+        self.original.persist_origin()
+        path, byte_sha, proposal_sha = self._chat_stage(self.original.plan)
+        self.assertFalse(any(self.sync.iterdir()))  # FolderSync remains unused.
+        consent = "PUBBLICA_VERSIONE_" + proposal_sha
+        output = io.StringIO()
+        with redirect_stdout(output):
+            result = exchange.main([
+                "ricevi-chat", "--file-sha256", byte_sha,
+                "--proposta-sha256", proposal_sha,
+                "--consenso-pubblicazione", consent])
+        self.assertEqual(result, 0)
+        self.assertIn(proposal_sha, output.getvalue())
+        self.assertNotIn(self.original.plan["scenario"], output.getvalue())
+        self.assertEqual(bridge.digest(exchange.pending()[0]), proposal_sha)
+        self.assertEqual(bridge.load_archive(), {})
+        home = serve.decision_home()
+        self.assertIn(proposal_sha, home)
+        self.assertIn("IN ATTESA DI DECISIONE", home)
+        self.assertIn("NON APPROVATA", exchange.render_page("TOKEN"))
+        # Full existing KDD home over real local HTTP, not just a helper mock.
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+        (self.sync / "cruscotto.html").write_text(
+            "<html><body><h2>1 · Decisioni e posizioni</h2>"
+            "<p>KDD original remains visible</p></body></html>", encoding="utf-8")
+        with mock.patch.object(serve.desk, "DIR", self.sync):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                conn = http.client.HTTPConnection(
+                    "127.0.0.1", server.server_port, timeout=5)
+                conn.request("GET", "/", headers={"Host": "127.0.0.1:8765"})
+                response = conn.getresponse()
+                shown = response.read().decode("utf-8")
+                conn.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+        self.assertEqual(response.status, 200)
+        self.assertIn(proposal_sha, shown)
+        self.assertIn("IN ATTESA DI DECISIONE", shown)
+        self.assertIn("KDD original remains visible", shown)
+        self.assertEqual(exchange.receive_chat(byte_sha, proposal_sha, consent),
+                         proposal_sha)  # Same pending version is idempotent.
+        self.assertEqual(bridge.load_archive(), {})
+        self.assertTrue(path.is_file())  # Input retained for later forensic review.
+
+    def test_direct_chat_stops_without_consent_or_matching_two_digests(self):
+        self.original.persist_origin()
+        source, byte_sha, proposal_sha = self._chat_stage(self.original.plan)
+        consent = "PUBBLICA_VERSIONE_" + proposal_sha
+        for args in [
+            (byte_sha, proposal_sha, "NO"),
+            ("0"*64, proposal_sha, consent),
+            (byte_sha, "0"*64, consent),
+            ("../outside", proposal_sha, consent),
+        ]:
+            with self.subTest(args=args), self.assertRaises(bridge.BridgeError):
+                exchange.receive_chat(*args)
+        self.assertIsNone(exchange.pending())
+        self.assertEqual(bridge.load_archive(), {})
+        source.write_bytes(b'{"tampered":true}')
+        with self.assertRaisesRegex(bridge.BridgeError, "digest dei byte"):
+            exchange.receive_chat(byte_sha, proposal_sha, consent)
+        source.unlink()
+        source.symlink_to(self.original.home / "nonexistent.json")
+        with self.assertRaises(bridge.BridgeError):
+            exchange.receive_chat(byte_sha, proposal_sha, consent)
+        source.unlink()
+
+    def test_direct_chat_rejects_world_readable_and_unregistered_origin(self):
+        path, byte_sha, proposal_sha = self._chat_stage(self.original.plan)
+        consent = "PUBBLICA_VERSIONE_" + proposal_sha
+        with self.assertRaises(bridge.BridgeError):
+            exchange.receive_chat(byte_sha, proposal_sha, consent)
+        self.assertIsNone(exchange.pending())
+        self.original.persist_origin()
+        path.chmod(0o644)
+        with self.assertRaises(bridge.BridgeError):
+            exchange.receive_chat(byte_sha, proposal_sha, consent)
+        self.assertIsNone(exchange.pending())
+
+    def test_direct_chat_preserves_pending_version_and_rejected_replay(self):
+        self.original.persist_origin()
+        a = self._candidate("CHAT-A")
+        b = self._candidate("CHAT-B")
+        _, bytes_a, sha_a = self._chat_stage(a)
+        _, bytes_b, sha_b = self._chat_stage(b)
+        self.assertEqual(exchange.receive_chat(
+            bytes_a, sha_a, "PUBBLICA_VERSIONE_" + sha_a), sha_a)
+        with self.assertRaisesRegex(bridge.BridgeError, "attesa"):
+            exchange.receive_chat(bytes_b, sha_b, "PUBBLICA_VERSIONE_" + sha_b)
+        self.assertEqual(bridge.digest(exchange.pending()[0]), sha_a)
+        exchange.record_decision(bridge.canonical({
+            "sha256": sha_a, "stato": "RINVIATA", "nota": "Autore rinvia A"}))
+        self.assertEqual(exchange.receive_chat(
+            bytes_b, sha_b, "PUBBLICA_VERSIONE_" + sha_b), sha_b)
+        with self.assertRaises(bridge.BridgeError):
+            exchange.receive_chat(bytes_a, sha_a, "PUBBLICA_VERSIONE_" + sha_a)
+        self.assertEqual(bridge.digest(exchange.pending()[0]), sha_b)
+        self.assertEqual(bridge.load_archive(), {})
+
+
 if __name__ == "__main__":
     unittest.main()

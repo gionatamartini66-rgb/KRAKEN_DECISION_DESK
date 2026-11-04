@@ -2,6 +2,7 @@
 No remote API, Kraken order, automatic approval, or background synchronization.
 """
 from __future__ import annotations
+import argparse
 import hashlib
 import html
 import json
@@ -378,7 +379,7 @@ def render_page(token):
     if error:
         preview = "<p class='warn'>STOP: " + esc(error) + "</p>"
     elif item is None:
-        preview = "<p>Nessuna proposta importata da Drive.</p>"
+        preview = "<p>Nessuna proposta ricevuta dalla chat o da Drive.</p>"
     else:
         proposal, bundle = item
         state = bridge.read_context(bundle)
@@ -470,23 +471,27 @@ async function kddFile(){
                 "<p>Il riscontro è una dichiarazione dell'autore dopo il riesame, non una verifica autonoma di prezzi, ordini o risultati.</p>")
     return ("""<!doctype html><html lang="it"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>KDD · GPT e Drive</title><style>
+<title>KDD · GPT e archivio</title><style>
 body{max-width:900px;margin:auto;padding:18px;background:#0b1120;color:#e5edf9;
 font:16px/1.5 system-ui}article,section{background:#15223a;padding:15px;margin:12px 0;
 border-radius:10px}button,input{font:inherit;padding:10px;margin:6px}button{cursor:pointer}
 .warn{color:#fbbf24}a{color:#7dd3fc}details{margin:10px 0}
 </style></head><body><p><a href="/">Torna al KDD</a></p>
-<h1>Proposte GPT su Drive</h1>
-<section><h2>1 · Prepara dossier per GPT</h2><p>Il KDD prepara il documento,
-lo conserva come origine e lo copia nella cartella KDD_TEST_SAMSUNG utilizzata da FolderSync.
-FolderSync deve sincronizzare questa cartella verso Drive (configurazione Android dopo GO).</p><p>""" +
+<h1>Proposte GPT nel KDD</h1>
+<section><h2>1 · Fotografia KDD per la chat</h2><p>GPT può leggere la fotografia privata già identificata,
+tramite la connessione remota autorizzata, senza FolderSync. Il pulsante sotto
+prepara soltanto una COPIA per il vecchio percorso Drive/FolderSync: non serve
+per il circuito diretto e non pubblica una proposta.</p><p>""" +
         esc(latest_export()) +
         """</p><button onclick='kddSend("/gpt/prepara","","text/plain")'>
-Prepara per Drive</button></section>
-<section><h2>2 · Apri la proposta da Drive</h2><p>Quando la coppia FolderSync di ritorno sarà configurata con GO distinto,
-il file proposta_portafoglio.json arriverà nella cartella KDD_TEST_SAMSUNG.
-Il KDD lo acquisirà automaticamente già dalla home, senza scegliere o copiare JSON.
-La lettura NON approva la proposta. La sincronizzazione Android va collaudata a parte.</p>
+Prepara per Drive (legacy)</button></section>
+<section><h2>2 · Ricezione della proposta</h2><p>Con il consenso esplicito alla PUBBLICAZIONE in chat,
+GPT può consegnare la versione identificata direttamente a Termux tramite il
+ricevitore KDD: appare sulla home senza FolderSync o selettore file.
+La pubblicazione NON è approvazione, ordine o esecuzione.</p>
+<details><summary>Apri la proposta da Drive (legacy)</summary><p>FolderSync può ancora consegnare
+proposta_portafoglio.json nella cartella KDD_TEST_SAMSUNG, se configurato
+separatamente e collaudato. La lettura non approva la proposta.</p></details>
 <details><summary>Recupero manuale straordinario</summary>
 <input id="gpt-json" type="file" accept=".json,application/json">
 <button onclick="kddFile()">Importa da file locale</button></details>
@@ -513,3 +518,54 @@ def handle(action, raw):
             raise bridge.BridgeError("Conferma non valida")
         return "Decisione conservata nel KDD: " + confirm(obj["sha256"])["stato"]
     raise bridge.BridgeError("Azione non autorizzata")
+
+
+def receive_chat(file_sha256, proposal_sha256, publication_consent):
+    """Direct ChatGPT/Termux handoff through the EXISTING KDD receiver.
+
+    The chat transports exact bytes to the app-private incoming directory
+    through an explicitly authorised remote session, never through FolderSync.
+    A file/JSON digest pair is a consistency check, NOT chat authentication.
+    This imports a NON-APPROVED proposal; it does not call confirm().
+    """
+    if (not isinstance(file_sha256, str) or not bridge.HEX.fullmatch(file_sha256)
+            or not isinstance(proposal_sha256, str)
+            or not bridge.HEX.fullmatch(proposal_sha256)):
+        raise bridge.BridgeError("Chat: impronte SHA256 non valide")
+    if publication_consent != "PUBBLICA_VERSIONE_" + proposal_sha256:
+        raise bridge.BridgeError("Chat: consenso esplicito alla pubblicazione assente")
+    folder = bridge.private_directory(bridge.INBOX)
+    source = folder / (".chat-" + file_sha256 + ".json")
+    raw = bridge.read_regular(source, expected_parent=folder)
+    if hashlib.sha256(raw).hexdigest() != file_sha256:
+        raise bridge.BridgeError("Chat: digest dei byte non corrispondente")
+    proposal = bridge.strict_json(raw)
+    if bridge.digest(proposal) != proposal_sha256:
+        raise bridge.BridgeError("Chat: versione JSON non corrispondente")
+    # Single existing validator, replay/succession guard and private writer.
+    return receive(raw)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Ingresso diretto chat -> KDD, senza FolderSync né approvazione")
+    sub = parser.add_subparsers(dest="action", required=True)
+    incoming = sub.add_parser("ricevi-chat")
+    incoming.add_argument("--file-sha256", required=True)
+    incoming.add_argument("--proposta-sha256", required=True)
+    incoming.add_argument("--consenso-pubblicazione", required=True)
+    args = parser.parse_args(argv)
+    try:
+        sha = receive_chat(args.file_sha256, args.proposta_sha256,
+                           args.consenso_pubblicazione)
+        print("CHAT -> KDD: PUBBLICATA NON APPROVATA | versione:", sha)
+        return 0
+    except (bridge.BridgeError, OSError) as exc:
+        # Never echo proposal, timestamps, prices, balances or filesystem paths.
+        print("STOP CHAT -> KDD:", str(exc) if isinstance(exc, bridge.BridgeError)
+              else type(exc).__name__)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
