@@ -876,5 +876,169 @@ process.stdout.write(JSON.stringify(posted));
         self.assertEqual(bridge.load_archive(), {})
 
 
+    def test_rt33_01_two_independent_processes_cannot_both_publish(self):
+        """Real forked processes: forced overlap before rename, no mock locks."""
+        import multiprocessing as mp
+        import os
+        import time
+
+        self.original.persist_origin()
+        a, b = self._candidate("RT33-FORK-A"), self._candidate("RT33-FORK-B")
+        sha_a, sha_b = bridge.digest(a), bridge.digest(b)
+        self.assertNotEqual(sha_a, sha_b)
+        ctx = mp.get_context("fork")
+        start = ctx.Event()
+        out = ctx.Queue()
+
+        def worker(raw, start_gate, results):
+            # A wide, predictable race window *inside* the old unprotected
+            # transaction: both old processes would see an empty inbox.
+            actual_replace = os.replace
+
+            def slow_replace(source, target):
+                if Path(target).name == exchange.INCOMING_NAME:
+                    time.sleep(0.35)
+                return actual_replace(source, target)
+
+            with mock.patch.object(exchange.os, "replace", side_effect=slow_replace):
+                try:
+                    if not start_gate.wait(timeout=8):
+                        results.put(("STOP", "timeout"))
+                        return
+                    results.put(("PASS", exchange.receive(raw)))
+                except bridge.BridgeError as exc:
+                    results.put(("STOP", str(exc)))
+                except BaseException as exc:
+                    results.put(("ERROR", type(exc).__name__))
+
+        children = [
+            ctx.Process(target=worker, args=(bridge.canonical(plan), start, out))
+            for plan in (a, b)
+        ]
+        try:
+            for child in children:
+                child.start()
+            start.set()
+            outcomes = [out.get(timeout=12) for _ in children]
+            for child in children:
+                child.join(timeout=12)
+                self.assertEqual(child.exitcode, 0)
+        finally:
+            for child in children:
+                if child.is_alive():
+                    child.terminate()
+                    child.join(timeout=3)
+            out.close()
+            out.join_thread()
+        successful = [status for state, status in outcomes if state == "PASS"]
+        stopped = [status for state, status in outcomes if state == "STOP"]
+        self.assertEqual(len(successful), 1, outcomes)
+        self.assertEqual(len(stopped), 1, outcomes)
+        self.assertEqual(successful[0], bridge.digest(exchange.pending()[0]))
+        self.assertIn(successful[0], {sha_a, sha_b})
+        self.assertIn("attesa", stopped[0])
+        self.assertEqual(bridge.load_archive(), {})
+
+        # No hidden overwrite, even a later caller from a separate process.
+        rejected = b if successful[0] == sha_a else a
+        with self.assertRaisesRegex(bridge.BridgeError, "attesa"):
+            exchange.receive(bridge.canonical(rejected))
+        self.assertEqual(bridge.digest(exchange.pending()[0]), successful[0])
+
+    def test_rt33_02_eio_from_foldersync_does_not_mask_private_home_or_gpt(self):
+        import errno
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+        import serve
+
+        self.original.persist_origin()
+        proposal_sha = exchange.receive(bridge.canonical(self.original.plan))
+        source = self.sync / exchange.INCOMING_NAME
+        source.write_bytes(bridge.canonical(self._candidate("RT33-STALE")))
+        actual_lstat = Path.lstat
+
+        def error_for_synced(path, *args, **kwargs):
+            if Path(path) == source:
+                raise OSError(errno.EIO, "Injected EIO on synced file")
+            return actual_lstat(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "lstat", autospec=True, side_effect=error_for_synced):
+            with self.assertRaisesRegex(bridge.BridgeError, "FolderSync"):
+                exchange.receive_synced()
+            home = serve.decision_home()
+            gpt_page = exchange.render_page("SYNTHETIC")
+            self.assertIn(proposal_sha, home)
+            self.assertIn("IN ATTESA DI DECISIONE", home)
+            self.assertIn(proposal_sha, gpt_page)
+            self.assertIn("NON APPROVATA", gpt_page)
+            self.assertIn("STOP FolderSync legacy", home)
+            self.assertIn("STOP FolderSync legacy", gpt_page)
+            self.assertEqual(bridge.load_archive(), {})
+
+            # Exercise the actual HTTP handler on port 0, not only helpers.
+            (self.sync / "cruscotto.html").write_text(
+                "<html><body><h2>1 · Decisioni e posizioni</h2>"
+                "<p>Intact original home</p></body></html>", encoding="utf-8")
+            with mock.patch.object(serve.desk, "DIR", self.sync):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    for endpoint in ("/", "/gpt"):
+                        conn = http.client.HTTPConnection(
+                            "127.0.0.1", server.server_port, timeout=5)
+                        conn.request("GET", endpoint,
+                                     headers={"Host": "127.0.0.1:8765"})
+                        response = conn.getresponse()
+                        page = response.read().decode("utf-8")
+                        conn.close()
+                        self.assertEqual(response.status, 200, endpoint)
+                        self.assertIn(proposal_sha, page)
+                        self.assertIn("STOP FolderSync legacy", page)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=3)
+        self.assertEqual(bridge.digest(exchange.pending()[0]), proposal_sha)
+
+    def test_rt33_02_eio_from_open_or_legacy_status_is_contained(self):
+        import errno
+        import os
+        import serve
+
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        source = self.sync / exchange.INCOMING_NAME
+        source.write_bytes(bridge.canonical(self._candidate("RT33-OPEN-EIO")))
+        actual_open = os.open
+
+        def error_on_open(path, *args, **kwargs):
+            if Path(path) == source:
+                raise OSError(errno.EIO, "Injected open error")
+            return actual_open(path, *args, **kwargs)
+
+        with mock.patch.object(exchange.os, "open", side_effect=error_on_open):
+            self.assertIn(sha, serve.decision_home())
+            self.assertIn(sha, exchange.render_page("TOKEN"))
+            self.assertIn("STOP FolderSync legacy", exchange.render_page("TOKEN"))
+
+        source.unlink()
+        actual_iterdir = Path.iterdir
+
+        def error_on_listing(path, *args, **kwargs):
+            if Path(path) == self.sync:
+                raise OSError(errno.EIO, "Injected listing error")
+            return actual_iterdir(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "iterdir", autospec=True,
+                               side_effect=error_on_listing):
+            page = exchange.render_page("TOKEN")
+            self.assertIn(sha, page)
+            self.assertIn("STOP FolderSync: archivio condiviso", page)
+            self.assertIn(sha, serve.decision_home())
+        self.assertEqual(bridge.load_archive(), {})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,6 +3,7 @@ No remote API, Kraken order, automatic approval, or background synchronization.
 """
 from __future__ import annotations
 import argparse
+import contextlib
 import hashlib
 import html
 import json
@@ -16,7 +17,21 @@ from scripts import kdd_bridge_g2 as bridge
 EXCHANGE_ROOT = Path("/storage/emulated/0/KDD_TEST_SAMSUNG")
 INCOMING_NAME = "proposta_portafoglio.json"
 EXPORT_NAME = re.compile(r"kdd_handoff_[0-9a-f]{64}\.json\Z")
-_DECISION_LOCK = threading.RLock()  # one KDD server, concurrent HTTP requests
+_DECISION_LOCK = threading.RLock()  # coordinates threads; flock coordinates processes
+
+
+@contextlib.contextmanager
+def _decision_writer():
+    """One read/decide/commit gate shared by HTTP, CLI and FolderSync workers.
+
+    Lock order: process-local RLock -> inbox flock -> (if needed) bridge
+    approvals flock. Reuse the private, owner-only bridge lock primitive.
+    Every writer of the current proposal or its decision must use this gate.
+    """
+    with _DECISION_LOCK:
+        inbox = bridge.private_directory(bridge.INBOX, create=True)
+        with bridge._archive_write_lock(inbox):
+            yield
 
 
 def export_bundle(bundle):
@@ -116,7 +131,7 @@ def _approved_head(approved):
 
 def receive(raw):
     """Validate and import a new version without losing a still-pending choice."""
-    with _DECISION_LOCK:
+    with _decision_writer():
         return _receive_locked(raw)
 
 
@@ -172,30 +187,35 @@ def _receive_locked(raw):
 def receive_synced():
     """Read the local FolderSync file. It may remain or return after decision."""
     source = EXCHANGE_ROOT / INCOMING_NAME
-    if not EXCHANGE_ROOT.is_dir() or EXCHANGE_ROOT.is_symlink():
-        return None
-    if not source.exists() and not source.is_symlink():
-        return None
-    import stat
-    info = source.lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_size > bridge.MAX_BYTES:
-        raise bridge.BridgeError("Proposta FolderSync non regolare")
-    fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    # Only the external/shared-storage read is translated to a recoverable
+    # FolderSync STOP. Errors in the private commit must never be hidden here.
     try:
-        opened = os.fstat(fd)
-        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
-            raise bridge.BridgeError("Proposta FolderSync sostituita")
-        with os.fdopen(fd, "rb", closefd=False) as stream:
-            raw = stream.read(bridge.MAX_BYTES + 1)
-        if len(raw) > bridge.MAX_BYTES:
-            raise bridge.BridgeError("Proposta FolderSync troppo grande")
-    finally:
-        os.close(fd)
+        if not EXCHANGE_ROOT.is_dir() or EXCHANGE_ROOT.is_symlink():
+            return None
+        if not source.exists() and not source.is_symlink():
+            return None
+        import stat
+        info = source.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > bridge.MAX_BYTES:
+            raise bridge.BridgeError("Proposta FolderSync non regolare")
+        fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                raise bridge.BridgeError("Proposta FolderSync sostituita")
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                raw = stream.read(bridge.MAX_BYTES + 1)
+            if len(raw) > bridge.MAX_BYTES:
+                raise bridge.BridgeError("Proposta FolderSync troppo grande")
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise bridge.BridgeError("FolderSync: errore di lettura filesystem; STOP") from exc
     # A known, already decided version may be stale when FolderSync copies it
     # back. Recognize its exact content digest before freshness validation.
     proposal = bridge.strict_json(raw)
     sha = bridge.digest(proposal)
-    with _DECISION_LOCK:
+    with _decision_writer():
         approved = bridge.load_archive()
         events = decision_history()
         if sha in approved or any(e["versione_sha256"] == sha for e in events):
@@ -216,7 +236,7 @@ def pending():
 
 
 def confirm(sha):
-    with _DECISION_LOCK:
+    with _decision_writer():
         item = pending()
         if item is None:
             raise bridge.BridgeError("Nessuna proposta in attesa")
@@ -229,13 +249,17 @@ def confirm(sha):
         return bridge.approved_import(proposal, bundle, sha, "APPROVO_VERSIONE")
 
 def latest_export():
-    if EXCHANGE_ROOT.is_symlink() or not EXCHANGE_ROOT.is_dir():
-        return "Cartella di FolderSync non accessibile."
-    files = [p for p in EXCHANGE_ROOT.iterdir()
-             if EXPORT_NAME.fullmatch(p.name) and p.is_file() and not p.is_symlink()]
-    if not files:
-        return "Nessun dossier pronto per FolderSync."
-    return "Ultimo dossier pronto: " + max(files, key=lambda p: p.stat().st_mtime).name
+    try:
+        if EXCHANGE_ROOT.is_symlink() or not EXCHANGE_ROOT.is_dir():
+            return "Cartella di FolderSync non accessibile."
+        files = [p for p in EXCHANGE_ROOT.iterdir()
+                 if EXPORT_NAME.fullmatch(p.name) and p.is_file() and not p.is_symlink()]
+        if not files:
+            return "Nessun dossier pronto per FolderSync."
+        return "Ultimo dossier pronto: " + max(files, key=lambda p: p.stat().st_mtime).name
+    except OSError:
+        # Optional legacy status must not take the private proposal view down.
+        return "STOP FolderSync: archivio condiviso non leggibile."
 
 
 DECISION_EVENTS = "decision_events"
@@ -326,7 +350,7 @@ def decision_history():
 
 def record_decision(raw):
     """Persist one dated human statement, distinct from an actual Kraken trade."""
-    with _DECISION_LOCK:
+    with _decision_writer():
         obj = bridge.strict_json(raw)
         if not isinstance(obj, dict) or set(obj) != {"sha256", "stato", "nota"}:
             raise bridge.BridgeError("Decisione non valida")
@@ -498,24 +522,26 @@ font:16px/1.5 system-ui}article,section{background:#15223a;padding:15px;margin:1
 border-radius:10px}button,input{font:inherit;padding:10px;margin:6px}button{cursor:pointer}
 .warn{color:#fbbf24}a{color:#7dd3fc}details{margin:10px 0}
 </style></head><body><p><a href="/">Torna al KDD</a></p>
-<h1>Proposte GPT nel KDD</h1>
-<section><h2>1 · Fotografia KDD per la chat</h2><p>Prepara una fotografia privata
-identificata e verificabile da GPT tramite un connettore remoto autorizzato.
-Il KDD non la invia autonomamente alla chat: il trasporto richiede un connettore
-attivo in questa sessione e la sua disponibilità va verificata.</p>
-<button onclick='kddSend("/gpt/prepara-chat","","text/plain")'>
-Prepara fotografia per chat (senza Drive)</button>
-<details><summary>Prepara copia per Drive / FolderSync (legacy)</summary><p>""" +
+<h1>Proposte GPT · Drive e FolderSync</h1>
+<section><h2>1 · Prepara la fotografia KDD per Drive</h2><p>Il KDD conserva
+l'origine privata verificabile ed esporta una copia nella cartella FolderSync.
+Il trasporto previsto è KDD ↔ FolderSync ↔ Google Drive ↔ ChatGPT;
+la disponibilità della sincronizzazione non è attestata da questo pulsante.</p><p>""" +
         esc(latest_export()) +
         """</p><button onclick='kddSend("/gpt/prepara","","text/plain")'>
-Prepara per Drive (legacy)</button></details></section>
-<section><h2>2 · Ricezione della proposta</h2><p>Con il consenso esplicito alla PUBBLICAZIONE in chat,
-GPT può consegnare la versione identificata direttamente a Termux tramite il
-ricevitore KDD: appare sulla home senza FolderSync o selettore file.
-La pubblicazione NON è approvazione, ordine o esecuzione.</p>
-<details><summary>Apri la proposta da Drive (legacy)</summary><p>FolderSync può ancora consegnare
-proposta_portafoglio.json nella cartella KDD_TEST_SAMSUNG, se configurato
-separatamente e collaudato. La lettura non approva la proposta.</p></details>
+Prepara per Drive / FolderSync</button>
+<details><summary>Diagnostica locale (non trasporto operativo)</summary><p>
+La preparazione privata senza Drive è destinata a sviluppo e controprove.
+Desktop Commander non è un requisito di esercizio del KDD.</p>
+<button onclick='kddSend("/gpt/prepara-chat","","text/plain")'>
+Prepara fotografia privata di prova</button></details></section>
+<section><h2>2 · Ricezione della proposta da Drive</h2><p>FolderSync
+deposita proposta_portafoglio.json nella cartella KDD_TEST_SAMSUNG;
+il KDD controlla origine, integrità e versione prima di presentarla.
+La ricezione NON approva, NON invia ordini e NON esegue operazioni.</p>
+<details><summary>Apri la proposta da Drive (legacy)</summary><p>La sincronizzazione
+deve essere configurata e verificata separatamente. Se il file non è leggibile
+il KDD segnala STOP e conserva visibile la proposta privata già valida.</p></details>
 <details><summary>Recupero manuale straordinario</summary>
 <input id="gpt-json" type="file" accept=".json,application/json">
 <button onclick="kddFile()">Importa da file locale</button></details>
