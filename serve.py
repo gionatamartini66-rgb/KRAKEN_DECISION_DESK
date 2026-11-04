@@ -246,9 +246,15 @@ def decision_home():
     # Read historical proposals without equating reception, approval and execution.
     proposal, proposal_state, proposal_sha, events = None, "ASSENTE", None, []
     proposal_bundle, author_events, author_ambiguous = None, [], False
+    legacy_sync_error = None
     try:
         from scripts import kdd_drive_exchange as exchange
-        exchange.receive_synced()
+        try:
+            exchange.receive_synced()
+        except exchange.bridge.BridgeError as exc:
+            # Report broken FolderSync input without masking a valid direct
+            # chat receipt already present in the private KDD inbox.
+            legacy_sync_error = str(exc)
         item = exchange.pending()
         approved = exchange.bridge.load_archive()
         events = exchange.decision_history()
@@ -299,6 +305,10 @@ def decision_home():
                     " · " + esc(event["nota"]) + "</p>")
             historical.append("</section>")
             author_history = "".join(historical)
+
+    if legacy_sync_error:
+        blocks.append("<p role='status'>STOP FolderSync legacy: "
+                      + esc(legacy_sync_error) + ". Proposta privata conservata.</p>")
 
     if report is None:
         blocks.append("<p>Proposta GPT: " + esc(proposal_state) +
@@ -616,7 +626,7 @@ def with_controls(page: str, result: str = "") -> str:
         f"type='submit'{disabled}>↻ Aggiorna dati ora</button>"
         "</form><p><a style='font-weight:700;color:#8aceff' href='/mercati/spot'>"
         "🌐 Seleziona coppia Kraken Spot · grafici 15m / 1H / 4H / 1D</a></p>"
-        "<p><a href='/gpt'>📄 Proposte GPT su Drive</a></p>" 
+        "<p><a href='/gpt'>📄 Proposte GPT nel KDD</a></p>"
         "<p>Server solo su questo Samsung · prezzi pubblici · nessun ordine.</p>"
         f"<p id='kdd-refresh-status' role='status'>{html.escape(message)}</p>"
         "</section>"
@@ -1338,7 +1348,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.check_host():
             return
         path = urllib.parse.urlsplit(self.path).path
-        if path in ("/gpt/prepara", "/gpt/ricevi", "/gpt/conferma", "/gpt/decisione"):
+        if path in ("/gpt/prepara", "/gpt/prepara-chat", "/gpt/ricevi", "/gpt/conferma", "/gpt/decisione"):
             if not hmac.compare_digest(self.headers.get("X-KDD-Token", ""), TOKEN):
                 self.send_error(403, "Verifica richiesta non riuscita")
                 return

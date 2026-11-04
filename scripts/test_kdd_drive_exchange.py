@@ -793,5 +793,88 @@ process.stdout.write(JSON.stringify(posted));
         self.assertEqual(bridge.load_archive(), {})
 
 
+    def test_direct_chat_outbound_private_cli_and_legacy_separate(self):
+        """One real KDD-origin writer, no FolderSync or patrimonial stdout."""
+        import io
+        from contextlib import redirect_stdout
+        with mock.patch.object(bridge, "prepare", return_value=self.original.bundle):
+            path, origin_sha, snapshot_sha = exchange.prepare_chat()
+            self.assertEqual(origin_sha, bridge.digest(self.original.bundle))
+            self.assertEqual(snapshot_sha, self.original.bundle["packet_sha256"])
+            self.assertEqual(path.read_bytes(), bridge.canonical(self.original.bundle) + b"\n")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertFalse(any(self.sync.iterdir()))
+            self.assertEqual(exchange.handle("prepara-chat", b"" ).count(str(path)), 1)
+            with self.assertRaises(bridge.BridgeError):
+                exchange.handle("prepara-chat", b"unexpected")
+            out = io.StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(exchange.main(["prepara-chat"]), 0)
+        self.assertIn(str(path), out.getvalue())
+        self.assertIn(origin_sha, out.getvalue())
+        self.assertIn("NON ATTESTATO", out.getvalue())
+        self.assertNotIn(self.original.bundle["packet"]["patrimonio"]["posizioni"][0]["token"], out.getvalue())
+        self.assertEqual(bridge.verify_local_origin(self.original.bundle), origin_sha)
+        self.assertEqual(bridge.load_archive(), {})
+        self.assertFalse(any(self.sync.iterdir()))
+
+    def test_direct_chat_outbound_http_requires_csrf_and_shares_no_drive_copy(self):
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+        import serve
+        server = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 1)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        def call(method, target, body=b"", token=None):
+            conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+            headers = {"Host": "127.0.0.1:8765"}
+            if token is not None:
+                headers["X-KDD-Token"] = token
+            conn.request(method, target, body=body, headers=headers)
+            response = conn.getresponse()
+            result = (response.status, response.read().decode("utf-8"))
+            conn.close()
+            return result
+
+        status, page = call("GET", "/gpt")
+        self.assertEqual(status, 200)
+        self.assertIn("/gpt/prepara-chat", page)
+        status, _ = call("POST", "/gpt/prepara-chat", token="WRONG")
+        self.assertEqual(status, 403)
+        status, _ = call("POST", "/gpt/prepara-chat", body=b"not-empty", token=serve.TOKEN)
+        self.assertEqual(status, 422)
+        with mock.patch.object(bridge, "prepare", return_value=self.original.bundle):
+            status, msg = call("POST", "/gpt/prepara-chat", token=serve.TOKEN)
+        self.assertEqual(status, 200, msg)
+        self.assertIn("nessun invio automatico", msg)
+        self.assertEqual(bridge.verify_local_origin(self.original.bundle),
+                         bridge.digest(self.original.bundle))
+        self.assertFalse(any(self.sync.iterdir()))
+        self.assertEqual(bridge.load_archive(), {})
+
+
+    def test_direct_chat_not_hidden_by_corrupt_legacy_foldersync_input(self):
+        import serve
+        self.original.persist_origin()
+        _, file_sha, plan_sha = self._chat_stage(self.original.plan)
+        self.assertEqual(exchange.receive_chat(
+            file_sha, plan_sha, "PUBBLICA_VERSIONE_" + plan_sha), plan_sha)
+        (self.sync / exchange.INCOMING_NAME).write_bytes(b'{"broken":')
+        home = serve.decision_home()
+        self.assertIn("STOP FolderSync legacy", home)
+        self.assertIn("IN ATTESA DI DECISIONE", home)
+        self.assertIn(plan_sha, home)
+        page = exchange.render_page("SYNTHETIC")
+        self.assertIn("STOP FolderSync legacy", page)
+        self.assertIn("NON APPROVATA", page)
+        self.assertIn(plan_sha, page)
+        self.assertEqual(bridge.load_archive(), {})
+
+
 if __name__ == "__main__":
     unittest.main()

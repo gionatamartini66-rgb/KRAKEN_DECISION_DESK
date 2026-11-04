@@ -51,7 +51,8 @@ def export_bundle(bundle):
     return name
 
 
-def prepare_export():
+def _prepare_private_origin():
+    """One canonical producer/validator for either direct chat or legacy Drive."""
     original = bridge.prepare()
     outgoing = bridge.private_directory(bridge.OUTBOX, create=True)
     name = bridge.digest(original) + ".json"
@@ -59,6 +60,17 @@ def prepare_export():
     if status not in ("INSERITO", "GIA_PRESENTE"):
         raise bridge.BridgeError("Fotografia originale non confermata")
     bridge.verify_local_origin(original)
+    return original, outgoing / name
+
+
+def prepare_chat():
+    """KDD -> chat: owner-only retained source, NEVER shared to FolderSync."""
+    original, path = _prepare_private_origin()
+    return path, bridge.digest(original), original["packet_sha256"]
+
+
+def prepare_export():
+    original, _ = _prepare_private_origin()
     return export_bundle(original)
 
 
@@ -370,8 +382,14 @@ def record_decision(raw):
 
 def render_page(token):
     esc = lambda s: html.escape(str(s), quote=True)
+    sync_error = None
     try:
         receive_synced()
+    except bridge.BridgeError as exc:
+        # Legacy sync is an independent transport; it cannot hide a valid
+        # privately received chat proposal. Still show its STOP explicitly.
+        sync_error = str(exc)
+    try:
         item = pending()
         error = None
     except bridge.BridgeError as exc:
@@ -408,6 +426,9 @@ def render_page(token):
                    "<button onclick='kddSend(\"/gpt/conferma\",JSON.stringify({sha256:" +
                    json.dumps(sha) +
                    "}),\"application/json\")'>Confermo questa versione nel KDD</button>")
+    if sync_error:
+        preview = ("<p class='warn'>STOP FolderSync legacy: "
+                   + esc(sync_error) + "</p>" + preview)
     if item is not None and not error and (already_approved or declined):
         preview = preview.split("<button onclick=", 1)[0]
     try:
@@ -439,7 +460,7 @@ async function kddSend(path,body,kind){
   const r=await fetch(path,{method:'POST',headers:{'X-KDD-Token':KDD_TOKEN,
    'Content-Type':kind},body:body});
   status.textContent=await r.text();
-  if(r.ok) setTimeout(()=>location.reload(),1200);
+  if(r.ok && path!=="/gpt/prepara-chat") setTimeout(()=>location.reload(),1200);
  } catch(e) { status.textContent='KDD locale non raggiungibile.'; }
 }
 function kddDecision(sha){
@@ -478,13 +499,16 @@ border-radius:10px}button,input{font:inherit;padding:10px;margin:6px}button{curs
 .warn{color:#fbbf24}a{color:#7dd3fc}details{margin:10px 0}
 </style></head><body><p><a href="/">Torna al KDD</a></p>
 <h1>Proposte GPT nel KDD</h1>
-<section><h2>1 · Fotografia KDD per la chat</h2><p>GPT può leggere la fotografia privata già identificata,
-tramite la connessione remota autorizzata, senza FolderSync. Il pulsante sotto
-prepara soltanto una COPIA per il vecchio percorso Drive/FolderSync: non serve
-per il circuito diretto e non pubblica una proposta.</p><p>""" +
+<section><h2>1 · Fotografia KDD per la chat</h2><p>Prepara una fotografia privata
+identificata e verificabile da GPT tramite un connettore remoto autorizzato.
+Il KDD non la invia autonomamente alla chat: il trasporto richiede un connettore
+attivo in questa sessione e la sua disponibilità va verificata.</p>
+<button onclick='kddSend("/gpt/prepara-chat","","text/plain")'>
+Prepara fotografia per chat (senza Drive)</button>
+<details><summary>Prepara copia per Drive / FolderSync (legacy)</summary><p>""" +
         esc(latest_export()) +
         """</p><button onclick='kddSend("/gpt/prepara","","text/plain")'>
-Prepara per Drive (legacy)</button></section>
+Prepara per Drive (legacy)</button></details></section>
 <section><h2>2 · Ricezione della proposta</h2><p>Con il consenso esplicito alla PUBBLICAZIONE in chat,
 GPT può consegnare la versione identificata direttamente a Termux tramite il
 ricevitore KDD: appare sulla home senza FolderSync o selettore file.
@@ -506,6 +530,13 @@ def handle(action, raw):
         if raw:
             raise bridge.BridgeError("Preparazione: dati inattesi")
         return "Dossier pronto per FolderSync: " + prepare_export()
+    if action == "prepara-chat":
+        if raw:
+            raise bridge.BridgeError("Preparazione chat: dati inattesi")
+        path, origin_sha, snapshot_sha = prepare_chat()
+        return ("Fotografia KDD privata per chat; nessun invio automatico. "
+                "Percorso: " + str(path) + " | origine: " + origin_sha
+                + " | snapshot: " + snapshot_sha)
     if action == "ricevi":
         return "Proposta valida, NON approvata. Versione: " + receive(raw)
     if action == "decisione":
@@ -550,12 +581,19 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Ingresso diretto chat -> KDD, senza FolderSync né approvazione")
     sub = parser.add_subparsers(dest="action", required=True)
+    sub.add_parser("prepara-chat")
     incoming = sub.add_parser("ricevi-chat")
     incoming.add_argument("--file-sha256", required=True)
     incoming.add_argument("--proposta-sha256", required=True)
     incoming.add_argument("--consenso-pubblicazione", required=True)
     args = parser.parse_args(argv)
     try:
+        if args.action == "prepara-chat":
+            path, origin_sha, snapshot_sha = prepare_chat()
+            print("KDD -> CHAT: FOTOGRAFIA PRIVATA PRONTA | file:", path)
+            print("ORIGINE_SHA256:", origin_sha, "| SNAPSHOT_SHA256:", snapshot_sha)
+            print("TRASPORTO_CHAT: NON ATTESTATO | nessun invio automatico")
+            return 0
         sha = receive_chat(args.file_sha256, args.proposta_sha256,
                            args.consenso_pubblicazione)
         print("CHAT -> KDD: PUBBLICATA NON APPROVATA | versione:", sha)
