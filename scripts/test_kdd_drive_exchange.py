@@ -1326,5 +1326,368 @@ process.stdout.write(JSON.stringify(posted));
         self.test_rt33_01_two_independent_processes_cannot_both_publish()
 
 
+    def test_rt33_rt3_d1_missing_event_directory_is_genuinely_empty(self):
+        self.original.persist_origin()
+        a = self._candidate("RT3-NO-EVENT")
+        sha = exchange.receive(bridge.canonical(a))
+        self.assertEqual(exchange.decision_history(), [])
+        self.assertEqual(exchange.confirm(sha)["stato"], "INSERITO")
+        self.assertEqual(len(bridge.load_archive()), 1)
+
+    def test_rt33_rt3_d1_eio_stat_hides_prior_rinvio_without_guard(self):
+        """3.14 Path.exists may mask EIO, but prior human decision must not vanish."""
+        import errno
+        import os
+        self.original.persist_origin()
+        a = self._candidate("RT3-D1-A")
+        b = self._candidate("RT3-D1-B")
+        sha = exchange.receive(bridge.canonical(a))
+        payload = bridge.canonical({"sha256": sha, "stato": "RINVIATA",
+                                    "nota": "Rinviata prima del guasto eventi"})
+        self.assertEqual(exchange.record_decision(payload), "INSERITO")
+        folder = bridge.PRIVATE_ROOT / bridge.INBOX / exchange.DECISION_EVENTS
+        actual_stat = os.stat
+        def eio_stat(path, *args, **kwargs):
+            if Path(path) == folder:
+                raise OSError(errno.EIO, "EIO synthetic event metadata")
+            return actual_stat(path, *args, **kwargs)
+
+        with mock.patch.object(exchange.os, "stat", side_effect=eio_stat):
+            for action in (lambda: exchange.confirm(sha),
+                           lambda: exchange.receive(bridge.canonical(b)),
+                           lambda: exchange.record_decision(payload)):
+                with self.assertRaisesRegex(bridge.BridgeError,
+                                            "STOP ARCHIVIO DECISIONI"):
+                    action()
+        self.assertEqual(bridge.load_archive(), {})
+        self.assertEqual(bridge.digest(exchange.pending()[0]), sha)
+        self.assertEqual(len(exchange.decision_history()), 1)
+
+    def test_rt33_rt3_d1_event_directory_open_fstat_and_iter_eio(self):
+        import errno
+        import os
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        exchange.record_decision(bridge.canonical(
+            {"sha256":sha, "stato":"RIFIUTATA", "nota":"Stop storico"}))
+        folder = bridge.PRIVATE_ROOT / bridge.INBOX / exchange.DECISION_EVENTS
+        actual_open, actual_fstat = os.open, os.fstat
+        actual_iterdir = Path.iterdir
+        directory_inode = folder.stat()
+
+        def bad_open(path, *args, **kwargs):
+            if Path(path) == folder:
+                raise OSError(errno.EIO, "EIO event directory open")
+            return actual_open(path, *args, **kwargs)
+        def bad_fstat(fd, *args, **kwargs):
+            current = actual_fstat(fd, *args, **kwargs)
+            if (current.st_dev, current.st_ino) == (directory_inode.st_dev,
+                                                      directory_inode.st_ino):
+                raise OSError(errno.EIO, "EIO event directory fstat")
+            return current
+        def bad_iter(path, *args, **kwargs):
+            if Path(path) == folder:
+                raise OSError(errno.EIO, "EIO event directory enumeration")
+            return actual_iterdir(path, *args, **kwargs)
+
+        for method, fault in (("open", bad_open), ("fstat", bad_fstat)):
+            with self.subTest(method=method), mock.patch.object(
+                    exchange.os, method, side_effect=fault):
+                with self.assertRaisesRegex(bridge.BridgeError, "STOP ARCHIVIO DECISIONI"):
+                    exchange.confirm(sha)
+        with mock.patch.object(Path, "iterdir", autospec=True, side_effect=bad_iter):
+            with self.assertRaisesRegex(bridge.BridgeError, "STOP ARCHIVIO DECISIONI"):
+                exchange.confirm(sha)
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt33_rt3_d2_stat_eio_cannot_replace_undecided_a_with_b(self):
+        import errno
+        import os
+        self.original.persist_origin()
+        a, b = self._candidate("RT3-D2-A"), self._candidate("RT3-D2-B")
+        sha = exchange.receive(bridge.canonical(a))
+        final = bridge.PRIVATE_ROOT / bridge.INBOX / exchange.INCOMING_NAME
+        before = final.read_bytes()
+        real_stat = os.stat
+        def bad_stat(path, *args, **kwargs):
+            if Path(path) == final:
+                raise OSError(errno.EIO, "EIO proposal stat")
+            return real_stat(path, *args, **kwargs)
+        with mock.patch.object(exchange.os, "stat", side_effect=bad_stat):
+            with self.assertRaises(bridge.BridgeError):
+                exchange.receive(bridge.canonical(b))
+        self.assertEqual(final.read_bytes(), before)
+        self.assertEqual(bridge.digest(exchange.pending()[0]), sha)
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt33_rt3_d2_lstat_eio_symlink_and_stale_replay(self):
+        import errno
+        import os
+        self.original.persist_origin()
+        a, b = self._candidate("RT3-D2-LSTA"), self._candidate("RT3-D2-LSTB")
+        sha = exchange.receive(bridge.canonical(a))
+        final = bridge.PRIVATE_ROOT / bridge.INBOX / exchange.INCOMING_NAME
+        before = final.read_bytes()
+        real_lstat = os.lstat
+        def bad_lstat(path, *args, **kwargs):
+            if Path(path) == final:
+                raise OSError(errno.EIO, "EIO proposal lstat")
+            return real_lstat(path, *args, **kwargs)
+        with mock.patch.object(exchange.os, "lstat", side_effect=bad_lstat):
+            with self.assertRaises(bridge.BridgeError):
+                exchange.receive(bridge.canonical(b))
+        self.assertEqual(final.read_bytes(), before)
+        final.unlink()
+        target = self.original.home / "RT3-target.json"
+        target.write_bytes(before)
+        final.symlink_to(target)
+        with self.assertRaises(bridge.BridgeError):
+            exchange.receive(bridge.canonical(b))
+        final.unlink()
+        final.write_bytes(before)
+        final.chmod(0o600)
+        self.assertEqual(exchange.record_decision(bridge.canonical(
+            {"sha256":sha, "stato":"RINVIATA", "nota":"Decisione esplicita"})), "INSERITO")
+        self.assertEqual(exchange.receive(bridge.canonical(b)), bridge.digest(b))
+        with self.assertRaises(bridge.BridgeError):
+            exchange.receive(bridge.canonical(a))
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt33_rt3_d3_root_eio_visible_with_valid_private_pending(self):
+        import errno
+        import os
+        import serve
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        root = self.sync
+        real_lstat = os.lstat
+        def broken(path, *args, **kwargs):
+            if Path(path) == root:
+                raise OSError(errno.EIO, "FolderSync root EIO")
+            return real_lstat(path, *args, **kwargs)
+        with mock.patch.object(exchange.os, "lstat", side_effect=broken):
+            with self.assertRaisesRegex(bridge.BridgeError, "FolderSync"):
+                exchange.receive_synced()
+            for page in (serve.decision_home(), exchange.render_page("TOKEN")):
+                self.assertIn("STOP FolderSync", page)
+                self.assertIn(sha, page)
+                self.assertNotIn("STOP PERSISTENZA PRIVATA", page)
+        self.assertEqual(bridge.digest(exchange.pending()[0]), sha)
+
+    def test_rt33_rt3_d3_source_eio_is_not_absence(self):
+        import errno
+        import os
+        import serve
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        source = self.sync / exchange.INCOMING_NAME
+        source.write_bytes(bridge.canonical(self.original.plan))
+        real_stat, real_lstat = os.stat, os.lstat
+
+        def stat_fault(path, *args, **kwargs):
+            if Path(path) == source:
+                raise OSError(errno.EIO, "source stat EIO")
+            return real_stat(path, *args, **kwargs)
+        def lstat_fault(path, *args, **kwargs):
+            if Path(path) == source:
+                raise OSError(errno.EIO, "source lstat EIO")
+            return real_lstat(path, *args, **kwargs)
+        with mock.patch.object(exchange.os, "stat", side_effect=stat_fault), (
+                mock.patch.object(exchange.os, "lstat", side_effect=lstat_fault)):
+            with self.assertRaisesRegex(bridge.BridgeError, "FolderSync"):
+                exchange.receive_synced()
+            for page in (serve.decision_home(), exchange.render_page("TOKEN")):
+                self.assertIn("STOP FolderSync", page)
+                self.assertIn(sha, page)
+        source.unlink()
+        self.assertIsNone(exchange.receive_synced())
+        with mock.patch.object(exchange, "EXCHANGE_ROOT", self.original.home / "not-created"):
+            self.assertIsNone(exchange.receive_synced())
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt33_rt3_record_decision_target_eio_must_not_be_absence(self):
+        import errno
+        import os
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        folder = bridge.PRIVATE_ROOT / bridge.INBOX / exchange.DECISION_EVENTS
+        actual_stat, actual_lstat = os.stat, os.lstat
+        def bad_stat(path, *args, **kwargs):
+            if Path(path).parent == folder and Path(path).suffix == ".json":
+                raise OSError(errno.EIO, "event collision stat EIO")
+            return actual_stat(path, *args, **kwargs)
+        def bad_lstat(path, *args, **kwargs):
+            if Path(path).parent == folder and Path(path).suffix == ".json":
+                raise OSError(errno.EIO, "event collision lstat EIO")
+            return actual_lstat(path, *args, **kwargs)
+        payload = bridge.canonical({"sha256":sha, "stato":"RINVIATA",
+                                    "nota":"No silent collision"})
+        with mock.patch.object(exchange.os, "stat", side_effect=bad_stat), (
+                mock.patch.object(exchange.os, "lstat", side_effect=bad_lstat)):
+            with self.assertRaises(bridge.BridgeError):
+                exchange.record_decision(payload)
+        self.assertEqual(exchange.decision_history(), [])
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt33_rt3_race_two_processes_and_author_chain_still_safe(self):
+        self.test_rt33_01_two_independent_processes_cannot_both_publish()
+
+
+    def test_rt33_rt3_approved_archive_eio_does_not_erase_prior_chain(self):
+        import errno
+        import os
+        self.original.persist_origin()
+        a = self._candidate("RT3-APROVED-A")
+        sha_a = exchange.receive(bridge.canonical(a))
+        self.assertEqual(exchange.confirm(sha_a)["stato"], "INSERITO")
+        private_file = bridge.PRIVATE_ROOT / bridge.INBOX / exchange.INCOMING_NAME
+        private_file.unlink()  # Synthetic no-current-inbox, approval still exists.
+        folder = bridge.PRIVATE_ROOT / bridge.ARCHIVE
+        real_stat = os.stat
+        def error(path, *args, **kwargs):
+            if Path(path) == folder:
+                raise OSError(errno.EIO, "Archive metadata EIO")
+            return real_stat(path, *args, **kwargs)
+        b = self._candidate("RT3-APROVED-B", parent=None)
+        with mock.patch.object(exchange.os, "stat", side_effect=error):
+            with self.assertRaisesRegex(bridge.BridgeError, "STOP ARCHIVIO APPROVAZIONI"):
+                exchange.receive(bridge.canonical(b))
+        self.assertIsNone(exchange.pending())
+        self.assertEqual(set(bridge.load_archive()), {sha_a})
+
+    def test_rt33_rt3_decision_error_is_visible_not_503_in_http(self):
+        import errno
+        import os
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        exchange.record_decision(bridge.canonical(
+            {"sha256": sha, "stato": "RINVIATA", "nota": "D1 HTTP"}))
+        folder = bridge.PRIVATE_ROOT / bridge.INBOX / exchange.DECISION_EVENTS
+        real_stat = os.stat
+        def fail(path, *args, **kwargs):
+            if Path(path) == folder:
+                raise OSError(errno.EIO, "Decision archive EIO")
+            return real_stat(path, *args, **kwargs)
+        with mock.patch.object(exchange.os, "stat", side_effect=fail):
+            pages = self._rt2_http_gets()
+            self.assertIn("ARCHIVIO NON VERIFICABILE", pages["/"])
+            self.assertIn("STOP ARCHIVIO DECISIONI", pages["/gpt"])
+            for content in pages.values():
+                self.assertNotIn("APPROVATA · ARCHIVIO", content)
+                self.assertNotIn("Confermo questa versione nel KDD</button>", content)
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt33_rt3_receive_replace_then_exception_is_uncertain(self):
+        import errno
+        import os
+        self.original.persist_origin()
+        raw = bridge.canonical(self._candidate("RT3-REPLACE-UNCERTAIN"))
+        real_replace = os.replace
+        def replace_then_error(source, target):
+            real_replace(source, target)
+            if Path(target).name == exchange.INCOMING_NAME:
+                raise OSError(errno.EIO, "simulated kernel error after replace")
+        with mock.patch.object(exchange.os, "replace", side_effect=replace_then_error):
+            with self.assertRaises(bridge.PublicationUncertain):
+                exchange.receive(raw)
+        sha = bridge.digest(bridge.strict_json(raw))
+        self.assertEqual(bridge.digest(exchange.pending()[0]), sha)
+        self.assertEqual(bridge.load_archive(), {})
+        self.assertEqual(exchange.receive(raw), sha)
+
+    def test_rt33_rt3_receive_directory_fsync_uncertain_then_durable_retry(self):
+        import errno
+        self.original.persist_origin()
+        raw = bridge.canonical(self._candidate("RT3-FSYNC-UNCERTAIN"))
+        original_sync = bridge._sync_dir
+        folder = bridge.PRIVATE_ROOT / bridge.INBOX
+        attempts = [0]
+        def fail_once(directory):
+            if Path(directory) == folder and attempts[0] == 0:
+                attempts[0] += 1
+                raise OSError(errno.EIO, "simulated fsync directory failure")
+            return original_sync(directory)
+        with mock.patch.object(bridge, "_sync_dir", side_effect=fail_once):
+            with self.assertRaises(bridge.PublicationUncertain):
+                exchange.receive(raw)
+            self.assertEqual(exchange.receive(raw), bridge.digest(bridge.strict_json(raw)))
+        self.assertEqual(attempts[0], 1)
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt33_rt3_event_after_rename_fsync_is_uncertain_no_duplicate(self):
+        import errno
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        payload = bridge.canonical({"sha256": sha, "stato": "RINVIATA",
+                                    "nota": "Evento incerto: non duplicare"})
+        folder = bridge.PRIVATE_ROOT / bridge.INBOX / exchange.DECISION_EVENTS
+        real_sync = bridge._sync_dir
+        def fail(directory):
+            if Path(directory) == folder:
+                raise OSError(errno.EIO, "simulated event fsync failure")
+            return real_sync(directory)
+        with mock.patch.object(bridge, "_sync_dir", side_effect=fail):
+            with self.assertRaises(bridge.PublicationUncertain):
+                exchange.record_decision(payload)
+        self.assertEqual(len(exchange.decision_history()), 1)
+        with self.assertRaises(bridge.BridgeError):
+            exchange.record_decision(payload)
+        with self.assertRaises(bridge.BridgeError):
+            exchange.confirm(sha)
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt33_rt3_event_after_rename_exception_is_uncertain(self):
+        import errno
+        import os
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        payload = bridge.canonical({"sha256": sha, "stato": "RIFIUTATA",
+                                    "nota": "Evento rinominato ma incerto"})
+        actual_rename = os.rename
+        folder = bridge.PRIVATE_ROOT / bridge.INBOX / exchange.DECISION_EVENTS
+        def rename_then_error(source, target):
+            actual_rename(source, target)
+            if Path(target).parent == folder and Path(target).suffix == ".json":
+                raise OSError(errno.EIO, "kernel error after rename")
+        with mock.patch.object(exchange.os, "rename", side_effect=rename_then_error):
+            with self.assertRaises(bridge.PublicationUncertain):
+                exchange.record_decision(payload)
+        self.assertEqual(len(exchange.decision_history()), 1)
+        with self.assertRaises(bridge.BridgeError):
+            exchange.record_decision(payload)
+        self.assertEqual(bridge.load_archive(), {})
+
+
+    def test_rt33_rt3_d2_second_identity_check_stops_toctou(self):
+        import os
+        self.original.persist_origin()
+        a, b = self._candidate("RT3-TOCTOU-A"), self._candidate("RT3-TOCTOU-B")
+        sha_a = exchange.receive(bridge.canonical(a))
+        exchange.record_decision(bridge.canonical(
+            {"sha256":sha_a, "stato":"RINVIATA", "nota":"Successor allowed"}))
+        final = bridge.PRIVATE_ROOT / bridge.INBOX / exchange.INCOMING_NAME
+        original_bytes = final.read_bytes()
+        real_identity = exchange._private_file_identity
+        counts = [0]
+
+        def non_cooperative_replacement(path):
+            counts[0] += 1
+            if counts[0] == 2:
+                another = final.with_name(".rt3-synthetic-external.tmp")
+                another.write_bytes(original_bytes)
+                another.chmod(0o600)
+                os.replace(another, final)  # new inode, same bytes
+            return real_identity(path)
+
+        with mock.patch.object(exchange, "_private_file_identity",
+                               side_effect=non_cooperative_replacement):
+            with self.assertRaisesRegex(bridge.BridgeError, "mutata"):
+                exchange.receive(bridge.canonical(b))
+        self.assertEqual(counts[0], 2)
+        self.assertEqual(final.read_bytes(), original_bytes)
+        self.assertEqual(bridge.digest(exchange.pending()[0]), sha_a)
+        self.assertEqual(bridge.load_archive(), {})
+
+
 if __name__ == "__main__":
     unittest.main()

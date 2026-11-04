@@ -254,10 +254,12 @@ def decision_home():
         except exchange.bridge.BridgeError as exc:
             # A private STOP raised during sync ingestion is not itself
             # a FolderSync error. The following private read exposes it.
-            if not str(exc).startswith("STOP PERSISTENZA PRIVATA:"):
+            if not str(exc).startswith((
+                    "STOP PERSISTENZA PRIVATA:", "STOP ARCHIVIO DECISIONI:",
+                    "STOP ARCHIVIO APPROVAZIONI:")):
                 legacy_sync_error = str(exc)
         item = exchange.pending()
-        approved = exchange.bridge.load_archive()
+        approved = exchange._checked_approvals()
         events = exchange.decision_history()
         if item:
             candidate, proposal_bundle = item

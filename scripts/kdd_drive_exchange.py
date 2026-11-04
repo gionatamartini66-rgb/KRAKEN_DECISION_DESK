@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import tempfile
 import threading
 from scripts import kdd_bridge_g2 as bridge
@@ -129,6 +130,47 @@ def _approved_head(approved):
     return next(iter(heads))
 
 
+def _private_file_identity(path):
+    """None ONLY for proven ENOENT. EIO, symlink and unsafe inode are STOP."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise bridge.BridgeError("Voce privata non verificabile: STOP") from exc
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or info.st_mode & 0o077 or info.st_nlink != 1):
+        raise bridge.BridgeError("Voce privata non regolare: STOP")
+    return (info.st_dev, info.st_ino)
+
+
+def _checked_approvals():
+    """Never mistake an unreadable approval archive for an empty consent chain.
+
+    The shared bridge reader retains its historical consumer contract; gate
+    decision writes here with an independently verified directory and
+    comparison between committed filename set and returned versions.
+    """
+    try:
+        try:
+            folder = bridge.private_directory(bridge.ARCHIVE)
+        except bridge.BridgeError:
+            if _missing_private_directory(bridge.ARCHIVE):
+                return {}
+            raise
+        identity = bridge._check_dir(folder)
+        versions = bridge.load_archive()
+        if bridge._check_dir(folder) != identity:
+            raise bridge.BridgeError("Archivio approvazioni sostituito")
+        expected = {p.stem for p in folder.iterdir()
+                    if re.fullmatch(r"[0-9a-f]{64}\.json", p.name)}
+        if expected != set(versions):
+            raise bridge.BridgeError("Archivio approvazioni non riconciliato")
+        return versions
+    except (OSError, bridge.BridgeError) as exc:
+        raise bridge.BridgeError("STOP ARCHIVIO APPROVAZIONI: stato non verificabile") from exc
+
+
 def receive(raw):
     """Validate and import a new version without losing a still-pending choice."""
     with _decision_writer():
@@ -140,12 +182,13 @@ def _receive_locked(raw):
     folder = bridge.private_directory(bridge.INBOX, create=True)
     final = folder / INCOMING_NAME
     sha = bridge.digest(proposal)
-    approved = bridge.load_archive()
+    approved = _checked_approvals()
     events = decision_history()
     if sha in approved or any(e["versione_sha256"] == sha for e in events):
         raise bridge.BridgeError("Versione già deliberata: nessuna riattivazione")
 
-    if final.exists() or final.is_symlink():
+    before = _private_file_identity(final)
+    if before is not None:
         existing = pending()
         if existing is not None:
             old = bridge.digest(existing[0])
@@ -155,6 +198,14 @@ def _receive_locked(raw):
             old = bridge.digest(bridge.strict_json(
                 bridge.read_regular(final, expected_parent=folder)))
         if old == sha:
+            # An earlier os.replace may have succeeded while directory fsync
+            # failed. Do not claim an idempotent SUCCESS until durability is
+            # rechecked on this attempt.
+            try:
+                bridge._sync_dir(folder)
+            except (OSError, bridge.BridgeError) as exc:
+                raise bridge.PublicationUncertain(
+                    "PUBBLICAZIONE_INCERTA: inbox da riconciliare") from exc
             return sha
         if not (old in approved or any(
                 e["versione_sha256"] == old and e["stato"] in ("RIFIUTATA", "RINVIATA")
@@ -175,9 +226,20 @@ def _receive_locked(raw):
             f.flush()
             os.fsync(f.fileno())
         os.chmod(stage, 0o600)
-        os.replace(stage, final)
+        if _private_file_identity(final) != before:
+            raise bridge.BridgeError("Inbox privata mutata durante ricezione: STOP")
+        try:
+            os.replace(stage, final)
+        except OSError as exc:
+            # Replace may have completed before raising: never claim rollback.
+            raise bridge.PublicationUncertain(
+                "PUBBLICAZIONE_INCERTA: sostituzione inbox da verificare") from exc
         stage = None
-        bridge._sync_dir(folder)
+        try:
+            bridge._sync_dir(folder)
+        except (OSError, bridge.BridgeError) as exc:
+            raise bridge.PublicationUncertain(
+                "PUBBLICAZIONE_INCERTA: inbox da riconciliare") from exc
     finally:
         if stage is not None:
             stage.unlink(missing_ok=True)
@@ -190,12 +252,21 @@ def receive_synced():
     # Only the external/shared-storage read is translated to a recoverable
     # FolderSync STOP. Errors in the private commit must never be hidden here.
     try:
-        if not EXCHANGE_ROOT.is_dir() or EXCHANGE_ROOT.is_symlink():
+        try:
+            shared_dir = EXCHANGE_ROOT.lstat()
+        except FileNotFoundError:
+            return None  # A genuinely missing shared directory is not EIO.
+        if not stat.S_ISDIR(shared_dir.st_mode):
+            raise bridge.BridgeError("Cartella FolderSync non regolare: STOP")
+        try:
+            info = source.lstat()
+        except FileNotFoundError:
+            # Do not interpret a vanished/replaced parent as missing proposal.
+            current_dir = EXCHANGE_ROOT.lstat()
+            if (current_dir.st_dev, current_dir.st_ino) != (
+                    shared_dir.st_dev, shared_dir.st_ino):
+                raise bridge.BridgeError("Cartella FolderSync sostituita: STOP")
             return None
-        if not source.exists() and not source.is_symlink():
-            return None
-        import stat
-        info = source.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_size > bridge.MAX_BYTES:
             raise bridge.BridgeError("Proposta FolderSync non regolare")
         fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -216,7 +287,7 @@ def receive_synced():
     proposal = bridge.strict_json(raw)
     sha = bridge.digest(proposal)
     with _decision_writer():
-        approved = bridge.load_archive()
+        approved = _checked_approvals()
         events = decision_history()
         if sha in approved or any(e["versione_sha256"] == sha for e in events):
             return sha  # previous A must not replace current B
@@ -228,26 +299,25 @@ def receive_synced():
 _PRIVATE_STOP = "STOP PERSISTENZA PRIVATA: proposta non leggibile o non verificabile"
 
 
-def _missing_private_inbox():
-    """Identify only genuinely absent, otherwise securely verified, directory chains.
-
-    The bridge's reader translates ENOENT and EIO to the same BridgeError.
-    Check each *existing* ancestor using its own descriptor-based verifier;
-    absence is legitimate only at a proven missing component. Broken,
-    inaccessible, replaced or symlinked components must raise STOP.
-    """
+def _missing_private_directory(name):
+    """Verified absence of one private directory, never an obscured EIO."""
+    if name not in (bridge.INBOX, bridge.ARCHIVE):
+        raise bridge.BridgeError("Directory privata non autorizzata")
     root = bridge.PRIVATE_ROOT
     chain = (Path.home() / ".local", Path.home() / ".local" / "state",
-             root.parent, root, root / bridge.INBOX)
+             root.parent, root, root / name)
     for path in chain:
         try:
             os.lstat(path)
         except FileNotFoundError:
             return True
-        # Any other OSError, including EACCES and EIO, stays a STOP.
         bridge._check_dir(path, owner_only=path in
-                          (root.parent, root, root / bridge.INBOX))
+                          (root.parent, root, root / name))
     return False
+
+
+def _missing_private_inbox():
+    return _missing_private_directory(bridge.INBOX)
 
 
 def pending():
@@ -357,39 +427,47 @@ def latest_events(rows):
 
 
 def decision_history():
-    """Read dated human events; an interrupted .tmp is not a committed event."""
+    """No event history may be described as empty after an access failure."""
     try:
-        folder = bridge.private_directory(bridge.INBOX) / DECISION_EVENTS
-        bridge._check_dir(folder)
-    except bridge.BridgeError:
-        if not (bridge.PRIVATE_ROOT / bridge.INBOX / DECISION_EVENTS).exists():
+        try:
+            parent = bridge.private_directory(bridge.INBOX)
+        except bridge.BridgeError:
+            if _missing_private_inbox():
+                return []
+            raise
+        before = bridge._check_dir(parent)
+        folder = parent / DECISION_EVENTS
+        try:
+            os.lstat(folder)
+        except FileNotFoundError:
+            if bridge._check_dir(parent) != before:
+                raise bridge.BridgeError("Inbox decisionale sostituita: STOP")
             return []
-        raise
-    rows = []
-    basic = {"versione_sha256", "stato", "nota", "creato_utc"}
-    for path in sorted(folder.iterdir()):
-        if re.fullmatch(r"\.kdd-event-[A-Za-z0-9_-]+\.tmp", path.name):
-            if path.is_symlink() or not path.is_file():
-                raise bridge.BridgeError("Residuo decisionale non regolare")
-            continue
-        if not re.fullmatch(r"[0-9a-f]{64}\.json", path.name):
-            raise bridge.BridgeError("Archivio decisionale non regolare")
-        record = bridge.strict_json(bridge.read_regular(path, expected_parent=folder))
-        keys = set(record)
-        if (bridge.digest(record) != path.stem
-                or keys not in (basic, basic | {"proposta"})
-                or record.get("stato") not in DECISION_STATES):
-            raise bridge.BridgeError("Archivio decisionale alterato")
-        if "proposta" in record:
-            proposal = record["proposta"]
-            if (record["stato"] not in ("RIFIUTATA", "RINVIATA")
-                    or not isinstance(proposal, dict)
-                    or bridge.digest(proposal) != record["versione_sha256"]):
-                raise bridge.BridgeError("Collegamento proposta/evento alterato")
-        rows.append(record)
-    # Timestamps only: a SHA digest is not evidence of temporal order.
-    # Whole-second historical ties are labelled as unordered in the UI.
-    return sorted(rows, key=_event_time)
+        bridge._check_dir(folder)
+        rows = []
+        basic = {"versione_sha256", "stato", "nota", "creato_utc"}
+        for path in sorted(folder.iterdir()):
+            if re.fullmatch(r"\.kdd-event-[A-Za-z0-9_-]+\.tmp", path.name):
+                _private_file_identity(path)  # Inert but must be regular/private.
+                continue
+            if not re.fullmatch(r"[0-9a-f]{64}\.json", path.name):
+                raise bridge.BridgeError("Archivio decisionale non regolare")
+            record = bridge.strict_json(bridge.read_regular(path, expected_parent=folder))
+            keys = set(record)
+            if (bridge.digest(record) != path.stem
+                    or keys not in (basic, basic | {"proposta"})
+                    or record.get("stato") not in DECISION_STATES):
+                raise bridge.BridgeError("Archivio decisionale alterato")
+            if "proposta" in record:
+                proposal = record["proposta"]
+                if (record["stato"] not in ("RIFIUTATA", "RINVIATA")
+                        or not isinstance(proposal, dict)
+                        or bridge.digest(proposal) != record["versione_sha256"]):
+                    raise bridge.BridgeError("Collegamento proposta/evento alterato")
+            rows.append(record)
+        return sorted(rows, key=_event_time)
+    except (bridge.BridgeError, OSError) as exc:
+        raise bridge.BridgeError("STOP ARCHIVIO DECISIONI: storia non verificabile") from exc
 
 
 def record_decision(raw):
@@ -404,7 +482,7 @@ def record_decision(raw):
         if not isinstance(note, str) or not note.strip() or len(note) > 1500:
             raise bridge.BridgeError("Motivazione o evidenza obbligatoria (massimo 1500 caratteri)")
         current = pending()
-        approved = bridge.load_archive()
+        approved = _checked_approvals()
         events = decision_history()
         if state in ("RIFIUTATA", "RINVIATA"):
             if current is None or bridge.digest(current[0]) != sha or sha in approved:
@@ -427,7 +505,7 @@ def record_decision(raw):
         folder = bridge.ensure_dir(bridge.private_directory(bridge.INBOX, create=True) / DECISION_EVENTS)
         filename = bridge.digest(entry) + ".json"
         target = folder / filename
-        if target.exists() or target.is_symlink():
+        if bridge._path_present(target):
             raise bridge.BridgeError("Evento gia registrato")
         stage = None
         try:
@@ -438,11 +516,20 @@ def record_decision(raw):
                 f.flush()
                 os.fsync(f.fileno())
             os.chmod(stage, 0o600)
-            # Same-dir rename of a complete staged file works on Python Termux.
-            # In-process lock + prior existence check prevent KDD HTTP races.
-            os.rename(stage, target)
+            if bridge._path_present(target):
+                raise bridge.BridgeError("Collisione evento durante commit: STOP")
+            # Same-dir rename under the shared interprocess decision lock.
+            try:
+                os.rename(stage, target)
+            except OSError as exc:
+                raise bridge.PublicationUncertain(
+                    "PUBBLICAZIONE_INCERTA: evento da riconciliare") from exc
             stage = None
-            bridge._sync_dir(folder)
+            try:
+                bridge._sync_dir(folder)
+            except (OSError, bridge.BridgeError) as exc:
+                raise bridge.PublicationUncertain(
+                    "PUBBLICAZIONE_INCERTA: evento da riconciliare") from exc
             return "INSERITO"
         finally:
             if stage is not None:
@@ -457,10 +544,17 @@ def render_page(token):
         # A private-read STOP can propagate through receive_synced() while
         # validating an otherwise readable shared input. It is NOT evidence
         # of FolderSync failure. pending() below reports it independently.
-        if not str(exc).startswith(_PRIVATE_STOP):
+        if not str(exc).startswith((
+                _PRIVATE_STOP, "STOP ARCHIVIO DECISIONI:",
+                "STOP ARCHIVIO APPROVAZIONI:")):
             sync_error = str(exc)
     try:
         item = pending()
+        if item is not None:
+            # A private draft is not displayable as decidable without a
+            # trustworthy account of prior approvals and author decisions.
+            _checked_approvals()
+            decision_history()
         error = None
     except bridge.BridgeError as exc:
         item, error = None, str(exc)
@@ -472,7 +566,7 @@ def render_page(token):
         proposal, bundle = item
         state = bridge.read_context(bundle)
         sha = bridge.digest(proposal)
-        already_approved = sha in bridge.load_archive()
+        already_approved = sha in _checked_approvals()
         decisions = [x for x in decision_history() if x["versione_sha256"] == sha]
         declined = any(x["stato"] in ("RIFIUTATA", "RINVIATA") for x in decisions)
         rows = "".join(
@@ -503,7 +597,7 @@ def render_page(token):
         preview = preview.split("<button onclick=", 1)[0]
     try:
         events = decision_history()
-        approvals = bridge.load_archive()
+        approvals = _checked_approvals()
         ambiguous_seconds = uncertain_event_seconds(events)
         def event_line(x):
             source = x.get("proposta") or approvals.get(x["versione_sha256"], {}).get("proposta")
@@ -550,8 +644,8 @@ async function kddFile(){
     if item is not None and not error:
         sha = bridge.digest(item[0])
         states = (("ESECUZIONE_DICHIARATA", "RIESAME", "RISCONTRO_DICHIARATO")
-                  if sha in bridge.load_archive() else ("RIFIUTATA", "RINVIATA"))
-        if states and not (sha not in bridge.load_archive() and any(
+                  if sha in _checked_approvals() else ("RIFIUTATA", "RINVIATA"))
+        if states and not (sha not in _checked_approvals() and any(
                 x["versione_sha256"] == sha and x["stato"] in ("RIFIUTATA", "RINVIATA")
                 for x in decision_history())):
             decision_form = ("<h3>Registra scelta o evento dell'autore</h3>"
