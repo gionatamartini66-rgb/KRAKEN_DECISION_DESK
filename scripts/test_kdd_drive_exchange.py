@@ -2323,5 +2323,63 @@ process.stdout.write(JSON.stringify(posted));
 
 
 
+    def test_rt6_f1_pre_replace_eio_staging_survives_and_blocks_restart(self):
+        """Real enrollment writer: pre-rename EIO must not hide its .tmp intent."""
+        import errno
+        import os
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        root = bridge.PRIVATE_ROOT
+        enrollment = root / exchange._ENROLLMENT
+        initial = enrollment.read_bytes()
+        self.assertEqual(list(root.glob(".decision-enrollment-*.tmp")), [])
+        real_replace = os.replace
+        interrupted = []
+
+        def before_replace(source, destination):
+            if Path(destination) == enrollment:
+                interrupted.append((Path(source), Path(destination)))
+                self.assertTrue(Path(source).is_file())
+                raise OSError(errno.EIO, "RT6 EIO before enrollment replace")
+            return real_replace(source, destination)
+
+        with mock.patch.object(exchange.os, "replace", side_effect=before_replace):
+            with self.assertRaisesRegex(bridge.PublicationUncertain,
+                                        "PUBBLICAZIONE_INCERTA"):
+                exchange.confirm(sha)
+
+        self.assertEqual(len(interrupted), 1)
+        stages = list(root.glob(".decision-enrollment-*.tmp"))
+        self.assertEqual(len(stages), 1)
+        self.assertEqual(stages[0], interrupted[0][0])
+        self.assertTrue(stages[0].stat().st_size > 0)
+        self.assertEqual(enrollment.read_bytes(), initial)
+        self.assertEqual(bridge.load_archive(), {})
+        # The real verifier MUST detect the existing, unread journal stage.
+        with self.assertRaisesRegex(exchange.DecisionContinuityError,
+                                    "STOP DECISIONI"):
+            exchange._checked_approvals()
+        with self.assertRaisesRegex(exchange.DecisionContinuityError,
+                                    "STOP DECISIONI"):
+            exchange.confirm(sha)
+        # A new process also reads the persisted .tmp and fails closed.
+        status, detail = self._rt4_fork_confirm(sha)
+        self.assertEqual(status, "STOP", detail)
+        self.assertIn("STOP DECISIONI", detail)
+        self.assertTrue(stages[0].is_file())  # no automatic cleanup
+
+    def test_rt6_f1_pristine_enrollment_without_staging_still_works(self):
+        """A clean synthetic install retains its ordinary decision path."""
+        root = bridge.PRIVATE_ROOT
+        self.assertEqual(list(root.glob(".decision-enrollment-*.tmp")), [])
+        self.assertEqual(exchange._checked_approvals(), {})
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        self.assertEqual(exchange.confirm(sha)["stato"], "INSERITO")
+        self.assertEqual(exchange.confirm(sha)["stato"], "GIA_PRESENTE")
+        self.assertEqual(set(exchange._checked_approvals()), {sha})
+        self.assertEqual(list(root.glob(".decision-enrollment-*.tmp")), [])
+
+
 if __name__ == "__main__":
     unittest.main()

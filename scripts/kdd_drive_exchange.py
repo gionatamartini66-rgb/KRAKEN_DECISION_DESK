@@ -62,7 +62,7 @@ def _read_enrollment():
     """The enrollment anchors a proposal ID AND each full approval digest."""
     root = bridge.PRIVATE_ROOT
     bridge._check_dir(root)
-    if any(re.fullmatch(r"\.decision-enrollment-.*\\.tmp", p.name)
+    if any(re.fullmatch(r"\.decision-enrollment-.*\.tmp", p.name)
            for p in root.iterdir()):
         raise bridge.BridgeError("Staging iscrizione non riconciliato")
     enrollment = bridge.strict_json(bridge.read_regular(
