@@ -2240,6 +2240,26 @@ process.stdout.write(JSON.stringify(posted));
         self.assertEqual(exchange._checked_approvals()[sha]["approvato_utc"], when)
         self.assertEqual(len(bridge.load_archive()), 1)
 
+    def test_rt5_unenrolled_legacy_preview_is_explicitly_not_approved(self):
+        sha, file, original = self._rt5_approve()
+        root = bridge.PRIVATE_ROOT
+        (root / exchange._ENROLLMENT).rename(root / "rt5-enrollment-held-for-audit")
+        (root / exchange._WITNESSES).rename(root / "rt5-witnesses-held-for-audit")
+        with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+            exchange._checked_approvals()
+        preview = bridge.approved_html()
+        self.assertIn("Archivio non verificabile: STOP", preview)
+        self.assertIn("Anteprima GPT storica NON CERTIFICATA", preview)
+        self.assertIn("MANTENERE", preview)  # Untrusted historical prose.
+        self.assertNotIn("Proposta patrimoniale GPT approvata", preview)
+        import serve
+        operational = serve.with_controls(
+            "<html><body><h2>1 · Decisioni e posizioni</h2>"
+            "<p>SPOT-PREVIEW-ALIVE</p></body></html>")
+        self.assertIn("STOP", operational)
+        self.assertNotIn("Proposta patrimoniale GPT approvata", operational)
+        self.assertIn("SPOT-PREVIEW-ALIVE", operational)
+
     def test_rt5_e_legacy_id_only_cannot_auto_attest(self):
         sha, file, original = self._rt5_approve()
         root = bridge.PRIVATE_ROOT

@@ -711,6 +711,7 @@ def with_controls(page: str, result: str = "") -> str:
         portfolio_proposals = ("<section id='kdd-gpt-patrimonio' role='status'>"
                                "<h2>Proposte patrimoniali GPT</h2>"
                                "<p>Archivio GPT temporaneamente non verificabile: STOP. "
+                               "Archivio non verificabile. "
                                "Nessuna proposta è stata certificata.</p></section>")
     try:
         decision_panel = decision_home()

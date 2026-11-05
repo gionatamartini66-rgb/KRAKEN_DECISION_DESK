@@ -902,20 +902,37 @@ def approved_import(proposal, bundle, approved_sha, consent, *, now=None,
 
 
 def approved_html(*, verified_records=None):
-    """Always render independently checked approval state, never raw archive.
+    """Verified approval view; an unanchored legacy archive is STOP-only text.
 
-    Passing verified_records is reserved to consumers that already completed
-    Exchange continuity checks. Direct legacy callers use the injected reader.
-    No reader available => STOP, even when the legacy archive exists.
+    The old standalone bridge has no enrollment/witness and historically
+    exposed the GPT prose for review. Preserve that *untrusted preview* for
+    compatibility without presenting it as an attested human approval.
+    Operational HTTP callers ALWAYS pass Exchange-verified records; a broken
+    v002 enrollment is never promoted to a legacy preview.
     """
-    esc = lambda v: html.escape(str(v), quote=True)
+    esc = lambda value: html.escape(str(value), quote=True)
+    unverified_legacy = False
     try:
-        if verified_records is None:
-            if _approval_view_reader is None:
-                raise BridgeError("Verifica continuità non disponibile")
-            records = _approval_view_reader()
-        else:
+        if verified_records is not None:
             records = verified_records
+        elif _approval_view_reader is not None:
+            try:
+                records = _approval_view_reader()
+            except Exception:
+                # The presence of an enrollment (valid, old, or corrupted)
+                # categorically forbids legacy downgrade. Symlink counts as
+                # present, and an undecidable path is STOP via the catch.
+                if _path_present(PRIVATE_ROOT / ".decision-enrollment-v001.json"):
+                    raise
+                records = load_archive()
+                unverified_legacy = True
+        else:
+            # Only a standalone pre-Exchange legacy bridge can reach here.
+            # The textual content is *not* a certified approval.
+            if _path_present(PRIVATE_ROOT / ".decision-enrollment-v001.json"):
+                raise BridgeError("Verifica continuità obbligatoria")
+            records = load_archive()
+            unverified_legacy = True
         if not isinstance(records, dict):
             raise BridgeError("Approvazioni non verificabili")
         for sha, record in records.items():
@@ -923,6 +940,8 @@ def approved_html(*, verified_records=None):
     except Exception:
         return "<section id='kdd-gpt-patrimonio'><h2>Proposte patrimoniali GPT</h2><p>Archivio non verificabile: STOP.</p></section>"
     if not records:
+        if unverified_legacy:
+            return "<section id='kdd-gpt-patrimonio'><h2>Proposte patrimoniali GPT</h2><p>Archivio non verificabile: STOP. Nessuna approvazione attestata.</p></section>"
         return "<section id='kdd-gpt-patrimonio'><h2>Proposte patrimoniali GPT</h2><p>Nessuna versione approvata importata.</p></section>"
     heads = set(records) - {e["proposta"].get("sostituisce_sha256") for e in records.values()}
     if len(heads) != 1:
@@ -938,7 +957,14 @@ def approved_html(*, verified_records=None):
         "</p><p>Evidenze: "+esc(r["evidenze"])+
         "</p><p>Riesame: "+esc(r["riesame"])+"</p></details></li>"
         for r in p["posizioni"])
-    return ("<section id='kdd-gpt-patrimonio'><h2>Proposta patrimoniale GPT approvata</h2>"
+    heading = ("<h2>Anteprima GPT storica NON CERTIFICATA · STOP</h2>"
+               if unverified_legacy else
+               "<h2>Proposta patrimoniale GPT approvata</h2>")
+    warning = ("<p role='status'>Archivio non verificabile: STOP. Il testo"
+               " seguente è un'anteprima storica non attribuibile a consenso"
+               " integro e non costituisce decisione approvata.</p>"
+               if unverified_legacy else "")
+    return ("<section id='kdd-gpt-patrimonio'>" + heading + warning +
             "<p>Versione "+esc(latest["versione_sha256"][:16])+" · snapshot "+esc(p["snapshot_utc"])+
             " · ESECUZIONE NON ATTESTATA. Testo generato da GPT, non verificato come fatto finanziario. Valutazione storica: riesaminare al nuovo mercato.</p>"
             "<p>Scenario: "+esc(p["scenario"])+"</p><p>Alternativa generale: "+
