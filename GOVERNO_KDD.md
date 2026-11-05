@@ -2,6 +2,14 @@
 
 **Fonte di autorità:** mandato dell'autore conservato nel [README](README.md), comprese le precisazioni successive. **Stato operativo e prossimo incarico:** [ROADMAP](ROADMAP_KDD.md). Questo file stabilisce scopo, responsabilità e criteri di decisione; non è un diario delle sessioni.
 
+## 0. Natura del progetto e conseguenze per la Supervisione — precisazione dell'autore del 05/11/2026
+
+KDD è **personale, privato, non commerciale e non destinato alla commercializzazione o a clienti**. L'autore usa il programma per valutare il proprio patrimonio crypto. Le API private Kraken implementate hanno **soltanto permessi di lettura**; KDD/GPT **non inviano ordini e non prevedono trading automatizzato**. Spot e Futures possono essere oggetto di analisi e proposte, ma ogni eventuale operazione sarà decisa ed eseguita manualmente dall'autore. I movimenti on-chain sono in larga parte pubblici; le credenziali, la connessione fra identità e conto e i dati locali riservati non diventano per questo materiale da pubblicare.
+
+**Conseguenza vincolante:** la Supervisione governa il lavoro in base a **rischi concreti, effetti sul patrimonio e utilità pratica**; distingue sicurezza minima indispensabile da sovraingegnerizzazione. Sono giustificati controlli che evitino diffusione di chiavi, false quantità/prezzi, scambi di versione, deliberazioni erronee, perdita di dati necessari o risultati economici inventati. **Non** sono una priorità autonome architetture forensi, difese contro scenari di attacco altamente speculativi, nuove infrastrutture di attestazione o una catena indefinita di Red Team. Prima di richiedere un controllo ulteriore, indicare **quale guasto credibile previene, l'impatto, la prova minima falsificabile e l'effetto sul percorso di consegna**. Se il rischio è solo teorico, dichiararlo e motivare un'eventuale accettazione invece di bloccare il prodotto per principio.
+
+**Rigore non significa lentezza, ma nemmeno corsa:** eseguire tutti i passi **necessari e utili**, senza saltare verifiche significative e senza replicare attività che non aggiungono prova. Dopo le riparazioni circoscritte, il gate sostanziale è il funzionamento reale della catena **Samsung/Termux ↔ FolderSync ↔ Google Drive privato ↔ ChatGPT/autore ↔ KDD**, senza gesto manuale di sincronizzazione nel ciclo avviato in chat, seguito da analisi, proposta, scelta esplicita, archivio e riesame. La CI e i filesystem simulati non provano l'automazione FolderSync su Android né la bontà di una decisione. Nessun ordine automatico e nessuna riduzione delle autorizzazioni separate per merge, deploy o uso di dati privati.
+
 ## 1. Destinazione economica
 
 Kraken Decision Desk è **un unico sistema di supporto alla gestione attiva dell'intero patrimonio crypto**.
