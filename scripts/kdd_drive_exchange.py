@@ -45,8 +45,8 @@ class DecisionContinuityError(PrivatePersistenceError):
 
 _ENROLLMENT = ".decision-enrollment-v001.json"
 _WITNESSES = "decision_witnesses"
-_WITNESS_SCHEMA = "kdd_decision_witness_v001"
-_ENROLLMENT_SCHEMA = "kdd_decision_enrollment_v001"
+_WITNESS_SCHEMA = "kdd_decision_witness_v002"
+_ENROLLMENT_SCHEMA = "kdd_decision_enrollment_v002"
 _RESTORE_STOP = "STOP DECISIONI — RIPRISTINO NECESSARIO"
 
 
@@ -58,11 +58,11 @@ def _witness_dir():
     return directory
 
 
-def _read_witnesses():
-    """Durable, independent evidence of EVERY committed-or-attempted decision."""
+def _read_enrollment():
+    """The enrollment anchors a proposal ID AND each full approval digest."""
     root = bridge.PRIVATE_ROOT
     bridge._check_dir(root)
-    if any(re.fullmatch(r"\.decision-enrollment-.*\.tmp", p.name)
+    if any(re.fullmatch(r"\.decision-enrollment-.*\\.tmp", p.name)
            for p in root.iterdir()):
         raise bridge.BridgeError("Staging iscrizione non riconciliato")
     enrollment = bridge.strict_json(bridge.read_regular(
@@ -71,14 +71,30 @@ def _read_witnesses():
             or enrollment["schema"] != _ENROLLMENT_SCHEMA
             or not isinstance(enrollment["nonce"], str)
             or not re.fullmatch(r"[0-9a-f]{32}", enrollment["nonce"])
-            or not all(isinstance(enrollment[k], list)
-                       and enrollment[k] == sorted(set(enrollment[k]))
-                       and all(isinstance(v, str) and bridge.HEX.fullmatch(v)
-                               for v in enrollment[k])
-                       for k in ("events", "approvals"))):
-        raise bridge.BridgeError("Iscrizione continuità non valida")
+            or type(enrollment["events"]) is not list
+            or enrollment["events"] != sorted(set(enrollment["events"]))
+            or any(not isinstance(s, str) or not bridge.HEX.fullmatch(s)
+                   for s in enrollment["events"])
+            or type(enrollment["approvals"]) is not list):
+        raise bridge.BridgeError("Iscrizione continuità non valida o legacy")
+    approved = enrollment["approvals"]
+    if (any(not isinstance(item, dict)
+            or set(item) != {"versione_sha256", "record_sha256"}
+            or any(not isinstance(item[k], str)
+                   or not bridge.HEX.fullmatch(item[k])
+                   for k in ("versione_sha256", "record_sha256"))
+            for item in approved)
+            or approved != sorted(approved, key=lambda x: x["versione_sha256"])
+            or len({item["versione_sha256"] for item in approved}) != len(approved)):
+        raise bridge.BridgeError("Iscrizione approvazioni non valida")
+    return enrollment
+
+
+def _read_witnesses():
+    """Every approved document must exactly match witness AND enrollment."""
+    enrollment = _read_enrollment()
     directory = _witness_dir()
-    witnessed_events, witnessed_approvals = {}, set()
+    witnessed_events, witnessed_approvals = {}, {}
     for item in directory.iterdir():
         match = re.fullmatch(r"([ea])-([0-9a-f]{64})\.json", item.name)
         if match is None:
@@ -86,25 +102,32 @@ def _read_witnesses():
         kind, sha = match.groups()
         proof = bridge.strict_json(bridge.read_regular(
             item, expected_parent=directory))
-        if (set(proof) != {"schema", "kind", "sha", "record"}
+        if (set(proof) != {"schema", "kind", "sha", "record", "record_sha256"}
                 or proof["schema"] != _WITNESS_SCHEMA
-                or proof["kind"] != kind or proof["sha"] != sha):
+                or proof["kind"] != kind or proof["sha"] != sha
+                or not isinstance(proof["record_sha256"], str)
+                or not bridge.HEX.fullmatch(proof["record_sha256"])
+                or not isinstance(proof["record"], dict)
+                or bridge.digest(proof["record"]) != proof["record_sha256"]):
             raise bridge.BridgeError("Testimonianza di continuità alterata")
         if kind == "e":
-            if not isinstance(proof["record"], dict) or bridge.digest(proof["record"]) != sha:
+            if proof["record_sha256"] != sha:
                 raise bridge.BridgeError("Impronta evento non valida")
             witnessed_events[sha] = proof["record"]
         else:
-            if proof["record"] != {"versione_sha256": sha}:
-                raise bridge.BridgeError("Impronta approvazione non valida")
-            witnessed_approvals.add(sha)
+            bridge.validate_approval_record(proof["record"], expected_sha=sha)
+            witnessed_approvals[sha] = proof["record"]
+    anchor = {e["versione_sha256"]: e["record_sha256"]
+              for e in enrollment["approvals"]}
     if (set(enrollment["events"]) != set(witnessed_events)
-            or set(enrollment["approvals"]) != witnessed_approvals):
+            or set(anchor) != set(witnessed_approvals)
+            or any(bridge.digest(witnessed_approvals[sha]) != digest
+                   for sha, digest in anchor.items())):
         raise bridge.BridgeError("Impronte di continuità mancanti o mutate")
     return witnessed_events, witnessed_approvals
 
 
-def _enrollment_add(kind, sha):
+def _enrollment_add(kind, sha, record):
     """Durably reserve history in the independent enrollment BEFORE witness.
 
     A dropped witness plus a dropped history file must still disagree with
@@ -113,14 +136,19 @@ def _enrollment_add(kind, sha):
     root = bridge.PRIVATE_ROOT
     bridge._check_dir(root)
     marker = root / _ENROLLMENT
-    enrollment = bridge.strict_json(bridge.read_regular(
-        marker, expected_parent=root))
-    field = "events" if kind == "e" else "approvals"
-    if (set(enrollment) != {"schema", "nonce", "events", "approvals"}
-            or not isinstance(enrollment.get(field), list)
-            or sha in enrollment[field]):
-        raise DecisionContinuityError(_RESTORE_STOP)
-    enrollment[field] = sorted([*enrollment[field], sha])
+    enrollment = _read_enrollment()
+    if kind == "e":
+        if sha in enrollment["events"] or bridge.digest(record) != sha:
+            raise DecisionContinuityError(_RESTORE_STOP)
+        enrollment["events"] = sorted([*enrollment["events"], sha])
+    else:
+        bridge.validate_approval_record(record, expected_sha=sha)
+        if any(item["versione_sha256"] == sha for item in enrollment["approvals"]):
+            raise DecisionContinuityError(_RESTORE_STOP)
+        enrollment["approvals"] = sorted(
+            [*enrollment["approvals"], {"versione_sha256": sha,
+                                       "record_sha256": bridge.digest(record)}],
+            key=lambda item: item["versione_sha256"])
     stage = None
     try:
         with tempfile.NamedTemporaryFile(prefix=".decision-enrollment-",
@@ -137,8 +165,10 @@ def _enrollment_add(kind, sha):
         raise bridge.PublicationUncertain(
             "PUBBLICAZIONE_INCERTA: iscrizione decisioni") from exc
     finally:
-        if stage is not None:
-            stage.unlink(missing_ok=True)
+        # A failed enrollment write may be an interrupted approval intent.
+        # Preserve an unresolved stage as forensic evidence: normal reads
+        # fail closed until an explicitly authorised reconciliation.
+        pass
 
 
 def _verify_continuity():
@@ -149,7 +179,7 @@ def _verify_continuity():
         approvals = _approvals_unchecked()
         actual_events = {bridge.digest(row): row for row in events}
         if (actual_events != witnessed_events
-                or set(approvals) != witnessed_approvals):
+                or approvals != witnessed_approvals):
             raise bridge.BridgeError("Storia deliberazioni discontinua")
         return events, approvals
     except (bridge.BridgeError, OSError, TypeError, KeyError) as exc:
@@ -168,12 +198,19 @@ def _write_witness(kind, sha, record, *, enrolling=False):
     """
     if kind not in ("e", "a") or not bridge.HEX.fullmatch(sha):
         raise bridge.BridgeError("Testimonianza non valida")
+    if not isinstance(record, dict):
+        raise bridge.BridgeError("Record testimonianza assente")
+    if kind == "e":
+        if bridge.digest(record) != sha:
+            raise bridge.BridgeError("Impronta evento non valida")
+    else:
+        bridge.validate_approval_record(record, expected_sha=sha)
     if not enrolling:
-        _enrollment_add(kind, sha)
+        _enrollment_add(kind, sha, record)
     directory = _witness_dir()
     final = directory / (kind + "-" + sha + ".json")
     obj = {"schema": _WITNESS_SCHEMA, "kind": kind, "sha": sha,
-           "record": record if kind == "e" else {"versione_sha256": sha}}
+           "record": record, "record_sha256": bridge.digest(record)}
     raw = bridge.canonical(obj) + b"\n"
     try:
         fd = os.open(final, os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -193,11 +230,15 @@ def _write_witness(kind, sha, record, *, enrolling=False):
 def _continuity_snapshot(events, approvals):
     return bridge.digest({
         "eventi": sorted(bridge.digest(x) for x in events),
-        "approvazioni": sorted(approvals),
+        "approvazioni": sorted(
+            ({"versione_sha256": sha, "record_sha256": bridge.digest(record)}
+             for sha, record in approvals.items()),
+            key=lambda row: row["versione_sha256"]),
     })
 
 
-def initialize_decision_continuity(*, mode, acknowledgement, expected_sha256=None):
+def initialize_decision_continuity(*, mode, acknowledgement, expected_sha256=None,
+                                   verified_approval_hashes=None):
     """EXPLICIT local enrollment or audited migration. Never called on reads.
 
     New: requires author acknowledgement and pristine observed inputs.
@@ -230,18 +271,31 @@ def initialize_decision_continuity(*, mode, acknowledgement, expected_sha256=Non
             elif (not isinstance(expected_sha256, str)
                     or expected_sha256 != _continuity_snapshot(events, approvals)):
                 raise DecisionContinuityError(_RESTORE_STOP)
-            witnesses = bridge.ensure_dir(root / _WITNESSES)
+            # A v001 ID-only history cannot certify archived metadata.
+            # RECONCILE of pre-existing approvals requires independent,
+            # explicitly supplied full-record hashes. No auto-upgrade.
+            if approvals and (mode != "RECONCILE"
+                    or type(verified_approval_hashes) is not dict
+                    or set(verified_approval_hashes) != set(approvals)
+                    or any(type(verified_approval_hashes[k]) is not str
+                           or verified_approval_hashes[k] != bridge.digest(v)
+                           for k, v in approvals.items())):
+                raise DecisionContinuityError(_RESTORE_STOP)
+            bridge.ensure_dir(root / _WITNESSES)
             for entry in events:
                 _write_witness("e", bridge.digest(entry), entry, enrolling=True)
-            for version in approvals:
-                _write_witness("a", version, None, enrolling=True)
+            for version, record in approvals.items():
+                _write_witness("a", version, record, enrolling=True)
             # Enrollment is written LAST. Partial migration is not "new".
             enrollment = root / _ENROLLMENT
             data = bridge.canonical({
                 "schema": _ENROLLMENT_SCHEMA,
                 "nonce": secrets.token_hex(16),
                 "events": sorted(bridge.digest(entry) for entry in events),
-                "approvals": sorted(approvals),
+                "approvals": sorted(
+                    ({"versione_sha256": sha, "record_sha256": bridge.digest(record)}
+                     for sha, record in approvals.items()),
+                    key=lambda row: row["versione_sha256"]),
             }) + b"\n"
             try:
                 fd = os.open(enrollment, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
@@ -419,6 +473,11 @@ def _approvals_unchecked():
 
 def _checked_approvals():
     return _verify_continuity()[1]
+
+
+# Downward dependency injection: Bridge never imports Exchange. All direct
+# approved_html() consumers use this exact fail-closed continuity validator.
+bridge._approval_view_reader = _checked_approvals
 
 
 def receive(raw):
@@ -621,9 +680,17 @@ def confirm(sha):
                for row in decision_history()):
             raise bridge.BridgeError("Versione gia rifiutata o rinviata: occorre nuova proposta")
         approved = _checked_approvals()
-        if sha not in approved:
-            _write_witness("a", sha, None)
-        return bridge.approved_import(proposal, bundle, sha, "APPROVO_VERSIONE")
+        if sha in approved:
+            # An idempotent replay must never invent a fresh timestamp.
+            return {"stato": "GIA_PRESENTE", "versione_sha256": sha}
+        record = bridge.make_approval_record(proposal)
+        result = bridge.approved_import(
+            proposal, bundle, sha, "APPROVO_VERSIONE", prepared_record=record,
+            before_commit=lambda exact: _write_witness("a", sha, exact))
+        # No publication is declared successful without verifying the exact
+        # durable record against BOTH enrollment and independent witness.
+        _checked_approvals()
+        return result
 
 def latest_export():
     try:
@@ -895,7 +962,7 @@ def render_page(token):
                     " · " + esc(x["versione_sha256"][:12]) + attribution +
                     order_note + " · " + esc(x["nota"]) + "</p>")
         history = "".join(event_line(x) for x in events)
-        archive = bridge.approved_html() + "<h3>Decisioni e riesami datati</h3>" + (history or "<p>Nessun evento registrato.</p>")
+        archive = bridge.approved_html(verified_records=approvals) + "<h3>Decisioni e riesami datati</h3>" + (history or "<p>Nessun evento registrato.</p>")
     except Exception:
         archive = "<p>Archivio non verificabile: nessuna approvazione attestata.</p>"
     script = """<script>

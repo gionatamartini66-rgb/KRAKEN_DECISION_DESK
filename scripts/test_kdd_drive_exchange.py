@@ -1991,5 +1991,317 @@ process.stdout.write(JSON.stringify(posted));
         self.assertEqual(set(exchange._checked_approvals()), {sha})
 
 
+    # RT5-D1-F1: all below are synthetic-only isolated filesystem tests.
+    def _rt5_approve(self):
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        self.assertEqual(exchange.confirm(sha)["stato"], "INSERITO")
+        approved = exchange._checked_approvals()[sha]
+        self.assertEqual(approved["versione_sha256"], sha)
+        self.assertNotEqual(bridge.digest(approved), sha)
+        root = bridge.PRIVATE_ROOT
+        proof = bridge.strict_json((root / exchange._WITNESSES /
+                                   ("a-" + sha + ".json")).read_bytes())
+        anchor = bridge.strict_json((root / exchange._ENROLLMENT).read_bytes())
+        self.assertEqual(proof["record"], approved)
+        self.assertEqual(proof["record_sha256"], bridge.digest(approved))
+        self.assertEqual(anchor["schema"], exchange._ENROLLMENT_SCHEMA)
+        self.assertEqual(anchor["approvals"],
+                         [{"versione_sha256": sha,
+                           "record_sha256": bridge.digest(approved)}])
+        return sha, bridge.PRIVATE_ROOT / bridge.ARCHIVE / (sha + ".json"), approved
+
+    def _rt5_save(self, file, value):
+        file.write_bytes(bridge.canonical(value) + bytes([10]))
+
+    def test_rt5_a_full_record_metadata_differential(self):
+        sha, file, original = self._rt5_approve()
+        changes = (
+            ("approvato_utc", "1999-01-01T00:00:00+00:00"),
+            ("snapshot_id", "0"*64),
+            ("nessun_ordine", False),
+            ("esecuzione", "ESEGUITA"),
+            ("consenso", "IGNOTO"),
+            ("versione_sha256", "0"*64),
+            ("proposta", {"schema": "fake"}),
+            ("extra", "new"),
+            ("approvato_utc", 17),
+            ("nessun_ordine", 1),
+            ("esecuzione", None),
+        )
+        try:
+            for key, value in changes:
+                with self.subTest(key=key, value=value):
+                    changed = copy.deepcopy(original)
+                    changed[key] = value
+                    self._rt5_save(file, changed)
+                    with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+                        exchange._checked_approvals()
+                    self.assertIn("STOP", bridge.approved_html())
+                    self._rt5_save(file, original)
+                    self.assertEqual(exchange._checked_approvals()[sha], original)
+            for key in original:
+                with self.subTest(missing=key):
+                    changed = copy.deepcopy(original)
+                    del changed[key]
+                    self._rt5_save(file, changed)
+                    with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+                        exchange._checked_approvals()
+                    self._rt5_save(file, original)
+        finally:
+            self._rt5_save(file, original)
+
+    def test_rt5_b_all_http_and_direct_consumers_fail_closed(self):
+        import serve
+        sha, file, original = self._rt5_approve()
+        self.assertIn("GPT approvata", bridge.approved_html())
+        self.assertIn("APPROVATA", serve.decision_home())
+        changed = copy.deepcopy(original)
+        changed["approvato_utc"] = "1999-01-01T00:00:00+00:00"
+        self._rt5_save(file, changed)
+        try:
+            for page in (bridge.approved_html(), serve.decision_home(),
+                         serve.with_controls("<html><body><h2>1 · Decisioni e posizioni</h2>"
+                                             "<p>SPOT-ALIVE</p></body></html>"),
+                         exchange.render_page("synthetic")):
+                self.assertNotIn("Proposta patrimoniale GPT approvata", page)
+                self.assertNotIn("APPROVATA · ARCHIVIO", page)
+                self.assertIn("STOP", page)
+            http = self._rt2_http_gets()
+            for endpoint, body in http.items():
+                self.assertIn("STOP", body, endpoint)
+                self.assertNotIn("Proposta patrimoniale GPT approvata", body, endpoint)
+                self.assertNotIn("APPROVATA · ARCHIVIO", body, endpoint)
+            self.assertIn("ORIGINAL-SPOT-AVAILABLE", http["/"])
+            self.assertIn("href='/mercati/spot'", http["/"])
+            with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+                exchange.confirm(sha)
+        finally:
+            self._rt5_save(file, original)
+        self.assertIn("APPROVATA", serve.decision_home())
+
+    def test_rt5_c_archive_witness_enrollment_corruption_and_loss(self):
+        sha, file, original = self._rt5_approve()
+        root = bridge.PRIVATE_ROOT
+        witness = root / exchange._WITNESSES / ("a-" + sha + ".json")
+        enrollment = root / exchange._ENROLLMENT
+        for name, path in (("approval", file), ("witness", witness),
+                           ("enrollment", enrollment)):
+            backup = path.read_bytes()
+            for variant in ("corrupt", "delete", "mode"):
+                with self.subTest(path=name, variant=variant):
+                    if variant == "corrupt":
+                        path.write_bytes(b'{"tampered":true}' + bytes([10]))
+                    elif variant == "delete":
+                        path.unlink()
+                    else:
+                        path.chmod(0o644)
+                    try:
+                        with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+                            exchange._checked_approvals()
+                    finally:
+                        path.write_bytes(backup)
+                        path.chmod(0o600)
+                    self.assertIn(sha, exchange._checked_approvals())
+        # Modify both witness and archived record coherently while leaving
+        # the durable enrollment hash untouched; this MUST STILL FAIL.
+        e = bridge.strict_json(enrollment.read_bytes())
+        proof = bridge.strict_json(witness.read_bytes())
+        changed = copy.deepcopy(original)
+        changed["approvato_utc"] = "1999-01-01T00:00:00+00:00"
+        proof["record"] = changed
+        proof["record_sha256"] = bridge.digest(changed)
+        try:
+            self._rt5_save(file, changed)
+            self._rt5_save(witness, proof)
+            with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+                exchange._checked_approvals()
+            self.assertEqual(bridge.strict_json(enrollment.read_bytes()), e)
+        finally:
+            self._rt5_save(file, original)
+            proof["record"] = original
+            proof["record_sha256"] = bridge.digest(original)
+            self._rt5_save(witness, proof)
+        self.assertIn(sha, exchange._checked_approvals())
+
+    def test_rt5_c_replaced_archive_inode_stays_unattested(self):
+        import os
+        sha, file, original = self._rt5_approve()
+        replacement = file.with_name(".rt5-synthetic-substitution")
+        altered = copy.deepcopy(original)
+        altered["approvato_utc"] = "2001-01-01T00:00:00+00:00"
+        try:
+            self._rt5_save(replacement, altered)
+            replacement.chmod(0o600)
+            os.replace(replacement, file)
+            with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+                exchange._checked_approvals()
+        finally:
+            replacement.unlink(missing_ok=True)
+            self._rt5_save(file, original)
+        self.assertIn(sha, exchange._checked_approvals())
+
+    def test_rt5_d_pre_rename_uncertain_recovery_is_not_approved(self):
+        import errno
+        import os
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        actual_rename = os.rename
+        failed = [False]
+        def fault(source, destination):
+            if (Path(destination).parent.name == bridge.ARCHIVE
+                    and Path(destination).name == sha + ".json"):
+                failed[0] = True
+                raise OSError(errno.EIO, "archive before rename")
+            return actual_rename(source, destination)
+        with mock.patch.object(bridge.os, "rename", side_effect=fault):
+            with self.assertRaises(bridge.PublicationUncertain):
+                exchange.confirm(sha)
+        self.assertTrue(failed[0])
+        with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+            exchange._checked_approvals()
+        self.assertEqual(bridge.reconcile_archive(), ["NON_PUBBLICATO"])
+        # The original write-ahead witness remains forensic evidence: there
+        # can be no automatic retry or invented successful publication.
+        with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+            exchange.confirm(sha)
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt5_d_before_witness_failure_does_not_publish(self):
+        import errno
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        with mock.patch.object(exchange, "_write_witness",
+                               side_effect=OSError(errno.EIO, "before witness")):
+            with self.assertRaises(OSError):
+                exchange.confirm(sha)
+        self.assertEqual(bridge.load_archive(), {})
+        self.assertEqual(exchange._checked_approvals(), {})
+        self.assertEqual(exchange.confirm(sha)["stato"], "INSERITO")
+        self.assertEqual(exchange.confirm(sha)["stato"], "GIA_PRESENTE")
+        self.assertEqual(len(exchange._checked_approvals()), 1)
+
+    def test_rt5_d_after_witness_before_commit_stops_with_evidence(self):
+        import errno
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        with mock.patch.object(bridge, "_exclusive_json_locked",
+                               side_effect=OSError(errno.EIO, "before commit")):
+            with self.assertRaises(OSError):
+                exchange.confirm(sha)
+        self.assertEqual(bridge.load_archive(), {})
+        proof = bridge.PRIVATE_ROOT / exchange._WITNESSES / ("a-" + sha + ".json")
+        self.assertTrue(proof.is_file())
+        self.assertIn("record_sha256", bridge.strict_json(proof.read_bytes()))
+        for action in (lambda: exchange._checked_approvals(), lambda: exchange.confirm(sha),
+                       lambda: exchange.receive(bridge.canonical(self.original.plan))):
+            with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+                action()
+
+    def test_rt5_d_after_witness_fsync_uncertain_stops(self):
+        import errno
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        actual_sync = bridge._sync_dir
+        def fault(folder):
+            if Path(folder).name == exchange._WITNESSES:
+                raise OSError(errno.EIO, "post witness fsync")
+            return actual_sync(folder)
+        with mock.patch.object(bridge, "_sync_dir", side_effect=fault):
+            with self.assertRaises(bridge.PublicationUncertain):
+                exchange.confirm(sha)
+        self.assertEqual(bridge.load_archive(), {})
+        with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+            exchange._checked_approvals()
+
+    def test_rt5_d_after_archive_rename_uncertain_explicit_recovery(self):
+        import errno
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        actual_sync = bridge._sync_dir
+        archive_syncs = [0]
+        def fault(folder):
+            if Path(folder).name == bridge.ARCHIVE:
+                archive_syncs[0] += 1
+                # First fsync persists the journal; second follows rename.
+                if archive_syncs[0] == 2:
+                    raise OSError(errno.EIO, "after archive rename before dir fsync")
+            return actual_sync(folder)
+        with mock.patch.object(bridge, "_sync_dir", side_effect=fault):
+            with self.assertRaises(bridge.PublicationUncertain):
+                exchange.confirm(sha)
+        self.assertEqual(archive_syncs[0], 2)
+        with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+            exchange._checked_approvals()
+        self.assertEqual(bridge.reconcile_archive(), ["PUBBLICATO_CONFERMATO"])
+        doc = exchange._checked_approvals()[sha]
+        when = doc["approvato_utc"]
+        self.assertEqual(exchange.confirm(sha)["stato"], "GIA_PRESENTE")
+        self.assertEqual(exchange._checked_approvals()[sha]["approvato_utc"], when)
+        self.assertEqual(len(bridge.load_archive()), 1)
+
+    def test_rt5_e_legacy_id_only_cannot_auto_attest(self):
+        sha, file, original = self._rt5_approve()
+        root = bridge.PRIVATE_ROOT
+        witness = root / exchange._WITNESSES / ("a-" + sha + ".json")
+        enrollment = root / exchange._ENROLLMENT
+        old = bridge.strict_json(enrollment.read_bytes())
+        old["schema"] = "kdd_decision_enrollment_v001"
+        old["approvals"] = [sha]
+        self._rt5_save(enrollment, old)
+        old_proof = {"schema": "kdd_decision_witness_v001",
+                     "kind": "a", "sha": sha, "record": {"versione_sha256": sha}}
+        self._rt5_save(witness, old_proof)
+        with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+            exchange._checked_approvals()
+        with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+            exchange.initialize_decision_continuity(
+                mode="NEW", acknowledgement="INIZIALIZZO_NUOVO_STORICO")
+        with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+            exchange.initialize_decision_continuity(
+                mode="RECONCILE", acknowledgement="RICONCILIO_STORICO_PRECEDENTE",
+                expected_sha256="0"*64)
+        # Synthetic evidence removed from original names only for an EXPLICIT
+        # independently attested reconciliation test, never auto migration.
+        enrollment.rename(root / "old-enrollment-forensic")
+        (root / exchange._WITNESSES).rename(root / "old-witnesses-forensic")
+        expected = exchange._continuity_snapshot([], {sha: original})
+        with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+            exchange.initialize_decision_continuity(
+                mode="RECONCILE", acknowledgement="RICONCILIO_STORICO_PRECEDENTE",
+                expected_sha256=expected)
+        with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+            exchange.initialize_decision_continuity(
+                mode="RECONCILE", acknowledgement="RICONCILIO_STORICO_PRECEDENTE",
+                expected_sha256=expected, verified_approval_hashes={sha: "0"*64})
+        result = exchange.initialize_decision_continuity(
+            mode="RECONCILE", acknowledgement="RICONCILIO_STORICO_PRECEDENTE",
+            expected_sha256=expected,
+            verified_approval_hashes={sha: bridge.digest(original)})
+        self.assertEqual(result["approvazioni"], 1)
+        self.assertEqual(exchange._checked_approvals()[sha], original)
+
+    def test_rt5_d_enrollment_replace_uncertain_preserves_staging_or_stop(self):
+        import errno
+        import os
+        self.original.persist_origin()
+        sha = exchange.receive(bridge.canonical(self.original.plan))
+        root = bridge.PRIVATE_ROOT
+        target = root / exchange._ENROLLMENT
+        original = os.replace
+        def fault(source, destination):
+            original(source, destination)
+            if Path(destination) == target:
+                raise OSError(errno.EIO, "post replace uncertainty")
+        with mock.patch.object(exchange.os, "replace", side_effect=fault):
+            with self.assertRaises(bridge.PublicationUncertain):
+                exchange.confirm(sha)
+        self.assertEqual(bridge.load_archive(), {})
+        with self.assertRaisesRegex(bridge.BridgeError, "STOP DECISIONI"):
+            exchange._checked_approvals()
+        self.assertTrue((root / exchange._ENROLLMENT).exists())
+
+
+
 if __name__ == "__main__":
     unittest.main()

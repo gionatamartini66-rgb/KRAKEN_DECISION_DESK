@@ -704,7 +704,9 @@ def with_controls(page: str, result: str = "") -> str:
         # Delay optional bridge import: malformed or unavailable G2 code cannot
         # prevent localhost Spot dashboard from starting.
         from scripts import kdd_bridge_g2 as bridge_g2
-        portfolio_proposals = bridge_g2.approved_html()
+        from scripts import kdd_drive_exchange as exchange
+        portfolio_proposals = bridge_g2.approved_html(
+            verified_records=exchange._checked_approvals())
     except Exception:
         portfolio_proposals = ("<section id='kdd-gpt-patrimonio' role='status'>"
                                "<h2>Proposte patrimoniali GPT</h2>"
