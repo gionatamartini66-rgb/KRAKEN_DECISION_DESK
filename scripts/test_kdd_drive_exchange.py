@@ -1118,12 +1118,12 @@ process.stdout.write(JSON.stringify(posted));
     def test_rt2_a_absence_verified_with_missing_inbox_and_missing_file(self):
         import serve
         self.assertIsNone(exchange.pending())
-        self.assertIn("Proposta GPT: ASSENTE", serve.decision_home())
+        self.assertRegex(serve.decision_home(), r"Proposta GPT(?::| ·) ASSENTE")
         self.assertIn("Nessuna proposta ricevuta", exchange.render_page("TOKEN"))
         folder = bridge.private_directory(bridge.INBOX, create=True)
         self.assertFalse((folder / exchange.INCOMING_NAME).exists())
         self.assertIsNone(exchange.pending())
-        self.assertIn("Proposta GPT: ASSENTE", serve.decision_home())
+        self.assertRegex(serve.decision_home(), r"Proposta GPT(?::| ·) ASSENTE")
         self.assertIn("Nessuna proposta ricevuta", exchange.render_page("TOKEN"))
         self.assertEqual(bridge.load_archive(), {})
 
