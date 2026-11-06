@@ -50,6 +50,11 @@ CANONICAL_KDD_SOURCE = wallet.DEFAULT_SOURCE
 PROPOSAL_FIELDS = frozenset(("schema", "proposta_id", "snapshot_id", "snapshot_utc", "creato_utc", "posizioni", "scenario", "scenario_alternativo", "rischi_comuni", "liquidita", "revisione", "fonti_esterne", "sostituisce_sha256"))
 POSITION_FIELDS = frozenset(("indice", "token", "azione", "tesi", "rischi", "alternativa", "invalidazione", "riesame", "costi", "evidenze"))
 SOURCE_REF_FIELDS = frozenset(("nome", "url"))
+APPROVAL_FIELDS = frozenset(("versione_sha256", "consenso", "approvato_utc",
+                             "snapshot_id", "proposta", "nessun_ordine", "esecuzione"))
+# Only Exchange installs this independent durability verifier at import.
+# Without it, read-only approval HTML is deliberately STOP, not self-attesting.
+_approval_view_reader = None
 
 
 class BridgeError(ValueError):
@@ -230,13 +235,7 @@ def _pending_file(directory, filename):
 def _validate_transaction_document(directory, filename, raw):
     doc = strict_json(raw)
     if directory.name == ARCHIVE:
-        if (not isinstance(doc, dict) or doc.get("versione_sha256") != filename[:-5]
-                or doc.get("consenso") != "CONFERMATO_DA_COMANDO_UTENTE"
-                or not isinstance(doc.get("proposta"), dict)
-                or digest(doc["proposta"]) != filename[:-5]
-                or doc.get("esecuzione") != "NON_ATTESTATA"
-                or doc.get("nessun_ordine") is not True):
-            raise BridgeError("Decisione archiviata non verificabile")
+        validate_approval_record(doc, expected_sha=filename[:-5])
     elif directory.name == OUTBOX:
         if (not isinstance(doc, dict) or digest(doc) != filename[:-5]
                 or doc.get("schema") != SCHEMA_BUNDLE):
@@ -796,6 +795,47 @@ def validate_proposal(proposal, bundle, *, now=None):
     return proposal
 
 
+def validate_approval_record(entry, *, expected_sha=None):
+    """One strict schema contract for archive, transaction and witnesses."""
+    if not isinstance(entry, dict) or set(entry) != APPROVAL_FIELDS:
+        raise BridgeError("Record integrale approvazione non canonico")
+    proposal = entry["proposta"]
+    if (not isinstance(proposal, dict)
+            or type(entry["versione_sha256"]) is not str
+            or not HEX.fullmatch(entry["versione_sha256"])
+            or expected_sha is not None and entry["versione_sha256"] != expected_sha
+            or digest(proposal) != entry["versione_sha256"]
+            or entry["consenso"] != "CONFERMATO_DA_COMANDO_UTENTE"
+            or type(entry["consenso"]) is not str
+            or type(entry["snapshot_id"]) is not str
+            or entry["snapshot_id"] != proposal.get("snapshot_id")
+            or not HEX.fullmatch(entry["snapshot_id"])
+            or type(entry["approvato_utc"]) is not str
+            or entry["nessun_ordine"] is not True
+            or type(entry["esecuzione"]) is not str
+            or entry["esecuzione"] != "NON_ATTESTATA"):
+        raise BridgeError("Record integrale approvazione incoerente")
+    when = instant(entry["approvato_utc"])
+    if (when.tzinfo is None or when.utcoffset() is None
+            or when.utcoffset() != dt.timedelta(0)):
+        raise BridgeError("Data approvazione senza UTC")
+    if entry["approvato_utc"] != when.isoformat(timespec="seconds"):
+        raise BridgeError("Data approvazione non canonica")
+    return entry
+
+
+def make_approval_record(proposal, *, now=None):
+    """Freeze the complete approved document BEFORE its write-ahead witness."""
+    version = digest(proposal)
+    return validate_approval_record({
+        "versione_sha256": version,
+        "consenso": "CONFERMATO_DA_COMANDO_UTENTE",
+        "approvato_utc": checked_now(now).isoformat(timespec="seconds"),
+        "snapshot_id": proposal["snapshot_id"], "proposta": proposal,
+        "nessun_ordine": True, "esecuzione": "NON_ATTESTATA",
+    }, expected_sha=version)
+
+
 def load_archive(*, create=False):
     try:
         folder = private_directory(ARCHIVE, create=create)
@@ -819,16 +859,12 @@ def load_archive(*, create=False):
         if file.is_symlink() or not file.is_file() or not re.fullmatch(r"[0-9a-f]{64}\.json", file.name):
             raise BridgeError("Archivio non regolare")
         entry = strict_json(read_regular(file, expected_parent=folder))
-        proposal = entry.get("proposta")
-        if not isinstance(proposal, dict) or digest(proposal) != file.stem:
-            raise BridgeError("Archivio alterato")
-        if entry.get("versione_sha256") != file.stem or entry.get("consenso") != "CONFERMATO_DA_COMANDO_UTENTE":
-            raise BridgeError("Approvazione archiviata incoerente")
-        out[file.stem] = entry
+        out[file.stem] = validate_approval_record(entry, expected_sha=file.stem)
     return out
 
 
-def approved_import(proposal, bundle, approved_sha, consent, *, now=None):
+def approved_import(proposal, bundle, approved_sha, consent, *, now=None,
+                    prepared_record=None, before_commit=None):
     """Only a KDD-origin photograph may be bound to explicit human consent."""
     verify_local_origin(bundle)
     validate_proposal(proposal, bundle, now=now)
@@ -850,22 +886,62 @@ def approved_import(proposal, bundle, approved_sha, consent, *, now=None):
             raise BridgeError("Revisione non collegata alla versione corrente")
         if not existing and parent is not None:
             raise BridgeError("Versione precedente inesistente")
-        entry = {"versione_sha256": version, "consenso": "CONFERMATO_DA_COMANDO_UTENTE",
-                 "approvato_utc": checked_now(now).isoformat(timespec="seconds"),
-                 "snapshot_id": proposal["snapshot_id"], "proposta": proposal,
-                 "nessun_ordine": True, "esecuzione": "NON_ATTESTATA"}
+        # Approval timestamp and every metadata byte were frozen earlier in
+        # Exchange. Bridge MUST write that identical prepared record.
+        entry = (make_approval_record(proposal, now=now) if prepared_record is None
+                 else validate_approval_record(prepared_record, expected_sha=version))
+        if entry["proposta"] != proposal:
+            raise BridgeError("Record approvazione diverso dalla proposta autorizzata")
+        # Called under the approval flock, after parent/consent validation and
+        # immediately before a real archive publication. Crash after intent
+        # but before commit => unresolved witness => STOP, not false success.
+        if before_commit is not None:
+            before_commit(entry)
         status = _exclusive_json_locked(folder, version+".json", entry)
         return {"stato": status, "versione_sha256": version}
 
 
-def approved_html():
-    """Read-only escaped view to reuse existing KDD dashboard without new POST routes."""
-    esc = lambda v: html.escape(str(v), quote=True)
+def approved_html(*, verified_records=None):
+    """Verified approval view; an unanchored legacy archive is STOP-only text.
+
+    The old standalone bridge has no enrollment/witness and historically
+    exposed the GPT prose for review. Preserve that *untrusted preview* for
+    compatibility without presenting it as an attested human approval.
+    Operational HTTP callers ALWAYS pass Exchange-verified records; a broken
+    v002 enrollment is never promoted to a legacy preview.
+    """
+    esc = lambda value: html.escape(str(value), quote=True)
+    unverified_legacy = False
     try:
-        records = load_archive()
+        if verified_records is not None:
+            records = verified_records
+        elif _approval_view_reader is not None:
+            try:
+                records = _approval_view_reader()
+            except Exception:
+                # The presence of an enrollment (valid, old, or corrupted)
+                # categorically forbids legacy downgrade. Symlink counts as
+                # present, and an undecidable path is STOP via the catch.
+                if _path_present(PRIVATE_ROOT / ".decision-enrollment-v001.json"):
+                    raise
+                records = load_archive()
+                unverified_legacy = True
+        else:
+            # Only a standalone pre-Exchange legacy bridge can reach here.
+            # The textual content is *not* a certified approval.
+            if _path_present(PRIVATE_ROOT / ".decision-enrollment-v001.json"):
+                raise BridgeError("Verifica continuità obbligatoria")
+            records = load_archive()
+            unverified_legacy = True
+        if not isinstance(records, dict):
+            raise BridgeError("Approvazioni non verificabili")
+        for sha, record in records.items():
+            validate_approval_record(record, expected_sha=sha)
     except Exception:
-        return "<section><h2>Proposte patrimoniali GPT</h2><p>Archivio non verificabile: STOP.</p></section>"
+        return "<section id='kdd-gpt-patrimonio'><h2>Proposte patrimoniali GPT</h2><p>Archivio non verificabile: STOP.</p></section>"
     if not records:
+        if unverified_legacy:
+            return "<section id='kdd-gpt-patrimonio'><h2>Proposte patrimoniali GPT</h2><p>Archivio non verificabile: STOP. Nessuna approvazione attestata.</p></section>"
         return "<section id='kdd-gpt-patrimonio'><h2>Proposte patrimoniali GPT</h2><p>Nessuna versione approvata importata.</p></section>"
     heads = set(records) - {e["proposta"].get("sostituisce_sha256") for e in records.values()}
     if len(heads) != 1:
@@ -881,7 +957,14 @@ def approved_html():
         "</p><p>Evidenze: "+esc(r["evidenze"])+
         "</p><p>Riesame: "+esc(r["riesame"])+"</p></details></li>"
         for r in p["posizioni"])
-    return ("<section id='kdd-gpt-patrimonio'><h2>Proposta patrimoniale GPT approvata</h2>"
+    heading = ("<h2>Anteprima GPT storica NON CERTIFICATA · STOP</h2>"
+               if unverified_legacy else
+               "<h2>Proposta patrimoniale GPT approvata</h2>")
+    warning = ("<p role='status'>Archivio non verificabile: STOP. Il testo"
+               " seguente è un'anteprima storica non attribuibile a consenso"
+               " integro e non costituisce decisione approvata.</p>"
+               if unverified_legacy else "")
+    return ("<section id='kdd-gpt-patrimonio'>" + heading + warning +
             "<p>Versione "+esc(latest["versione_sha256"][:16])+" · snapshot "+esc(p["snapshot_utc"])+
             " · ESECUZIONE NON ATTESTATA. Testo generato da GPT, non verificato come fatto finanziario. Valutazione storica: riesaminare al nuovo mercato.</p>"
             "<p>Scenario: "+esc(p["scenario"])+"</p><p>Alternativa generale: "+
