@@ -79,6 +79,111 @@ class WalletPacketG0Tests(unittest.TestCase):
     def pack(self,now=T):
         return p.build(self.root, now=now)
 
+    def _analytic_fixture(self):
+        iso=T.isoformat()
+        self.snapshot["binance_reference"] = {
+            "status":"OK", "observed_utc":iso, "tokens":[
+                {"token":"ADA", "status":"OK", "binance_pairs":[{"pair":"ADAUSDT"}],
+                 "binance_base_volume_24h_subset":500, "kraken_base_volume_24h_subset":250,
+                 "volume_ratio_subsets":2},
+                {"token":"SOL", "status":"NOT_LISTED_FOR_QUOTE", "binance_pairs":[]}]}
+        self.dossier["candidati"] = [{
+            "token":"SOL", "coppia_analisi":"SOL/USD",
+            "flusso_spot_kraken":{"stato":"COMPLETO_4H", "coppia":"SOL/USD",
+                "osservato_utc":iso, "finestra_4h_completa":True,
+                "numero_trade_ottenuti":900, "durata_campione_secondi":14401,
+                "delta_4h":{"numero_trade":900, "acquisti_aggressivi_quote":1200,
+                            "vendite_aggressive_quote":900, "delta_quote":300,
+                            "percentuale_netto_su_volume":14.29}},
+            "fondamentali_coingecko":{"id":"solana", "fonte":"https://api.coingecko.com/api/v3/coins/solana",
+                "aggiornato_utc":iso, "capitalizzazione_usd":8000,
+                "offerta_circolante":100, "offerta_totale":110},
+            "simulazione_costi_eur_wallet":[{"coppia":"SOL/USD",
+                "costo_roundtrip_eur":1.25, "n_conversioni":1}]}]
+        self.dossier["contesto_derivati_btc"] = {
+            "strumento":"PF_XBTUSD",
+            "open-interest":{"ultimo_punto_utc":iso, "ultimo_punto_provvisorio":False,
+                             "ultimo_close":123, "close_4h_fa":110},
+            "cvd":{"ultimo_punto_utc":iso, "ultimo_punto_provvisorio":False,
+                   "ultimo_cvd":5, "cvd_4h_fa":3, "ultimo_buy_volume":9,
+                   "ultimo_sell_volume":4}}
+        self.dossier["fonti_esterne"] = {"coingecko_global":{
+            "fonte":"https://api.coingecko.com/api/v3/global",
+            "aggiornato_sorgente_utc":T.timestamp(),
+            "capitalizzazione_totale_usd":123456,
+            "volume_24h_usd":5000, "dominanza_btc_pct":56.7}}
+        self.dump()
+
+    def test_analytic_handoff_multisource_to_actual_bridge_reader(self):
+        self._analytic_fixture()
+        pkt=self.pack()
+        evidence=pkt["evidenze_multifonte"]
+        self.assertEqual(evidence["benchmark_copertura"]["token_esaminati"],2)
+        self.assertEqual(evidence["benchmark_copertura"]["token_con_dati"],1)
+        self.assertEqual(evidence["benchmark_binance"][0]["volume_base_binance_24h"],"500")
+        self.assertEqual(evidence["benchmark_binance"][0]["unita"],"quantita token base in 24h")
+        candidate=evidence["candidati"][0]
+        self.assertEqual(candidate["token"],"SOL")
+        self.assertEqual(candidate["flusso_spot"]["coppia"],"SOL/USD")
+        self.assertEqual(candidate["flusso_spot"]["delta_4h"]["delta_quote"],"300")
+        self.assertEqual(candidate["fondamentali"]["id_coingecko"],"solana")
+        self.assertEqual(candidate["simulazioni_costi"]["righe"][0]["costo_roundtrip_eur"],"1.25")
+        self.assertEqual(evidence["derivati_btc"]["open-interest"]["valori"]["ultimo_close"],"123")
+        self.assertEqual(evidence["contesto"]["dominanza_btc_pct"],"56.7")
+        self.assertEqual(pkt["patrimonio"]["n_posizioni"],3)
+        import kdd_bridge_g2 as bridge
+        bundle={"schema":bridge.SCHEMA_BUNDLE, "packet":pkt,
+                "packet_sha256":bridge.digest(pkt), "preparato_utc":T.isoformat(),
+                "provenienza":"KDD_LOCALE_DICHIARATA_NON_AUTENTICATA",
+                "trasporto":"MANUALE_NON_ESEGUITO"}
+        self.assertIsInstance(bridge.read_context(bundle,now=T),dict)
+
+    def test_analytic_handoff_wrong_pair_partial_stale_and_missing_are_not_values(self):
+        self._analytic_fixture()
+        flow=self.dossier["candidati"][0]["flusso_spot_kraken"]
+        flow["coppia"]="ETH/USD"
+        self.dossier["candidati"][0]["fondamentali_coingecko"]={"stato":"ID non verificato"}
+        self.dossier["candidati"][0]["simulazione_costi_eur_wallet"][0]["coppia"]="ETH/USD"
+        self.dossier["contesto_derivati_btc"]["cvd"]["ultimo_punto_utc"]=(T-dt.timedelta(hours=3)).isoformat()
+        self.dump()
+        ev=self.pack()["evidenze_multifonte"]
+        self.assertEqual(ev["candidati"][0]["flusso_spot"]["stato"],"COPPIA_INCOERENTE")
+        self.assertIsNone(ev["candidati"][0]["flusso_spot"]["delta_4h"])
+        self.assertEqual(ev["candidati"][0]["fondamentali"]["stato"],"NON_VERIFICATO")
+        self.assertEqual(ev["candidati"][0]["simulazioni_costi"]["righe"],[])
+        self.assertEqual(ev["derivati_btc"]["cvd"]["stato"],"SCADUTO")
+        self.assertIsNone(ev["derivati_btc"]["cvd"]["valori"])
+
+    def test_analytic_handoff_genuine_kraken_trade_producer(self):
+        import flusso_spot
+        self._analytic_fixture()
+        now=T.timestamp()
+        trades=[
+            ["10","1",now-14500,"b","m",""],
+            ["10","2",now-120,"s","m",""],
+            ["10","4",now-60,"b","m",""]]
+        produced=flusso_spot.analyze(trades,now,"SOL/USD")
+        self.assertEqual(produced["stato"],"COMPLETO_4H")
+        produced["osservato_utc"]=T.isoformat()
+        self.dossier["candidati"][0]["flusso_spot_kraken"]=produced
+        self.dump()
+        packet=self.pack()
+        flow=packet["evidenze_multifonte"]["candidati"][0]["flusso_spot"]
+        self.assertEqual(flow["stato"],"DISPONIBILE")
+        self.assertEqual(flow["delta_4h"]["delta_quote"],"20.0")
+        self.assertEqual(flow["numero_trade"],3)
+        self.assertEqual(flow["unita"],"valuta di quotazione USD")
+
+    def test_analytic_handoff_incomplete_and_unaligned_dossier(self):
+        self._analytic_fixture()
+        self.dossier["candidati"][0]["flusso_spot_kraken"]["stato"]="FINESTRA_4H_NON_COPERTA"
+        self.dossier["candidati"][0]["flusso_spot_kraken"]["finestra_4h_completa"]=False
+        self.dump()
+        self.assertEqual(self.pack()["evidenze_multifonte"]["candidati"][0]["flusso_spot"]["stato"],"INCOMPLETO")
+        self.dossier["kraken_istantanea_utc"]=(T-dt.timedelta(minutes=1)).isoformat()
+        self.dump()
+        self.assertEqual(self.pack()["evidenze_multifonte"]["stato"],"NON_ALLINEATO")
+
     def test_economic_context_is_in_real_packet_path_and_not_a_recommendation(self):
         packet = self.pack()
         summary = packet["patrimonio"]["quadro_economico_per_gpt"]
