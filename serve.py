@@ -579,7 +579,10 @@ def decision_home():
             body += "<p>GPT: nessuna valutazione collegabile a questa posizione.</p>"
         if verified_pair:
             body += ("<p><b>Coppia documentata da dossier KDD:</b> " +
-                     esc(entry["coppia"]) + ". Elegibilità sul conto non verificata. " +
+                     esc(entry["coppia"]) + ". Fonte: dossier KDD e fotografia Kraken " +
+                     esc(market_time or "data non disponibile") +
+                     " (identità storica, prezzi da aggiornare). " +
+                     "Elegibilità sul conto non verificata. " +
                      _decision_pair_links(entry["pair_key"], frames=entry.get("timeframe")) +
                      "</p>")
         else:
