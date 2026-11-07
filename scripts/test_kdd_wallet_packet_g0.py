@@ -156,6 +156,64 @@ class WalletPacketG0Tests(unittest.TestCase):
         self.assertEqual(ev["derivati_btc"]["cvd"]["stato"],"SCADUTO")
         self.assertIsNone(ev["derivati_btc"]["cvd"]["valori"])
 
+    def test_r1_stale_book_cost_is_historical_without_usable_number(self):
+        self._analytic_fixture()
+        stale=(T-dt.timedelta(hours=3)).isoformat()
+        self.snapshot["rilevazione_utc"]=stale
+        self.dossier["kraken_istantanea_utc"]=stale
+        # Directly exercise the analytical selector: a packet may reject a
+        # stale source before this path, which would otherwise hide the defect.
+        evidence=p.analytic_evidence(
+            self.snapshot, self.dossier, [{"token":"SOL","stato_identita":"VALIDA"}],
+            [{"token":"SOL","coppia_analisi":"SOL/USD"}], T)
+        costs=evidence["candidati"][0]["simulazioni_costi"]
+        self.assertEqual(costs["stato"],"COSTO_STORICO")
+        self.assertEqual(costs["righe"][0]["stato"],"COSTO_STORICO")
+        self.assertIsNone(costs["righe"][0]["costo_roundtrip_eur"])
+        self.assertEqual(costs["freschezza"],"DA_AGGIORNARE")
+        self.assertIn("storica", costs["limite"].lower())
+
+    def test_r1_covered_rolling_15m_survives_incomplete_4h_and_closed_is_distinct(self):
+        import flusso_spot
+        if not hasattr(flusso_spot, "analyze"):
+            self.skipTest("Updater packaging fixture has producer placeholder")
+        self._analytic_fixture()
+        now=T.timestamp()
+        # 20m history covers rolling 15m, not the preceding four hours.
+        trades=[["10","1",now-1200,"b","m",""],
+                ["10","2",now-700,"s","m",""],
+                ["10","4",now-60,"b","m",""]]
+        flow=flusso_spot.analyze(trades,now,"SOL/USD")
+        self.assertFalse(flow["finestra_4h_completa"])
+        self.assertTrue(flow["finestra_15m_completa"])
+        self.assertIsNone(flow["delta_4h"])
+        flow["osservato_utc"]=T.isoformat()
+        self.dossier["candidati"][0]["flusso_spot_kraken"]=flow
+        self.dump()
+        out=self.pack()["evidenze_multifonte"]["candidati"][0]["flusso_spot"]
+        self.assertEqual(out["stato"],"INCOMPLETO")
+        self.assertIsNone(out["delta_4h"])
+        self.assertEqual(out["delta_15m_mobile"]["stato"],"DISPONIBILE")
+        self.assertEqual(out["delta_15m_mobile"]["valori"]["delta_quote"],"20.0")
+        self.assertEqual(out["delta_candela_15m_chiusa"]["stato"],"RIFERIMENTO_MANCANTE")
+        self.assertIsNone(out["delta_candela_15m_chiusa"]["valori"])
+        # An independently covered closed candle has explicit boundaries.
+        end=dt.datetime.fromtimestamp((int(now)//900)*900-900,dt.timezone.utc)
+        # Use synthetic timestamps relative to that boundary for full coverage.
+        end_ts=end.timestamp()
+        covered=[["10","1",end_ts-1000,"b","m",""],
+                 ["10","2",end_ts-800,"s","m",""],
+                 ["10","4",now-1,"b","m",""]]
+        closed=flusso_spot.analyze(covered,now,"SOL/USD",end.isoformat())
+        self.assertEqual(closed["candela_15m_chiusa"]["stato"],"COMPLETA")
+        closed["osservato_utc"]=T.isoformat()
+        self.dossier["candidati"][0]["flusso_spot_kraken"]=closed
+        self.dump()
+        out=self.pack()["evidenze_multifonte"]["candidati"][0]["flusso_spot"]
+        self.assertEqual(out["delta_candela_15m_chiusa"]["stato"],"DISPONIBILE")
+        self.assertEqual(out["delta_candela_15m_chiusa"]["fine_utc"],end.isoformat(timespec="seconds"))
+        self.assertIsNone(out["delta_4h"])
+
     def test_analytic_handoff_genuine_kraken_trade_producer(self):
         import flusso_spot
         if not hasattr(flusso_spot, "analyze"):

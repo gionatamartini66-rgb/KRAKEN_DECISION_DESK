@@ -586,6 +586,42 @@ def analytic_evidence(snapshot, dossier, positions, shortlist, now):
                 "durata_campione_secondi": flow.get("durata_campione_secondi") if type(flow.get("durata_campione_secondi")) is int else None,
                 "delta_4h": None, "unita": "valuta di quotazione " + pair.split("/")[1],
                 "limite": "Non e CVD storico, non prova direzione futura."}
+        # Rolling 15m is independently covered: an incomplete 4h must not erase it.
+        # A closed 15m candle is a distinct interval and needs its own coverage.
+        short_ok = (same and flow_time["freschezza"] == "RECENTE"
+                    and flow.get("finestra_15m_completa") is True
+                    and isinstance(flow.get("delta_15m"), dict))
+        short_keys = ("numero_trade", "acquisti_aggressivi_quote",
+                      "vendite_aggressive_quote", "delta_quote",
+                      "percentuale_netto_su_volume")
+        spot["delta_15m_mobile"] = ({
+            "stato": "DISPONIBILE",
+            "finestra": "15 minuti mobili antecedenti osservato_utc",
+            "valori": {k: _analytic_value(flow["delta_15m"].get(k))
+                       for k in short_keys if k in flow["delta_15m"]}}
+            if short_ok else {
+                "stato": "COPPIA_INCOERENTE" if flow and not same else
+                         "SCADUTO" if flow_time["freschezza"] == "DA_AGGIORNARE" else
+                         "INCOMPLETO" if same else "MANCANTE",
+                "finestra": "15 minuti mobili", "valori": None})
+        closed = flow.get("candela_15m_chiusa")
+        closed = closed if isinstance(closed, dict) else {}
+        closed_ok = (same and flow_time["freschezza"] == "RECENTE"
+                     and closed.get("stato") == "COMPLETA"
+                     and isinstance(closed.get("misure"), dict)
+                     and isinstance(closed.get("inizio_utc"), str)
+                     and isinstance(closed.get("fine_utc"), str))
+        spot["delta_candela_15m_chiusa"] = {
+            "stato": "DISPONIBILE" if closed_ok else
+                     "COPPIA_INCOERENTE" if flow and not same else
+                     "SCADUTO" if flow_time["freschezza"] == "DA_AGGIORNARE" else
+                     str(closed.get("stato") or "RIFERIMENTO_MANCANTE"),
+            "inizio_utc": closed.get("inizio_utc") if closed_ok else None,
+            "fine_utc": closed.get("fine_utc") if closed_ok else None,
+            "valori": ({k: _analytic_value(closed["misure"].get(k))
+                        for k in short_keys if k in closed["misure"]}
+                       if closed_ok else None),
+            "limite": "Candela chiusa [inizio, fine), distinta dai 15 minuti mobili."}
         if full and isinstance(flow.get("delta_4h"), dict):
             spot["delta_4h"] = {k: _analytic_value(flow["delta_4h"].get(k))
                                 for k in ("numero_trade", "acquisti_aggressivi_quote", "vendite_aggressive_quote", "delta_quote", "percentuale_netto_su_volume") if k in flow["delta_4h"]}
@@ -612,16 +648,31 @@ def analytic_evidence(snapshot, dossier, positions, shortlist, now):
             costs.append({"coppia": cost["coppia"], "costo_roundtrip_eur": value,
                           "stato": "IPOTESI" if value is not None else "NON_VERIFICATO",
                           "n_conversioni": cost.get("n_conversioni") if type(cost.get("n_conversioni")) is int else None})
+        cost_time = _analytic_time(snapshot.get("rilevazione_utc"), now)
+        cost_recent = cost_time["freschezza"] == "RECENTE"
+        for row in costs:
+            if row["costo_roundtrip_eur"] is None:
+                row["stato"] = "NON_VERIFICABILE"
+            elif cost_recent:
+                row["stato"] = "IPOTESI_RECENTE"
+            else:
+                row["stato"] = "COSTO_STORICO" if cost_time["freschezza"] == "DA_AGGIORNARE" else "NON_VERIFICABILE"
+            if not cost_recent:
+                row["costo_roundtrip_eur"] = None
         candidates.append({"token": token, "coppia": pair, "flusso_spot": spot,
                            "fondamentali": fundamentals,
                            "simulazioni_costi": {"fonte": "Kraken Depth / fee ipotetiche KDD",
                                                  "osservato_utc": snapshot["rilevazione_utc"],
-                                                 "freschezza": _analytic_time(snapshot["rilevazione_utc"], now)["freschezza"],
-                                                 "stato": "IPOTESI" if costs else "MANCANTE",
+                                                 "freschezza": cost_time["freschezza"],
+                                                 "stato": ("IPOTESI_RECENTE" if cost_recent else
+                                                           "COSTO_STORICO" if cost_time["freschezza"] == "DA_AGGIORNARE" else
+                                                           "NON_VERIFICABILE") if costs else "MANCANTE",
                                                  "copertura": "Solo coppie EUR campionate",
                                                  "unita": "EUR / roundtrip ipotetico",
                                                  "righe": costs,
-                                                 "limite": "Nessun fill o fee reale attestato."}})
+                                                 "limite": ("Stima storica: valori soppressi per evitare uso operativo; "
+                                                            if not cost_recent else "") +
+                                                           "Nessun fill o fee reale attestato."}})
     deriv = dossier.get("contesto_derivati_btc")
     deriv = deriv if isinstance(deriv, dict) and deriv.get("strumento") == "PF_XBTUSD" else {}
     futures = {"strumento": "PF_XBTUSD", "fonte": "Kraken Futures analytics",
