@@ -2863,7 +2863,7 @@ class AnyKrakenSpotTests(unittest.TestCase):
                             side_effect=RuntimeError('bridge isolated for this test')):
                 page = serve.with_controls("<h2>1 · Decisioni e posizioni</h2>")
         self.assertIn('Patrimonio: PARZIALE', page)
-        self.assertIn('<b>BTC</b>', page)
+        self.assertIn('<strong>BTC</strong>', page)
         self.assertIn("href='/mercati/spot'", page)
         self.assertNotIn("href='/analisi/sui-mtf'", page)
         self.assertNotIn("href='/grafico/sui-4h'", page)
@@ -4008,6 +4008,47 @@ class IntegratedDecisionHomeTests(unittest.TestCase):
     def render_home(self):
         return serve.with_controls(d.render(self.report))
 
+    def test_issue36_first_screen_positions_before_history_and_refresh(self):
+        page=self.render_home()
+        self.assertIn("id='kdd-refresh-button'",page)
+        self.assertIn("Valore indicativo:",page)
+        self.assertIn("Nessuna proposta GPT attuale",page)
+        self.assertIn("Storico prove e proposte",page)
+        self.assertIn("id='kdd-all-positions'",page)
+        self.assertEqual(page.count("class='kdd-position'"),10)
+        self.assertLess(page.index("id='kdd-all-positions'"),
+                        page.index("id='kdd-historical-proposals'"))
+        self.assertLess(page.index("id='kdd-mobile-overview'"),
+                        page.index("id='kdd-all-positions'"))
+        self.assertIn("Valutazione storica su dieci asset",page)
+        self.assertIn("NON RICONCILIATA",page)
+        self.assertIn("href='/grafico/spot?pair=XXBTZEUR",page)
+
+    def test_issue36_missing_proposal_and_freshness_at_consultation(self):
+        from scripts import kdd_drive_exchange as exchange
+        with unittest.mock.patch.object(exchange,"pending",return_value=None):
+            recent=self.render_home()
+            self.assertIn("Nessuna proposta GPT attuale",recent)
+            self.assertIn("Mercato: RECENTE",recent)
+            self.assertIn("Saldo: DA AGGIORNARE",recent)
+        old=(self.now-dt.timedelta(hours=4)).isoformat()
+        self.report["rilevazione_utc"]=old
+        (self.root/"ultimo_report.json").write_text(json.dumps(self.report),encoding="utf-8")
+        with unittest.mock.patch.object(exchange,"pending",return_value=None):
+            stale=self.render_home()
+        self.assertIn("Mercato: DA AGGIORNARE",stale)
+        self.assertIn("Nessuna proposta GPT attuale",stale)
+
+    def test_issue36_current_reconciled_proposal_is_visible_without_historical_actions(self):
+        from scripts import kdd_drive_exchange as exchange
+        original,bundle=self.r2_origin()
+        with unittest.mock.patch.object(exchange,"pending",return_value=(original,bundle)):
+            page=self.render_home()
+        self.assertIn("Proposta GPT attuale riconciliata",page)
+        self.assertNotIn("Nessuna proposta GPT attuale",page)
+        self.assertIn("Storico prove e proposte",page)
+        self.assertEqual(page.count("class='kdd-position'"),10)
+
     def test_decision_first_real_render_and_complete_wallet(self):
         page = self.render_home()
         self.assertLess(page.index("id='kdd-decisioni'"), page.index("id='piano-gpt'"))
@@ -4020,7 +4061,7 @@ class IntegratedDecisionHomeTests(unittest.TestCase):
         self.assertIn("ETH", page)
         self.assertIn("Quantità non nota", page)
         self.assertIn("PARZIALE", page)
-        self.assertIn("Visualizza tutte le posizioni", page)
+        self.assertIn("Le posizioni (10)", page)
         self.assertIn("id='kdd-legacy-spot'", page)
 
     def test_direct_catalogued_pair_links_and_missing_frame(self):
