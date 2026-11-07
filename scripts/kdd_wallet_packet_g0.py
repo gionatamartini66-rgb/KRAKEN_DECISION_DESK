@@ -507,6 +507,229 @@ def public_shortlist(snapshot: dict) -> list[dict]:
     return out
 
 
+def _analytic_time(raw, now):
+    try:
+        observed = when(raw, "fonte analitica")
+    except PacketError:
+        return {"osservato_utc": None, "freschezza": "NON_VERIFICATA"}
+    return {"osservato_utc": observed.isoformat(timespec="seconds"),
+            "freschezza": source_status(observed, now, max_age_min=60)["stato"]}
+
+
+def _analytic_value(value):
+    try:
+        return amount(value, "dato analitico", nonnegative=False)
+    except PacketError:
+        return None
+
+
+def _analytic_pair(token, pair):
+    return (isinstance(token, str) and isinstance(pair, str)
+            and pair.split("/")[:1] == [token] and
+            pair.count("/") == 1 and pair.split("/")[1] in ("EUR", "USD", "USDC", "USDT"))
+
+
+def analytic_evidence(snapshot, dossier, positions, shortlist, now):
+    """Select only already-produced evidence, with no trading inference."""
+    empty = {"stato": "NON_ALLINEATO", "benchmark_binance": [],
+             "candidati": [], "derivati_btc": {"stato": "NON_VERIFICATO"},
+             "contesto": {"stato": "NON_VERIFICATO"}}
+    if dossier.get("kraken_istantanea_utc") != snapshot.get("rilevazione_utc"):
+        return empty
+    relevant = {p["token"] for p in positions
+                if p.get("stato_identita") == "VALIDA" and isinstance(p.get("token"), str)}
+    selected = {r["token"]: r["coppia_analisi"] for r in shortlist
+                if _analytic_pair(r.get("token"), r.get("coppia_analisi"))}
+    relevant.update(selected)
+    bn = snapshot.get("binance_reference")
+    bn = bn if isinstance(bn, dict) else {}
+    bn_time = _analytic_time(bn.get("observed_utc"), now)
+    bn_rows = bn.get("tokens") if isinstance(bn.get("tokens"), list) else []
+    benchmark = []
+    for item in bn_rows[:20]:
+        if not isinstance(item, dict) or item.get("token") not in relevant:
+            continue
+        valid = item.get("status") == "OK" and bn_time["freschezza"] == "RECENTE"
+        benchmark.append({"token": item["token"], "fonte": "Binance Spot / Kraken Spot",
+                          **bn_time, "stato": "DISPONIBILE" if valid else
+                          "SCADUTO" if bn_time["freschezza"] == "DA_AGGIORNARE" else "NON_VERIFICATO",
+                          "coppie_binance": [r["pair"] for r in (item.get("binance_pairs") or [])[:2]
+                                             if isinstance(r, dict) and isinstance(r.get("pair"), str)
+                                             and r["pair"].startswith(item["token"])],
+                          "volume_base_binance_24h": _analytic_value(item.get("binance_base_volume_24h_subset")) if valid else None,
+                          "volume_base_kraken_24h": _analytic_value(item.get("kraken_base_volume_24h_subset")) if valid else None,
+                          "rapporto_sottoinsiemi": _analytic_value(item.get("volume_ratio_subsets")) if valid else None,
+                          "unita": "quantita token base in 24h",
+                          "copertura": "Binance USDC/USDT contro Kraken EUR/USD/USDC",
+                          "limite": "Sottoinsiemi di mercati; non liquidita eseguibile o quota globale."})
+    candidates = []
+    for item in (dossier.get("candidati") or [])[:4]:
+        if not isinstance(item, dict):
+            continue
+        token, pair = item.get("token"), item.get("coppia_analisi")
+        if token not in selected or selected[token] != pair:
+            continue
+        flow = item.get("flusso_spot_kraken")
+        flow = flow if isinstance(flow, dict) else {}
+        flow_time = _analytic_time(flow.get("osservato_utc"), now)
+        same = flow.get("coppia") == pair
+        full = (same and flow.get("stato") == "COMPLETO_4H"
+                and flow.get("finestra_4h_completa") is True
+                and flow_time["freschezza"] == "RECENTE")
+        spot = {"fonte": "Kraken public Trades", "coppia": pair, **flow_time,
+                "stato": "DISPONIBILE" if full else
+                "COPPIA_INCOERENTE" if flow and not same else
+                "SCADUTO" if flow_time["freschezza"] == "DA_AGGIORNARE" else
+                "INCOMPLETO" if same else "MANCANTE",
+                "copertura": "Una coppia, fino a 1000 trade",
+                "numero_trade": flow.get("numero_trade_ottenuti") if type(flow.get("numero_trade_ottenuti")) is int else None,
+                "durata_campione_secondi": flow.get("durata_campione_secondi") if type(flow.get("durata_campione_secondi")) is int else None,
+                "delta_4h": None, "unita": "valuta di quotazione " + pair.split("/")[1],
+                "limite": "Non e CVD storico, non prova direzione futura."}
+        # Rolling 15m is independently covered: an incomplete 4h must not erase it.
+        # A closed 15m candle is a distinct interval and needs its own coverage.
+        short_ok = (same and flow_time["freschezza"] == "RECENTE"
+                    and flow.get("finestra_15m_completa") is True
+                    and isinstance(flow.get("delta_15m"), dict))
+        short_keys = ("numero_trade", "acquisti_aggressivi_quote",
+                      "vendite_aggressive_quote", "delta_quote",
+                      "percentuale_netto_su_volume")
+        spot["delta_15m_mobile"] = ({
+            "stato": "DISPONIBILE",
+            "finestra": "15 minuti mobili antecedenti osservato_utc",
+            "valori": {k: _analytic_value(flow["delta_15m"].get(k))
+                       for k in short_keys if k in flow["delta_15m"]}}
+            if short_ok else {
+                "stato": "COPPIA_INCOERENTE" if flow and not same else
+                         "SCADUTO" if flow_time["freschezza"] == "DA_AGGIORNARE" else
+                         "INCOMPLETO" if same else "MANCANTE",
+                "finestra": "15 minuti mobili", "valori": None})
+        closed = flow.get("candela_15m_chiusa")
+        closed = closed if isinstance(closed, dict) else {}
+        closed_ok = (same and flow_time["freschezza"] == "RECENTE"
+                     and closed.get("stato") == "COMPLETA"
+                     and isinstance(closed.get("misure"), dict)
+                     and isinstance(closed.get("inizio_utc"), str)
+                     and isinstance(closed.get("fine_utc"), str))
+        spot["delta_candela_15m_chiusa"] = {
+            "stato": "DISPONIBILE" if closed_ok else
+                     "COPPIA_INCOERENTE" if flow and not same else
+                     "SCADUTO" if flow_time["freschezza"] == "DA_AGGIORNARE" else
+                     str(closed.get("stato") or "RIFERIMENTO_MANCANTE"),
+            "inizio_utc": closed.get("inizio_utc") if closed_ok else None,
+            "fine_utc": closed.get("fine_utc") if closed_ok else None,
+            "valori": ({k: _analytic_value(closed["misure"].get(k))
+                        for k in short_keys if k in closed["misure"]}
+                       if closed_ok else None),
+            "limite": "Candela chiusa [inizio, fine), distinta dai 15 minuti mobili."}
+        if full and isinstance(flow.get("delta_4h"), dict):
+            spot["delta_4h"] = {k: _analytic_value(flow["delta_4h"].get(k))
+                                for k in ("numero_trade", "acquisti_aggressivi_quote", "vendite_aggressive_quote", "delta_quote", "percentuale_netto_su_volume") if k in flow["delta_4h"]}
+        fund = item.get("fondamentali_coingecko")
+        fund = fund if isinstance(fund, dict) else {}
+        ft = _analytic_time(fund.get("aggiornato_utc"), now)
+        fv = (isinstance(fund.get("id"), str) and isinstance(fund.get("fonte"), str)
+              and ft["freschezza"] == "RECENTE")
+        fundamentals = {"fonte": fund["fonte"][:180] if fv else "CoinGecko (ID non attestato)",
+                        **ft, "stato": "DISPONIBILE" if fv else
+                        "SCADUTO" if ft["freschezza"] == "DA_AGGIORNARE" else "NON_VERIFICATO",
+                        "id_coingecko": fund.get("id") if fv else None,
+                        "capitalizzazione_usd": _analytic_value(fund.get("capitalizzazione_usd")) if fv else None,
+                        "offerta_circolante": _analytic_value(fund.get("offerta_circolante")) if fv else None,
+                        "offerta_totale": _analytic_value(fund.get("offerta_totale")) if fv else None,
+                        "unita": "USD e quantita token",
+                        "copertura": "Solo ID CoinGecko validato dal produttore",
+                        "limite": "Assenza non equivale a zero."}
+        costs = []
+        for cost in (item.get("simulazione_costi_eur_wallet") or [])[:6]:
+            if not isinstance(cost, dict) or not _analytic_pair(token, cost.get("coppia")):
+                continue
+            value = _analytic_value(cost.get("costo_roundtrip_eur"))
+            costs.append({"coppia": cost["coppia"], "costo_roundtrip_eur": value,
+                          "stato": "IPOTESI" if value is not None else "NON_VERIFICATO",
+                          "n_conversioni": cost.get("n_conversioni") if type(cost.get("n_conversioni")) is int else None})
+        cost_time = _analytic_time(snapshot.get("rilevazione_utc"), now)
+        cost_recent = cost_time["freschezza"] == "RECENTE"
+        for row in costs:
+            if row["costo_roundtrip_eur"] is None:
+                row["stato"] = "NON_VERIFICABILE"
+            elif cost_recent:
+                row["stato"] = "IPOTESI_RECENTE"
+            else:
+                row["stato"] = "COSTO_STORICO" if cost_time["freschezza"] == "DA_AGGIORNARE" else "NON_VERIFICABILE"
+            if not cost_recent:
+                row["costo_roundtrip_eur"] = None
+        candidates.append({"token": token, "coppia": pair, "flusso_spot": spot,
+                           "fondamentali": fundamentals,
+                           "simulazioni_costi": {"fonte": "Kraken Depth / fee ipotetiche KDD",
+                                                 "osservato_utc": snapshot["rilevazione_utc"],
+                                                 "freschezza": cost_time["freschezza"],
+                                                 "stato": ("IPOTESI_RECENTE" if cost_recent else
+                                                           "COSTO_STORICO" if cost_time["freschezza"] == "DA_AGGIORNARE" else
+                                                           "NON_VERIFICABILE") if costs else "MANCANTE",
+                                                 "copertura": "Solo coppie EUR campionate",
+                                                 "unita": "EUR / roundtrip ipotetico",
+                                                 "righe": costs,
+                                                 "limite": ("Stima storica: valori soppressi per evitare uso operativo; "
+                                                            if not cost_recent else "") +
+                                                           "Nessun fill o fee reale attestato."}})
+    deriv = dossier.get("contesto_derivati_btc")
+    deriv = deriv if isinstance(deriv, dict) and deriv.get("strumento") == "PF_XBTUSD" else {}
+    futures = {"strumento": "PF_XBTUSD", "fonte": "Kraken Futures analytics",
+               "copertura": "Solo future BTC; non mercato Spot o cross-exchange",
+               "limite": "Unita OI da verificare prima dell'interpretazione."}
+    for name, keys in (("open-interest", ("ultimo_close", "close_4h_fa")),
+                       ("cvd", ("ultimo_cvd", "cvd_4h_fa", "ultimo_buy_volume", "ultimo_sell_volume"))):
+        row = deriv.get(name)
+        row = row if isinstance(row, dict) else {}
+        ts = _analytic_time(row.get("ultimo_punto_utc"), now)
+        valid = (ts["freschezza"] == "RECENTE" and row.get("ultimo_punto_provvisorio") is False
+                 and all(_analytic_value(row.get(k)) is not None for k in keys))
+        futures[name] = {**ts, "stato": "DISPONIBILE" if valid else
+                         "SCADUTO" if ts["freschezza"] == "DA_AGGIORNARE" else "NON_VERIFICATO",
+                         "valori": {k: _analytic_value(row.get(k)) for k in keys} if valid else None,
+                         "unita": str(row.get("unita") or "unita contrattuale non verificata")[:120]}
+    global_row = (dossier.get("fonti_esterne") or {}).get("coingecko_global")
+    global_row = global_row if isinstance(global_row, dict) else {}
+    stamp = global_row.get("aggiornato_sorgente_utc")
+    try:
+        if type(stamp) not in (int, float) or not math.isfinite(stamp):
+            raise ValueError("timestamp CoinGecko assente")
+        native = dt.datetime.fromtimestamp(stamp, UTC)
+        context_time = _analytic_time(native.isoformat(), now)
+    except (ValueError, OverflowError, OSError, TypeError):
+        context_time = {"osservato_utc": None, "freschezza": "NON_VERIFICATA"}
+    context_valid = context_time["freschezza"] == "RECENTE"
+    context = {"fonte": str(global_row.get("fonte") or "CoinGecko global")[:160],
+               **context_time, "stato": "DISPONIBILE" if context_valid else
+               "SCADUTO" if context_time["freschezza"] == "DA_AGGIORNARE" else "NON_VERIFICATO",
+               "capitalizzazione_totale_usd": _analytic_value(global_row.get("capitalizzazione_totale_usd")) if context_valid else None,
+               "volume_24h_usd": _analytic_value(global_row.get("volume_24h_usd")) if context_valid and not global_row.get("anomalia_volume_24h") else None,
+               "dominanza_btc_pct": _analytic_value(global_row.get("dominanza_btc_pct")) if context_valid else None,
+               "unita": "USD, percentuale", "copertura": "Mercato crypto aggregato CoinGecko, non Kraken",
+               "limite": "Fonte aggregata, non liquidita Kraken; RSS non prova causalita macro."}
+    feed = []
+    for item in (snapshot.get("feed") or [])[:8]:
+        if not isinstance(item, dict) or not isinstance(item.get("fonte"), str):
+            continue
+        if not isinstance(item.get("titolo"), str):
+            continue
+        feed.append({"fonte": item["fonte"][:90], "titolo": item["titolo"][:180],
+                     "link": item.get("link", "")[:220] if isinstance(item.get("link"), str) else None,
+                     "pubblicato_originale": item.get("data", "")[:90] if isinstance(item.get("data"), str) else None,
+                     "stato_orario": "NON_VERIFICATO", "copertura": "Solo titoli RSS campionati",
+                     "limite": "Non prova causalita macro o impatto su asset."})
+    return {"stato": "EVIDENZE_CON_LIMITI",
+            "benchmark_copertura": {"fonte": "Binance Spot pubblico", **bn_time,
+                "stato": str(bn.get("status") or "MANCANTE")[:35],
+                "token_esaminati": len(bn_rows),
+                "token_con_dati": sum(1 for x in bn_rows if isinstance(x, dict) and x.get("status") == "OK"),
+                "limite": "Il pacchetto espone solo token posseduti o candidati; quote non equivalenti."},
+            "titoli_contesto": feed, "benchmark_binance": benchmark,
+            "candidati": candidates, "derivati_btc": futures, "contesto": context,
+            "limite": "Evidenze descrittive, non ordini o segnali operativi."}
+
+
 def cash_balances(portfolio: dict, report: dict) -> dict:
     raw = portfolio.get("liquidita_spot_api")
     report_cash = report.get("liquidita_spot_api")
@@ -869,6 +1092,7 @@ def build(root: Path, now: dt.datetime | None = None) -> dict:
                            "n_posizioni": len(positions)},
             "scenario_mercato_kdd": str(report.get("mercato", "NON_DETERMINATO"))[:300],
             "opportunita_esterne_scanner": public_shortlist(snapshot),
+            "evidenze_multifonte": analytic_evidence(snapshot, dossier, positions, public_shortlist(snapshot), now),
             "nessun_ordine": True,
             "richiesta_gpt": "Valuta prima TUTTE le posizioni possedute; per ognuna mantenere/incrementare/alleggerire/uscire/ruotare e alternative, con dati e limiti. Solo poi confronta opportunita esterne. Non inventare prezzi, notizie, commissioni, performance o esecuzioni; ricerca fonti attuali indipendenti e proponi opzioni all'autore, mai ordini automatici.",
             "limiti": ["Prototipo G0 locale: nessun trasferimento a Drive o chat senza consenso dell'autore.",
