@@ -2863,7 +2863,7 @@ class AnyKrakenSpotTests(unittest.TestCase):
                             side_effect=RuntimeError('bridge isolated for this test')):
                 page = serve.with_controls("<h2>1 · Decisioni e posizioni</h2>")
         self.assertIn('Patrimonio: PARZIALE', page)
-        self.assertIn('<b>BTC</b>', page)
+        self.assertIn('<strong>BTC</strong>', page)
         self.assertIn("href='/mercati/spot'", page)
         self.assertNotIn("href='/analisi/sui-mtf'", page)
         self.assertNotIn("href='/grafico/sui-4h'", page)
