@@ -1,5 +1,15 @@
 # KDD — MANDATO INTEGRALE DI SUBENTRO DELLA SUPERVISIONE APICALE
 
+## Attualizzazione operativa — 7 novembre 2026 (senza alterare il mandato del 6 novembre)
+
+**L'autore ha corretto espressamente l'ordine delle dipendenze:** «non si può fare una casa senza muri». Il collaudo tecnico che costituisce il *primo incarico* del mandato del 06/11 **è stato eseguito**: proposta sintetica JSON attraverso GPT → Drive → FolderSync automatico → Android → importazione KDD → home HTTP `/` e `/gpt`, risposta **NON APPROVATA**; dossier JSON completo trasferito in direzione inversa con stessa impronta. Su autorizzazione dell'autore la proposta del 31/10 è stata **RIFIUTATA** e registrata (1 evento, 0 approvazioni). Saldo e mercato Kraken rinnovati il 06/11, dieci posizioni, nessun ordine. La proposta usata per la prova è **solo sintetica**, non una scelta economica.
+
+**Prossimo incarico vigente:** come stabilito nella [ROADMAP canonica](ROADMAP_KDD.md), prima verificare e completare i **produttori di evidenze KDD-06–22**, in modo che i dati dei mercati, flussi, fondamentali e contesto confluiscano davvero, con fonti/tempi/limiti, nel dossier. Solo dopo un gate di adeguatezza analitica affrontare la sintesi patrimoniale KDD-02–05 e il giudizio GPT KDD-23, seguiti da proposta KDD-25, deliberazione/archivio KDD-26 e prova d'utilità KDD-29. KDD-01 e il trasporto tecnico KDD-24 sono fondazioni acquisite nei limiti provati. **Nessuna chiusura formale automatica dei 29 requisiti.** KDD-27 e 28 conservano la propria destinazione futura.
+
+Le istruzioni e le prove del mandato del 6 novembre, integralmente conservate sotto, sono **riferite al suo primo incarico e alla fotografia di allora**: non riaprire quel gate né usarle per invertire la precedenza ora decisa dall'autore. I vincoli di lettura EOF, ruoli, GO distinti, natura personale e privata e Kraken solo lettura rimangono validi.
+
+---
+
 ## MANDATO ATTUALE DI PASSAGGIO DI CONSEGNE — 6 NOVEMBRE 2026
 **Identificativo:** KDD-SUP-HANDOFF-20261106-G0
 **Autorità:** autore del KDD. **Destinataria:** nuova chat di Supervisione apicale.
