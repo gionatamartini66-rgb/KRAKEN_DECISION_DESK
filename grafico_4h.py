@@ -587,7 +587,7 @@ sono una descrizione geometrica; nessun segnale BUY/SELL.
 Prezzi OHLC originali rappresentabili senza collisioni; EMA e livelli
 conservano il valore numerico di calcolo, ma possono sovrapporsi alla
 risoluzione massima della scala (12 decimali).
-Pattern e altri timeframe NON sono ancora implementati.</p>
+I timeframe 15m, 1H, 4H e 1D sono disponibili nel selettore. Il riconoscimento dei pattern candlestick (KDD-11) non è ancora implementato.</p>
 </section>
 <footer><a href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer">
 __NOTICE__</a> · Libreria gratuita Lightweight Charts 5.2.1, servita localmente.

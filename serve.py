@@ -485,28 +485,30 @@ def decision_home():
 
     # Pair provenance belongs to the same completed snapshot and wallet digest.
     dossier = None
-    if market_fresh == "RECENTE":
-        try:
-            candidate = desk.load("dossier_multifonte.json", {})
-            state_doc = report.get("dossier_stato")
-            four = candidate.get("patrimonio_4tf") if isinstance(candidate, dict) else None
-            wallet_sha = report.get("fotografia_portafoglio_sha256")
-            if (isinstance(wallet_sha, str) and len(wallet_sha) == 64
-                    and isinstance(candidate, dict) and isinstance(state_doc, dict)
-                    and state_doc.get("stato") not in (
-                        "NON_ALLINEATO", "NON_ALLINEATO_PATRIMONIO",
-                        "PATRIMONIO_NON_VERIFICABILE")
-                    and candidate.get("kraken_istantanea_utc") == market_time
-                    and isinstance(four, dict)
-                    and four.get("rilevazione_kraken_utc") == market_time
-                    and wallet_sha == candidate.get("fotografia_portafoglio_sha256")
-                    == state_doc.get("fotografia_portafoglio_sha256")
-                    == four.get("portafoglio_sha256")
-                    and isinstance(four.get("posizioni"), list)
-                    and len(four["posizioni"]) == len(positions)):
-                dossier = four["posizioni"]
-        except (OSError, ValueError, KeyError, TypeError, UnicodeError):
-            dossier = None
+    # Pair identity is historical evidence tied to the exact market snapshot and
+    # wallet SHA. Expiry of economic observations must not erase that identity.
+    # The chart route checks AssetPairs and obtains fresh candles on opening.
+    try:
+        candidate = desk.load("dossier_multifonte.json", {})
+        state_doc = report.get("dossier_stato")
+        four = candidate.get("patrimonio_4tf") if isinstance(candidate, dict) else None
+        wallet_sha = report.get("fotografia_portafoglio_sha256")
+        if (isinstance(wallet_sha, str) and len(wallet_sha) == 64
+                and isinstance(candidate, dict) and isinstance(state_doc, dict)
+                and state_doc.get("stato") not in (
+                    "NON_ALLINEATO", "NON_ALLINEATO_PATRIMONIO",
+                    "PATRIMONIO_NON_VERIFICABILE")
+                and candidate.get("kraken_istantanea_utc") == market_time
+                and isinstance(four, dict)
+                and four.get("rilevazione_kraken_utc") == market_time
+                and wallet_sha == candidate.get("fotografia_portafoglio_sha256")
+                == state_doc.get("fotografia_portafoglio_sha256")
+                == four.get("portafoglio_sha256")
+                and isinstance(four.get("posizioni"), list)
+                and len(four["posizioni"]) == len(positions)):
+            dossier = four["posizioni"]
+    except (OSError, ValueError, KeyError, TypeError, UnicodeError):
+        dossier = None
     observed_pairs = _decision_observed_pairs(report, dossier)
 
     blocks.append("<h3>Patrimonio strategico a gestione attiva</h3>"
@@ -538,9 +540,27 @@ def decision_home():
             priorities.append(token + ": " + ("dati incompleti" if holding.get("errore")
                                                else "ipotesi GPT " + str(gpt.get("azione"))))
         status = "Dati incompleti" if holding.get("errore") or vtext.startswith("valore indicativo") else "Valore stimato"
+        entry = dossier[i] if dossier else None
+        verified_pair = (
+            isinstance(entry, dict) and entry.get("indice") == i
+            and entry.get("token") == token
+            and _decision_pair_identity(
+                token, entry.get("coppia"), entry.get("pair_key"),
+                entry.get("asset_base"), observed_pairs,
+                entry.get("valuta_quotazione")))
+        if verified_pair:
+            key = esc(entry["pair_key"])
+            navigation = (
+                "<a href='/grafico/spot?pair=" + key +
+                "&amp;tf=4h'>Grafico</a> · "
+                "<a href='/analisi/spot?pair=" + key +
+                "'>Confronta 4 timeframe</a>")
+        else:
+            navigation = "<a href='/mercati/spot'>Trova la coppia nel catalogo</a>"
         body = ("<article class='kdd-position'><p><strong>" + esc(token) +
                 "</strong> · " + esc(vtext) + " · " + esc(status) +
-                "</p><details><summary>Quantità, evidenze e grafici</summary><p>" +
+                "</p><p class='kdd-position-chart'>" + navigation +
+                "</p><details><summary>Quantità ed evidenze</summary><p>" +
                 esc(qtext) +
                 " · " + esc(vtext) + "</p><p><b>KDD (osservazione):</b> " +
                 esc(technical) + "</p><p><b>Scelta registrata:</b> " +
@@ -557,12 +577,7 @@ def decision_home():
                      esc(gpt.get("costi")) + "</p>")
         else:
             body += "<p>GPT: nessuna valutazione collegabile a questa posizione.</p>"
-        entry = dossier[i] if dossier else None
-        if (isinstance(entry, dict) and entry.get("indice") == i and
-                entry.get("token") == token and
-                _decision_pair_identity(token, entry.get("coppia"),
-                                        entry.get("pair_key"), entry.get("asset_base"),
-                                        observed_pairs, entry.get("valuta_quotazione"))):
+        if verified_pair:
             body += ("<p><b>Coppia documentata da dossier KDD:</b> " +
                      esc(entry["coppia"]) + ". Elegibilità sul conto non verificata. " +
                      _decision_pair_links(entry["pair_key"], frames=entry.get("timeframe")) +
@@ -571,7 +586,7 @@ def decision_home():
             declared = (entry.get("coppia") if isinstance(entry, dict)
                         and isinstance(entry.get("coppia"), str) else None)
             body += ("<p>Coppia e grafici diretti: identità non riconciliata "
-                     "con il dossier corrente." +
+                     "con il dossier e la fotografia documentata." +
                      (" Coppia dichiarata NON CONFERMATA: " + esc(declared) + "."
                       if declared else "") + "</p>")
         rows.append(body + "</details></article>")

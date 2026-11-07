@@ -4064,6 +4064,71 @@ class IntegratedDecisionHomeTests(unittest.TestCase):
         self.assertIn("Le posizioni (10)", page)
         self.assertIn("id='kdd-legacy-spot'", page)
 
+    def test_issue38_stale_market_retains_verified_navigation_without_gpt_priority(self):
+        from scripts import kdd_drive_exchange as exchange
+        import copy
+        old=(self.now-dt.timedelta(hours=4)).isoformat(timespec="seconds")
+        report=copy.deepcopy(self.report)
+        report["rilevazione_utc"]=old
+        dossier=json.loads((self.root/"dossier_multifonte.json").read_text())
+        dossier["kraken_istantanea_utc"]=old
+        dossier["patrimonio_4tf"]["rilevazione_kraken_utc"]=old
+        snapshot=json.loads((self.root/"ultima_rilevazione.json").read_text())
+        snapshot["rilevazione_utc"]=old
+        (self.root/"ultimo_report.json").write_text(json.dumps(report))
+        (self.root/"dossier_multifonte.json").write_text(json.dumps(dossier))
+        (self.root/"ultima_rilevazione.json").write_text(json.dumps(snapshot))
+        with unittest.mock.patch.object(exchange,"pending",return_value=None):
+            page=self.render_home()
+        self.assertIn("Mercato: DA AGGIORNARE",page)
+        self.assertIn("href='/grafico/spot?pair=XXBTZEUR&amp;tf=4h'",page)
+        self.assertIn("href='/analisi/spot?pair=XXBTZEUR'",page)
+        self.assertEqual(page.count("class='kdd-position-chart'"),10)
+        self.assertEqual(page.count("Trova la coppia nel catalogo"),9)
+        self.assertIn("Nessuna proposta GPT attuale",page)
+        self.assertLess(page.index("class='kdd-position-chart'"),
+                        page.index("<summary>Quantità ed evidenze</summary>"))
+        self.assertIn("Quantità non nota",page)
+
+    def test_issue38_missing_or_mismatched_dossier_uses_catalog_not_guesses(self):
+        import copy
+        dossier_file=self.root/"dossier_multifonte.json"
+        original=dossier_file.read_text()
+        cases=[None, "wallet", "pair", "alias"]
+        for case in cases:
+            with self.subTest(case=case):
+                dossier_file.write_text(original)
+                report=copy.deepcopy(self.report)
+                snap=json.loads((self.root/"ultima_rilevazione.json").read_text())
+                if case is None:
+                    dossier_file.unlink()
+                elif case=="wallet":
+                    dossier=json.loads(original)
+                    dossier["fotografia_portafoglio_sha256"]="f"*64
+                    dossier_file.write_text(json.dumps(dossier))
+                elif case=="pair":
+                    dossier=json.loads(original)
+                    dossier["patrimonio_4tf"]["posizioni"][0]["asset_base"]="ETH"
+                    dossier_file.write_text(json.dumps(dossier))
+                elif case=="alias":
+                    snap["markets"]["ETH"]={"pair_key":"XXBTZEUR","pair":"ETH/EUR"}
+                    (self.root/"ultima_rilevazione.json").write_text(json.dumps(snap))
+                page=self.render_home()
+                self.assertNotIn("href='/grafico/spot?pair=XXBTZEUR&amp;tf=4h'",page)
+                self.assertEqual(page.count("class='kdd-position-chart'"),10)
+                self.assertEqual(page.count("Trova la coppia nel catalogo"),10)
+                (self.root/"ultima_rilevazione.json").write_text(json.dumps(snap if case!="alias" else {
+                    **snap,"markets":{k:v for k,v in snap["markets"].items() if k!="ETH"}}))
+        dossier_file.write_text(original)
+
+    def test_issue38_unmatched_snapshot_cannot_use_old_pair(self):
+        snapshot=json.loads((self.root/"ultima_rilevazione.json").read_text())
+        snapshot["rilevazione_utc"]=(self.now-dt.timedelta(days=1)).isoformat()
+        (self.root/"ultima_rilevazione.json").write_text(json.dumps(snapshot))
+        page=self.render_home()
+        self.assertNotIn("href='/grafico/spot?pair=XXBTZEUR&amp;tf=4h'",page)
+        self.assertIn("Trova la coppia nel catalogo",page)
+
     def test_direct_catalogued_pair_links_and_missing_frame(self):
         page = self.render_home()
         self.assertIn("href='/grafico/spot?pair=XXBTZEUR&amp;tf=4h'", page)
