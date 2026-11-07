@@ -369,6 +369,18 @@ def decision_home():
     balance = balance if isinstance(balance, dict) else {}
     balance_time = balance.get("acquisizione_saldo_utc")
     balance_fresh = _decision_age(balance_time, now=now)
+    blocks.append("<div id='kdd-mobile-overview'><h3>Il tuo patrimonio</h3>"
+                  "<p><strong>Valore indicativo: " + esc(total) + "</strong> · " +
+                  str(len(positions)) + " posizioni · " +
+                  esc(complete if isinstance(complete, int) else "n.d.") +
+                  " valorizzate" +
+                  (" · totale parziale, non intero patrimonio" if state == "PARZIALE" else "") +
+                  "</p><p>Mercato: " + esc(market_fresh) + " · " +
+                  esc(market_time or "ora non disponibile") +
+                  " · Saldo: " + esc(balance_fresh) + " · " +
+                  esc(balance_time or "ora non disponibile") +
+                  "</p><p>Stime di mercato, non rendimento fiscale; T0 separato.</p></div>")
+    blocks.append("<details id='kdd-source-clocks'><summary>Origine e orari dei dati</summary>")
     blocks.append("<p>Patrimonio: " + esc(state) + " · " +
                   str(len(positions)) + " posizioni" +
                   " · valorizzate " + esc(complete if isinstance(complete, int) else "n.d.") +
@@ -381,14 +393,23 @@ def decision_home():
                   esc(balance.get("origine", "non documentata")) + " · acquisizione " +
                   esc(balance_time or "assente") + " · " + esc(balance_fresh) +
                   ". La freschezza del mercato non aggiorna i saldi.</p>")
+    blocks.append("</details>")
     dossier_state = report.get("dossier_stato")
     if isinstance(dossier_state, dict):
+        blocks.append("<p><b>Qualità delle analisi:</b> " +
+                      esc(dossier_state.get("stato", "NON VERIFICABILE")) +
+                      " · copertura patrimoniale " +
+                      esc(dossier_state.get("idoneita_analisi_patrimoniale", "NON ACCERTATA")) +
+                      ". Dati fondamentali e macro non attestati restano da verificare.</p>")
+        blocks.append("<details id='kdd-dossier-details'><summary>Dettagli sulla copertura</summary>")
         blocks.append("<p><b>Copertura dossier GPT:</b> " +
                       esc(dossier_state.get("stato", "NON VERIFICABILE")) +
                       " · idoneità " +
                       esc(dossier_state.get("idoneita_analisi_patrimoniale", "NON ACCERTATA")) +
                       ".</p>")
+        blocks.append("</details>")
 
+    historical_start = len(blocks)
     if proposal is None:
         blocks.append("<article><h3>Proposta GPT · " + esc(proposal_state) +
                       "</h3><p>Nessuna valutazione patrimoniale attribuibile per questa home. "
@@ -457,6 +478,11 @@ def decision_home():
                       "patrimonio ma NON È UNA PRIORITÀ GPT CORRENTE: "
                       "fotografia di mercato o deliberazione da riesaminare.</p>")
 
+    # Keep the full proposal, event timeline, versions and rejection details,
+    # but do not lead the mobile home with historical synthetic material.
+    historical_proposals = "".join(blocks[historical_start:])
+    del blocks[historical_start:]
+
     # Pair provenance belongs to the same completed snapshot and wallet digest.
     dossier = None
     if market_fresh == "RECENTE":
@@ -504,14 +530,18 @@ def decision_home():
         technical = holding.get("note")
         technical = "; ".join(str(x) for x in technical) if isinstance(technical, list) and technical else holding.get("errore", "Nessuna conclusione tecnica documentata")
         source = _decision_origin(token, holding.get("decisione"), decisions, observed)
-        gpt = proposal["posizioni"][i] if proposal else None
+        gpt = proposal["posizioni"][i] if proposal_current and proposal else None
         important = bool(holding.get("errore")) or (
             proposal_current and gpt is not None and
             gpt.get("azione") not in ("MANTENERE", "RINVIARE"))
         if important:
             priorities.append(token + ": " + ("dati incompleti" if holding.get("errore")
                                                else "ipotesi GPT " + str(gpt.get("azione"))))
-        body = ("<article><h4><b>" + esc(token) + "</b></h4><p>" + esc(qtext) +
+        status = "Dati incompleti" if holding.get("errore") or vtext.startswith("valore indicativo") else "Valore stimato"
+        body = ("<article class='kdd-position'><p><strong>" + esc(token) +
+                "</strong> · " + esc(vtext) + " · " + esc(status) +
+                "</p><details><summary>Quantità, evidenze e grafici</summary><p>" +
+                esc(qtext) +
                 " · " + esc(vtext) + "</p><p><b>KDD (osservazione):</b> " +
                 esc(technical) + "</p><p><b>Scelta registrata:</b> " +
                 esc(holding.get("decisione", "nessuna")) + " · " + esc(source) + "</p>")
@@ -544,7 +574,8 @@ def decision_home():
                      "con il dossier corrente." +
                      (" Coppia dichiarata NON CONFERMATA: " + esc(declared) + "."
                       if declared else "") + "</p>")
-        rows.append(body + "</article>")
+        rows.append(body + "</details></article>")
+    blocks.append("<details id='kdd-priorities'><summary>Attenzioni da esaminare</summary>")
     if priorities:
         blocks.append("<p><b>Attenzioni da esaminare (non ordini):</b> " +
                       esc("; ".join(priorities[:3])) +
@@ -553,9 +584,10 @@ def decision_home():
     else:
         blocks.append("<p>Nessuna priorità deducibile da questi dati: "
                       "non equivale a una decisione di mantenere tutto il patrimonio.</p>")
-    blocks.append("<details id='kdd-all-positions'><summary>Visualizza tutte le posizioni (" +
-                  str(len(positions)) + ") e le alternative</summary>" +
-                  "".join(rows) + "</details>")
+    blocks.append("</details>")
+    blocks.append("<section id='kdd-all-positions' aria-label='Posizioni patrimoniali'>"
+                  "<h3>Le posizioni (" + str(len(positions)) + ")</h3>" +
+                  "".join(rows) + "</section>")
 
     blocks.append("<h3>Opportunità operative Spot · segnalazioni KDD</h3>")
     candidates = report.get("schede_v02")
@@ -608,7 +640,8 @@ def decision_home():
             if (isinstance(old_plan, dict) and "errore" not in old_plan
                     and old_plan.get("mercato") == "SPOT"
                     and old_plan.get("token") == token and old_plan.get("coppia") == pair):
-                body += ("<p><b>GPT · vecchio piano Spot singolo-token:</b> " +
+                body += ("<details><summary>Vecchio piano GPT Spot (solo storico)</summary>"
+                         "<p><b>GPT · vecchio piano Spot singolo-token:</b> " +
                          esc(old_plan.get("azione")) + " · " +
                          esc(old_plan.get("tesi")) + "</p><p>Ingresso: " +
                          esc(old_plan.get("condizione_ingresso")) +
@@ -618,14 +651,30 @@ def decision_home():
                          " · riesame: " + esc(old_plan.get("revisione")) +
                          ". Fotografia GPT " + esc(old_plan.get("snapshot_kraken_utc")) +
                          " · " + esc(_decision_age(old_plan.get("snapshot_kraken_utc"), now=now)) +
-                         ".</p>")
+                         ".</p></details>")
             else:
                 body += ("<p><b>GPT:</b> nessuna proposta operativa validata e collegata "
                          "a questa coppia. Lo scanner non indica un acquisto, "
                          "un ingresso, un importo o un ordine.</p>")
-            blocks.append(body + "</article>")
+            blocks.append("<article><p><strong>" + esc(token) + "</strong> · " +
+                          esc(item.get("esito", "NON VALUTATO")) +
+                          " · caso da esaminare, non ordine</p>"
+                          "<details><summary>Analisi Spot, coppie e limiti</summary>" +
+                          body + "</details></article>")
     blocks.append("<p><a href='/mercati/spot'>Esplora il catalogo completo Kraken Spot</a>"
                   " · <a href='/gpt'>Discuti le ipotesi in ChatGPT e consulta decisioni/storico</a>.</p>")
+    blocks.append("<section id='kdd-gpt-current'><h3>GPT e decisioni</h3>")
+    if proposal_current:
+        blocks.append("<p><strong>Proposta GPT attuale riconciliata</strong> · " +
+                      esc(proposal_state) + " · " +
+                      esc(proposal.get("scenario", "")) +
+                      ". <a href='/gpt'>Apri la proposta e decidi</a>.</p>")
+    else:
+        blocks.append("<p role='status'><strong>Nessuna proposta GPT attuale</strong>. "
+                      "Le prove e le proposte precedenti non sono decisioni sulle posizioni di oggi. "
+                      "<a href='/gpt'>Consulta il ponte GPT</a>.</p>")
+    blocks.append("<details id='kdd-historical-proposals'><summary>Storico prove e proposte</summary>" +
+                  historical_proposals + "</details></section>")
     return "".join(blocks) + "</section>"
 
 def with_controls(page: str, result: str = "") -> str:
