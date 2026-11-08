@@ -289,6 +289,74 @@ def finanziamento_150_book(source, portfolio, *, saldo_recente, kraken_client=No
             "limite": "Fee 0,8% ipotizzata; book mobile e minimi/negoziabilita del conto ignoti."}
 
 
+def economic_evidence(source, wallet, four, candidates, now):
+    """One bounded, read-only source chain; every asset retains a row."""
+    import kdd_economics as econ
+    items = {"posizioni": [], "candidati": []}
+    wallet_rows = wallet.get("posizioni") if isinstance(wallet, dict) else None
+    wallet_rows = wallet_rows if isinstance(wallet_rows, list) else []
+    for index, row in enumerate(wallet_rows):
+        tf = (four.get("posizioni") or [])[index] if index < len(four.get("posizioni") or []) else {}
+        token, valid = desk.wallet_symbol(row.get("token") if isinstance(row, dict) else None)
+        identity = econ.identify(token, tf.get("coppia"), tf.get("pair_key"),
+                                 catalog_verified=bool(valid and tf.get("asset_base") in (
+                                     token, "XBT" if token == "BTC" else token)))
+        items["posizioni"].append({"indice": index, "token": token, "identita": identity})
+    for index, row in enumerate(candidates):
+        token = row.get("token")
+        pair = row.get("coppia_analisi")
+        key = row.get("kraken_pair_key")
+        identity = econ.identify(token, pair, key,
+                                 catalog_verified=bool(key and pair == row.get("coppia_analisi")))
+        items["candidati"].append({"indice": index, "token": token,
+                                   "coppia_analisi": pair, "identita": identity})
+    # Candidate and owned asset coverage share one cache and one request budget.
+    # No unverified ticker can consume the budget or inherit another project's data.
+    cache, calls = {}, 0
+    priority = items["candidati"][:1] + items["posizioni"] + items["candidati"][1:]
+    for row in priority:
+        identity = row["identita"]
+        cg = identity.get("coingecko_id")
+        if not cg:
+            row["fondamentali"] = econ.fundamentals(identity, None, now, now)
+            row["evento"] = econ.release_event(identity, None, now, now)
+            row["lettura_economica"] = econ.decision_context(
+                identity, row["fondamentali"], row["evento"])
+            continue
+        if cg not in cache:
+            if calls < 6:
+                calls += 1
+                try:
+                    url = (econ.CG + cg +
+                           "?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false")
+                    cache[cg] = json.loads(desk.request(url, timeout=12).decode("utf-8"))
+                except (ValueError, OSError, RuntimeError, KeyError, TypeError):
+                    cache[cg] = None
+                time.sleep(.35)
+            else:
+                cache[cg] = None
+        row["fondamentali"] = econ.fundamentals(identity, cache[cg], now, now)
+        repo = identity.get("repository_primario")
+        release = None
+        if repo and calls < 9:
+            calls += 1
+            try:
+                url = "https://api.github.com/repos/" + repo + "/releases/latest"
+                release = json.loads(desk.request(url, timeout=10).decode("utf-8"))
+            except (ValueError, OSError, RuntimeError, KeyError, TypeError):
+                pass
+        row["evento"] = econ.release_event(identity, release, now, now)
+        row["lettura_economica"] = econ.decision_context(
+            identity, row["fondamentali"], row["evento"])
+    btc = next((r for r in (four.get("posizioni") or []) if r.get("token") == "BTC"), {})
+    return {"schema": econ.VERSION, "acquisito_utc": now.isoformat(timespec="seconds"),
+            "posizioni": items["posizioni"], "candidati": items["candidati"],
+            "macro": econ.macro(source.get("feed"), now),
+            "regime": econ.regime(btc, (source.get("coingecko_global") or {}), now),
+            "richieste_esterne_massime": 9, "richieste_effettuate": calls,
+            "limite": "Nessun consiglio, prezzo futuro, unlock o impatto macro dedotto"}
+
+
 def collect(source=None, *, asset_pairs=None):
     """Prepara il dossier sullo snapshot appena acquisito, senza iniziare un'analisi GPT."""
     now=desk.NOW()
@@ -311,6 +379,7 @@ def collect(source=None, *, asset_pairs=None):
             for x in card.get('costi_roundtrip',[]) if x.get('valuta_partenza')=='EUR']
         matching=next((x for x in card.get('alternative',[]) if x['pair']==base_pair),None)
         if matching:
+            row["kraken_pair_key"] = matching.get("pair_key")
             row["ultimo_prezzo_in_quote"]=matching.get("prezzo_quote")
             try:
                 result=desk.kraken('OHLC',pair=matching["pair_key"],interval=15)
@@ -378,11 +447,18 @@ def collect(source=None, *, asset_pairs=None):
     finanziamento_book = finanziamento_150_book(
         dict(source, _verified_asset_pairs=asset_pairs), portafoglio,
         saldo_recente=qualita.get("saldo_recente_verificato", False))
+    economic = economic_evidence(source, portafoglio, analisi_patrimonio, candidates, now)
+    # Global market data is obtained independently and may be unavailable.
+    import kdd_economics as econ
+    btc = next((r for r in (analisi_patrimonio.get("posizioni") or [])
+                if r.get("token") == "BTC"), {})
+    economic["regime"] = econ.regime(btc, external.get("coingecko_global"), now)
     dossier={
         "schema":3,"creato_utc":desk.NOW().isoformat(timespec="seconds"),
         "kraken_istantanea_utc":source["rilevazione_utc"],"eta_kraken_minuti_al_dossier":round(age,2),
         "regime":{"trend_eur":source.get("trends",{}),"btc_spot_eur":source.get("markets",{}).get("BTC")},
         "candidati":candidates,"grafici_4h":quattro_ore,
+        "evidenze_economiche":economic,
         "patrimonio_4tf":analisi_patrimonio,
         "finanziamento_150_book_pubblico":finanziamento_book,
         "ricerca_setup":source.get("ricerca_setup",{}),

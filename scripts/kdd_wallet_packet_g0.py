@@ -737,13 +737,21 @@ def analytic_evidence(snapshot, dossier, positions, shortlist, now):
                      "pubblicato_originale": item.get("data", "")[:90] if isinstance(item.get("data"), str) else None,
                      "stato_orario": "NON_VERIFICATO", "copertura": "Solo titoli RSS campionati",
                      "limite": "Non prova causalita macro o impatto su asset."})
+    economic = dossier.get("evidenze_economiche")
+    if economic is not None:
+        import kdd_economics
+        try:
+            economic = kdd_economics.at_read(economic, positions, shortlist, now)
+        except (ValueError, TypeError, KeyError, OverflowError) as exc:
+            raise PacketError("Evidenza economica non attribuibile") from exc
     return {"stato": "EVIDENZE_CON_LIMITI",
             "benchmark_copertura": {"fonte": "Binance Spot pubblico", **bn_time,
                 "stato": str(bn.get("status") or "MANCANTE")[:35],
                 "token_esaminati": len(bn_rows),
                 "token_con_dati": sum(1 for x in bn_rows if isinstance(x, dict) and x.get("status") == "OK"),
                 "limite": "Il pacchetto espone solo token posseduti o candidati; quote non equivalenti."},
-            "titoli_contesto": feed, "benchmark_binance": benchmark,
+            "titoli_contesto": feed, "economia": economic,
+            "benchmark_binance": benchmark,
             "candidati": candidates, "derivati_btc": futures, "contesto": context,
             "limite": "Evidenze descrittive, non ordini o segnali operativi."}
 
