@@ -311,6 +311,10 @@ def technical_in_packet(row, now):
             'figure_candlestick': figure,
             'fonte':str(frame.get('fonte') or '')[:130],
             'limite':'Solo candele chiuse Kraken Spot; non prezzo eseguibile'}
+    # Recompute higher/lower-frame contradictions from verified observations.
+    result["confronto_figure_4tf"] = kdd_candles.compare_context(result["timeframe"])
+    if "confronto_figure_4tf" in row and row["confronto_figure_4tf"] != result["confronto_figure_4tf"]:
+        raise PacketError("Confronto figure 4TF alterato")
     # A previously complete set is partial when ANY frame has aged.
     source_state=row.get('stato')
     if source_state=='COMPLETO' and all(

@@ -336,6 +336,13 @@ def collect(source=None, *, asset_pairs=None):
         else:
             row["fondamentali_coingecko"]={
                 "stato":"ID token non validato su CoinGecko: nessun dato fondamentale attribuito"}
+        # KDD-11: candidate shortlist does not carry the verified four-frame
+        # closed OHLCV series. Never promote 15m/1H level summaries to patterns.
+        row["figure_candlestick"] = {
+            "stato": "NON_DISPONIBILE",
+            "motivo": "Serie OHLCV chiuse 4TF non attestata per candidato nel dossier",
+            "coppia": row.get("coppia_analisi"),
+            "fonte": "Nessuna serie verificata per riconoscimento KDD-11"}
         candidates.append(row)
         time.sleep(.5)
     # Campione 4H anche dei quattro asset strategici (non solo gainer).

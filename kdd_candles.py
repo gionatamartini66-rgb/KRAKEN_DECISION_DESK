@@ -4,11 +4,11 @@ import datetime as dt
 import math
 import statistics
 
-VERSION = "kdd11-candle-v001"
+VERSION = "kdd11-candle-v002"
 FRAMES = {"15m": 900, "1H": 3600, "4H": 14400, "1D": 86400}
 
 
-def recognize(data, *, now=None):
+def recognize(data, *, now=None, _history=False):
     """Recompute from OHLCV; every event uses only bars available at its close."""
     import grafico_4h as charts
     now = now or dt.datetime.now(dt.timezone.utc)
@@ -50,10 +50,65 @@ def recognize(data, *, now=None):
     ema50 = charts.ema_points(bars, 50)[-1]["value"]
     figures = []
     closed = dt.datetime.fromtimestamp(last["time"]+seconds, dt.timezone.utc).isoformat(timespec="seconds")
-    def add(kind, condition, invalidation, *, event_time=None):
-        figures.append({"figura": kind, "stato": "IN_ATTESA_CONFERMA",
-                        "evento_chiusura_utc": event_time or closed,
-                        "criterio": condition, "invalidazione": invalidation})
+    def add(kind, condition, invalidation, *, event_time=None, event_index=None,
+            level=None, phases=None):
+        # Shape is independent from interpretation. Context can contradict a
+        # geometric figure, and a closed future candle is required to resolve it.
+        direction = ("RIALZISTA" if kind in ("HAMMER_PIN_BAR", "POSSIBILE_MORNING_STAR",
+                      "FALSA_ROTTURA_INFERIORE", "RETEST_DOPO_BREAKOUT", "DOPPIO_TEST_LIVELLO")
+                     else "RIBASSISTA" if kind in ("SHOOTING_STAR", "FALSA_ROTTURA_SUPERIORE")
+                     else "NEUTRA")
+        near = (support is not None and abs(c-support)/support <= .01
+                if direction == "RIALZISTA" else
+                resistance is not None and abs(c-resistance)/resistance <= .01
+                if direction == "RIBASSISTA" else None)
+        aligned = (trend == "DISCESA" if direction == "RIALZISTA"
+                   else trend == "SALITA" if direction == "RIBASSISTA" else None)
+        conflicts = []
+        if direction != "NEUTRA" and not near:
+            conflicts.append("NESSUN_LIVELLO_STRUTTURALE_VICINO_ENTRO_1_PERCENTO")
+        if direction != "NEUTRA" and not aligned:
+            conflicts.append("TREND_ANTECEDENTE_NON_COERENTE_CON_IPOTESI_INVERSIONE")
+        if ratio is None:
+            conflicts.append("VOLUME_RELATIVO_NON_VALUTABILE")
+        elif ratio < 1:
+            conflicts.append("VOLUME_INFERIORE_ALLA_MEDIA20")
+        index = len(bars)-1 if event_index is None else event_index
+        event = {"figura": kind, "forma_osservata": condition,
+                 "stato": "IN_ATTESA_CONFERMA",
+                 "evento_chiusura_utc": event_time or closed,
+                 "criterio": condition, "invalidazione": invalidation,
+                 "contesto": {"trend_antecedente": trend,
+                             "direzione_ipotesi": direction,
+                             "presso_livello_strutturale_1pct": near,
+                             "volume_vs_media20": ratio,
+                             "ema20": ema20, "ema50": ema50,
+                             "supporto": support, "resistenza": resistance},
+                 "conflitti": conflicts,
+                 "conferme_mancanti": ["CHIUSURA_SUCCESSIVA_COERENTE"],
+                 "fasi_utc": phases or [event_time or closed]}
+        if level is not None:
+            event["livello_testato"] = level
+        # Follow only CLOSED candles strictly after the event. No future input
+        # enters detection at the event's own timestamp.
+        for later in bars[index+1:]:
+            if kind in ("HAMMER_PIN_BAR", "DOPPIO_TEST_LIVELLO", "RETEST_DOPO_BREAKOUT",
+                        "FALSA_ROTTURA_INFERIORE", "POSSIBILE_MORNING_STAR"):
+                invalid = later["close"] < (level if level is not None else bars[index]["low"])
+                reaction = later["close"] > bars[index]["high"]
+            elif kind in ("SHOOTING_STAR", "FALSA_ROTTURA_SUPERIORE"):
+                invalid = later["close"] > (level if level is not None else bars[index]["high"])
+                reaction = later["close"] < bars[index]["low"]
+            else:
+                invalid = False
+                reaction = False
+            if invalid or reaction:
+                event["stato"] = "INVALIDATA" if invalid else "REAZIONE_CHIUSA_OSSERVATA"
+                event["risoluzione_utc"] = dt.datetime.fromtimestamp(
+                    later["time"]+seconds, dt.timezone.utc).isoformat(timespec="seconds")
+                event["conferme_mancanti"] = [] if reaction else ["IPOTESI_INVALIDATA"]
+                break
+        figures.append(event)
     if spread > 0:
         if body/spread <= .1:
             add("DOJI", "corpo/range <= 0.10", "Chiusura successiva oltre l'estremo opposto")
@@ -100,18 +155,68 @@ def recognize(data, *, now=None):
         breakout=bars[j]
         if breakout["close"] <= level:
             continue
-        if l <= level*1.003 and c >= level and last["time"] > breakout["time"]:
-            add("RETEST_DOPO_BREAKOUT", "breakout precedente e test del livello su candela distinta",
-                "Chiusura sotto livello del breakout")
+        if (level*.997 <= l <= level*1.003 and c >= level
+                and all(x["close"] >= level for x in bars[j+1:])):
+            add("RETEST_DOPO_BREAKOUT", "breakout precedente e test entro 0.3% su candela distinta",
+                "Chiusura sotto livello del breakout", level=level,
+                phases=[dt.datetime.fromtimestamp(breakout["time"]+seconds, dt.timezone.utc).isoformat(timespec="seconds"),
+                        closed])
             break
     # A double test is two separate closed lows near a PRIOR level, without a close below it.
     if len(bars)>=27:
         level=min(x["low"] for x in bars[-27:-7])
-        touches=[x for x in bars[-7:] if abs(x["low"]-level)/level <= .003
-                 and x["close"] >= level]
-        if len(touches)>=2 and touches[-1]["time"]-touches[0]["time"]>=seconds*2:
-            add("DOPPIO_TEST_LIVELLO", "due minimi separati presso livello precedente, senza rottura chiusa",
-                "Chiusura sotto livello")
+        touches=[(i,x) for i,x in enumerate(bars[-7:], start=len(bars)-7)
+                 if abs(x["low"]-level)/level <= .003 and x["close"] >= level]
+        found = None
+        for first_idx, first in touches:
+            for second_idx, second in touches:
+                if second_idx-first_idx < 2:
+                    continue
+                between = bars[first_idx+1:second_idx]
+                # Require a CLOSED rebound >= 0.6%, not repeated sideways wicks.
+                if (between and max(x["close"] for x in between) >= level*1.006
+                        and all(x["close"] >= level for x in bars[first_idx:second_idx+1])):
+                    found = (first_idx, second_idx)
+                    break
+            if found:
+                break
+        if found:
+            a,b=found
+            utc=lambda i: dt.datetime.fromtimestamp(
+                bars[i]["time"]+seconds, dt.timezone.utc).isoformat(timespec="seconds")
+            add("DOPPIO_TEST_LIVELLO", "due test entro 0.3%, reazione chiusa >= 0.6% tra i test",
+                "Chiusura sotto livello", event_time=utc(b), event_index=b,
+                level=level, phases=[utc(a),utc(b)])
+    if not _history:
+        # Historical shapes are detected at their own close, then resolved
+        # using only subsequent closed bars, never the other way around.
+        for index in range(max(50, len(bars)-5), len(bars)-1):
+            prefix = bars[:index+1]
+            event_end = dt.datetime.fromtimestamp(
+                prefix[-1]["time"]+seconds, dt.timezone.utc).isoformat(timespec="seconds")
+            earlier = recognize(dict(data, candles=prefix,
+                closed_at_utc=event_end, observed_utc=event_end),
+                now=dt.datetime.fromisoformat(event_end), _history=True)
+            for old in earlier["figure"]:
+                if old["figura"] not in ("HAMMER_PIN_BAR", "SHOOTING_STAR",
+                                        "POSSIBILE_MORNING_STAR", "FALSA_ROTTURA_INFERIORE",
+                                        "FALSA_ROTTURA_SUPERIORE"):
+                    continue
+                event = dict(old)
+                for later in bars[index+1:]:
+                    bullish = old["figura"] in ("HAMMER_PIN_BAR", "POSSIBILE_MORNING_STAR",
+                                                 "FALSA_ROTTURA_INFERIORE")
+                    invalid = (later["close"] < prefix[-1]["low"] if bullish
+                               else later["close"] > prefix[-1]["high"])
+                    reaction = (later["close"] > prefix[-1]["high"] if bullish
+                                else later["close"] < prefix[-1]["low"])
+                    if invalid or reaction:
+                        event["stato"] = "INVALIDATA" if invalid else "REAZIONE_CHIUSA_OSSERVATA"
+                        event["risoluzione_utc"] = dt.datetime.fromtimestamp(
+                            later["time"]+seconds, dt.timezone.utc).isoformat(timespec="seconds")
+                        event["conferme_mancanti"] = [] if reaction else ["IPOTESI_INVALIDATA"]
+                        break
+                figures.append(event)
     return {"schema": VERSION, "stato": "AGGIORNATO" if timing["fresh"] else "SCADUTO",
             "timeframe": label, "coppia": data.get("pair"), "pair_key": data.get("pair_key"),
             "chiusura_utc": closed, "rilevazione_utc": data["observed_utc"],
@@ -120,3 +225,21 @@ def recognize(data, *, now=None):
             "volume_vs_media20": ratio, "ema20": ema20, "ema50": ema50,
             "supporto_precedente": support, "resistenza_precedente": resistance,
             "figure": figures[-8:], "limite": "Configurazioni descrittive; conferma successiva non presunta"}
+
+
+def compare_context(frames):
+    """Describe disagreements across closed frames; never a trading verdict."""
+    directions = {}
+    for label in FRAMES:
+        frame = frames.get(label, {})
+        evidence = frame.get("figure_candlestick") or {}
+        if evidence.get("stato") not in ("AGGIORNATO", "SCADUTO"):
+            directions[label] = "NON_DISPONIBILE"
+            continue
+        directions[label] = evidence.get("trend_precedente", "NON_DISPONIBILE")
+    higher = [directions[k] for k in ("4H", "1D") if directions[k] in ("SALITA", "DISCESA")]
+    lower = [directions[k] for k in ("15m", "1H") if directions[k] in ("SALITA", "DISCESA")]
+    conflict = bool(higher and lower and any(a != b for a in higher for b in lower))
+    return {"schema": VERSION, "trend_per_timeframe": directions,
+            "contraddizione_alto_basso": conflict,
+            "limite": "Chiusure a orari diversi; confronto descrittivo"}

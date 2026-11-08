@@ -659,6 +659,7 @@ def read_context(bundle, *, now=None, expected_sha256=None):
         have_prices.append(val is not None and qty is not None)
         tf = row.get("analisi_4tf")
         states = {}
+        figure_read_states = {}
         if tf and tf.get("stato") == "COMPLETO":
             original_frames = tf.get("timeframe")
             if (not isinstance(original_frames, dict)
@@ -706,6 +707,12 @@ def read_context(bundle, *, now=None, expected_sha256=None):
                             raise BridgeError("Figure OHLCV non verificabili: "+label) from exc
                         if original != f["figure_candlestick"]:
                             raise BridgeError("Figure OHLCV alterate: "+label)
+                    if f.get("figure_candlestick") is not None:
+                        figure_read_states[label] = {
+                            "stato_alla_lettura": state,
+                            "stato_alla_rilevazione": f["figure_candlestick"]["stato"],
+                            "rilevazione_utc": f["figure_candlestick"]["rilevazione_utc"],
+                            "storico": state != "AGGIORNATO"}
                     states[label] = state
         if len(states) != 4:
             states = {k: states.get(k, "NON_DISPONIBILE") for k in FRAMES}
@@ -714,6 +721,7 @@ def read_context(bundle, *, now=None, expected_sha256=None):
         observations.append({"indice": i, "token": row.get("token"),
                              "stato_identita": row.get("stato_identita"),
                              "timeframe_ricalcolati": states,
+                             "figure_candlestick_alla_lettura": figure_read_states,
                              "quattro_tf_aggiornati": all_tf, "prezzo_eur_attestato_localmente": val is not None})
     declared = numeric(section.get("totale_stimato_eur_senza_cash"))
     if declared is None and sum_eur != 0:

@@ -227,5 +227,6 @@ def collect(portfolio, source, *, asset_pairs=None, fetch=None, now=None,
             vals = list(entry["timeframe"].values())
             entry["stato"] = ("COMPLETO" if all(v["stato"] == "AGGIORNATO" for v in vals)
                               else "PARZIALE")
+        entry["confronto_figure_4tf"] = kdd_candles.compare_context(entry["timeframe"])
         result["posizioni"].append(entry)
     return result

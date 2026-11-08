@@ -77,3 +77,50 @@ class CandleEvidenceTests(unittest.TestCase):
         row["timeframe"]["4H"]["figure_candlestick"]["figure"]=[{"figura":"FALSA"}]
         with self.assertRaises(wallet.PacketError):
             wallet.technical_in_packet(row,now)
+    def test_hammer_context_changes_with_prior_trend(self):
+        def evidence(delta):
+            for i,b in enumerate(self.bars):
+                o=100+delta*i
+                b.update(open=o, high=o+1, low=o-1, close=o+.1)
+            b=self.bars[-1]
+            b.update(open=b["open"], close=b["open"]+.1,
+                     high=b["open"]+.25, low=b["open"]-1)
+            return k.recognize(self.data(),now=self.now)
+        down=evidence(-.3)
+        up=evidence(.3)
+        def hammer(x):return next(f for f in x["figure"] if f["figura"]=="HAMMER_PIN_BAR")
+        self.assertNotEqual(hammer(down)["contesto"]["trend_antecedente"],
+                            hammer(up)["contesto"]["trend_antecedente"])
+        self.assertNotEqual(hammer(down)["conflitti"],hammer(up)["conflitti"])
+
+    def test_double_test_requires_closed_reaction(self):
+        level=98.0
+        for b in self.bars[-7:]:
+            b.update(open=98.5,high=99,low=level,close=98.5)
+        self.assertNotIn("DOPPIO_TEST_LIVELLO",
+            [f["figura"] for f in k.recognize(self.data(),now=self.now)["figure"]])
+
+    def test_deep_wick_not_retest(self):
+        for b in self.bars:
+            b.update(open=100, high=101, low=99, close=100)
+        self.bars[-3].update(open=100, high=104, low=99, close=103)
+        self.bars[-2].update(open=103, high=105, low=102, close=104)
+        self.bars[-1].update(open=104, high=105, low=90, close=103)
+        self.assertNotIn("RETEST_DOPO_BREAKOUT",
+            [f["figura"] for f in k.recognize(self.data(),now=self.now)["figure"]])
+
+    def test_historical_hammer_invalidated_after_closed_bar(self):
+        b=self.bars[-2]
+        b.update(open=100, high=100.2, low=99, close=100.1)
+        self.bars[-1].update(open=99, high=99.5, low=98, close=98.5)
+        figures=k.recognize(self.data(),now=self.now)["figure"]
+        self.assertTrue(any(f["figura"]=="HAMMER_PIN_BAR" and
+                            f["stato"]=="INVALIDATA" for f in figures))
+
+    def test_cross_timeframe_contradiction_and_missing(self):
+        frames={label:{"figure_candlestick":{"stato":"AGGIORNATO",
+                "trend_precedente":"DISCESA" if label in ("15m","1H") else "SALITA"}}
+                for label in k.FRAMES}
+        self.assertTrue(k.compare_context(frames)["contraddizione_alto_basso"])
+        frames["1D"]={}
+        self.assertEqual(k.compare_context(frames)["trend_per_timeframe"]["1D"],"NON_DISPONIBILE")
