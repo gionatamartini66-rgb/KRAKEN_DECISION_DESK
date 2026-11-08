@@ -40,9 +40,18 @@ class UpdateTests(unittest.TestCase):
                 p.write_text('# file ' + name + '\n')
         for directory in (self.root, self.live):
             (directory / 'test_decision_desk.py').write_text(TEST_BODY)
+            (directory / 'test_kdd_candles.py').write_text(
+                'import unittest, pathlib\n'
+                'class CandlesStaging(unittest.TestCase):\n'
+                ' def test_module_present(self):\n'
+                '  self.assertTrue(pathlib.Path("kdd_candles.py").is_file())\n'
+            )
             for name in kdd.PACKET_FILES:
                 origin = Path(__file__).resolve().parents[1] / name
-                if name.endswith(('test_kdd_portfolio_4tf.py', 'test_kdd_bridge_g2.py', 'test_kdd_android_transaction_g2.py', 'test_kdd_drive_exchange.py', 'test_kdd_funding_book_g2.py', 'kdd_android_regressions.py')):
+                # This updater fixture contains placeholder application modules;
+                # package probes here test staging, while the real packet and
+                # candlestick suites execute on genuine source in CI/preflight.
+                if name.endswith(('test_kdd_portfolio_4tf.py', 'test_kdd_bridge_g2.py', 'test_kdd_android_transaction_g2.py', 'test_kdd_drive_exchange.py', 'test_kdd_funding_book_g2.py', 'kdd_android_regressions.py', 'test_kdd_wallet_packet_g0.py')):
                     # The updater's synthetic source tree intentionally uses
                     # placeholder application code. Its staging test verifies
                     # packaging only; real E2E runs separately on true KDD.
@@ -129,6 +138,71 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual((self.live / 'README.md').read_text(), self.old_readme)
         self.assertEqual(synthetic.read_bytes(), evidence)
 
+
+    def test_rt42_deploy_01_missing_live_candles_check_and_apply_backup(self):
+        name = "kdd_candles.py"
+        self.assertIn(name, kdd.PY_FILES)
+        self.assertIn("test_kdd_candles.py", kdd.PY_FILES)
+        (self.live / name).unlink()
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=True)
+        self.assertIn(name, output.getvalue())
+        self.assertIn("PRECHECK OK", output.getvalue())
+        self.assertFalse((self.live / name).exists())
+        home = Path(self.tmp.name) / "isolated-home"
+        home.mkdir()
+        with patch.object(kdd.Path, "home", return_value=home), \
+             patch("builtins.input", return_value="APPLICA"), \
+             contextlib.redirect_stdout(io.StringIO()):
+            kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=False)
+        self.assertEqual((self.live / name).read_bytes(),
+                         (self.root / name).read_bytes())
+        backups=list((home / ".local/share/kdd-deploy-backups").glob("*"))
+        self.assertEqual(len(backups),1)
+        self.assertFalse((backups[0] / name).exists(),
+                         "A new module must not have invented prior backup bytes")
+
+    def test_rt42_deploy_01_rollback_removes_new_candles_and_restores_old(self):
+        name="kdd_candles.py"
+        for existed in (False, True):
+            with self.subTest(existed=existed):
+                if existed:
+                    (self.live/name).write_text("# old module\\n")
+                else:
+                    (self.live/name).unlink(missing_ok=True)
+                old=(self.live/name).read_bytes() if existed else None
+                home=Path(self.tmp.name)/("home-old" if existed else "home-new")
+                home.mkdir()
+                real=kdd.isolated_test
+                calls=0
+                def fail_post(stage):
+                    nonlocal calls
+                    calls+=1
+                    if calls==2:
+                        raise kdd.SafetyError("synthetic postflight failure")
+                    return real(stage)
+                with patch.object(kdd.Path,"home",return_value=home), \
+                     patch.object(kdd,"isolated_test",side_effect=fail_post), \
+                     patch("builtins.input",return_value="APPLICA"), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaisesRegex(kdd.SafetyError,"rollback"):
+                        kdd.apply(self.root,self.live,commit_sha=self.sha,dry_run=False)
+                self.assertEqual((self.live/name).read_bytes() if existed else None,old)
+                self.assertEqual((self.live/"README.md").read_text(),self.old_readme)
+                backups=list((home/".local/share/kdd-deploy-backups").glob("*"))
+                self.assertEqual(len(backups),1)
+                self.assertEqual((backups[0]/name).read_bytes() if existed else None,old)
+
+    def test_rt42_deploy_01_candles_suite_executed_by_runner(self):
+        import subprocess
+        commands=[]
+        def capture(args, *, cwd, timeout=120):
+            commands.append(tuple(args))
+            return subprocess.CompletedProcess(args,0,"","OK")
+        with patch.object(kdd,"capability_preflight"), \
+             patch.object(kdd,"command",side_effect=capture):
+            kdd.isolated_test(self.root)
+        self.assertTrue(any("test_kdd_candles" in args for args in commands))
     def test_rt1_f4_book_test_is_deployed_and_executed_in_pre_and_postflight(self):
         import subprocess
         name = "scripts/test_kdd_funding_book_g2.py"
