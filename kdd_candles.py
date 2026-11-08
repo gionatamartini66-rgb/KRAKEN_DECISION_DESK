@@ -251,18 +251,37 @@ def recognize(data, *, now=None, _history=False):
 
 
 def compare_context(frames):
-    """Describe disagreements across closed frames; never a trading verdict."""
-    directions = {}
+    """Four-frame comparison with explicit current-vs-historical validity.
+
+    A stored figure's AGGIORNATO is a *source-time* label, not permission
+    to use it as a current observation. Missing legacy frame states fail closed.
+    """
+    current, historical, coverage, closings = {}, {}, {}, {}
     for label in FRAMES:
-        frame = frames.get(label, {})
+        frame = frames.get(label) or {}
         evidence = frame.get("figure_candlestick") or {}
-        if evidence.get("stato") not in ("AGGIORNATO", "SCADUTO"):
-            directions[label] = "NON_DISPONIBILE"
-            continue
-        directions[label] = evidence.get("trend_precedente", "NON_DISPONIBILE")
-    higher = [directions[k] for k in ("4H", "1D") if directions[k] in ("SALITA", "DISCESA")]
-    lower = [directions[k] for k in ("15m", "1H") if directions[k] in ("SALITA", "DISCESA")]
-    conflict = bool(higher and lower and any(a != b for a in higher for b in lower))
-    return {"schema": VERSION, "trend_per_timeframe": directions,
+        state = frame.get("stato", "NON_DISPONIBILE")
+        trend = evidence.get("trend_precedente")
+        valid_trend = trend if trend in ("SALITA", "DISCESA", "LATERALE") else None
+        closings[label] = evidence.get("chiusura_utc") or frame.get("chiusura_utc")
+        historical[label] = valid_trend or "NON_DISPONIBILE"
+        fresh = state == "AGGIORNATO" and evidence.get("stato") == "AGGIORNATO"
+        coverage[label] = "AGGIORNATO" if fresh and valid_trend else (
+            "SCADUTO" if state == "SCADUTO" or evidence.get("stato") == "SCADUTO"
+            else "NON_DISPONIBILE")
+        current[label] = valid_trend if coverage[label] == "AGGIORNATO" else "NON_VALUTABILE"
+    # Four current frames are required; otherwise false would conflate
+    # absence of evidence with a verified absence of contradiction.
+    evaluable = all(coverage[k] == "AGGIORNATO" for k in FRAMES)
+    higher = [current[k] for k in ("4H", "1D") if current[k] in ("SALITA", "DISCESA")]
+    lower = [current[k] for k in ("15m", "1H") if current[k] in ("SALITA", "DISCESA")]
+    conflict = (bool(higher and lower and any(a != b for a in higher for b in lower))
+                if evaluable else None)
+    return {"schema": VERSION, "stato_confronto": "VALUTABILE" if evaluable else "NON_VALUTABILE",
+            "trend_per_timeframe": current,
+            "trend_storici_per_timeframe": historical,
+            "copertura_per_timeframe": coverage,
+            "chiusure_utc": closings,
             "contraddizione_alto_basso": conflict,
-            "limite": "Chiusure a orari diversi; confronto descrittivo"}
+            "limite": ("Confronto descrittivo tra chiusure diverse"
+                       if evaluable else "Dati scaduti o insufficienti; nessun confronto attuale")}

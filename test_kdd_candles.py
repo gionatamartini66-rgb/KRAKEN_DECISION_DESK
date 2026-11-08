@@ -118,12 +118,12 @@ class CandleEvidenceTests(unittest.TestCase):
                             f["stato"]=="INVALIDATA" for f in figures))
 
     def test_cross_timeframe_contradiction_and_missing(self):
-        frames={label:{"figure_candlestick":{"stato":"AGGIORNATO",
+        frames={label:{"stato":"AGGIORNATO","figure_candlestick":{"stato":"AGGIORNATO",
                 "trend_precedente":"DISCESA" if label in ("15m","1H") else "SALITA"}}
                 for label in k.FRAMES}
         self.assertTrue(k.compare_context(frames)["contraddizione_alto_basso"])
         frames["1D"]={}
-        self.assertEqual(k.compare_context(frames)["trend_per_timeframe"]["1D"],"NON_DISPONIBILE")
+        self.assertEqual(k.compare_context(frames)["trend_per_timeframe"]["1D"],"NON_VALUTABILE")
     def test_rt42_f3_01_double_test_context_immutable_after_future_bars(self):
         # 60 contiguous 15m candles. Historical support at index 40,
         # touches at 54 and 56, closed rebound at 55, later breakout.
@@ -179,3 +179,70 @@ class CandleEvidenceTests(unittest.TestCase):
                       "forma_osservata","fasi_utc"):
             self.assertEqual(a[field],b[field],field)
         self.assertEqual(b["stato"],"INVALIDATA")
+
+    def test_rt42_f4_02_all_stale_is_not_current_conflict(self):
+        frames={label:{"stato":"SCADUTO","figure_candlestick":{
+            "stato":"AGGIORNATO",
+            "trend_precedente":"DISCESA" if label in ("15m","1H") else "SALITA",
+            "chiusura_utc":"2026-11-06T20:00:00+00:00"}} for label in k.FRAMES}
+        result=k.compare_context(frames)
+        self.assertIsNone(result["contraddizione_alto_basso"])
+        self.assertEqual(result["stato_confronto"],"NON_VALUTABILE")
+        self.assertEqual(result["trend_storici_per_timeframe"]["1D"],"SALITA")
+        self.assertTrue(all(x=="NON_VALUTABILE" for x in result["trend_per_timeframe"].values()))
+
+    def test_rt42_f4_02_mixed_stale_and_missing_legacy(self):
+        frames={label:{"stato":"AGGIORNATO","figure_candlestick":{
+            "stato":"AGGIORNATO",
+            "trend_precedente":"DISCESA" if label in ("15m","1H") else "SALITA"}}
+            for label in k.FRAMES}
+        frames["4H"]["stato"]="SCADUTO"
+        result=k.compare_context(frames)
+        self.assertIsNone(result["contraddizione_alto_basso"])
+        self.assertEqual(result["trend_per_timeframe"]["4H"],"NON_VALUTABILE")
+        frames["4H"]={"figure_candlestick":{"stato":"AGGIORNATO","trend_precedente":"SALITA"}}
+        self.assertEqual(k.compare_context(frames)["copertura_per_timeframe"]["4H"],"NON_DISPONIBILE")
+
+    def test_rt42_f4_02_all_fresh_conflict(self):
+        frames={label:{"stato":"AGGIORNATO","figure_candlestick":{
+            "stato":"AGGIORNATO",
+            "trend_precedente":"DISCESA" if label in ("15m","1H") else "SALITA"}}
+            for label in k.FRAMES}
+        result=k.compare_context(frames)
+        self.assertEqual(result["stato_confronto"],"VALUTABILE")
+        self.assertIs(result["contraddizione_alto_basso"],True)
+        for frame in frames.values():
+            frame["figure_candlestick"]["trend_precedente"]="SALITA"
+        self.assertIs(k.compare_context(frames)["contraddizione_alto_basso"],False)
+
+    def test_rt42_f4_02_packet_recomputes_at_later_read(self):
+        import patrimonio_4tf as portfolio
+        from scripts import kdd_wallet_packet_g0 as wallet
+        now=dt.datetime.fromtimestamp((1794000000//86400)*86400+120,dt.timezone.utc)
+        row={"coppia":"BTC/EUR","pair_key":"XXBTZEUR",
+             "asset_base":"BTC","valuta_quotazione":"EUR",
+             "stato":"COMPLETO","timeframe":{}}
+        for label,sec in k.FRAMES.items():
+            end=int((now.timestamp()-120)//sec)*sec
+            delta=-.4 if label in ("15m","1H") else .4
+            bars=[{"time":end-60*sec+i*sec,
+                   "open":100+delta*i,"high":101+delta*i,"low":99+delta*i,
+                   "close":100+delta*i+.1,"volume":100} for i in range(60)]
+            # Keep all prices positive, including the downtrend.
+            source={"timeframe":label,"interval_seconds":sec,"candles":bars,
+                    "observed_utc":now.isoformat(timespec="seconds"),
+                    "closed_at_utc":dt.datetime.fromtimestamp(end,dt.timezone.utc).isoformat(timespec="seconds"),
+                    "pair":"BTC/EUR","pair_key":"XXBTZEUR","token":"BTC",
+                    "source":"Kraken Spot synthetic"}
+            row["timeframe"][label]=portfolio.analyze_frame(source,now)
+        row["confronto_figure_4tf"]=k.compare_context(row["timeframe"])
+        initial=wallet.technical_in_packet(row,now)
+        self.assertIs(initial["confronto_figure_4tf"]["contraddizione_alto_basso"],True)
+        later=wallet.technical_in_packet(row,now+dt.timedelta(days=3))
+        result=later["confronto_figure_4tf"]
+        self.assertIsNone(result["contraddizione_alto_basso"])
+        self.assertEqual(result["stato_confronto"],"NON_VALUTABILE")
+        self.assertEqual(result["trend_storici_per_timeframe"]["1D"],"SALITA")
+        row["confronto_figure_4tf"]["contraddizione_alto_basso"]=False
+        with self.assertRaises(wallet.PacketError):
+            wallet.technical_in_packet(row,now)

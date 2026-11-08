@@ -716,12 +716,20 @@ def read_context(bundle, *, now=None, expected_sha256=None):
                     states[label] = state
         if len(states) != 4:
             states = {k: states.get(k, "NON_DISPONIBILE") for k in FRAMES}
+        # Do not reuse the packet's historical four-frame verdict as current.
+        import kdd_candles
+        read_frames = {}
+        for label in FRAMES:
+            source_frame = (tf.get("timeframe") or {}).get(label, {}) if isinstance(tf, dict) else {}
+            read_frames[label] = dict(source_frame or {}, stato=states[label])
+        comparison_at_read = kdd_candles.compare_context(read_frames)
         all_tf = all(value == "AGGIORNATO" for value in states.values())
         complete += bool(all_tf)
         observations.append({"indice": i, "token": row.get("token"),
                              "stato_identita": row.get("stato_identita"),
                              "timeframe_ricalcolati": states,
                              "figure_candlestick_alla_lettura": figure_read_states,
+                             "confronto_figure_4tf_alla_lettura": comparison_at_read,
                              "quattro_tf_aggiornati": all_tf, "prezzo_eur_attestato_localmente": val is not None})
     declared = numeric(section.get("totale_stimato_eur_senza_cash"))
     if declared is None and sum_eur != 0:
