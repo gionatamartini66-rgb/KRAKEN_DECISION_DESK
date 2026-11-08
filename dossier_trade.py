@@ -363,15 +363,28 @@ def economic_evidence(source, wallet, four, candidates, now, *,
                     previous_cache[key] = data
 
     cache, release_cache = {}, {}
+    source_failures = {}  # Public transport diagnostics; no API keys or response bodies.
     cg_calls, release_calls = 0, 0
+    import urllib.error
+    rate_limited = False
     for cg in selected:
+        if rate_limited:
+            cache[cg] = None
+            source_failures[cg] = "RINVIATO_RATE_LIMIT_HTTP_429"
+            continue  # A 429 must not trigger five more requests in this refresh.
         cg_calls += 1
         try:
             url = (econ.CG + cg +
                    "?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false")
             cache[cg] = json.loads(desk.request(url, timeout=12).decode("utf-8"))
-        except (ValueError, OSError, RuntimeError, KeyError, TypeError):
+        except urllib.error.HTTPError as exc:
             cache[cg] = None
+            source_failures[cg] = "HTTP_" + str(exc.code)
+            if exc.code == 429:
+                rate_limited = True
+        except (ValueError, OSError, RuntimeError, KeyError, TypeError) as exc:
+            cache[cg] = None
+            source_failures[cg] = "ERRORE_" + type(exc).__name__
         time.sleep(.35)
     projects = sorted({row["identita"]["repository_primario"]
                        for group in items.values() for row in group
@@ -404,7 +417,8 @@ def economic_evidence(source, wallet, four, candidates, now, *,
                 elif cg not in selected_ids:
                     fundamental = dict(fresh, stato="NON_ACQUISITO_PER_BUDGET")
                 elif cache.get(cg) is None:
-                    fundamental = dict(fresh, stato="NON_DISPONIBILE_FONTE")
+                    fundamental = dict(fresh, stato="NON_DISPONIBILE_FONTE",
+                                       motivo=source_failures.get(cg, "RISPOSTA_NON_DISPONIBILE"))
                 else:
                     fundamental = fresh
             row["fondamentali"] = fundamental
