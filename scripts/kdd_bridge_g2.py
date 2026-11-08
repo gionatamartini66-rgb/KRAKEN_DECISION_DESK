@@ -659,6 +659,7 @@ def read_context(bundle, *, now=None, expected_sha256=None):
         have_prices.append(val is not None and qty is not None)
         tf = row.get("analisi_4tf")
         states = {}
+        figure_read_states = {}
         if tf and tf.get("stato") == "COMPLETO":
             original_frames = tf.get("timeframe")
             if (not isinstance(original_frames, dict)
@@ -688,14 +689,47 @@ def read_context(bundle, *, now=None, expected_sha256=None):
                             raise BridgeError("Serie 4TF o ultima chiusura incoerente")
                         last = int((moment.timestamp()-120)//seconds)*seconds
                         state = "AGGIORNATO" if closed.timestamp() >= last else "SCADUTO"
+                    if f.get("figure_candlestick") is not None:
+                        import kdd_candles
+                        sequence = f.get("serie_ohlcv_chiuse")
+                        if not isinstance(sequence, list) or len(sequence) < 50:
+                            raise BridgeError("OHLCV figure assenti: "+label)
+                        try:
+                            original = kdd_candles.recognize({
+                                "timeframe": label, "interval_seconds": seconds,
+                                "candles": sequence, "pair": tf.get("coppia"),
+                                "pair_key": tf.get("pair_key"),
+                                "observed_utc": f["rilevazione_utc"],
+                                "closed_at_utc": f["chiusura_utc"],
+                                "source": f.get("fonte"),
+                            }, now=instant(f["rilevazione_utc"]))
+                        except (ValueError, KeyError, TypeError, OverflowError) as exc:
+                            raise BridgeError("Figure OHLCV non verificabili: "+label) from exc
+                        if original != f["figure_candlestick"]:
+                            raise BridgeError("Figure OHLCV alterate: "+label)
+                    if f.get("figure_candlestick") is not None:
+                        figure_read_states[label] = {
+                            "stato_alla_lettura": state,
+                            "stato_alla_rilevazione": f["figure_candlestick"]["stato"],
+                            "rilevazione_utc": f["figure_candlestick"]["rilevazione_utc"],
+                            "storico": state != "AGGIORNATO"}
                     states[label] = state
         if len(states) != 4:
             states = {k: states.get(k, "NON_DISPONIBILE") for k in FRAMES}
+        # Do not reuse the packet's historical four-frame verdict as current.
+        import kdd_candles
+        read_frames = {}
+        for label in FRAMES:
+            source_frame = (tf.get("timeframe") or {}).get(label, {}) if isinstance(tf, dict) else {}
+            read_frames[label] = dict(source_frame or {}, stato=states[label])
+        comparison_at_read = kdd_candles.compare_context(read_frames)
         all_tf = all(value == "AGGIORNATO" for value in states.values())
         complete += bool(all_tf)
         observations.append({"indice": i, "token": row.get("token"),
                              "stato_identita": row.get("stato_identita"),
                              "timeframe_ricalcolati": states,
+                             "figure_candlestick_alla_lettura": figure_read_states,
+                             "confronto_figure_4tf_alla_lettura": comparison_at_read,
                              "quattro_tf_aggiornati": all_tf, "prezzo_eur_attestato_localmente": val is not None})
     declared = numeric(section.get("totale_stimato_eur_senza_cash"))
     if declared is None and sum_eur != 0:

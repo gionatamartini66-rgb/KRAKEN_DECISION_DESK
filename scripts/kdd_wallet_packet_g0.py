@@ -210,6 +210,7 @@ def four_tf_evidence(portfolio, report, dossier, expected_market):
 
 
 def technical_in_packet(row, now):
+    import kdd_candles
     """Evidence belongs to the declared Kraken pair, with closed OHLC rows."""
     if not isinstance(row,dict):
         raise PacketError('Posizione tecnica non strutturata')
@@ -276,6 +277,13 @@ def technical_in_packet(row, now):
                 'stato','orientamento','chiusura_utc','rilevazione_utc',
                 'candele','close','ema20','ema50','volume','volume_vs_media20',
                 'supporto_vicino','resistenza_vicina')}
+            # Independently recompute the versioned candle result from the
+            # original OHLCV. Never trust a persisted pattern label.
+            figure = kdd_candles.recognize(
+                dict(source_data, pair=pair, pair_key=pair_key,
+                     source=frame.get('fonte')), now=observation)
+            if 'figure_candlestick' in frame and frame['figure_candlestick'] != figure:
+                raise PacketError('Figura candlestick non coerente con OHLCV: '+label)
             authoritative.update(pivot_giornaliero=extra['pivots'],
                                  livelli_strutturali=extra['structure'],
                                  intervallo_secondi=seconds)
@@ -300,8 +308,18 @@ def technical_in_packet(row, now):
             'volume':amount(frame.get('volume'),'volume'),
             'pivot_giornaliero':frame.get('pivot_giornaliero'),
             'livelli_strutturali':frame.get('livelli_strutturali'),
+            'figure_candlestick': figure,
             'fonte':str(frame.get('fonte') or '')[:130],
             'limite':'Solo candele chiuse Kraken Spot; non prezzo eseguibile'}
+    # Recompute higher/lower-frame contradictions from verified observations.
+    # Verify the persisted comparison at its original observation time.
+    # A later packet must not fail merely because previously fresh bars aged.
+    original_comparison = kdd_candles.compare_context(row["timeframe"])
+    if ("confronto_figure_4tf" in row and
+            row["confronto_figure_4tf"] != original_comparison):
+        raise PacketError("Confronto figure 4TF alterato")
+    # Publish the comparison recomputed from the verified read-time states.
+    result["confronto_figure_4tf"] = kdd_candles.compare_context(result["timeframe"])
     # A previously complete set is partial when ANY frame has aged.
     source_state=row.get('stato')
     if source_state=='COMPLETO' and all(

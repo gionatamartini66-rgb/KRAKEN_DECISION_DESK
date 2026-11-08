@@ -12,6 +12,7 @@ import time
 
 import decision_desk as desk
 import grafico_4h as charts
+import kdd_candles
 
 LABELS = (("15m", "15m"), ("1H", "1h"), ("4H", "4h"), ("1D", "1d"))
 QUOTES = ("EUR", "USD", "USDC")
@@ -97,6 +98,7 @@ def analyze_frame(data, now):
                 pivot_giornaliero=calculations["pivots"],
                 livelli_strutturali=calculations["structure"],
                 intervallo_secondi=data["interval_seconds"],
+                figure_candlestick=kdd_candles.recognize(data, now=now),
                 fonte=data["source"], limiti=[
                     "Solo candele chiuse, non quotazione eseguibile",
                     "EMA e livelli descrittivi, nessun ordine o segnale automatico",
@@ -225,5 +227,6 @@ def collect(portfolio, source, *, asset_pairs=None, fetch=None, now=None,
             vals = list(entry["timeframe"].values())
             entry["stato"] = ("COMPLETO" if all(v["stato"] == "AGGIORNATO" for v in vals)
                               else "PARZIALE")
+        entry["confronto_figure_4tf"] = kdd_candles.compare_context(entry["timeframe"])
         result["posizioni"].append(entry)
     return result
