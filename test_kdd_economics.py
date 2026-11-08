@@ -28,6 +28,134 @@ class EconomicEvidenceTests(unittest.TestCase):
                     "circulating_supply":10,"total_supply":20,
                     "max_supply":max_supply}}
 
+    def test_real_wallet_and_shortlist_project_registry_is_curated(self):
+        # Identity pairs reproduced from a 10-position/4-candidate schema.
+        expected = {
+            "BNB": ("binancecoin", "BNB"),
+            "FET": ("fetch-ai", "Artificial Superintelligence Alliance"),
+            "JUP": ("jupiter-exchange-solana", "Jupiter"),
+            "RENDER": ("render-token", "Render"),
+            "PEPE": ("pepe", "Pepe"),
+            "PUMP": ("pump-fun", "Pump.fun"),
+        }
+        for token, (coin_id, name) in expected.items():
+            with self.subTest(token=token):
+                identity = self.ident(token)
+                self.assertEqual(identity["stato"], "IDENTITA_VERIFICATA_DA_CATALOGO")
+                self.assertEqual((identity["coingecko_id"], identity["progetto"]),
+                                 (coin_id, name))
+                self.assertEqual(e.fundamentals(identity, self.market(identity), T, T)
+                                 ["stato"], "VERIFICATO")
+                forged = self.market(identity)
+                forged["name"] = "Wrapped " + name
+                self.assertEqual(e.fundamentals(identity, forged, T, T)
+                                 ["stato"], "NON_VERIFICATO")
+                self.assertEqual(e.identify(token, token+"/EUR", "BOGUS",
+                                            catalog=self.catalog(token))["stato"],
+                                 "NON_VERIFICATO")
+        self.assertIn("ASI", self.ident("FET")["limite"])
+        self.assertIn("RNDR", self.ident("RENDER")["limite"])
+        self.assertEqual(self.ident("USELESS")["stato"], "NON_VERIFICATO")
+        self.assertEqual(e.identify("RENDER", "RNDR/EUR", "RENDEREUR",
+                                    catalog=self.catalog("RENDER"))["stato"],
+                         "NON_VERIFICATO")
+
+    def test_real_roster_three_bounded_refreshes_recover_external_failures(self):
+        import json
+        import dossier_trade as producer
+        from unittest import mock
+        tokens = ["BNB", "FET", "JUP", "NEAR", "RENDER", "SOL", "SUI",
+                  "ETH", "BTC", "XRP"]
+        shortlist = ["USELESS", "PEPE", "PUMP", "BNB"]
+        pairs = {t+"EUR": {"wsname": t+"/EUR", "status": "online"}
+                 for t in tokens}
+        pairs.update({t+"USD": {"wsname": t+"/USD", "status": "online"}
+                      for t in shortlist})
+        wallet = {"posizioni": [{"token": t} for t in tokens]}
+        four = {"posizioni": [{"token": t, "coppia": t+"/EUR",
+                               "pair_key": t+"EUR"}
+                              for t in tokens]}
+        candidates = [{"token": t, "coppia_analisi": t+"/USD",
+                       "kraken_pair_key": t+"USD"} for t in shortlist]
+        phase = [0]
+
+        def public_source(url, timeout=12):
+            if "/releases/latest" in url:
+                repo = url.split("/repos/")[1].split("/releases/")[0]
+                return json.dumps({"html_url": "https://github.com/" + repo +
+                                   "/releases/tag/v1", "name": "Release v1",
+                                   "published_at": T.isoformat()}).encode()
+            coin_id = url.split("/coins/")[1].split("?")[0]
+            if phase[0] == 0 and coin_id in ("bitcoin", "fetch-ai"):
+                raise OSError("Simulated public source outage")
+            token = next(t for t, v in e.PROJECTS.items() if v[0] == coin_id)
+            return json.dumps(self.market(self.ident(token))).encode()
+
+        outputs = []
+        with mock.patch.object(producer.desk, "request", side_effect=public_source), \\
+             mock.patch.object(producer.time, "sleep"):
+            previous = None
+            for iteration in range(3):
+                phase[0] = iteration
+                result = producer.economic_evidence(
+                    {"feed": []}, wallet, four, candidates,
+                    T + dt.timedelta(minutes=iteration), asset_pairs=pairs,
+                    previous=previous)
+                outputs.append(result)
+                previous = result
+        for output in outputs:
+            self.assertEqual(len(output["posizioni"]), 10)
+            self.assertEqual(len(output["candidati"]), 4)
+            self.assertEqual(sum(x["identita"]["stato"] ==
+                                 "IDENTITA_VERIFICATA_DA_CATALOGO"
+                                 for x in output["posizioni"]), 10)
+            self.assertLessEqual(output["richieste_effettuate"], 9)
+        first, second, third = outputs
+        self.assertEqual(sum(x["fondamentali"]["stato"] == "VERIFICATO"
+                             for x in first["posizioni"]), 4)
+        self.assertEqual(sum(x["fondamentali"]["stato"] == "VERIFICATO"
+                             for x in second["posizioni"]), 8)
+        self.assertEqual(sum(x["fondamentali"]["stato"] == "VERIFICATO"
+                             for x in third["posizioni"]), 10)
+        self.assertEqual([x["fondamentali"]["stato"]
+                          for x in third["candidati"]],
+                         ["NON_VERIFICATO_IDENTITA", "VERIFICATO",
+                          "VERIFICATO", "VERIFICATO"])
+        self.assertEqual(
+            next(x for x in first["posizioni"] if x["token"] == "FET")
+            ["fondamentali"]["motivo"], "ERRORE_OSError")
+
+    def test_coin_gecko_429_stops_bounded_requests_without_faking_data(self):
+        import urllib.error
+        import dossier_trade as producer
+        from unittest import mock
+        tokens = ["BNB", "BTC"]
+        wallet = {"posizioni": [{"token": t} for t in tokens]}
+        four = {"posizioni": [{"token": t, "coppia": t+"/EUR",
+                               "pair_key": t+"EUR"} for t in tokens]}
+        pairs = {t+"EUR": {"status": "online", "wsname": t+"/EUR"}
+                 for t in tokens}
+        called = []
+
+        def denied(url, timeout=12):
+            if "/releases/latest" in url:
+                raise OSError("release unavailable")
+            called.append(url)
+            raise urllib.error.HTTPError(url, 429, "rate limited", {}, None)
+
+        with mock.patch.object(producer.desk, "request", side_effect=denied), \\
+             mock.patch.object(producer.time, "sleep"):
+            result = producer.economic_evidence(
+                {"feed": []}, wallet, four, [], T, asset_pairs=pairs)
+        self.assertEqual(len(called), 1)
+        self.assertEqual(result["richieste_coingecko"], 1)
+        self.assertEqual([r["fondamentali"]["stato"]
+                          for r in result["posizioni"]],
+                         ["NON_DISPONIBILE_FONTE"] * 2)
+        self.assertEqual([r["fondamentali"]["motivo"]
+                          for r in result["posizioni"]],
+                         ["HTTP_429", "RINVIATO_RATE_LIMIT_HTTP_429"])
+
     def test_identity_requires_verified_catalog_pair_and_curated_mapping(self):
         self.assertEqual(self.ident()["stato"],"IDENTITA_VERIFICATA_DA_CATALOGO")
         self.assertEqual(e.identify("BTC","XBT/EUR","XXBTZEUR",
