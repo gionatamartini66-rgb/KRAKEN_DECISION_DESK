@@ -92,7 +92,7 @@ class EconomicEvidenceTests(unittest.TestCase):
             return json.dumps(self.market(self.ident(token))).encode()
 
         outputs = []
-        with mock.patch.object(producer.desk, "request", side_effect=public_source), \\
+        with mock.patch.object(producer.desk, "request", side_effect=public_source), \
              mock.patch.object(producer.time, "sleep"):
             previous = None
             for iteration in range(3):
@@ -143,7 +143,7 @@ class EconomicEvidenceTests(unittest.TestCase):
             called.append(url)
             raise urllib.error.HTTPError(url, 429, "rate limited", {}, None)
 
-        with mock.patch.object(producer.desk, "request", side_effect=denied), \\
+        with mock.patch.object(producer.desk, "request", side_effect=denied), \
              mock.patch.object(producer.time, "sleep"):
             result = producer.economic_evidence(
                 {"feed": []}, wallet, four, [], T, asset_pairs=pairs)
