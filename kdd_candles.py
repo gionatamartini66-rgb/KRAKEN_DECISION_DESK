@@ -58,32 +58,55 @@ def recognize(data, *, now=None, _history=False):
                       "FALSA_ROTTURA_INFERIORE", "RETEST_DOPO_BREAKOUT", "DOPPIO_TEST_LIVELLO")
                      else "RIBASSISTA" if kind in ("SHOOTING_STAR", "FALSA_ROTTURA_SUPERIORE")
                      else "NEUTRA")
-        near = (support is not None and abs(c-support)/support <= .01
+        index = len(bars)-1 if event_index is None else event_index
+        # The event's causal context is frozen at its own closing candle.
+        # Subsequent bars may resolve the event, never rewrite its context.
+        if index == len(bars)-1:
+            event_trend, event_support, event_resistance = trend, support, resistance
+            event_ema20, event_ema50, event_ratio = ema20, ema50, ratio
+            event_close = c
+        else:
+            prefix = bars[:index+1]
+            prior_close = prefix[-2]["close"]
+            event_move = (prior_close-prefix[-7]["close"])/prefix[-7]["close"]
+            event_trend = ("SALITA" if event_move > .008 else
+                           "DISCESA" if event_move < -.008 else "LATERALE")
+            event_levels = charts.structural_levels(prefix[:-1])
+            event_support = (event_levels.get("supports") or [{}])[0].get("price")
+            event_resistance = (event_levels.get("resistances") or [{}])[0].get("price")
+            event_ema20 = charts.ema_points(prefix, 20)[-1]["value"]
+            event_ema50 = charts.ema_points(prefix, 50)[-1]["value"]
+            event_avg = statistics.mean(x["volume"] for x in prefix[-21:-1])
+            event_ratio = (round(prefix[-1]["volume"]/event_avg, 4)
+                           if event_avg > 0 else None)
+            event_close = prefix[-1]["close"]
+        near = (event_support is not None and
+                abs(event_close-event_support)/event_support <= .01
                 if direction == "RIALZISTA" else
-                resistance is not None and abs(c-resistance)/resistance <= .01
+                event_resistance is not None and
+                abs(event_close-event_resistance)/event_resistance <= .01
                 if direction == "RIBASSISTA" else None)
-        aligned = (trend == "DISCESA" if direction == "RIALZISTA"
-                   else trend == "SALITA" if direction == "RIBASSISTA" else None)
+        aligned = (event_trend == "DISCESA" if direction == "RIALZISTA"
+                   else event_trend == "SALITA" if direction == "RIBASSISTA" else None)
         conflicts = []
         if direction != "NEUTRA" and not near:
             conflicts.append("NESSUN_LIVELLO_STRUTTURALE_VICINO_ENTRO_1_PERCENTO")
         if direction != "NEUTRA" and not aligned:
             conflicts.append("TREND_ANTECEDENTE_NON_COERENTE_CON_IPOTESI_INVERSIONE")
-        if ratio is None:
+        if event_ratio is None:
             conflicts.append("VOLUME_RELATIVO_NON_VALUTABILE")
-        elif ratio < 1:
+        elif event_ratio < 1:
             conflicts.append("VOLUME_INFERIORE_ALLA_MEDIA20")
-        index = len(bars)-1 if event_index is None else event_index
         event = {"figura": kind, "forma_osservata": condition,
                  "stato": "IN_ATTESA_CONFERMA",
                  "evento_chiusura_utc": event_time or closed,
                  "criterio": condition, "invalidazione": invalidation,
-                 "contesto": {"trend_antecedente": trend,
+                 "contesto": {"trend_antecedente": event_trend,
                              "direzione_ipotesi": direction,
                              "presso_livello_strutturale_1pct": near,
-                             "volume_vs_media20": ratio,
-                             "ema20": ema20, "ema50": ema50,
-                             "supporto": support, "resistenza": resistance},
+                             "volume_vs_media20": event_ratio,
+                             "ema20": event_ema20, "ema50": event_ema50,
+                             "supporto": event_support, "resistenza": event_resistance},
                  "conflitti": conflicts,
                  "conferme_mancanti": ["CHIUSURA_SUCCESSIVA_COERENTE"],
                  "fasi_utc": phases or [event_time or closed]}

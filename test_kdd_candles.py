@@ -124,3 +124,58 @@ class CandleEvidenceTests(unittest.TestCase):
         self.assertTrue(k.compare_context(frames)["contraddizione_alto_basso"])
         frames["1D"]={}
         self.assertEqual(k.compare_context(frames)["trend_per_timeframe"]["1D"],"NON_DISPONIBILE")
+    def test_rt42_f3_01_double_test_context_immutable_after_future_bars(self):
+        # 60 contiguous 15m candles. Historical support at index 40,
+        # touches at 54 and 56, closed rebound at 55, later breakout.
+        for b in self.bars:
+            b.update(open=100, high=101, low=99, close=100, volume=100)
+        self.bars[40].update(low=98, close=99)
+        self.bars[54].update(open=99, low=98, close=98.4)
+        self.bars[55].update(open=98.4, low=98.3, high=100, close=99.5)
+        self.bars[56].update(open=99, low=98, close=98.4)
+        self.bars[57].update(open=99, low=98.5, high=99.8, close=99)
+        self.bars[58].update(open=100, low=99, high=102, close=101.5)
+        self.bars[59].update(open=101.5, low=100, high=104, close=103)
+        def run(n):
+            data=self.data()
+            data["candles"]=self.bars[:n]
+            close=dt.datetime.fromtimestamp(
+                data["candles"][-1]["time"]+self.sec,dt.timezone.utc)
+            data["closed_at_utc"]=close.isoformat()
+            data["observed_utc"]=(close+dt.timedelta(seconds=120)).isoformat()
+            return k.recognize(data,now=close+dt.timedelta(seconds=120))
+        before=run(58)
+        after=run(60)
+        def event(result):
+            return next(x for x in result["figure"]
+                        if x["figura"]=="DOPPIO_TEST_LIVELLO"
+                        and len(x["fasi_utc"])==2)
+        a,b=event(before),event(after)
+        for field in ("evento_chiusura_utc","contesto","conflitti",
+                      "forma_osservata","fasi_utc","livello_testato"):
+            self.assertEqual(a[field],b[field],field)
+        self.assertEqual(a["stato"],"IN_ATTESA_CONFERMA")
+        self.assertEqual(b["stato"],"REAZIONE_CHIUSA_OSSERVATA")
+        self.assertEqual(b["risoluzione_utc"],
+                         dt.datetime.fromtimestamp(self.bars[58]["time"]+self.sec,
+                                                   dt.timezone.utc).isoformat(timespec="seconds"))
+
+    def test_rt42_f3_01_historical_hammer_context_immutable(self):
+        b=self.bars[-3]
+        b.update(open=100,high=100.2,low=99,close=100.1)
+        def run(n):
+            data=self.data()
+            data["candles"]=self.bars[:n]
+            close=dt.datetime.fromtimestamp(data["candles"][-1]["time"]+self.sec,
+                                            dt.timezone.utc)
+            data["closed_at_utc"]=close.isoformat()
+            data["observed_utc"]=(close+dt.timedelta(seconds=120)).isoformat()
+            return k.recognize(data,now=close+dt.timedelta(seconds=120))
+        a=next(f for f in run(58)["figure"] if f["figura"]=="HAMMER_PIN_BAR")
+        self.bars[-2].update(open=99,high=99.5,low=98,close=98.5)
+        b=next(f for f in run(60)["figure"] if f["figura"]=="HAMMER_PIN_BAR"
+               and f["evento_chiusura_utc"]==a["evento_chiusura_utc"])
+        for field in ("evento_chiusura_utc","contesto","conflitti",
+                      "forma_osservata","fasi_utc"):
+            self.assertEqual(a[field],b[field],field)
+        self.assertEqual(b["stato"],"INVALIDATA")
