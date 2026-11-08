@@ -46,6 +46,12 @@ class UpdateTests(unittest.TestCase):
                 ' def test_module_present(self):\n'
                 '  self.assertTrue(pathlib.Path("kdd_candles.py").is_file())\n'
             )
+            (directory / 'test_kdd_economics.py').write_text(
+                'import unittest, pathlib\n'
+                'class EconomicStaging(unittest.TestCase):\n'
+                ' def test_module_present(self):\n'
+                '  self.assertTrue(pathlib.Path("kdd_economics.py").is_file())\n'
+            )
             for name in kdd.PACKET_FILES:
                 origin = Path(__file__).resolve().parents[1] / name
                 # This updater fixture contains placeholder application modules;
@@ -193,6 +199,36 @@ class UpdateTests(unittest.TestCase):
                 self.assertEqual(len(backups),1)
                 self.assertEqual((backups[0]/name).read_bytes() if existed else None,old)
 
+    def test_issue43_economic_module_staged_prepost_and_rollback(self):
+        name="kdd_economics.py"
+        self.assertIn(name,kdd.PY_FILES)
+        self.assertIn("test_kdd_economics.py",kdd.PY_FILES)
+        self.assertIn(name,kdd.FILES)
+        (self.live/name).unlink()
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            kdd.apply(self.root,self.live,commit_sha=self.sha,dry_run=True)
+        self.assertIn(name,output.getvalue())
+        self.assertIn("PRECHECK OK",output.getvalue())
+        self.assertFalse((self.live/name).exists())
+        home=Path(self.tmp.name)/"issue43-home"
+        home.mkdir()
+        original=kdd.isolated_test
+        count=0
+        def fail_post(stage):
+            nonlocal count
+            count+=1
+            if count==2:
+                raise kdd.SafetyError("synthetic postflight")
+            return original(stage)
+        with patch.object(kdd.Path,"home",return_value=home), \
+             patch.object(kdd,"isolated_test",side_effect=fail_post), \
+             patch("builtins.input",return_value="APPLICA"), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(kdd.SafetyError,"rollback"):
+                kdd.apply(self.root,self.live,commit_sha=self.sha,dry_run=False)
+        self.assertFalse((self.live/name).exists())
+        self.assertEqual((self.live/"README.md").read_text(),self.old_readme)
+
     def test_rt42_deploy_01_candles_suite_executed_by_runner(self):
         import subprocess
         commands=[]
@@ -203,6 +239,7 @@ class UpdateTests(unittest.TestCase):
              patch.object(kdd,"command",side_effect=capture):
             kdd.isolated_test(self.root)
         self.assertTrue(any("test_kdd_candles" in args for args in commands))
+        self.assertTrue(any("test_kdd_economics" in args for args in commands))
     def test_rt1_f4_book_test_is_deployed_and_executed_in_pre_and_postflight(self):
         import subprocess
         name = "scripts/test_kdd_funding_book_g2.py"

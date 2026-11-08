@@ -114,6 +114,75 @@ class WalletPacketG0Tests(unittest.TestCase):
             "volume_24h_usd":5000, "dominanza_btc_pct":56.7}}
         self.dump()
 
+    def test_issue43_economic_source_packet_bridge_and_aging(self):
+        import kdd_economics as econ
+        import kdd_bridge_g2 as bridge
+        self._analytic_fixture()
+        held = [x["token"] for x in self.portfolio["posizioni"]]
+        catalog = {token+"EUR": {"pair_key": token+"EUR", "pair": token+"/EUR",
+                                 "base": token, "quote": "EUR"}
+                   for token in held if token in econ.PROJECTS}
+        rows = []
+        for i, token in enumerate(held):
+            ident = econ.identify(token, token+"/EUR", token+"EUR", catalog=catalog)
+            rows.append({"indice": i, "token": token, "identita": ident,
+                         "fondamentali": econ.fundamentals(ident,None,T,T),
+                         "evento": econ.release_event(ident,None,T,T)})
+        candidate = self.dossier["candidati"][0]
+        ident = econ.identify("SOL","SOL/USD","SOLUSD",catalog={
+            "SOLUSD":{"pair_key":"SOLUSD","pair":"SOL/USD",
+                      "base":"SOL","quote":"USD"}})
+        economic = {"schema": econ.VERSION, "acquisito_utc": T.isoformat(),
+                    "posizioni": rows,
+                    "candidati": [{"indice":0,"token":"SOL",
+                                  "coppia_analisi":"SOL/USD","identita":ident,
+                                  "fondamentali":econ.fundamentals(ident,None,T,T),
+                                  "evento":econ.release_event(ident,None,T,T)}],
+                    "macro":econ.macro([],T),
+                    "fonti_economiche":econ.sources_matrix(),
+                    "regime":{"stato":"INDETERMINATO","qualita":"INSUFFICIENTE"}}
+        self.dossier["evidenze_economiche"] = economic
+        self.dump()
+        packet = self.pack()
+        self.assertEqual(len(packet["evidenze_multifonte"]["economia"]["posizioni"]),3)
+        self.assertEqual(len(packet["evidenze_multifonte"]["economia"]["candidati"]),1)
+        self.assertEqual(len(packet["evidenze_multifonte"]["economia"]["fonti_economiche"]),10)
+        bundle={"schema":bridge.SCHEMA_BUNDLE,"packet":packet,
+                "packet_sha256":bridge.digest(packet),
+                "preparato_utc":T.isoformat(),
+                "provenienza":"KDD_LOCALE_DICHIARATA_NON_AUTENTICATA",
+                "trasporto":"MANUALE_NON_ESEGUITO"}
+        current=bridge.read_context(bundle,now=T)
+        self.assertEqual(len(current["evidenze_economiche_alla_lettura"]["posizioni"]),3)
+        later=bridge.read_context(bundle,now=T+dt.timedelta(days=3))
+        self.assertEqual(later["evidenze_economiche_alla_lettura"]["regime"]["qualita"],"SCADUTO")
+        packet["evidenze_multifonte"]["economia"]["posizioni"][0]["token"]="ETH"
+        with self.assertRaises(bridge.BridgeError):
+            bridge.read_context(bundle,now=T)
+        # Even if the attacker recomputes the local SHA, attribution must STOP.
+        packet["evidenze_multifonte"]["economia"]["posizioni"][0]["token"]="ADA"
+        packet["evidenze_multifonte"]["economia"]["posizioni"][0]["identita"]["coingecko_id"]="bitcoin"
+        bundle["packet_sha256"]=bridge.digest(packet)
+        with self.assertRaisesRegex(bridge.BridgeError,"economica"):
+            bridge.read_context(bundle,now=T)
+
+    def test_issue43_economic_source_tamper_stops_packet(self):
+        import kdd_economics as econ
+        self._analytic_fixture()
+        rows=[{"indice":i,"token":x["token"],
+               "identita":econ.identify(x["token"],None,None),
+               "fondamentali":econ.fundamentals({},None,T,T),
+               "evento":econ.release_event({},None,T,T)}
+              for i,x in enumerate(self.portfolio["posizioni"])]
+        self.dossier["evidenze_economiche"]={
+            "schema":econ.VERSION,"acquisito_utc":T.isoformat(),
+            "posizioni":rows,"candidati":[],
+            "regime":{"stato":"INDETERMINATO"},
+            "macro":econ.macro([],T)}
+        self.dump()
+        with self.assertRaises(p.PacketError):
+            self.pack()
+
     def test_analytic_handoff_multisource_to_actual_bridge_reader(self):
         self._analytic_fixture()
         pkt=self.pack()

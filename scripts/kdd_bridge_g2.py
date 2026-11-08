@@ -749,12 +749,23 @@ def read_context(bundle, *, now=None, expected_sha256=None):
             saldo["stato"].get("stato") in ("ORIGINE_SCONOSCIUTA", "OROLOGIO_INCOERENTE")):
         bal_status = {"stato": "ORIGINE_SCONOSCIUTA", "eta_minuti": None}
     market_status = wallet.source_status(snap, moment)
+    economic_read = None
+    multifonte = pkt.get("evidenze_multifonte")
+    if isinstance(multifonte, dict) and multifonte.get("economia") is not None:
+        import kdd_economics
+        try:
+            economic_read = kdd_economics.at_read(
+                multifonte["economia"], rows,
+                pkt.get("opportunita_esterne_scanner") or [], moment)
+        except (ValueError, TypeError, KeyError, OverflowError) as exc:
+            raise BridgeError("Evidenza economica non verificabile") from exc
     return {"schema": "kdd_gpt_read_context_v001", "snapshot_id": digest(pkt),
             "snapshot_utc": pkt["rilevazione_kdd_utc"],
             "letto_utc": moment.isoformat(timespec="seconds"),
             "mercato": market_status, "saldo": bal_status,
             "n_posizioni": len(rows), "quattro_tf_aggiornati": complete,
             "copertura": observations,
+            "evidenze_economiche_alla_lettura": economic_read,
             "totale_parziale": bool(section.get("totale_parziale")) or partial,
             "book_150_alla_lettura": stato_book_150_alla_lettura(
                 pkt, moment, mercato_stato=market_status["stato"],
