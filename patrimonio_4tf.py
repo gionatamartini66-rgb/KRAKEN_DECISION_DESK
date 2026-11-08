@@ -12,6 +12,7 @@ import time
 
 import decision_desk as desk
 import grafico_4h as charts
+import kdd_candles
 
 LABELS = (("15m", "15m"), ("1H", "1h"), ("4H", "4h"), ("1D", "1d"))
 QUOTES = ("EUR", "USD", "USDC")
@@ -97,6 +98,7 @@ def analyze_frame(data, now):
                 pivot_giornaliero=calculations["pivots"],
                 livelli_strutturali=calculations["structure"],
                 intervallo_secondi=data["interval_seconds"],
+                figure_candlestick=kdd_candles.recognize(data, now=now),
                 fonte=data["source"], limiti=[
                     "Solo candele chiuse, non quotazione eseguibile",
                     "EMA e livelli descrittivi, nessun ordine o segnale automatico",

@@ -688,6 +688,24 @@ def read_context(bundle, *, now=None, expected_sha256=None):
                             raise BridgeError("Serie 4TF o ultima chiusura incoerente")
                         last = int((moment.timestamp()-120)//seconds)*seconds
                         state = "AGGIORNATO" if closed.timestamp() >= last else "SCADUTO"
+                    if f.get("figure_candlestick") is not None:
+                        import kdd_candles
+                        sequence = f.get("serie_ohlcv_chiuse")
+                        if not isinstance(sequence, list) or len(sequence) < 50:
+                            raise BridgeError("OHLCV figure assenti: "+label)
+                        try:
+                            original = kdd_candles.recognize({
+                                "timeframe": label, "interval_seconds": seconds,
+                                "candles": sequence, "pair": tf.get("coppia"),
+                                "pair_key": tf.get("pair_key"),
+                                "observed_utc": f["rilevazione_utc"],
+                                "closed_at_utc": f["chiusura_utc"],
+                                "source": f.get("fonte"),
+                            }, now=instant(f["rilevazione_utc"]))
+                        except (ValueError, KeyError, TypeError, OverflowError) as exc:
+                            raise BridgeError("Figure OHLCV non verificabili: "+label) from exc
+                        if original != f["figure_candlestick"]:
+                            raise BridgeError("Figure OHLCV alterate: "+label)
                     states[label] = state
         if len(states) != 4:
             states = {k: states.get(k, "NON_DISPONIBILE") for k in FRAMES}

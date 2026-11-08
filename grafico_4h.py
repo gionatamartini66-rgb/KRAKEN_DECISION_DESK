@@ -382,6 +382,14 @@ def page_from_data(x, *, now=None, home_url="/"):
         '"' + (' aria-current="page"' if frame_key == active else "") +
         '>' + html.escape(label) + '</a>'
         for frame_key, (_, label) in TIMEFRAMES.items())
+    import kdd_candles
+    try:
+        candle_patterns = kdd_candles.recognize(x, now=now)
+        names = ", ".join(item["figura"] + " (" + item["stato"] + ")"
+                          for item in candle_patterns.get("figure", []))
+        patterns_text = (names or "Nessuna figura attestata nelle ultime candele")
+    except (ValueError, TypeError, KeyError, OverflowError):
+        patterns_text = "Figure non verificabili: serie o tempi insufficienti"
     candle_json = json.dumps(x["candles"], separators=(",",":"), allow_nan=False)
     technical = technical_from_candles(x["candles"], interval_seconds=interval)
     technical_json = json.dumps(technical, separators=(",",":"), allow_nan=False)
@@ -587,7 +595,10 @@ sono una descrizione geometrica; nessun segnale BUY/SELL.
 Prezzi OHLC originali rappresentabili senza collisioni; EMA e livelli
 conservano il valore numerico di calcolo, ma possono sovrapporsi alla
 risoluzione massima della scala (12 decimali).
-I timeframe 15m, 1H, 4H e 1D sono disponibili nel selettore. Il riconoscimento dei pattern candlestick (KDD-11) non è ancora implementato.</p>
+I timeframe 15m, 1H, 4H e 1D sono disponibili nel selettore.</p>
+<p class="muted"><b>Figure candlestick KDD-11:</b> __PATTERNS__.
+Sono osservazioni deterministiche su candele chiuse, non segnali operativi;
+la conferma richiede eventi successivi non presunti.</p>
 </section>
 <footer><a href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer">
 __NOTICE__</a> · Libreria gratuita Lightweight Charts 5.2.1, servita localmente.
@@ -986,4 +997,5 @@ try {
             .replace("__PRECISION__", str(decimal_places))
             .replace("__MIN_MOVE__", f"{min_move:.{decimal_places}f}")
             .replace("__DECIMALS__", str(decimal_places))
+            .replace("__PATTERNS__", html.escape(patterns_text, quote=True))
             .replace("__SOURCE__", html.escape(x.get("source", "Dossier Kraken KDD"))))

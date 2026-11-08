@@ -541,7 +541,7 @@ class DeskTests(unittest.TestCase):
         self.assertIn("HistogramSeries",page)
         self.assertIn('"time":1800000000',page)
         self.assertIn("nessun ordine",page)
-        self.assertIn("pattern candlestick (KDD-11) non è ancora implementato",page)
+        self.assertIn("Figure candlestick KDD-11",page)
         self.assertNotIn("readonly.json",page)
         self.assertIn("TradingView",page)
 
