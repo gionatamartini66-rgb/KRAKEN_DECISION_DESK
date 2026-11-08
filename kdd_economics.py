@@ -21,6 +21,52 @@ PROJECTS = {
     "ICNT": ("impossible-cloud-network-token", "Impossible Cloud Network", None),
 }
 CG = "https://api.coingecko.com/api/v3/coins/"
+
+# Capabilities, not observed flows or claims of institutional buying.
+# Entries labelled CONSULTABILE are references for GPT research only.
+_SOURCE_MATRIX = (
+    ("coingecko", "CoinGecko /coins", "AGGREGATORE",
+     "INTEGRATO", "https://api.coingecko.com/api/v3/coins/",
+     "Supply, market cap e FDV per ID attribuito", "Non certifica chain, unlock, domanda o identita del conto"),
+    ("release_primarie", "Release repository di progetto", "FONTE_PRIMARIA",
+     "INTEGRATO", "https://github.com/",
+     "Release software dei soli progetti registrati", "Non prova adozione o movimento del prezzo"),
+    ("feed_ufficiali", "Federal Reserve / BCE / Consiglio UE", "FONTE_PRIMARIA",
+     "INTEGRATO", "https://www.federalreserve.gov/",
+     "Titoli ufficiali RSS gia acquisiti da KDD", "Nessun impatto crypto o sorpresa vs consenso dedotto"),
+    ("coinglass_web", "CoinGlass ETF e derivati", "AGGREGATORE",
+     "CONSULTABILE_DA_GPT_NON_ACQUISITO", "https://www.coinglass.com/it/etf/bitcoin",
+     "Flussi ETF, OI, funding e liquidazioni consultabili", "OI non equivale a capitale istituzionale spot"),
+    ("coinglass_api", "CoinGlass API premium", "AGGREGATORE",
+     "INDISPONIBILE", "https://www.coinglass.com/it/pricing",
+     "Integrazione automatica CoinGlass", "Nessun piano a pagamento o chiave autorizzati"),
+    ("farside", "Farside Bitcoin ETF Flow", "AGGREGATORE",
+     "CONSULTABILE_DA_GPT_NON_ACQUISITO", "https://farside.co.uk/bitcoin-etf-flow-all-data/",
+     "Flussi netti giornalieri degli ETF spot BTC", "Non distingue investitori istituzionali e retail"),
+    ("cftc_cme", "CFTC Commitments of Traders / CME", "FONTE_PRIMARIA",
+     "CONSULTABILE_DA_GPT_NON_ACQUISITO", "https://www.cftc.gov/MarketReports/CommitmentsofTraders/index.htm",
+     "Posizionamento settimanale futures regolamentati", "Dati ritardati, non il complesso del mercato crypto"),
+    ("sec_13f", "SEC Form 13F", "FONTE_PRIMARIA",
+     "CONSULTABILE_DA_GPT_NON_ACQUISITO", "https://www.sec.gov/rules-regulations/staff-guidance/division-investment-management-frequently-asked-questions/frequently-asked-questions-about-form-13f",
+     "Partecipazioni dichiarate da soggetti obbligati", "Disclosure trimestrale ritardata, non flusso in tempo reale"),
+    ("defillama", "DefiLlama Stablecoins", "AGGREGATORE_ONCHAIN",
+     "CONSULTABILE_DA_GPT_NON_ACQUISITO", "https://defillama.com/stablecoins/chains",
+     "Supply stablecoin per chain e variazioni", "L'aumento di supply non prova acquisti crypto istituzionali"),
+    ("cryptopanic", "CryptoPanic", "INDICE_NOTIZIE",
+     "CONSULTABILE_DA_GPT_NON_ACQUISITO", "https://cryptopanic.com/developers/api/",
+     "Scoperta opzionale di notizie", "Non misura capitali; verificare la fonte primaria; API con autenticazione"),
+)
+
+
+def sources_matrix():
+    return [{"id": key, "fonte": source, "tipo": kind, "stato": status,
+             "url": url, "copertura": coverage, "limite": caveat}
+            for key, source, kind, status, url, coverage, caveat in _SOURCE_MATRIX]
+
+
+def canonical_token(token):
+    return "BTC" if token in ("XBT", "XXBT") else token
+
 KNOWN_MACRO = {
     "Fed — politica monetaria": "www.federalreserve.gov",
     "BCE — comunicati e discorsi": "www.ecb.europa.eu",
@@ -53,24 +99,39 @@ def numeric(value):
     return value if math.isfinite(value) and value >= 0 else None
 
 
-def identify(token, pair, pair_key, *, catalog_verified=False):
+def identify(token, pair, pair_key, *, catalog=None):
+    """Attribute an asset only through the exact ONLINE Kraken AssetPairs mapping.
+
+    The caller must supply serve.spot_catalog() of the actual public response.
+    A plausible string or a boolean assertion cannot establish an identity.
+    """
     base = {"stato": "NON_VERIFICATO", "token": token,
             "coppia": pair, "pair_key": pair_key,
             "limite": "Nessuna attribuzione CoinGecko dal solo ticker"}
-    if not catalog_verified or not isinstance(token, str) or token not in PROJECTS:
+    project_token = canonical_token(token)
+    if not isinstance(token, str) or project_token not in PROJECTS:
         return base
-    expected_base = "XBT" if token == "BTC" else token
-    if not isinstance(pair, str) or pair.split("/")[:1] not in ([token], [expected_base]) or (
-            pair.count("/") != 1 or pair.split("/")[1] not in ("EUR", "USD", "USDC")):
+    if not isinstance(catalog, dict) or not isinstance(pair_key, str):
         return base
-    if not isinstance(pair_key, str) or not pair_key or len(pair_key) > 32:
+    observed = catalog.get(pair_key)
+    if not isinstance(observed, dict):
         return base
-    cg, name, repository = PROJECTS[token]
+    valid_bases = ("BTC", "XBT") if project_token == "BTC" else (project_token,)
+    if (not isinstance(pair, str) or pair.count("/") != 1
+            or pair.split("/")[0] not in valid_bases
+            or pair.split("/")[1] not in ("EUR", "USD", "USDC")
+            or observed.get("pair_key") != pair_key
+            or observed.get("pair") != pair
+            or observed.get("base") != pair.split("/")[0]
+            or observed.get("quote") != pair.split("/")[1]):
+        return base
+    cg, name, repository = PROJECTS[project_token]
     return dict(base, stato="IDENTITA_VERIFICATA_DA_CATALOGO",
+                token_progetto=project_token,
+                asset_base_kraken=observed["base"],
                 progetto=name, coingecko_id=cg, repository_primario=repository,
-                fonte_identita="Kraken AssetPairs + registro progetto curato",
-                limite="Corrispondenza curata: migrazioni e contratti da rivalidare")
-
+                fonte_identita="Kraken pubblico /0/public/AssetPairs (online) + registro progetto curato",
+                limite="Corrispondenza curata: chain/contract e negoziabilita conto non attestati")
 
 def fundamentals(identity, payload, now, acquired):
     out = {"stato": "NON_VERIFICATO", "fonte": None, "rilevato_utc": None,
@@ -83,7 +144,7 @@ def fundamentals(identity, payload, now, acquired):
     if identity.get("stato") != "IDENTITA_VERIFICATA_DA_CATALOGO" or not isinstance(payload, dict):
         return out
     cg = identity["coingecko_id"]
-    if (payload.get("id") != cg or payload.get("symbol", "").upper() != identity["token"]
+    if (payload.get("id") != cg or payload.get("symbol", "").upper() != canonical_token(identity["token"])
             or payload.get("name") != identity["progetto"]):
         return out
     m = payload.get("market_data")
@@ -251,8 +312,12 @@ def at_read(source, positions, shortlist, now):
         raise ValueError("Copertura economica")
     if len(original_positions) != len(positions) or len(original_candidates) != len(shortlist):
         raise ValueError("Cardinalita economica")
+    matrix = source.get("fonti_economiche")
+    if matrix is not None and matrix != sources_matrix():
+        raise ValueError("Matrice fonti economiche alterata")
     result = {"schema": VERSION, "acquisito_utc": source["acquisito_utc"],
               "letto_utc": now.isoformat(timespec="seconds"),
+              "fonti_economiche": matrix if matrix is not None else [],
               "posizioni": [], "candidati": []}
     for name, source_rows, expected in (
             ("posizioni", original_positions, positions),
@@ -266,10 +331,22 @@ def at_read(source, positions, shortlist, now):
             if not isinstance(identity, dict) or identity.get("token") != row["token"]:
                 raise ValueError("Identita economica non valida")
             if identity.get("stato") == "IDENTITA_VERIFICATA_DA_CATALOGO":
-                if (row["token"] not in PROJECTS or
-                        identity.get("coingecko_id") != PROJECTS[row["token"]][0] or
-                        identity.get("progetto") != PROJECTS[row["token"]][1] or
-                        not identity.get("pair_key")):
+                project_token = canonical_token(row["token"])
+                if (project_token not in PROJECTS or
+                        identity.get("token_progetto", project_token) != project_token or
+                        identity.get("coingecko_id") != PROJECTS[project_token][0] or
+                        identity.get("progetto") != PROJECTS[project_token][1] or
+                        not identity.get("pair_key") or
+                        not isinstance(identity.get("coppia"), str) or
+                        identity["coppia"].count("/") != 1 or
+                        identity["coppia"].split("/")[0] not in (
+                            ("BTC", "XBT") if project_token == "BTC" else (project_token,)) or
+                        identity["coppia"].split("/")[1] not in ("EUR", "USD", "USDC") or
+                        identity.get("asset_base_kraken",
+                                     identity["coppia"].split("/")[0])
+                        != identity["coppia"].split("/")[0] or
+                        (name == "candidati" and
+                         identity["coppia"] != target.get("coppia_analisi"))):
                     raise ValueError("Identita CoinGecko non attribuibile")
             row_copy = dict(row)
             for field in ("fondamentali", "evento"):
@@ -296,6 +373,14 @@ def at_read(source, positions, shortlist, now):
             row_copy["lettura_economica"] = decision_context(
                 identity, row_copy["fondamentali"], row_copy["evento"])
             result[name].append(row_copy)
+    result["copertura_fondamentali"] = {
+        "posizioni_totali": len(result["posizioni"]),
+        "posizioni_verificate_alla_lettura": sum(
+            r["fondamentali"].get("stato") == "VERIFICATO" for r in result["posizioni"]),
+        "candidati_totali": len(result["candidati"]),
+        "candidati_verificati_alla_lettura": sum(
+            r["fondamentali"].get("stato") == "VERIFICATO" for r in result["candidati"]),
+        "limite": "La rotazione e la cache locale hanno orari propri; nessuna assenza equivale a zero."}
     regime_data = source.get("regime")
     if not isinstance(regime_data, dict):
         raise ValueError("Regime economico mancante")

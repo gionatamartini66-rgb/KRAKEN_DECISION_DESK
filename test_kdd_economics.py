@@ -8,8 +8,16 @@ T=dt.datetime(2026,11,8,13,30,tzinfo=dt.timezone.utc)
 
 
 class EconomicEvidenceTests(unittest.TestCase):
+    def catalog(self, token="BTC", pair=None, key=None):
+        pair = pair or token+"/EUR"
+        key = key or token+"EUR"
+        base, quote = pair.split("/")
+        return {key: {"pair_key": key, "pair": pair,
+                      "base": base, "quote": quote}}
+
     def ident(self, token="BTC"):
-        return e.identify(token,token+"/EUR",token+"EUR",catalog_verified=True)
+        return e.identify(token,token+"/EUR",token+"EUR",
+                          catalog=self.catalog(token))
 
     def market(self, ident=None, max_supply=21000000):
         ident=ident or self.ident()
@@ -23,12 +31,15 @@ class EconomicEvidenceTests(unittest.TestCase):
     def test_identity_requires_verified_catalog_pair_and_curated_mapping(self):
         self.assertEqual(self.ident()["stato"],"IDENTITA_VERIFICATA_DA_CATALOGO")
         self.assertEqual(e.identify("BTC","XBT/EUR","XXBTZEUR",
-                                    catalog_verified=True)["coingecko_id"],"bitcoin")
+                                    catalog=self.catalog("BTC","XBT/EUR","XXBTZEUR"))["coingecko_id"],"bitcoin")
         for ident in (
-            e.identify("BTC","BTC/EUR","BTCEUR",catalog_verified=False),
-            e.identify("BTC","ETH/EUR","BTCEUR",catalog_verified=True),
-            e.identify("BTC","BTC/EUR",None,catalog_verified=True),
-            e.identify("FAKE","FAKE/EUR","FAKEEUR",catalog_verified=True),
+            e.identify("BTC","BTC/EUR","BTCEUR",catalog={}),
+            e.identify("BTC","ETH/EUR","BTCEUR",catalog=self.catalog("BTC")),
+            e.identify("BTC","BTC/EUR",None,catalog=self.catalog("BTC")),
+            e.identify("FAKE","FAKE/EUR","FAKEEUR",catalog=self.catalog("FAKE")),
+            e.identify("BTC","BTC/EUR","NONEXISTENT-KRAKEN-PAIR",catalog=self.catalog("BTC")),
+            e.identify("ADA","ADA/EUR","ANOTHER_PROJECT",catalog=self.catalog("ADA")),
+            e.identify("BTC","BTC/EUR","BTCEUR",catalog=self.catalog("ETH")),
         ):
             self.assertEqual(ident["stato"],"NON_VERIFICATO")
             self.assertNotIn("coingecko_id",ident)
@@ -151,15 +162,99 @@ class EconomicEvidenceTests(unittest.TestCase):
             if token is None:
                 raise ValueError("unknown project")
             return json.dumps(self.market(self.ident(token))).encode()
+        asset_pairs={t+"EUR": {"wsname":t+"/EUR","status":"online"}
+                     for t in tokens}
         with mock.patch.object(producer.desk,"request",side_effect=fake), \
              mock.patch.object(producer.time,"sleep"):
-            result=producer.economic_evidence({"feed":[]},portfolio,four,candidate,T)
+            result=producer.economic_evidence(
+                {"feed":[]}, portfolio, four, candidate, T, asset_pairs=asset_pairs)
         self.assertEqual(len(result["posizioni"]),10)
         self.assertEqual(len(result["candidati"]),1)
         self.assertEqual(result["candidati"][0]["fondamentali"]["stato"],"VERIFICATO")
         self.assertEqual(result["posizioni"][0]["fondamentali"]["stato"],"VERIFICATO")
         self.assertEqual(result["posizioni"][9]["identita"]["stato"],"NON_VERIFICATO")
         self.assertLessEqual(result["richieste_effettuate"],9)
+
+
+    def test_budget_rotation_cache_and_source_states_across_two_acquisitions(self):
+        import json
+        import dossier_trade as producer
+        from unittest import mock
+        tokens=["BTC","SOL","ETH","NEAR","SUI","XRP","ONDO","ADA","KAS","ICNT"]
+        portfolio={"posizioni":[{"token":t} for t in tokens]}
+        pairs={t+"EUR":{"status":"online","wsname":t+"/EUR"} for t in tokens}
+        four={"posizioni":[{"token":t,"coppia":t+"/EUR",
+                             "pair_key":t+"EUR","asset_base":t}
+                            for t in tokens]}
+        candidate=[{"token":"ADA","coppia_analisi":"ADA/EUR",
+                    "kraken_pair_key":"ADAEUR"}]
+
+        def response(url, timeout=12):
+            if "/releases/latest" in url:
+                repo=url.split("/repos/")[1].split("/releases/")[0]
+                return json.dumps({"html_url":"https://github.com/"+repo+"/releases/tag/v1",
+                                   "name":"Release v1","published_at":T.isoformat()}).encode()
+            cg=url.split("/coins/")[1].split("?")[0]
+            tok=next(t for t,v in e.PROJECTS.items() if v[0]==cg)
+            return json.dumps(self.market(self.ident(tok))).encode()
+
+        with mock.patch.object(producer.desk,"request",side_effect=response), \
+             mock.patch.object(producer.time,"sleep"):
+            first=producer.economic_evidence({"feed":[]},portfolio,four,candidate,T,
+                                             asset_pairs=pairs)
+            second=producer.economic_evidence(
+                {"feed":[]},portfolio,four,candidate,T+dt.timedelta(minutes=1),
+                asset_pairs=pairs,previous=first)
+        self.assertEqual(len(first["posizioni"]),10)
+        self.assertEqual(len(second["posizioni"]),10)
+        self.assertEqual(sum(r["fondamentali"]["stato"]=="VERIFICATO"
+                             for r in first["posizioni"]),6)
+        self.assertEqual(sum(r["fondamentali"]["stato"]=="NON_ACQUISITO_PER_BUDGET"
+                             for r in first["posizioni"]),4)
+        self.assertEqual(sum(r["fondamentali"]["stato"]=="VERIFICATO"
+                             for r in second["posizioni"]),10)
+        self.assertEqual(sum(r["fondamentali"].get("origine")=="CACHE_LOCALE_FONTE_PUBBLICA"
+                             for r in second["posizioni"]),4)
+        self.assertLessEqual(first["richieste_effettuate"],9)
+        self.assertLessEqual(second["richieste_effettuate"],9)
+        self.assertEqual(first["richieste_coingecko"],6)
+        self.assertEqual(second["richieste_coingecko"],6)
+        self.assertEqual(second["candidati"][0]["fondamentali"]["stato"],"VERIFICATO")
+
+    def test_producer_forged_candidate_pair_does_not_attribute_project(self):
+        import dossier_trade as producer
+        from unittest import mock
+        pairs={"XXBTZEUR":{"wsname":"XBT/EUR","status":"online"},
+               "ADAEUR":{"wsname":"ADA/EUR","status":"online"}}
+        four={"posizioni":[{"token":"BTC","coppia":"XBT/EUR",
+                            "pair_key":"XXBTZEUR","asset_base":"XBT"}]}
+        wallet={"posizioni":[{"token":"BTC"}]}
+        candidates=[{"token":"ADA","coppia_analisi":"ADA/EUR",
+                     "kraken_pair_key":"ANOTHER_PROJECT"},
+                    {"token":"BTC","coppia_analisi":"XBT/EUR",
+                     "kraken_pair_key":"ADAEUR"}]
+        with mock.patch.object(producer.desk,"request",side_effect=AssertionError(
+                    "Nessun CoinGecko per candidati non identificati")), \
+             mock.patch.object(producer.time,"sleep"):
+            # Owned BTC may validly query; remove it to test only forged candidates.
+            result=producer.economic_evidence({"feed":[]},{"posizioni":[]},
+                      {"posizioni":[]},candidates,T,asset_pairs=pairs)
+        self.assertEqual([r["identita"]["stato"] for r in result["candidati"]],
+                         ["NON_VERIFICATO","NON_VERIFICATO"])
+        self.assertTrue(all(r["fondamentali"]["stato"]=="NON_VERIFICATO_IDENTITA"
+                            for r in result["candidati"]))
+
+    def test_source_matrix_is_non_acquisition_and_tamper_is_rejected(self):
+        source,positions,shortlist=self.sample()
+        source["fonti_economiche"]=e.sources_matrix()
+        read=e.at_read(source,positions,shortlist,T)
+        self.assertIn("cftc_cme",[r["id"] for r in read["fonti_economiche"]])
+        self.assertEqual(next(r["stato"] for r in read["fonti_economiche"]
+                              if r["id"]=="farside"),
+                         "CONSULTABILE_DA_GPT_NON_ACQUISITO")
+        source["fonti_economiche"][0]["stato"]="INTEGRATO_MISURA_DI_AFFLUSSO"
+        with self.assertRaises(ValueError):
+            e.at_read(source,positions,shortlist,T)
 
     def test_missing_legacy_economics_does_not_create_facts(self):
         source,positions,shortlist=self.sample()
