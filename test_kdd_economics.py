@@ -484,7 +484,7 @@ class AdaptivePortfolioTests(unittest.TestCase):
                                 "fully_diluted_valuation": {"usd": 200},
                                 "circulating_supply": 10, "total_supply": 20,
                                 "max_supply": 100}}).encode()
-        with mock.patch.object(dossier_trade.desk, "request", side_effect=response), \\
+        with mock.patch.object(dossier_trade.desk, "request", side_effect=response), \
              mock.patch.object(dossier_trade.time, "sleep"):
             first = dossier_trade.economic_evidence({"feed": []}, wallet, four,
                         [{"token": "ZEC", "coppia_analisi": "ZEC/EUR",
