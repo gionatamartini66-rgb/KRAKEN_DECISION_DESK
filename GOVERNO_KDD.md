@@ -10,6 +10,16 @@ KDD è **personale, privato, non commerciale e non destinato alla commercializza
 
 **Rigore non significa lentezza, ma nemmeno corsa:** eseguire tutti i passi **necessari e utili**, senza saltare verifiche significative e senza replicare attività che non aggiungono prova. Dopo le riparazioni circoscritte, il gate sostanziale è il funzionamento reale della catena **Samsung/Termux ↔ FolderSync ↔ Google Drive privato ↔ ChatGPT/autore ↔ KDD**, senza gesto manuale di sincronizzazione nel ciclo avviato in chat, seguito da analisi, proposta, scelta esplicita, archivio e riesame. La CI e i filesystem simulati non provano l'automazione FolderSync su Android né la bontà di una decisione. Nessun ordine automatico e nessuna riduzione delle autorizzazioni separate per merge, deploy o uso di dati privati.
 
+## 0-bis. Gate di collaudo integrale prima di decisioni operative — decisione vincolante dell'autore, 09/11/2026
+
+**Fino a quando il KDD non sarà pronto, funzionante e verificato in tutti i suoi 29 punti canonici, ogni proposta, scenario o indicazione prodotta dal KDD o discussa con GPT nell'ambito del progetto ha esclusivamente valore di PROVA DI FUNZIONALITÀ.** Una simulazione credibile, un dossier idoneo, una PR con CI verde, una proposta convincente o una prova in chat non equivalgono al completamento del sistema.
+
+**La conversione di criptovalute in liquidità operativa (inclusi EUR, USDC o altre disponibilità) sarà valutata per l'eventuale avallo finanziario soltanto dopo tale completamento e la verifica di tutti i punti.** Fino ad allora non proporre alcuna conversione come azione operativa da compiere, non sollecitare un ordine e non interpretare i GO tecnici per ricerca, sviluppo, merge, deploy, refresh, pubblicazione di test o verifica come autorizzazione a movimentare fondi.
+
+Nelle prove possono comparire quantità, coppie, tempi, costi, alternative, confronti e ipotesi di vendita/acquisto: sono **simulazioni esplicitamente etichettate, non raccomandazioni operative approvate**. Anche una eventuale proposta di prova registrata nel KDD non costituisce un trade né una deliberazione patrimoniale. Il registro deve distinguere espressamente collaudo, proposta, avallo futuro ed eventuale esecuzione manuale dichiarata dall'autore.
+
+Il raggiungimento dei requisiti tecnici dovrà essere dimostrato in modo pertinente; la chiusura di una casella senza funzionamento provato non soddisfa il gate. Una volta dimostrata la completezza, la valutazione finanziaria e l'eventuale avallo dell'autore resteranno **un passaggio nuovo, espresso e separato**. Questa disposizione integra e prevale, per la fase corrente, su precedenti formulazioni che anticipavano la creazione effettiva di liquidità.
+
 ## 1. Destinazione economica
 
 Kraken Decision Desk è **un unico sistema di supporto alla gestione attiva dell'intero patrimonio crypto**.
