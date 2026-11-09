@@ -56,6 +56,42 @@ def apply(snapshot, path=None):
                           "disponibile_spot": str(available)})
     if not positions and not liquidity:
         raise ValueError("Nessun asset valido: non sostituisco il portafoglio")
+    # Every successful BalanceEx snapshot can show a zero explicitly or omit
+    # an asset entirely. Neither is a failed acquisition; errors above do not
+    # write anything. Preserve earlier observations without rewriting T0.
+    previous_active = set(earlier)
+    current_active = {x["token"] for x in positions}
+    historic = set(original.get("token_visti_in_precedenza", []))
+    historic |= previous_active
+    zeros = sorted(token for token, parts in all_balances.items()
+                   if token not in ("EUR", "USD", "USDC", "EURC")
+                   and any(x["segment"] == "spot" and Decimal(x["saldo"]) == 0
+                           for x in parts))
+    entering = sorted(current_active - previous_active)
+    events = list(original.get("storico_transizioni_posizioni", []))
+    if not all(isinstance(x, dict) for x in events):
+        raise ValueError("Storico delle transizioni non verificabile")
+    for token in entering:
+        events.append({"acquisito_utc": acquired, "token": token,
+                       "evento": "RIENTRO" if token in historic else "INGRESSO"})
+    for token in sorted(previous_active - current_active):
+        events.append({"acquisito_utc": acquired, "token": token,
+                       "evento": "USCITA",
+                       "evidenza": ("ZERO_ESPLICITO_BALANCEEX" if token in zeros
+                                    else "ASSENTE_DALLA_FOTOGRAFIA_BALANCEEX")})
+    original["token_visti_in_precedenza"] = sorted(historic | current_active)
+    original["storico_transizioni_posizioni"] = events
+    original["riconciliazione_posizioni"] = {
+        "acquisito_utc": acquired, "stato": "ACQUISIZIONE_COMPLETA",
+        "attive": sorted(current_active),
+        "zero_esplicito": zeros,
+        "assenti_rispetto_alla_precedente": sorted(
+            token for token in previous_active-current_active if token not in zeros),
+        "entrate": sorted(token for token in entering if token not in historic),
+        "rientrate": sorted(token for token in entering if token in historic),
+        "uscite": sorted(previous_active-current_active),
+        "limite": "Assenza dalla nuova lettura non equivale a saldo zero. Errori di lettura non aggiornano il wallet."
+    }
     # Copy the T0 ID and digest unchanged; the T0 file itself is never opened for writing.
     original["posizioni"] = sorted(positions, key=lambda x: x["token"])
     original["fonte_quantita"] = "Kraken BalanceEx API privata SOLA LETTURA, " + acquired
