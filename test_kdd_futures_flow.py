@@ -20,11 +20,11 @@ class FuturesFlowTests(unittest.TestCase):
             "result": "success", "serverTime": "2026-11-09T17:24:35Z",
             "history": [
                 {"time": "2026-11-09T17:24:30Z", "price": 74900, "size": "0.2",
-                 "side": "buy", "type": "liquidation"},
+                 "side": "buy", "type": "liquidation", "trade_id": 101, "uid": "exec-101"},
                 {"time": "2026-11-09T17:24:20Z", "price": 74910, "size": "0.1",
-                 "side": "sell", "type": "fill"},
+                 "side": "sell", "type": "fill", "trade_id": 102, "uid": "exec-102"},
                 {"time": "2026-11-09T17:23:20Z", "price": 74920, "size": "0.8",
-                 "side": "buy", "type": "block"}]}
+                 "side": "buy", "type": "block", "trade_id": 103, "uid": "exec-103"}]}
 
     def fake_request(self, url, timeout=13):
         self.assertTrue(url.startswith(flow.BASE))
