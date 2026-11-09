@@ -255,7 +255,7 @@ def capability_preflight() -> None:
 def isolated_test(staging: Path) -> None:
     capability_preflight()
     # Non serve rete. I test usano fixture sintetiche e file privati SOLO locali.
-    proc = command([sys.executable, '-m', 'unittest', '-q', 'test_decision_desk', 'test_kdd_candles', 'test_kdd_economics'],
+    proc = command([sys.executable, '-m', 'unittest', '-q', 'test_decision_desk', 'test_kdd_candles', 'test_kdd_economics', 'test_kdd_futures_flow'],
                    cwd=staging, timeout=150)
     if proc.stdout.strip():
         print(proc.stdout[-1700:])
