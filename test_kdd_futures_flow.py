@@ -83,15 +83,25 @@ class FuturesFlowTests(unittest.TestCase):
         return flow.collect(self.now, request=self.fake_request)
 
     def test_stale_trades_and_malformed_types_are_not_attributed(self):
-        stale = self._fresh()
-        self.history["history"][0]["time"] = "2026-11-09T16:00:00Z"
+        self._fresh()
+        for i, row in enumerate(self.history["history"]):
+            row["time"] = "2026-11-09T16:00:00Z"
         bad = flow.collect(self.now, request=self.fake_request)
-        self.assertEqual(bad["esecuzioni"]["stato"], "NON_VERIFICATO")
+        self.assertEqual(bad["esecuzioni"]["stato"], "SCADUTO")
         self.assertEqual(bad["funding"]["stato"], "OSSERVATO")
         self.history["history"][0]["time"] = "2026-11-09T17:24:30Z"
         self.history["history"][0]["type"] = "unrecognized"
         bad = flow.collect(self.now, request=self.fake_request)
         self.assertEqual(bad["esecuzioni"]["stato"], "NON_VERIFICATO")
+
+    def test_live_ordering_variance_is_sorted_without_dropping_trades(self):
+        # Actual Kraken /history can be out of timestamp order.
+        self.history["history"] = list(reversed(self.history["history"]))
+        observed = flow.collect(self.now, request=self.fake_request)
+        self.assertEqual(observed["esecuzioni"]["stato"], "CAMPIONE_RECENTE")
+        self.assertEqual(observed["esecuzioni"]["n_esecuzioni"], 3)
+        self.assertEqual(observed["esecuzioni"]["n_liquidazioni_nel_campione"], 1)
+        self.assertEqual(observed["esecuzioni"]["primo_trade_utc"], "2026-11-09T17:23:20+00:00")
 
     def test_funding_nonfinite_and_trade_size_zero_fail_closed(self):
         self.ticker["tickers"][0]["fundingRate"] = "NaN"
