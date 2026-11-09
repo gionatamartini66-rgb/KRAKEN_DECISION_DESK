@@ -197,6 +197,8 @@ def resolve_public(token, pair, search_result, market_results, now):
              and isinstance(c.get("id"), str)
              and re.fullmatch(r"[a-z0-9-]{2,120}", c["id"])
              and isinstance(c.get("name"), str) and c["name"]]
+    if len(search_result["coins"]) >= 100:
+        return dict(blank, motivo="RISULTATI_RICERCA_PAGINATI_NON_ESAUSTIVI")
     if not exact:
         return blank
     if len(exact) > 3 or len({c["id"] for c in exact}) != len(exact):
@@ -209,8 +211,11 @@ def resolve_public(token, pair, search_result, market_results, now):
     matches = []
     for coin in exact:
         response = market_results[coin["id"]]
-        if not isinstance(response, dict) or not isinstance(response.get("tickers"), list):
+        if (not isinstance(response, dict) or not isinstance(response.get("tickers"), list)
+                or (response.get("name") is not None and response.get("name") != coin["name"])):
             return dict(blank, motivo="RISPOSTA_MARKET_NON_VALIDA")
+        if len(response["tickers"]) >= 100:
+            return dict(blank, motivo="MERCATI_PAGINATI_NON_ESAUSTIVI")
         if any(isinstance(t, dict)
                and isinstance(t.get("market"), dict)
                and t["market"].get("identifier") == "kraken"
@@ -452,6 +457,11 @@ def at_read(source, positions, shortlist, now):
                         or (name == "candidati" and pair != target.get("coppia_analisi"))):
                     raise ValueError("Identita CoinGecko non attribuibile")
             row_copy = dict(row)
+            if identity.get("metodo") == "KRAKEN_COINGECKO_MARKET":
+                verified = stamp(identity["prova_mercato"].get("verificato_utc"))
+                if not verified or now-verified > dt.timedelta(days=7):
+                    row_copy["identita"] = dict(identity, stato="NON_VERIFICATO",
+                                               motivo="ATTESTAZIONE_IDENTITA_SCADUTA")
             for field in ("fondamentali", "evento"):
                 evidence = row.get(field)
                 if not isinstance(evidence, dict):
@@ -474,7 +484,7 @@ def at_read(source, positions, shortlist, now):
                         "VERIFICATO" if evidence["stato"] == "VERIFICATO" and now-t <= max_age
                         else "SCADUTO"))
             row_copy["lettura_economica"] = decision_context(
-                identity, row_copy["fondamentali"], row_copy["evento"])
+                row_copy["identita"], row_copy["fondamentali"], row_copy["evento"])
             result[name].append(row_copy)
     result["copertura_fondamentali"] = {
         "posizioni_totali": len(result["posizioni"]),
