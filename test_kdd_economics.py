@@ -615,6 +615,206 @@ class AdaptivePortfolioTests(unittest.TestCase):
         self.assertEqual(result["economia"]["posizioni"][0]["fondamentali"]
                          ["stato"], "VERIFICATO")
 
+    def test_doge_xdg_kraken_aliases_and_coin_gecko_flags_fail_closed(self):
+        """Exercise actual identity functions; REST key XDGEUR is public-market attested."""
+        import kraken_readonly
+        import patrimonio_4tf
+        import serve
+
+        self.assertNotIn("DOGE", e.PROJECTS)
+        for alias in ("DOGE", "XDG", "XXDG"):
+            with self.subTest(alias=alias):
+                self.assertEqual(kraken_readonly.normalize(alias)[0], "DOGE")
+                self.assertEqual(patrimonio_4tf.canonical_base(alias), "DOGE")
+                self.assertEqual(e.canonical_token(alias), "DOGE")
+        for alias in ("BTC", "XBT", "XXBT"):
+            with self.subTest(alias=alias):
+                self.assertEqual(e.canonical_token(alias), "BTC")
+                self.assertEqual(patrimonio_4tf.canonical_base(alias), "BTC")
+
+        # Shape of Kraken AssetPairs; uses the independently documented
+        # XDGEUR REST market rather than an invented DOGEEUR key.
+        pairs = {"XDGEUR": {"wsname": "XDG/EUR", "altname": "XDGEUR",
+                             "status": "online"}}
+        catalog = serve.spot_catalog(lambda endpoint: pairs)
+        self.assertEqual(catalog["XDGEUR"]["base"], "XDG")
+        search = {"coins": [
+            {"id": "dogecoin", "symbol": "doge", "name": "Dogecoin"},
+            {"id": "wrapped-dogecoin-fixture", "symbol": "doge",
+             "name": "Wrapped Dogecoin (fixture)"}]}
+        good = {"market": {"identifier": "kraken"}, "base": "DOGE",
+                "target": "EUR", "is_stale": False, "is_anomaly": False}
+        markets = {"dogecoin": {"tickers": [good]},
+                   "wrapped-dogecoin-fixture": {"tickers": []}}
+        payload = {"id": "dogecoin", "symbol": "doge", "name": "Dogecoin",
+                   "market_data": {"last_updated": T.isoformat(),
+                                   "market_cap": {"usd": 100},
+                                   "fully_diluted_valuation": {"usd": 200},
+                                   "circulating_supply": 10, "total_supply": 20,
+                                   "max_supply": None}}
+        for alias in ("DOGE", "XDG", "XXDG"):
+            with self.subTest(alias=alias):
+                resolution = e.resolve_public(alias, "XDG/EUR", search, markets, T)
+                self.assertEqual(resolution["coingecko_id"], "dogecoin")
+                identity = e.identify(alias, "XDG/EUR", "XDGEUR",
+                                      catalog=catalog, discovered=resolution)
+                self.assertEqual(identity["stato"], "IDENTITA_VERIFICATA_DA_CATALOGO")
+                self.assertEqual(identity["asset_base_kraken"], "XDG")
+                self.assertEqual(identity["token_progetto"], "DOGE")
+                self.assertTrue(e._dynamic_valid(alias, "XDG/EUR", identity))
+                self.assertEqual(e.fundamentals(identity, payload, T, T)["stato"],
+                                 "VERIFICATO")
+                self.assertEqual(e.identify(alias, "XDG/EUR", "DOGEEUR",
+                                 catalog=catalog, discovered=resolution)["stato"],
+                                 "NON_VERIFICATO")
+        for flag in ("is_stale", "is_anomaly"):
+            for label, value in (("missing", None), ("null", None),
+                                 ("true", True), ("integer_zero", 0),
+                                 ("string_false", "false"), ("integer_one", 1)):
+                with self.subTest(flag=flag, value=label):
+                    altered = copy.deepcopy(markets)
+                    ticker = altered["dogecoin"]["tickers"][0]
+                    if label == "missing":
+                        del ticker[flag]
+                    else:
+                        ticker[flag] = value
+                    result = e.resolve_public("DOGE", "XDG/EUR", search, altered, T)
+                    self.assertEqual(result["stato"], "NON_VERIFICATO")
+                    self.assertEqual(result["motivo"], "NESSUN_MERCATO_KRAKEN_CONFERMATO")
+        # A second verified competitor forbids positive attribution.
+        ambiguous = copy.deepcopy(markets)
+        ambiguous["wrapped-dogecoin-fixture"]["tickers"] = [good]
+        self.assertEqual(e.resolve_public("DOGE", "XDG/EUR", search, ambiguous, T)
+                         ["motivo"], "TICKER_AMBIGUO_SU_KRAKEN")
+
+    def test_doge_normalized_wallet_to_real_dossier_at_read_and_gpt_packet(self):
+        """Synthetic BalanceEx → Kraken AssetPairs → CoinGecko → GPT packet."""
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        import dossier_trade
+        import kdd_saldi
+        import kraken_readonly
+        import patrimonio_4tf
+        import serve
+        from scripts import kdd_wallet_packet_g0 as packet
+
+        old_tokens = ["BNB", "FET", "JUP", "NEAR", "RENDER",
+                      "SOL", "SUI", "ETH", "BTC", "XRP"]
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "wallet.json"
+            path.write_text(json.dumps({
+                "t0_id": "T0_IMMUTABILE", "t0_sha256": "HASH_IMMUTABILE",
+                "posizioni": [{"token": token, "quantita": "1"}
+                              for token in old_tokens]}), encoding="utf-8")
+            segments = [{"token": token, "account_segment": "spot",
+                         "balance": "1", "available_balance": "1"}
+                        for token in old_tokens]
+            segments.append({
+                "token": kraken_readonly.normalize("XXDG")[0],
+                "account_segment": "spot", "balance": "100",
+                "available_balance": "100"})
+            segments.append({"token": "EUR", "account_segment": "spot",
+                             "balance": "1", "available_balance": "1"})
+            kdd_saldi.apply({
+                "source": "Kraken Spot REST /0/private/BalanceEx (read-only)",
+                "acquired_utc": T.isoformat(),
+                "account_segments": segments}, path=path)
+            wallet = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(wallet["t0_sha256"], "HASH_IMMUTABILE")
+        self.assertEqual(wallet["t0_id"], "T0_IMMUTABILE")
+        self.assertEqual(len(wallet["posizioni"]), 11)
+        self.assertIn("DOGE", [row["token"] for row in wallet["posizioni"]])
+        self.assertIn({"acquisito_utc": T.isoformat(), "token": "DOGE",
+                       "evento": "INGRESSO"},
+                      wallet["storico_transizioni_posizioni"])
+        pairs = {token + "EUR": {"wsname": token + "/EUR", "status": "online"}
+                 for token in old_tokens}
+        pairs["XDGEUR"] = {"wsname": "XDG/EUR", "altname": "XDGEUR",
+                           "status": "online"}
+        catalog = serve.spot_catalog(lambda endpoint: pairs)
+        doge_meta, status, _ = patrimonio_4tf.select_pair("DOGE", catalog)
+        self.assertIsNone(status)
+        self.assertEqual((doge_meta["pair_key"], doge_meta["pair"]),
+                         ("XDGEUR", "XDG/EUR"))
+        four = {"posizioni": [
+            {"token": row["token"],
+             "coppia": ("XDG/EUR" if row["token"] == "DOGE"
+                        else row["token"] + "/EUR"),
+             "pair_key": ("XDGEUR" if row["token"] == "DOGE"
+                          else row["token"] + "EUR")}
+            for row in wallet["posizioni"]]}
+        seen = []
+        def source(url, timeout=12):
+            seen.append(url)
+            if url.endswith("/search?query=DOGE"):
+                return json.dumps({"coins": [
+                    {"id": "dogecoin", "symbol": "doge", "name": "Dogecoin"},
+                    {"id": "doge-test-copy", "symbol": "doge",
+                     "name": "DOGE copy (fixture)"}]}).encode()
+            if "/tickers?exchange_ids=kraken" in url:
+                coin_id = url.split("/coins/")[1].split("/")[0]
+                tickers = ([{"market": {"identifier": "kraken"},
+                             "base": "DOGE", "target": "EUR",
+                             "is_stale": False, "is_anomaly": False}]
+                           if coin_id == "dogecoin" else [])
+                return json.dumps({"tickers": tickers}).encode()
+            if "/releases/latest" in url:
+                raise OSError("No synthetic releases")
+            coin_id = url.split("/coins/")[1].split("?")[0]
+            if coin_id == "dogecoin":
+                token, name = "DOGE", "Dogecoin"
+            else:
+                token, name = next((token, details[1])
+                                   for token, details in e.PROJECTS.items()
+                                   if details[0] == coin_id)
+            return json.dumps({
+                "id": coin_id, "symbol": token.lower(), "name": name,
+                "market_data": {"last_updated": T.isoformat(),
+                                "market_cap": {"usd": 100},
+                                "fully_diluted_valuation": {"usd": 200},
+                                "circulating_supply": 10, "total_supply": 20,
+                                "max_supply": 100}}).encode()
+
+        with mock.patch.object(dossier_trade.desk, "request", side_effect=source), \
+             mock.patch.object(dossier_trade.time, "sleep"):
+            first = dossier_trade.economic_evidence(
+                {"feed": []}, wallet, four, [], T, asset_pairs=pairs)
+            second = dossier_trade.economic_evidence(
+                {"feed": []}, wallet, four, [], T + dt.timedelta(minutes=1),
+                asset_pairs=pairs, previous=first)
+        for evidence in (first, second):
+            self.assertEqual(len(evidence["posizioni"]), 11)
+            self.assertEqual(sum(row["token"] in old_tokens
+                                 for row in evidence["posizioni"]), 10)
+            self.assertLessEqual(evidence["richieste_effettuate"], 9)
+            doge = next(row for row in evidence["posizioni"]
+                        if row["token"] == "DOGE")
+            self.assertEqual(doge["identita"]["coingecko_id"], "dogecoin")
+            self.assertEqual(doge["identita"]["asset_base_kraken"], "XDG")
+            self.assertEqual(doge["fondamentali"]["stato"], "VERIFICATO")
+        self.assertEqual(first["richieste_identificazione"], 3)
+        self.assertEqual(second["richieste_identificazione"], 0)
+        self.assertEqual(sum(url.endswith("/search?query=DOGE") for url in seen), 1)
+        positions = [{"token": row["token"], "stato_identita": "VALIDA"}
+                     for row in wallet["posizioni"]]
+        got = packet.analytic_evidence(
+            {"rilevazione_utc": T.isoformat()},
+            {"kraken_istantanea_utc": T.isoformat(),
+             "evidenze_economiche": second, "candidati": []},
+            positions, [], T + dt.timedelta(minutes=1))
+        self.assertEqual(len(got["economia"]["posizioni"]), 11)
+        doge_packet = next(row for row in got["economia"]["posizioni"]
+                           if row["token"] == "DOGE")
+        self.assertEqual(doge_packet["identita"]["coingecko_id"], "dogecoin")
+        self.assertEqual(doge_packet["fondamentali"]["stato"], "VERIFICATO")
+        altered = copy.deepcopy(second)
+        next(row for row in altered["posizioni"]
+             if row["token"] == "DOGE")["identita"]["coingecko_id"] = "bitcoin"
+        with self.assertRaises(ValueError):
+            e.at_read(altered, positions, [], T + dt.timedelta(minutes=1))
+
     def test_wallet_entry_zero_absent_and_return_preserve_t0(self):
         import json
         import tempfile
