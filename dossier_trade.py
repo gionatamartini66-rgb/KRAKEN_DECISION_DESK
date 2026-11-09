@@ -349,8 +349,8 @@ def economic_evidence(source, wallet, four, candidates, now, *,
                                    "coppia_analisi": pair, "identita": identity})
 
     # One unresolved unique token per cycle, deterministic rotation. Limit
-    # discovery to 1 search + at most 3 market checks; a fourth match remains
-    # explicitly ambiguous. No automatic pick of first/ranked CoinGecko hit.
+    # discovery to 1 search + up to 8 market checks (9 total). If more
+    # candidates appear, leave identity unresolved; never pick the first hit.
     unresolved = {}
     for group in ("posizioni", "candidati"):
         for row in items[group]:
@@ -397,8 +397,10 @@ def economic_evidence(source, wallet, four, candidates, now, *,
             exact = [c for c in search["coins"] if isinstance(c, dict)
                      and isinstance(c.get("symbol"), str)
                      and c["symbol"].upper() == econ.canonical_token(token)]
-            if len(exact) > 3:
-                discovery_problem = "TICKER_AMBIGUO_RICERCA_NON_ESAUSTIVA"
+            if len(search["coins"]) >= 100:
+                discovery_problem = "RISULTATI_RICERCA_PAGINATI_NON_ESAUSTIVI"
+            elif len(exact) > econ.MAX_MARKET_CANDIDATES:
+                discovery_problem = "TICKER_OMONIMI_SUPERANO_BUDGET"
             else:
                 markets = {}
                 for coin in exact:

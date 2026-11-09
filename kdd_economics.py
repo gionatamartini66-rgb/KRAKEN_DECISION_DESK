@@ -32,6 +32,8 @@ PROJECT_CAVEATS = {k: v["caveat"] for k, v in _CURATED.items()
                    if isinstance(v.get("caveat"), str)}
 CG = "https://api.coingecko.com/api/v3/coins/"
 CG_SEARCH = "https://api.coingecko.com/api/v3/search?query="
+# One search plus every exact-symbol market check must fit the nine-request budget.
+MAX_MARKET_CANDIDATES = 8
 VERSION = "kdd-economic-v001"
 UTC = dt.timezone.utc
 
@@ -201,7 +203,9 @@ def resolve_public(token, pair, search_result, market_results, now):
         return dict(blank, motivo="RISULTATI_RICERCA_PAGINATI_NON_ESAUSTIVI")
     if not exact:
         return blank
-    if len(exact) > 3 or len({c["id"] for c in exact}) != len(exact):
+    if len(exact) > MAX_MARKET_CANDIDATES:
+        return dict(blank, motivo="TICKER_OMONIMI_SUPERANO_BUDGET")
+    if len({c["id"] for c in exact}) != len(exact):
         return dict(blank, motivo="TICKER_AMBIGUO_RICERCA_NON_ESAUSTIVA")
     if not isinstance(market_results, dict) or any(c["id"] not in market_results
                                                     or market_results[c["id"]] is None

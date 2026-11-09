@@ -525,6 +525,96 @@ class AdaptivePortfolioTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             e.at_read(tampered, positions, shortlist, T + dt.timedelta(minutes=2))
 
+
+    def test_five_real_zec_homonyms_are_checked_before_attribution(self):
+        """Five exact ZEC symbols reflect CoinGecko's 09/11 public response."""
+        search = {"coins": [
+            {"id": "zcash", "symbol": "zec", "name": "Zcash"},
+            {"id": "binance-peg-zcash-token", "symbol": "zec", "name": "Binance-Peg Zcash Token"},
+            {"id": "near-intents-bridged-zec", "symbol": "zec", "name": "NEAR Intents Bridged ZEC"},
+            {"id": "omnibridge-bridged-zcash-solana", "symbol": "zec", "name": "Omnibridge Bridged Zcash"},
+            {"id": "hyperlane-bridged-shield-swap-wrapped-zec-aleo",
+             "symbol": "zec", "name": "Hyperlane Bridged Shield Swap Wrapped ZEC"}]}
+        markets = {coin["id"]: {"tickers": []} for coin in search["coins"]}
+        markets["zcash"] = {"tickers": [
+            {"market": {"identifier": "kraken"}, "base": "ZEC",
+             "target": "EUR", "is_stale": False, "is_anomaly": False}]}
+        result = e.resolve_public("ZEC", "ZEC/EUR", search, markets, T)
+        self.assertEqual(result["stato"], "RISOLTO")
+        self.assertEqual(result["coingecko_id"], "zcash")
+        real_catalog = {"XZECZEUR": {
+            "pair_key": "XZECZEUR", "pair": "ZEC/EUR",
+            "base": "ZEC", "quote": "EUR"}}
+        self.assertEqual(
+            e.identify("ZEC", "ZEC/EUR", "XZECZEUR",
+                       catalog=real_catalog, discovered=result)["coingecko_id"], "zcash")
+        # Two Kraken matches are ambiguous even if the first is the expected token.
+        altered = copy.deepcopy(markets)
+        altered["near-intents-bridged-zec"]["tickers"] = [
+            {"market": {"identifier": "kraken"}, "base": "ZEC", "target": "EUR"}]
+        self.assertEqual(e.resolve_public("ZEC", "ZEC/EUR", search, altered, T)
+                         ["motivo"], "TICKER_AMBIGUO_SU_KRAKEN")
+        missing = copy.deepcopy(markets)
+        del missing["binance-peg-zcash-token"]
+        self.assertEqual(e.resolve_public("ZEC", "ZEC/EUR", search, missing, T)
+                         ["motivo"], "MERCATI_COINGECKO_NON_COMPLETI")
+        nine = {"coins": search["coins"] + [
+            {"id": f"extra-zec-{i}", "symbol": "zec", "name": f"Extra ZEC {i}"}
+            for i in range(4)]}
+        self.assertEqual(e.resolve_public("ZEC", "ZEC/EUR", nine, {}, T)
+                         ["motivo"], "TICKER_OMONIMI_SUPERANO_BUDGET")
+
+    def test_five_homonyms_pass_real_producer_and_gpt_packet(self):
+        import dossier_trade
+        from scripts import kdd_wallet_packet_g0 as packet
+        from unittest import mock
+        import json
+        search = {"coins": [
+            {"id": "zcash", "symbol": "zec", "name": "Zcash"},
+            {"id": "binance-peg-zcash-token", "symbol": "zec", "name": "Binance-Peg"},
+            {"id": "near-intents-bridged-zec", "symbol": "zec", "name": "NEAR Bridged"},
+            {"id": "omnibridge-bridged-zcash-solana", "symbol": "zec", "name": "Omnibridge"},
+            {"id": "hyperlane-bridged-shield-swap-wrapped-zec-aleo",
+             "symbol": "zec", "name": "Hyperlane"}]}
+        seen = []
+        def public_response(url, timeout=12):
+            seen.append(url)
+            if url.endswith("/search?query=ZEC"):
+                return json.dumps(search).encode()
+            if "/tickers?exchange_ids=kraken" in url:
+                coin_id = url.split("/coins/")[1].split("/")[0]
+                rows = ([{"market": {"identifier": "kraken"}, "base": "ZEC",
+                          "target": "EUR", "is_stale": False, "is_anomaly": False}]
+                        if coin_id == "zcash" else [])
+                return json.dumps({"tickers": rows}).encode()
+            if "/coins/zcash?" in url:
+                return json.dumps({"id": "zcash", "name": "Zcash", "symbol": "zec",
+                  "market_data": {"last_updated": T.isoformat(),
+                  "market_cap": {"usd": 100}, "fully_diluted_valuation": {"usd": 200},
+                  "circulating_supply": 10, "total_supply": 20, "max_supply": 100}}).encode()
+            raise OSError("unexpected public request")
+        with mock.patch.object(dossier_trade.desk, "request", side_effect=public_response), \
+             mock.patch.object(dossier_trade.time, "sleep"):
+            ev = dossier_trade.economic_evidence(
+                {"feed": []}, {"posizioni": [{"token": "ZEC"}]},
+                {"posizioni": [{"token": "ZEC", "coppia": "ZEC/EUR",
+                                "pair_key": "XZECZEUR"}]}, [], T,
+                asset_pairs={"XZECZEUR": {"wsname": "ZEC/EUR", "status": "online"}})
+        self.assertEqual(ev["richieste_identificazione"], 6)
+        self.assertLessEqual(ev["richieste_effettuate"], 9)
+        self.assertEqual(sum("tickers?exchange_ids=kraken" in x for x in seen), 5)
+        self.assertEqual(ev["posizioni"][0]["identita"]["coingecko_id"], "zcash")
+        self.assertEqual(ev["posizioni"][0]["fondamentali"]["stato"], "VERIFICATO")
+        result = packet.analytic_evidence(
+            {"rilevazione_utc": T.isoformat()},
+            {"kraken_istantanea_utc": T.isoformat(),
+             "evidenze_economiche": ev, "candidati": []},
+            [{"token": "ZEC", "stato_identita": "VALIDA"}], [], T)
+        self.assertEqual(result["economia"]["posizioni"][0]["identita"]
+                         ["coingecko_id"], "zcash")
+        self.assertEqual(result["economia"]["posizioni"][0]["fondamentali"]
+                         ["stato"], "VERIFICATO")
+
     def test_wallet_entry_zero_absent_and_return_preserve_t0(self):
         import json
         import tempfile
