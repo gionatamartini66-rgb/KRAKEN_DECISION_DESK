@@ -23,11 +23,12 @@ REPOSITORY = 'gionatamartini66-rgb/KRAKEN_DECISION_DESK'
 PY_FILES = (
     'analisi_v02.py', 'binance_reference.py', 'costi_spot.py',
     'decision_desk.py', 'dossier_trade.py', 'flusso_spot.py',
-    'grafico_4h.py', 'kdd_candles.py', 'kdd_economics.py', 'kdd_saldi.py', 'kraken_readonly.py',
+    'grafico_4h.py', 'kdd_candles.py', 'kdd_economics.py', 'kdd_futures_flow.py',
+    'kdd_saldi.py', 'kraken_readonly.py',
     'patrimonio_4tf.py',
     'mercati_spot.py', 'piano_gpt.py', 'ricerca_setup.py',
     'serve.py', 'studio_delta.py', 'test_decision_desk.py',
-    'test_kdd_candles.py', 'test_kdd_economics.py',
+    'test_kdd_candles.py', 'test_kdd_economics.py', 'test_kdd_futures_flow.py',
     'verifica_piani.py',
 )
 PACKET_FILES = (
