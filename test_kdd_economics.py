@@ -459,6 +459,10 @@ class AdaptivePortfolioTests(unittest.TestCase):
         roster = ["BNB", "FET", "JUP", "NEAR", "RENDER", "SOL", "SUI",
                   "ETH", "BTC", "XRP", "ZEC"]
         pairs = {x + "EUR": {"wsname": x + "/EUR", "status": "online"} for x in roster}
+        pairs["ZECUSD"] = {"wsname": "ZEC/USD", "status": "online"}
+        self.markets["zcash"]["tickers"].append({
+            "market": {"identifier": "kraken"}, "base": "ZEC",
+            "target": "USD", "is_anomaly": False, "is_stale": False})
         wallet = {"posizioni": [{"token": x} for x in roster]}
         four = {"posizioni": [{"token": x, "coppia": x + "/EUR",
                               "pair_key": x + "EUR"} for x in roster]}
@@ -487,32 +491,39 @@ class AdaptivePortfolioTests(unittest.TestCase):
         with mock.patch.object(dossier_trade.desk, "request", side_effect=response), \
              mock.patch.object(dossier_trade.time, "sleep"):
             first = dossier_trade.economic_evidence({"feed": []}, wallet, four,
-                        [{"token": "ZEC", "coppia_analisi": "ZEC/EUR",
-                          "kraken_pair_key": "ZECEUR"}], T, asset_pairs=pairs)
+                        [{"token": "ZEC", "coppia_analisi": "ZEC/USD",
+                          "kraken_pair_key": "ZECUSD"}], T, asset_pairs=pairs)
             second = dossier_trade.economic_evidence({"feed": []}, wallet, four,
-                        [{"token": "ZEC", "coppia_analisi": "ZEC/EUR",
-                          "kraken_pair_key": "ZECEUR"}],
+                        [{"token": "ZEC", "coppia_analisi": "ZEC/USD",
+                          "kraken_pair_key": "ZECUSD"}],
                         T + dt.timedelta(minutes=1), asset_pairs=pairs, previous=first)
+            third = dossier_trade.economic_evidence({"feed": []}, wallet, four,
+                        [{"token": "ZEC", "coppia_analisi": "ZEC/USD",
+                          "kraken_pair_key": "ZECUSD"}],
+                        T + dt.timedelta(minutes=2), asset_pairs=pairs, previous=second)
         self.assertEqual(len(first["posizioni"]), 11)
         self.assertEqual(first["posizioni"][-1]["identita"]["coingecko_id"], "zcash")
-        self.assertEqual(first["candidati"][0]["identita"]["coingecko_id"], "zcash")
-        self.assertEqual(second["richieste_identificazione"], 0)
+        self.assertEqual(first["candidati"][0]["identita"]["stato"], "NON_VERIFICATO")
+        self.assertEqual(second["candidati"][0]["identita"]["coingecko_id"], "zcash")
+        self.assertEqual(second["posizioni"][-1]["identita"]["coingecko_id"], "zcash")
+        self.assertEqual(third["richieste_identificazione"], 0)
         self.assertLessEqual(first["richieste_effettuate"], 9)
         self.assertLessEqual(second["richieste_effettuate"], 9)
-        self.assertEqual(len([url for url in seen if "/search?" in url]), 1)
+        self.assertLessEqual(third["richieste_effettuate"], 9)
+        self.assertEqual(len([url for url in seen if "/search?" in url]), 2)
         positions = [{"token": x, "stato_identita": "VALIDA"} for x in roster]
-        shortlist = [{"token": "ZEC", "coppia_analisi": "ZEC/EUR"}]
+        shortlist = [{"token": "ZEC", "coppia_analisi": "ZEC/USD"}]
         snap = {"rilevazione_utc": T.isoformat()}
         dossier = {"kraken_istantanea_utc": T.isoformat(),
-                   "evidenze_economiche": second, "candidati": []}
+                   "evidenze_economiche": third, "candidati": []}
         got = packet.analytic_evidence(snap, dossier, positions, shortlist,
-                                      T + dt.timedelta(minutes=1))
+                                      T + dt.timedelta(minutes=2))
         self.assertEqual(got["economia"]["posizioni"][-1]["identita"]["coingecko_id"], "zcash")
         self.assertEqual(len(got["economia"]["posizioni"]), 11)
-        tampered = copy.deepcopy(second)
+        tampered = copy.deepcopy(third)
         tampered["posizioni"][-1]["identita"]["coingecko_id"] = "bitcoin"
         with self.assertRaises(ValueError):
-            e.at_read(tampered, positions, shortlist, T + dt.timedelta(minutes=1))
+            e.at_read(tampered, positions, shortlist, T + dt.timedelta(minutes=2))
 
     def test_wallet_entry_zero_absent_and_return_preserve_t0(self):
         import json
