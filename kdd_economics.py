@@ -80,7 +80,11 @@ def sources_matrix():
 
 
 def canonical_token(token):
-    return "BTC" if token in ("XBT", "XXBT") else token
+    if token in ("XBT", "XXBT", "BTC"):
+        return "BTC"
+    if token in ("XDG", "XXDG", "DOGE"):
+        return "DOGE"
+    return token
 
 KNOWN_MACRO = {
     "Fed — politica monetaria": "www.federalreserve.gov",
@@ -225,8 +229,8 @@ def resolve_public(token, pair, search_result, market_results, now):
                and t["market"].get("identifier") == "kraken"
                and canonical_token(t.get("base")) == canonical_token(base)
                and t.get("target") == target
-               and t.get("is_anomaly") is not True
-               and t.get("is_stale") is not True
+               and t.get("is_anomaly") is False
+               and t.get("is_stale") is False
                for t in response["tickers"]):
             matches.append(coin)
     if len(matches) != 1:
