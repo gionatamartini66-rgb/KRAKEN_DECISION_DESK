@@ -85,6 +85,8 @@ class EconomicEvidenceTests(unittest.TestCase):
                 return json.dumps({"html_url": "https://github.com/" + repo +
                                    "/releases/tag/v1", "name": "Release v1",
                                    "published_at": T.isoformat()}).encode()
+            if "/search?query=" in url:
+                return json.dumps({"coins": []}).encode()
             coin_id = url.split("/coins/")[1].split("?")[0]
             if phase[0] == 0 and coin_id in ("bitcoin", "fetch-ai"):
                 raise OSError("Simulated public source outage")
@@ -112,7 +114,7 @@ class EconomicEvidenceTests(unittest.TestCase):
             self.assertLessEqual(output["richieste_effettuate"], 9)
         first, second, third = outputs
         self.assertEqual(sum(x["fondamentali"]["stato"] == "VERIFICATO"
-                             for x in first["posizioni"]), 4)
+                             for x in first["posizioni"]), 3)
         self.assertEqual(sum(x["fondamentali"]["stato"] == "VERIFICATO"
                              for x in second["posizioni"]), 8)
         self.assertEqual(sum(x["fondamentali"]["stato"] == "VERIFICATO"
@@ -285,6 +287,8 @@ class EconomicEvidenceTests(unittest.TestCase):
                 repo=url.split("/repos/")[1].split("/releases/")[0]
                 return json.dumps({"html_url":"https://github.com/"+repo+"/releases/tag/v1",
                                    "published_at":T.isoformat(),"name":"Release v1"}).encode()
+            if "/search?query=" in url:
+                return json.dumps({"coins":[]}).encode()
             cg=url.split("/coins/")[1].split("?")[0]
             token=next((t for t,x in e.PROJECTS.items() if x[0]==cg),None)
             if token is None:
@@ -390,6 +394,165 @@ class EconomicEvidenceTests(unittest.TestCase):
         self.assertEqual(e.at_read(source,positions,shortlist,T)["posizioni"][0]
                          ["fondamentali"]["stato"],"NON_VERIFICATO")
 
+
+
+class AdaptivePortfolioTests(unittest.TestCase):
+    """New projects are resolved with a second market source, not registered in Python."""
+    def setUp(self):
+        self.now = T
+        self.assertNotIn("ZEC", e.PROJECTS)
+        self.catalog = {"ZECEUR": {"pair_key": "ZECEUR", "pair": "ZEC/EUR",
+                                    "base": "ZEC", "quote": "EUR"}}
+        self.search = {"coins": [
+            {"id": "zcash", "symbol": "zec", "name": "Zcash"},
+            {"id": "zcash-lookalike", "symbol": "zec", "name": "Zcash Imitation"}]}
+        self.markets = {
+            "zcash": {"tickers": [{"market": {"identifier": "kraken"}, "base": "ZEC",
+                                   "target": "EUR", "is_anomaly": False, "is_stale": False}]},
+            "zcash-lookalike": {"tickers": [{"market": {"identifier": "elsewhere"},
+                                              "base": "ZEC", "target": "EUR"}]}}
+
+    def proof(self):
+        p = e.resolve_public("ZEC", "ZEC/EUR", self.search, self.markets, self.now)
+        self.assertEqual(p["stato"], "RISOLTO")
+        p["pair"] = "ZEC/EUR"
+        return p
+
+    def test_dynamic_identity_without_registration_is_bound_to_real_kraken_pair(self):
+        evidence = self.proof()
+        identity = e.identify("ZEC", "ZEC/EUR", "ZECEUR", catalog=self.catalog,
+                              discovered=evidence)
+        self.assertEqual(identity["coingecko_id"], "zcash")
+        self.assertEqual(identity["metodo"], "KRAKEN_COINGECKO_MARKET")
+        self.assertEqual(e.identify("ZEC", "ZEC/EUR", "FORGED", catalog=self.catalog,
+                                    discovered=evidence)["stato"], "NON_VERIFICATO")
+        self.assertEqual(e.identify("ZEC", "ZEC/USD", "ZECEUR", catalog=self.catalog,
+                                    discovered=evidence)["stato"], "NON_VERIFICATO")
+        fake = {"id": "zcash", "symbol": "zec", "name": "Zcash",
+                "market_data": {"last_updated": T.isoformat(),
+                                "market_cap": {"usd": 1000},
+                                "fully_diluted_valuation": {"usd": 2000},
+                                "circulating_supply": 10, "total_supply": 20,
+                                "max_supply": None}}
+        self.assertEqual(e.fundamentals(identity, fake, T, T)["stato"], "VERIFICATO")
+
+    def test_unknown_ticker_ambiguity_and_nonexhaustive_search_fail_closed(self):
+        ambiguous = copy.deepcopy(self.markets)
+        ambiguous["zcash-lookalike"]["tickers"][0]["market"]["identifier"] = "kraken"
+        self.assertEqual(e.resolve_public("ZEC", "ZEC/EUR", self.search, ambiguous,
+                                           T)["motivo"], "TICKER_AMBIGUO_SU_KRAKEN")
+        for result in ({"coins": self.search["coins"] * 2},
+                       {"coins": self.search["coins"]}):
+            market = self.markets if len(result["coins"]) > 3 else {"zcash": self.markets["zcash"]}
+            self.assertEqual(e.resolve_public("ZEC", "ZEC/EUR", result, market,
+                                               T)["stato"], "NON_VERIFICATO")
+        self.assertEqual(e.identify("RNDR", "RNDR/EUR", "RNDREUR",
+                                    catalog={"RNDREUR": {"pair_key": "RNDREUR",
+                                             "pair": "RNDR/EUR", "base": "RNDR", "quote": "EUR"}})
+                         ["stato"], "NON_VERIFICATO")
+
+    def test_real_producer_new_asset_and_gpt_consumer_with_dated_reuse(self):
+        import json
+        import dossier_trade
+        from scripts import kdd_wallet_packet_g0 as packet
+        from unittest import mock
+        roster = ["BNB", "FET", "JUP", "NEAR", "RENDER", "SOL", "SUI",
+                  "ETH", "BTC", "XRP", "ZEC"]
+        pairs = {x + "EUR": {"wsname": x + "/EUR", "status": "online"} for x in roster}
+        wallet = {"posizioni": [{"token": x} for x in roster]}
+        four = {"posizioni": [{"token": x, "coppia": x + "/EUR",
+                              "pair_key": x + "EUR"} for x in roster]}
+        seen = []
+        def response(url, timeout=12):
+            seen.append(url)
+            if "/search?query=ZEC" in url:
+                return json.dumps(self.search).encode()
+            if "/tickers?exchange_ids=kraken" in url:
+                coin_id = url.split("/coins/")[1].split("/")[0]
+                return json.dumps(self.markets[coin_id]).encode()
+            if "/releases/latest" in url:
+                raise OSError("no release")
+            coin_id = url.split("/coins/")[1].split("?")[0]
+            if coin_id == "zcash":
+                name, symbol = "Zcash", "zec"
+            else:
+                token = next(t for t, v in e.PROJECTS.items() if v[0] == coin_id)
+                name, symbol = e.PROJECTS[token][1], token.lower()
+            return json.dumps({"id": coin_id, "name": name, "symbol": symbol,
+                "market_data": {"last_updated": T.isoformat(),
+                                "market_cap": {"usd": 100},
+                                "fully_diluted_valuation": {"usd": 200},
+                                "circulating_supply": 10, "total_supply": 20,
+                                "max_supply": 100}}).encode()
+        with mock.patch.object(dossier_trade.desk, "request", side_effect=response), \\
+             mock.patch.object(dossier_trade.time, "sleep"):
+            first = dossier_trade.economic_evidence({"feed": []}, wallet, four,
+                        [{"token": "ZEC", "coppia_analisi": "ZEC/EUR",
+                          "kraken_pair_key": "ZECEUR"}], T, asset_pairs=pairs)
+            second = dossier_trade.economic_evidence({"feed": []}, wallet, four,
+                        [{"token": "ZEC", "coppia_analisi": "ZEC/EUR",
+                          "kraken_pair_key": "ZECEUR"}],
+                        T + dt.timedelta(minutes=1), asset_pairs=pairs, previous=first)
+        self.assertEqual(len(first["posizioni"]), 11)
+        self.assertEqual(first["posizioni"][-1]["identita"]["coingecko_id"], "zcash")
+        self.assertEqual(first["candidati"][0]["identita"]["coingecko_id"], "zcash")
+        self.assertEqual(second["richieste_identificazione"], 0)
+        self.assertLessEqual(first["richieste_effettuate"], 9)
+        self.assertLessEqual(second["richieste_effettuate"], 9)
+        self.assertEqual(len([url for url in seen if "/search?" in url]), 1)
+        positions = [{"token": x, "stato_identita": "VALIDA"} for x in roster]
+        shortlist = [{"token": "ZEC", "coppia_analisi": "ZEC/EUR"}]
+        snap = {"rilevazione_utc": T.isoformat()}
+        dossier = {"kraken_istantanea_utc": T.isoformat(),
+                   "evidenze_economiche": second, "candidati": []}
+        got = packet.analytic_evidence(snap, dossier, positions, shortlist,
+                                      T + dt.timedelta(minutes=1))
+        self.assertEqual(got["economia"]["posizioni"][-1]["identita"]["coingecko_id"], "zcash")
+        self.assertEqual(len(got["economia"]["posizioni"]), 11)
+        tampered = copy.deepcopy(second)
+        tampered["posizioni"][-1]["identita"]["coingecko_id"] = "bitcoin"
+        with self.assertRaises(ValueError):
+            e.at_read(tampered, positions, shortlist, T + dt.timedelta(minutes=1))
+
+    def test_wallet_entry_zero_absent_and_return_preserve_t0(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        import kdd_saldi
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "portafoglio.json"
+            original = {"t0_id": "T0_19_OTTOBRE", "t0_sha256": "ORIGINALE",
+                        "posizioni": [{"token": "BTC", "quantita": "2"}]}
+            path.write_text(json.dumps(original))
+            def apply(ts, holdings):
+                return kdd_saldi.apply({
+                  "source": "Kraken Spot REST /0/private/BalanceEx (read-only)",
+                  "acquired_utc": ts, "account_segments": [
+                      {"token": k, "account_segment": "spot",
+                       "balance": str(q), "available_balance": str(q)}
+                      for k, q in holdings.items()] + [
+                      {"token": "EUR", "account_segment": "spot",
+                       "balance": "1", "available_balance": "1"}]
+                }, path=path)
+            apply("2026-11-09T08:00:00+00:00", {"BTC": 2})
+            apply("2026-11-09T08:10:00+00:00", {"BTC": 2, "ZEC": 1})
+            apply("2026-11-09T08:20:00+00:00", {"BTC": 0, "ZEC": 1})
+            interim = json.loads(path.read_text())
+            self.assertEqual(interim["riconciliazione_posizioni"]["zero_esplicito"], ["BTC"])
+            self.assertEqual([x["token"] for x in interim["posizioni"]], ["ZEC"])
+            apply("2026-11-09T08:30:00+00:00", {"BTC": 1, "ZEC": 1})
+            result = json.loads(path.read_text())
+            history = result["storico_transizioni_posizioni"]
+            self.assertEqual([(x["token"], x["evento"]) for x in history],
+                             [("ZEC", "INGRESSO"), ("BTC", "USCITA"),
+                              ("BTC", "RIENTRO")])
+            self.assertEqual(history[1]["evidenza"], "ZERO_ESPLICITO_BALANCEEX")
+            self.assertEqual(result["t0_id"], "T0_19_OTTOBRE")
+            self.assertEqual(result["t0_sha256"], "ORIGINALE")
+            snap = json.loads(path.read_text())
+            with self.assertRaises(ValueError):
+                kdd_saldi.apply({"source": "invalid"}, path=path)
+            self.assertEqual(json.loads(path.read_text()), snap)
 
 if __name__=="__main__":
     unittest.main()
