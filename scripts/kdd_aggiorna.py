@@ -290,7 +290,12 @@ def isolated_test(staging: Path) -> None:
             if proc.returncode:
                 raise SafetyError('regressioni packet+Android synthetic non superate: '
                                   + pattern)
-        retained = command([sys.executable, '-B', 'scripts/kdd_android_regressions.py'],
+        # Termux needs both the project root and scripts/ import roots.
+        # -c retains cwd on sys.path; the explicit insertion also supports
+        # the legacy top-level kdd_wallet_packet_g0 imports in R5 fixtures.
+        retained = command([sys.executable, '-B', '-c',
+                            "import sys; sys.path.insert(0, 'scripts'); "
+                            "from scripts.kdd_android_regressions import main; main()"],
                            cwd=staging)
         if retained.returncode:
             raise SafetyError('invarianti R5 ancora pertinenti FALLITI')
@@ -339,7 +344,9 @@ def apply(root: Path, live: Path, *, commit_sha: str, dry_run: bool) -> None:
             if src.is_symlink():
                 raise SafetyError('symlink Python nel programma live: intervento manuale richiesto')
             shutil.copy2(src, staging / src.name)
-        for name in PY_FILES + PACKET_FILES:
+        # The curated project catalog is executable input to kdd_economics;
+        # staging must contain the same version that will be installed.
+        for name in PY_FILES + PACKET_FILES + DATA_FILES:
             dest = staging / name
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(root / name, dest)
