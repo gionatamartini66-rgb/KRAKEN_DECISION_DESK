@@ -316,14 +316,14 @@ def economic_evidence(source, wallet, four, candidates, now, *,
             if not isinstance(old, dict):
                 continue
             token = old.get("token")
+            pair = old.get("coppia")
             record = old.get("risoluzione")
             proof = record.get("prova_mercato") if isinstance(record, dict) else None
             verified = econ.stamp(proof.get("verificato_utc")) if isinstance(proof, dict) else None
             if (isinstance(token, str) and verified
                     and dt.timedelta(0) <= now-verified <= dt.timedelta(days=7)
-                    and econ._dynamic_valid(token, record.get("pair") if isinstance(record, dict) else None,
-                                            record)):
-                previous_dynamic[token] = record
+                    and econ._dynamic_valid(token, pair, record)):
+                previous_dynamic[(token, pair)] = record
 
     wallet_rows = wallet.get("posizioni") if isinstance(wallet, dict) else None
     wallet_rows = wallet_rows if isinstance(wallet_rows, list) else []
@@ -336,7 +336,7 @@ def economic_evidence(source, wallet, four, candidates, now, *,
         pair, key = tf.get("coppia"), tf.get("pair_key")
         identity = econ.identify(token, pair, key,
                                  catalog=catalog if valid and tf.get("token") == token else {},
-                                 discovered=previous_dynamic.get(token))
+                                 discovered=previous_dynamic.get((token, pair)))
         items["posizioni"].append({"indice": index, "token": token, "identita": identity})
     for index, row in enumerate(candidates):
         row = row if isinstance(row, dict) else {}
@@ -344,7 +344,7 @@ def economic_evidence(source, wallet, four, candidates, now, *,
         pair, key = row.get("coppia_analisi"), row.get("kraken_pair_key")
         identity = econ.identify(token, pair, key,
                                  catalog=catalog if valid else {},
-                                 discovered=previous_dynamic.get(token))
+                                 discovered=previous_dynamic.get((token, pair)))
         items["candidati"].append({"indice": index, "token": token,
                                    "coppia_analisi": pair, "identita": identity})
 
@@ -358,14 +358,16 @@ def economic_evidence(source, wallet, four, candidates, now, *,
             token = row["token"]
             if (identity.get("motivo") == "PROGETTO_NON_NEL_CATALOGO_CURATO"
                     and isinstance(token, str)):
-                unresolved.setdefault(token, (identity["coppia"], identity["pair_key"]))
-    pending_tokens = sorted(unresolved)
+                key = (token, identity["coppia"])
+                unresolved.setdefault(key, identity["pair_key"])
+    pending_pairs = sorted(unresolved)
     next_token = prior.get("prossimo_token_identita")
-    next_idx = next((i for i, token in enumerate(pending_tokens)
-                     if isinstance(next_token, str) and token >= next_token), 0)
-    chosen = pending_tokens[next_idx] if pending_tokens else None
-    next_token = (pending_tokens[(next_idx+1) % len(pending_tokens)]
-                  if pending_tokens else None)
+    next_idx = next((i for i, item in enumerate(pending_pairs)
+                     if isinstance(next_token, str)
+                     and "|".join(item) >= next_token), 0)
+    chosen = pending_pairs[next_idx] if pending_pairs else None
+    next_token = ("|".join(pending_pairs[(next_idx+1) % len(pending_pairs)])
+                  if pending_pairs else None)
     discovery_calls = 0
     rate_limited = False
     discovery_problem = None
@@ -383,9 +385,10 @@ def economic_evidence(source, wallet, four, candidates, now, *,
             return None, "ERRORE_" + type(exc).__name__
 
     if chosen:
-        pair, key = unresolved[chosen]
+        token, pair = chosen
+        key = unresolved[chosen]
         discovery_calls += 1
-        search, error = public_json(econ.CG_SEARCH + chosen)
+        search, error = public_json(econ.CG_SEARCH + token)
         if error:
             discovery_problem = error
         elif not isinstance(search, dict) or not isinstance(search.get("coins"), list):
@@ -393,7 +396,7 @@ def economic_evidence(source, wallet, four, candidates, now, *,
         else:
             exact = [c for c in search["coins"] if isinstance(c, dict)
                      and isinstance(c.get("symbol"), str)
-                     and c["symbol"].upper() == econ.canonical_token(chosen)]
+                     and c["symbol"].upper() == econ.canonical_token(token)]
             if len(exact) > 3:
                 discovery_problem = "TICKER_AMBIGUO_RICERCA_NON_ESAUSTIVA"
             else:
@@ -415,7 +418,7 @@ def economic_evidence(source, wallet, four, candidates, now, *,
                         break
                     time.sleep(.35)
                 if discovery_problem is None:
-                    resolved = econ.resolve_public(chosen, pair, search, markets, now)
+                    resolved = econ.resolve_public(token, pair, search, markets, now)
                     if resolved.get("stato") != "RISOLTO":
                         discovery_problem = resolved.get("motivo", "IDENTITA_NON_VERIFICATA")
         if resolved and resolved.get("stato") == "RISOLTO":
@@ -426,10 +429,10 @@ def economic_evidence(source, wallet, four, candidates, now, *,
             previous_dynamic[chosen] = resolved
         for group in ("posizioni", "candidati"):
             for row in items[group]:
-                if row["token"] != chosen:
+                if (row["token"], row["identita"].get("coppia")) != chosen:
                     continue
                 prior_id = row["identita"]
-                identity = econ.identify(chosen, prior_id.get("coppia"),
+                identity = econ.identify(token, prior_id.get("coppia"),
                                          prior_id.get("pair_key"), catalog=catalog,
                                          discovered=resolved if resolved and
                                          resolved.get("stato") == "RISOLTO" else None)
@@ -541,8 +544,8 @@ def economic_evidence(source, wallet, four, candidates, now, *,
                 key = (identity.get("token"), identity.get("coppia"),
                        identity.get("pair_key"), identity.get("coingecko_id"))
                 public_cache[key] = {"identita": identity, "fondamentali": data}
-    dynamic_cache = [{"token": token, "risoluzione": record}
-                     for token, record in sorted(previous_dynamic.items())][:100]
+    dynamic_cache = [{"token": token, "coppia": pair, "risoluzione": record}
+                     for (token, pair), record in sorted(previous_dynamic.items())][:100]
     btc = next((r for r in four_rows if isinstance(r, dict) and r.get("token") == "BTC"), {})
     return {"schema": econ.VERSION, "acquisito_utc": now.isoformat(timespec="seconds"),
             "posizioni": items["posizioni"], "candidati": items["candidati"],
