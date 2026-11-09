@@ -93,18 +93,18 @@ def _history(data, now):
     if not isinstance(trades, list) or not 0 < len(trades) <= 100:
         raise ValueError("invalid public history sample")
     validated = []
-    prior = None
     for row in trades:
         if not isinstance(row, dict) or row.get("type") not in TYPES:
             raise ValueError("unverifiable trade type")
         timestamp = _date(row["time"])
         if timestamp > observed + dt.timedelta(minutes=2) or timestamp > now + dt.timedelta(minutes=2):
             raise ValueError("future trade timestamp")
-        if prior is not None and timestamp > prior:
-            raise ValueError("unordered trades")
-        prior = timestamp
         validated.append({"t": timestamp, "price": _number(row["price"], positive=True),
                           "size": _number(row["size"], positive=True), "type": row["type"]})
+    # Kraken's live /history response has been observed out of timestamp order
+    # despite its documented descending sort. Sort the validated tape locally;
+    # retain all records and never infer missing hours from the 100-trade cap.
+    validated.sort(key=lambda row: row["t"], reverse=True)
     lo, hi = min(r["price"] for r in validated), max(r["price"] for r in validated)
     step = (hi - lo) / 10 if hi > lo else None
     bands = {}
