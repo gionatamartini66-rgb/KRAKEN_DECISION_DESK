@@ -665,6 +665,12 @@ class AdaptivePortfolioTests(unittest.TestCase):
                 self.assertEqual(identity["asset_base_kraken"], "XDG")
                 self.assertEqual(identity["token_progetto"], "DOGE")
                 self.assertTrue(e._dynamic_valid(alias, "XDG/EUR", identity))
+                untrusted = copy.deepcopy(resolution)
+                del untrusted["prova_mercato"]["is_stale"]
+                self.assertFalse(e._dynamic_valid(alias, "XDG/EUR", untrusted))
+                self.assertEqual(e.identify(alias, "XDG/EUR", "XDGEUR",
+                                 catalog=catalog, discovered=untrusted)["stato"],
+                                 "NON_VERIFICATO")
                 self.assertEqual(e.fundamentals(identity, payload, T, T)["stato"],
                                  "VERIFICATO")
                 self.assertEqual(e.identify(alias, "XDG/EUR", "DOGEEUR",
@@ -787,6 +793,13 @@ class AdaptivePortfolioTests(unittest.TestCase):
             second = dossier_trade.economic_evidence(
                 {"feed": []}, wallet, four, [], T + dt.timedelta(minutes=1),
                 asset_pairs=pairs, previous=first)
+            legacy = copy.deepcopy(first)
+            for record in legacy["identita_dinamiche"]:
+                if record["token"] == "DOGE":
+                    del record["risoluzione"]["prova_mercato"]["is_anomaly"]
+            rediscovered = dossier_trade.economic_evidence(
+                {"feed": []}, wallet, four, [], T + dt.timedelta(minutes=2),
+                asset_pairs=pairs, previous=legacy)
         for evidence in (first, second):
             self.assertEqual(len(evidence["posizioni"]), 11)
             self.assertEqual(sum(row["token"] in old_tokens
@@ -799,7 +812,8 @@ class AdaptivePortfolioTests(unittest.TestCase):
             self.assertEqual(doge["fondamentali"]["stato"], "VERIFICATO")
         self.assertEqual(first["richieste_identificazione"], 3)
         self.assertEqual(second["richieste_identificazione"], 0)
-        self.assertEqual(sum(url.endswith("/search?query=DOGE") for url in seen), 1)
+        self.assertEqual(rediscovered["richieste_identificazione"], 3)
+        self.assertEqual(sum(url.endswith("/search?query=DOGE") for url in seen), 2)
         positions = [{"token": row["token"], "stato_identita": "VALIDA"}
                      for row in wallet["posizioni"]]
         got = packet.analytic_evidence(
@@ -817,6 +831,11 @@ class AdaptivePortfolioTests(unittest.TestCase):
              if row["token"] == "DOGE")["identita"]["coingecko_id"] = "bitcoin"
         with self.assertRaises(ValueError):
             e.at_read(altered, positions, [], T + dt.timedelta(minutes=1))
+        legacy_packet = copy.deepcopy(second)
+        next(row for row in legacy_packet["posizioni"]
+             if row["token"] == "DOGE")["identita"]["prova_mercato"].pop("is_stale")
+        with self.assertRaises(ValueError):
+            e.at_read(legacy_packet, positions, [], T + dt.timedelta(minutes=1))
 
     def test_wallet_entry_zero_absent_and_return_preserve_t0(self):
         import json
