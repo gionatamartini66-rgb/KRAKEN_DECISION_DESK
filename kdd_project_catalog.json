@@ -1,0 +1,75 @@
+{
+  "schema": "kdd-project-catalog-v001",
+  "provenienza": "Corrispondenze curate già verificate in PR #45 (2026-11-08); non attestano chain/contract",
+  "projects": {
+    "BNB": {
+      "id": "binancecoin",
+      "name": "BNB"
+    },
+    "FET": {
+      "id": "fetch-ai",
+      "name": "Artificial Superintelligence Alliance",
+      "caveat": "FET/ASI: controllare le migrazioni Kraken e chain/contract; non presumere conversioni."
+    },
+    "JUP": {
+      "id": "jupiter-exchange-solana",
+      "name": "Jupiter"
+    },
+    "RENDER": {
+      "id": "render-token",
+      "name": "Render",
+      "caveat": "RNDR/RENDER: migrazione storica; non attribuire il vecchio RNDR al nuovo RENDER."
+    },
+    "PEPE": {
+      "id": "pepe",
+      "name": "Pepe"
+    },
+    "PUMP": {
+      "id": "pump-fun",
+      "name": "Pump.fun"
+    },
+    "BTC": {
+      "id": "bitcoin",
+      "name": "Bitcoin",
+      "repository": "bitcoin/bitcoin"
+    },
+    "SOL": {
+      "id": "solana",
+      "name": "Solana",
+      "repository": "anza-xyz/agave"
+    },
+    "ADA": {
+      "id": "cardano",
+      "name": "Cardano",
+      "repository": "IntersectMBO/cardano-node"
+    },
+    "ETH": {
+      "id": "ethereum",
+      "name": "Ethereum"
+    },
+    "NEAR": {
+      "id": "near",
+      "name": "NEAR Protocol"
+    },
+    "SUI": {
+      "id": "sui",
+      "name": "Sui"
+    },
+    "XRP": {
+      "id": "ripple",
+      "name": "XRP"
+    },
+    "ONDO": {
+      "id": "ondo-finance",
+      "name": "Ondo"
+    },
+    "KAS": {
+      "id": "kaspa",
+      "name": "Kaspa"
+    },
+    "ICNT": {
+      "id": "impossible-cloud-network-token",
+      "name": "Impossible Cloud Network"
+    }
+  }
+}
