@@ -146,5 +146,230 @@ class FuturesFlowTests(unittest.TestCase):
         self.assertEqual(result["flusso_futures"]["esecuzioni"]["n_liquidazioni_nel_campione"], 1)
 
 
+    def test_read_time_funding_numeric_mutations_are_rejected(self):
+        import copy
+        source = self._fresh()
+        for name in ("funding_rate_grezzo", "funding_rate_previsione_grezza"):
+            for bad in ("NaN", "Infinity", "-Infinity", "nonsense", True, False,
+                        float("nan"), float("inf"), None):
+                with self.subTest(name=name, bad=str(bad)):
+                    forged = copy.deepcopy(source)
+                    forged["funding"][name] = bad
+                    read = flow.at_read(forged, self.now)
+                    self.assertEqual(read["funding"]["stato"], "NON_VERIFICATO")
+                    self.assertNotIn("funding_rate_grezzo", read["funding"])
+        self.assertEqual(flow.at_read(source, self.now)["funding"]
+                         ["funding_rate_grezzo"], "-0.1")
+        for bad in ("NaN", "Infinity", True, "no-number"):
+            self.ticker["tickers"][0]["fundingRatePrediction"] = bad
+            self.assertEqual(flow.collect(self.now, request=self.fake_request)
+                             ["funding"]["stato"], "NON_VERIFICATO")
+
+    def test_read_time_summary_counts_bins_and_raw_tape_cannot_disagree(self):
+        import copy
+        sample = self._fresh()
+        self.assertEqual(sample["esecuzioni"]["n_liquidazioni_nel_campione"], 1)
+        for name, bad in (("n_liquidazioni_nel_campione", 99),
+                          ("n_liquidazioni_nel_campione", 99999),
+                          ("n_esecuzioni", 99), ("n_block_nel_campione", -1),
+                          ("durata_campione_secondi", float("inf"))):
+            with self.subTest(name=name, bad=bad):
+                forged = copy.deepcopy(sample)
+                forged["esecuzioni"][name] = bad
+                observed = flow.at_read(forged, self.now)["esecuzioni"]
+                self.assertEqual(observed["stato"], "NON_VERIFICATO")
+                self.assertNotIn("n_esecuzioni", observed)
+        for name, bad in (("volume_size_grezzo", "9999999"),
+                          ("n_esecuzioni", 99), ("prezzo_da", "-9")):
+            with self.subTest(name=name):
+                forged = copy.deepcopy(sample)
+                forged["esecuzioni"]["profilo_volumi_campione"][0][name] = bad
+                self.assertEqual(flow.at_read(forged, self.now)["esecuzioni"]
+                                 ["stato"], "NON_VERIFICATO")
+        for field, bad in (("size", "-1"), ("size", "Infinity"),
+                           ("price", "NaN"), ("type", "liquidation")):
+            forged = copy.deepcopy(sample)
+            forged["esecuzioni"]["trade_normalizzati"][0][field] = bad
+            self.assertEqual(flow.at_read(forged, self.now)["esecuzioni"]
+                             ["stato"], "NON_VERIFICATO")
+        for field in ("copertura", "richieste_pubbliche_massime", "heatmap"):
+            forged = copy.deepcopy(sample)
+            forged[field] = "market-wide liquidation heatmap"
+            self.assertEqual(flow.at_read(forged, self.now)["stato"],
+                             "NON_VERIFICATO")
+        for section, label in (("funding", "unita"), ("funding", "limite"),
+                               ("esecuzioni", "unita"), ("esecuzioni", "limite")):
+            forged = copy.deepcopy(sample)
+            forged[section][label] = "whales, USD notional, full heatmap"
+            self.assertEqual(flow.at_read(forged, self.now)[section]["stato"],
+                             "NON_VERIFICATO")
+
+    def test_trade_ids_duplicates_conflicts_and_equal_time_price(self):
+        import copy
+        self.history["history"][1]["time"] = self.history["history"][0]["time"]
+        self.history["history"][1]["price"] = self.history["history"][0]["price"]
+        distinct = self._fresh()
+        self.assertEqual(distinct["esecuzioni"]["n_esecuzioni"], 3)
+        self.assertEqual(len(distinct["esecuzioni"]["trade_normalizzati"]), 3)
+        # A byte-for-byte repeated public trade is counted only once.
+        repeat = copy.deepcopy(self.history["history"][0])
+        self.history["history"].append(repeat)
+        duplicate = flow.collect(self.now, request=self.fake_request)
+        self.assertEqual(duplicate["esecuzioni"]["n_esecuzioni"], 3)
+        self.assertEqual(flow.at_read(duplicate, self.now)["esecuzioni"]
+                         ["n_esecuzioni"], 3)
+        self.history["history"][-1]["size"] = "0.9999"
+        self.assertEqual(flow.collect(self.now, request=self.fake_request)
+                         ["esecuzioni"]["stato"], "NON_VERIFICATO")
+        self.history["history"][-1] = copy.deepcopy(repeat)
+        self.history["history"][-1]["trade_id"] = 999  # same uid, different ID
+        self.assertEqual(flow.collect(self.now, request=self.fake_request)
+                         ["esecuzioni"]["stato"], "NON_VERIFICATO")
+        del self.history["history"][-1]
+        self.history["history"][0]["trade_id"] = None
+        self.history["history"][0]["uid"] = None
+        self.assertEqual(flow.collect(self.now, request=self.fake_request)
+                         ["esecuzioni"]["stato"], "NON_VERIFICATO")
+
+    def test_source_clock_consistency_and_staleness(self):
+        import copy
+        good = self._fresh()
+        future = (self.now + dt.timedelta(minutes=20)).isoformat()
+        self.ticker["tickers"][0]["lastTime"] = future
+        self.assertEqual(flow.collect(self.now, request=self.fake_request)
+                         ["funding"]["stato"], "NON_VERIFICATO")
+        self.ticker["serverTime"] = future
+        self.assertEqual(flow.collect(self.now, request=self.fake_request)
+                         ["funding"]["stato"], "NON_VERIFICATO")
+        del self.ticker["serverTime"]
+        self.assertEqual(flow.collect(self.now, request=self.fake_request)
+                         ["funding"]["stato"], "NON_VERIFICATO")
+        self.history["serverTime"] = "2026-11-09T17:24:00Z"
+        self.assertEqual(flow.collect(self.now, request=self.fake_request)
+                         ["esecuzioni"]["stato"], "NON_VERIFICATO")
+        self.history["serverTime"] = future
+        self.assertEqual(flow.collect(self.now, request=self.fake_request)
+                         ["esecuzioni"]["stato"], "NON_VERIFICATO")
+        old = flow.at_read(good, self.now+dt.timedelta(minutes=18))
+        self.assertEqual(old["esecuzioni"]["stato"], "SCADUTO")
+        self.assertEqual(old["funding"]["stato"], "SCADUTO")
+        self.assertNotIn("trade_normalizzati", old["esecuzioni"])
+        self.assertNotIn("funding_rate_grezzo", old["funding"])
+        tamper = copy.deepcopy(good)
+        tamper["esecuzioni"]["ultimo_trade_utc"] = future
+        self.assertEqual(flow.at_read(tamper, self.now)["esecuzioni"]["stato"],
+                         "NON_VERIFICATO")
+
+    def test_public_errors_zero_sample_and_old_oi_cvd(self):
+        import urllib.error
+        import dossier_trade
+        from unittest.mock import patch
+        for condition in ("http429", "http503", "invalid_json", "empty", "missing"):
+            with self.subTest(condition=condition):
+                def request(url, timeout=13):
+                    if condition.startswith("http"):
+                        raise urllib.error.HTTPError(url, int(condition[4:]), "blocked", None, None)
+                    if condition == "invalid_json":
+                        return b"{broken json"
+                    data = dict(self.ticker if url.endswith("tickers") else self.history)
+                    if condition == "empty":
+                        data["history"] = []
+                    if condition == "missing":
+                        data.pop("serverTime", None)
+                    return json.dumps(data).encode()
+                result = flow.collect(self.now, request=request)
+                if condition != "empty":
+                    self.assertEqual(result["funding"]["stato"], "NON_VERIFICATO")
+                self.assertEqual(result["esecuzioni"]["stato"], "NON_VERIFICATO")
+        # Existing, independent OI/CVD data cannot be erased by tape failures.
+        seen = []
+        def request(url, timeout=13):
+            seen.append(url)
+            if "analytics/" in url:
+                raise OSError("OI/CVD temporarily unavailable")
+            raise urllib.error.HTTPError(url, 503, "futures tape unavailable", None, None)
+        with patch.object(dossier_trade.desk, "request", side_effect=request), \
+             patch.object(dossier_trade.time, "sleep"):
+            result = dossier_trade.derivatives_context(self.now.timestamp())
+        self.assertEqual(result["open-interest"]["errore"], "OSError")
+        self.assertEqual(result["cvd"]["errore"], "OSError")
+        self.assertEqual(result["flusso_futures"]["esecuzioni"]["stato"], "NON_VERIFICATO")
+        self.assertEqual(sum("/derivatives/api/v3/" in x for x in seen), 2)
+
+    def test_real_producer_serialized_packet_and_bridge_revalidate(self):
+        import copy
+        import dossier_trade
+        from scripts import kdd_wallet_packet_g0 as wallet
+        from scripts import kdd_bridge_g2 as bridge
+        from scripts import test_kdd_wallet_packet_g0 as fixture_mod
+
+        fixture = fixture_mod.WalletPacketG0Tests(
+            "test_wallet_first_all_assets_even_if_quote_missing")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture._analytic_fixture()
+        moment = fixture_mod.T
+        def ts(s):
+            return (moment - dt.timedelta(seconds=s)).isoformat()
+        self.ticker["serverTime"] = ts(5)
+        self.ticker["tickers"][0]["lastTime"] = ts(9)
+        self.history["serverTime"] = ts(5)
+        for i, item in enumerate(self.history["history"]):
+            item["time"] = ts(10 + i*5)
+        def request(url, timeout=13):
+            if "/api/charts/" in url:
+                raise OSError("OI/CVD synthetic offline")
+            return self.fake_request(url, timeout)
+        with patch.object(dossier_trade.desk, "request", side_effect=request), \
+             patch.object(dossier_trade.time, "sleep"):
+            producer = dossier_trade.derivatives_context(moment.timestamp())
+        self.assertEqual(producer["flusso_futures"]["esecuzioni"]["stato"],
+                         "CAMPIONE_RECENTE")
+        # Keep existing OI/CVD fixture; attach only the new public producer.
+        fixture.dossier["contesto_derivati_btc"]["flusso_futures"] = producer["flusso_futures"]
+        fixture.dump()
+        pkt = wallet.build(fixture.root, now=moment)
+        self.assertEqual(pkt["evidenze_multifonte"]["derivati_btc"]["open-interest"]
+                         ["stato"], "DISPONIBILE")
+        self.assertEqual(pkt["evidenze_multifonte"]["derivati_btc"]["cvd"]["stato"],
+                         "DISPONIBILE")
+        def bundle(packet):
+            return {"schema": bridge.SCHEMA_BUNDLE, "packet": packet,
+                    "packet_sha256": bridge.digest(packet),
+                    "preparato_utc": moment.isoformat(timespec="seconds")}
+        wire = json.loads(json.dumps(bundle(pkt)))
+        current = bridge.read_context(wire, now=moment)
+        self.assertEqual(current["flusso_futures_alla_lettura"]["esecuzioni"]
+                         ["n_liquidazioni_nel_campione"], 1)
+        stale = bridge.read_context(wire, now=moment+dt.timedelta(minutes=18))
+        self.assertEqual(stale["flusso_futures_alla_lettura"]["esecuzioni"]
+                         ["stato"], "SCADUTO")
+        self.assertNotIn("n_esecuzioni",
+                         stale["flusso_futures_alla_lettura"]["esecuzioni"])
+        # Tamper dossier before actual packet build, not a fake processor.
+        fixture.dossier["contesto_derivati_btc"]["flusso_futures"][
+            "esecuzioni"]["n_liquidazioni_nel_campione"] = 99
+        fixture.dump()
+        bad_source_pkt = wallet.build(fixture.root, now=moment)
+        self.assertEqual(bad_source_pkt["evidenze_multifonte"]["derivati_btc"]
+                         ["flusso_futures"]["esecuzioni"]["stato"], "NON_VERIFICATO")
+        # Tamper a valid packet, recompute local transport digest, then read.
+        attacked = copy.deepcopy(wire)
+        attacked["packet"]["evidenze_multifonte"]["derivati_btc"]["flusso_futures"][
+            "esecuzioni"]["n_liquidazioni_nel_campione"] = 99
+        attacked["packet_sha256"] = bridge.digest(attacked["packet"])
+        context = bridge.read_context(attacked, now=moment)
+        self.assertEqual(context["flusso_futures_alla_lettura"]["esecuzioni"]
+                         ["stato"], "NON_VERIFICATO")
+        self.assertNotIn("n_liquidazioni_nel_campione",
+                         context["flusso_futures_alla_lettura"]["esecuzioni"])
+        # An old packet without Futures remains usable, but not verified.
+        old = copy.deepcopy(wire)
+        del old["packet"]["evidenze_multifonte"]["derivati_btc"]["flusso_futures"]
+        old["packet_sha256"] = bridge.digest(old["packet"])
+        self.assertEqual(bridge.read_context(old, now=moment)
+                         ["flusso_futures_alla_lettura"]["stato"], "NON_VERIFICATO")
+
+
 if __name__ == "__main__":
     unittest.main()
