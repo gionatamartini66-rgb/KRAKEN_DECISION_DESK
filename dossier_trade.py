@@ -388,7 +388,7 @@ def economic_evidence(source, wallet, four, candidates, now, *,
         token, pair = chosen
         key = unresolved[chosen]
         discovery_calls += 1
-        search, error = public_json(econ.CG_SEARCH + token)
+        search, error = public_json(econ.CG_SEARCH + econ.canonical_token(token))
         if error:
             discovery_problem = error
         elif not isinstance(search, dict) or not isinstance(search.get("coins"), list):
