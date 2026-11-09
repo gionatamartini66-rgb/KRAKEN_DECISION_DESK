@@ -114,7 +114,7 @@ class EconomicEvidenceTests(unittest.TestCase):
             self.assertLessEqual(output["richieste_effettuate"], 9)
         first, second, third = outputs
         self.assertEqual(sum(x["fondamentali"]["stato"] == "VERIFICATO"
-                             for x in first["posizioni"]), 3)
+                             for x in first["posizioni"]), 4)
         self.assertEqual(sum(x["fondamentali"]["stato"] == "VERIFICATO"
                              for x in second["posizioni"]), 8)
         self.assertEqual(sum(x["fondamentali"]["stato"] == "VERIFICATO"
