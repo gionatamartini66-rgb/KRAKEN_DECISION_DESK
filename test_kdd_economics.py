@@ -553,6 +553,15 @@ class AdaptivePortfolioTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 kdd_saldi.apply({"source": "invalid"}, path=path)
             self.assertEqual(json.loads(path.read_text()), snap)
+            # A missing BTC entry is not equivalent to a reported zero.
+            apply("2026-11-09T08:40:00+00:00", {"ZEC": 1})
+            absent = json.loads(path.read_text())
+            self.assertEqual(absent["riconciliazione_posizioni"]
+                             ["assenti_rispetto_alla_precedente"], ["BTC"])
+            self.assertEqual(absent["storico_transizioni_posizioni"][-1]["evidenza"],
+                             "ASSENTE_DALLA_FOTOGRAFIA_BALANCEEX")
+            self.assertEqual(absent["storico_transizioni_posizioni"][1]
+                             ["acquisito_utc"], "2026-11-09T08:20:00+00:00")
 
 if __name__=="__main__":
     unittest.main()
