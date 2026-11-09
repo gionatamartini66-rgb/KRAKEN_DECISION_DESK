@@ -57,7 +57,11 @@ class UpdateTests(unittest.TestCase):
                 # This updater fixture contains placeholder application modules;
                 # package probes here test staging, while the real packet and
                 # candlestick suites execute on genuine source in CI/preflight.
-                if name.endswith(('test_kdd_portfolio_4tf.py', 'test_kdd_bridge_g2.py', 'test_kdd_android_transaction_g2.py', 'test_kdd_drive_exchange.py', 'test_kdd_funding_book_g2.py', 'kdd_android_regressions.py', 'test_kdd_wallet_packet_g0.py')):
+                if name.endswith('kdd_android_regressions.py'):
+                    # The real updater executes this runner as an importable
+                    # module, with both cwd and scripts/ available.
+                    (directory / name).write_text('def main():\n    return None\n')
+                elif name.endswith(('test_kdd_portfolio_4tf.py', 'test_kdd_bridge_g2.py', 'test_kdd_android_transaction_g2.py', 'test_kdd_drive_exchange.py', 'test_kdd_funding_book_g2.py', 'test_kdd_wallet_packet_g0.py')):
                     # The updater's synthetic source tree intentionally uses
                     # placeholder application code. Its staging test verifies
                     # packaging only; real E2E runs separately on true KDD.
@@ -198,6 +202,58 @@ class UpdateTests(unittest.TestCase):
                 backups=list((home/".local/share/kdd-deploy-backups").glob("*"))
                 self.assertEqual(len(backups),1)
                 self.assertEqual((backups[0]/name).read_bytes() if existed else None,old)
+
+
+    def test_new_catalog_is_present_in_preflight_and_installed(self):
+        """New JSON data must be tested, not just copied after preflight."""
+        name = "kdd_project_catalog.json"
+        payload = '{"schema":"kdd-project-catalog-v001","projects":{}}\n'
+        (self.root / name).write_text(payload)
+        (self.live / name).unlink()
+        observed = []
+        def inspect_stage(stage):
+            self.assertEqual((stage / name).read_text(), payload)
+            observed.append(stage)
+        with patch.object(kdd, 'isolated_test', side_effect=inspect_stage), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=True)
+        self.assertIn('PRECHECK OK', out.getvalue())
+        self.assertEqual(len(observed), 1)
+        self.assertFalse((self.live / name).exists())
+        home = Path(self.tmp.name) / 'catalog-install-home'
+        home.mkdir()
+        with patch.object(kdd.Path, 'home', return_value=home), \
+             patch.object(kdd, 'isolated_test', side_effect=inspect_stage), \
+             patch('builtins.input', return_value='APPLICA'), \
+             contextlib.redirect_stdout(io.StringIO()):
+            kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=False)
+        self.assertEqual((self.live / name).read_text(), payload)
+        self.assertEqual(len(observed), 3)
+        self.assertEqual((self.live / 'README.md').is_file(), True)
+
+    def test_r5_runner_resolves_both_import_roots_without_pythonpath(self):
+        """Exercise the actual R5 launcher on a clean subprocess environment."""
+        import os
+        import subprocess
+        real_command = kdd.command
+        r5_seen = []
+        def subprocess_with_clean_r5_environment(args, *, cwd, timeout=120):
+            if any('kdd_android_regressions' in str(arg) for arg in args):
+                r5_seen.append(tuple(args))
+                env = os.environ.copy()
+                env.pop('PYTHONPATH', None)
+                return subprocess.run(args, cwd=cwd, text=True,
+                                      capture_output=True, timeout=timeout, env=env)
+            return real_command(args, cwd=cwd, timeout=timeout)
+        with patch.object(kdd, 'capability_preflight'), \
+             patch.object(kdd, 'command', side_effect=subprocess_with_clean_r5_environment), \
+             contextlib.redirect_stdout(io.StringIO()):
+            # apply() prepares the README fingerprint and private fixtures;
+            # testing isolated_test(self.root) skips that required preparation.
+            kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=True)
+        self.assertEqual(len(r5_seen), 1)
+        self.assertIn('from scripts.kdd_android_regressions import main',
+                      ' '.join(r5_seen[0]))
 
     def test_issue43_economic_module_staged_prepost_and_rollback(self):
         name="kdd_economics.py"
