@@ -147,6 +147,15 @@ def derivatives_context(now):
         except Exception as exc:
             outputs[metric]={"errore":type(exc).__name__}
         time.sleep(.35)
+    # KDD-16: bounded public futures tape + funding; no keys, margin or orders.
+    # Keep the pre-existing OI/CVD measurements if this extra feed is missing.
+    try:
+        import kdd_futures_flow
+        outputs["flusso_futures"] = kdd_futures_flow.collect(now)
+    except (OSError, ValueError, TypeError, KeyError, OverflowError) as exc:
+        outputs["flusso_futures"] = {"strumento": "PF_XBTUSD",
+                                   "stato": "NON_VERIFICATO",
+                                   "motivo": type(exc).__name__}
     return outputs
 
 
