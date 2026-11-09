@@ -439,6 +439,8 @@ class AdaptivePortfolioTests(unittest.TestCase):
     def test_unknown_ticker_ambiguity_and_nonexhaustive_search_fail_closed(self):
         ambiguous = copy.deepcopy(self.markets)
         ambiguous["zcash-lookalike"]["tickers"][0]["market"]["identifier"] = "kraken"
+        ambiguous["zcash-lookalike"]["tickers"][0].update(
+            is_stale=False, is_anomaly=False)
         self.assertEqual(e.resolve_public("ZEC", "ZEC/EUR", self.search, ambiguous,
                                            T)["motivo"], "TICKER_AMBIGUO_SU_KRAKEN")
         for result in ({"coins": self.search["coins"] * 2},
@@ -551,7 +553,8 @@ class AdaptivePortfolioTests(unittest.TestCase):
         # Two Kraken matches are ambiguous even if the first is the expected token.
         altered = copy.deepcopy(markets)
         altered["near-intents-bridged-zec"]["tickers"] = [
-            {"market": {"identifier": "kraken"}, "base": "ZEC", "target": "EUR"}]
+            {"market": {"identifier": "kraken"}, "base": "ZEC", "target": "EUR",
+             "is_stale": False, "is_anomaly": False}]
         self.assertEqual(e.resolve_public("ZEC", "ZEC/EUR", search, altered, T)
                          ["motivo"], "TICKER_AMBIGUO_SU_KRAKEN")
         missing = copy.deepcopy(markets)
