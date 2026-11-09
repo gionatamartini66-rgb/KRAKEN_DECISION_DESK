@@ -483,6 +483,13 @@ def at_read(source, positions, shortlist, now):
                     row_copy[field] = dict(evidence, stato=(
                         "VERIFICATO" if evidence["stato"] == "VERIFICATO" and now-t <= max_age
                         else "SCADUTO"))
+            if row_copy["identita"].get("stato") != "IDENTITA_VERIFICATA_DA_CATALOGO":
+                # An expired project binding cannot leave verified numerical
+                # fundamentals attached to the historical wallet position.
+                row_copy["fondamentali"] = dict(
+                    fundamentals({}, None, now, now), stato="NON_VERIFICATO_IDENTITA",
+                    motivo="ATTESTAZIONE_IDENTITA_SCADUTA")
+                row_copy["evento"] = release_event({}, None, now, now)
             row_copy["lettura_economica"] = decision_context(
                 row_copy["identita"], row_copy["fondamentali"], row_copy["evento"])
             result[name].append(row_copy)
