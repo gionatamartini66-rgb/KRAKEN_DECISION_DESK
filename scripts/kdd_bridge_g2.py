@@ -759,6 +759,13 @@ def read_context(bundle, *, now=None, expected_sha256=None):
                 pkt.get("opportunita_esterne_scanner") or [], moment)
         except (ValueError, TypeError, KeyError, OverflowError) as exc:
             raise BridgeError("Evidenza economica non verificabile") from exc
+    # Re-evaluate persisted Futures evidence at the actual GPT read, not only
+    # when the packet was built. Transport digests do not attest semantics.
+    import kdd_futures_flow
+    derivatives = multifonte.get("derivati_btc") if isinstance(multifonte, dict) else None
+    futures_at_read = kdd_futures_flow.at_read(
+        derivatives.get("flusso_futures") if isinstance(derivatives, dict) else None,
+        moment)
     return {"schema": "kdd_gpt_read_context_v001", "snapshot_id": digest(pkt),
             "snapshot_utc": pkt["rilevazione_kdd_utc"],
             "letto_utc": moment.isoformat(timespec="seconds"),
@@ -766,6 +773,7 @@ def read_context(bundle, *, now=None, expected_sha256=None):
             "n_posizioni": len(rows), "quattro_tf_aggiornati": complete,
             "copertura": observations,
             "evidenze_economiche_alla_lettura": economic_read,
+            "flusso_futures_alla_lettura": futures_at_read,
             "totale_parziale": bool(section.get("totale_parziale")) or partial,
             "book_150_alla_lettura": stato_book_150_alla_lettura(
                 pkt, moment, mercato_stato=market_status["stato"],
