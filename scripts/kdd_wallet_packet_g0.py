@@ -1092,6 +1092,25 @@ def build(root: Path, now: dt.datetime | None = None) -> dict:
         raise PacketError("Totale numerico senza posizioni valorizzate")
     elif abs(valued_sum - Decimal(total)) > Decimal("0.01"):
         raise PacketError("Totale stimato non coincide con posizioni")
+    # Economic weight is explicit only for the known valued subset. A partial
+    # EUR total is NEVER the whole wallet; unknown asset valuations stay unknown.
+    entire_wallet_valued = (state == "COMPLETO" and not incomplete
+                            and not report.get("totale_parziale") and total is not None
+                            and valued_sum > 0)
+    for position in positions:
+        value = position.get("valore_eur")
+        weight = (format(Decimal(str(value)) * 100 / valued_sum, ".4f")
+                  if value is not None and valued_sum > 0 else None)
+        position["peso_sul_valorizzato_pct"] = weight
+        position["peso_sul_intero_patrimonio_pct"] = (
+            weight if entire_wallet_valued else None)
+        position["peso_stato"] = ("TOTALE_COMPLETO" if entire_wallet_valued else
+                                  "SOLO_SOTTOINSIEME_VALORIZZATO"
+                                  if weight is not None else "NON_CALCOLABILE")
+        position["peso_limite"] = (
+            "Esclusa liquidita spot; non comprende esposizioni Futures o saldi non acquisiti"
+            if entire_wallet_valued else
+            "Peso sul solo valore EUR conosciuto, non sull'intero patrimonio")
     book_for_gpt = book_150_per_gpt(
         dossier, positions, wallet_sha, snapshot["rilevazione_utc"], now)
     return {"schema": SCHEMA, "tipo": "PACCHETTO_PATRIMONIALE_PRIVATO",

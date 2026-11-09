@@ -2,53 +2,40 @@
 import datetime as dt
 import email.utils
 import math
+import json
+import re
+from pathlib import Path
 from urllib.parse import urlparse
 
+# Il file JSON e' un registro dati modificabile senza modificare il motore Python.
+# Le nuove identita' non vengono aggiunte automaticamente al registro curato:
+# sono conservate, con fonte e data, nel dossier locale.
+CATALOG_FILE = Path(__file__).with_name("kdd_project_catalog.json")
+def _load_catalog():
+    try:
+        data = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
+        if data.get("schema") != "kdd-project-catalog-v001":
+            return {}
+        return {k: v for k, v in data.get("projects", {}).items()
+                if re.fullmatch(r"[A-Z0-9]{2,20}", k)
+                and isinstance(v, dict)
+                and isinstance(v.get("id"), str)
+                and re.fullmatch(r"[a-z0-9-]{2,120}", v["id"])
+                and isinstance(v.get("name"), str) and v["name"]}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+_CURATED = _load_catalog()
+PROJECTS = {k: (v["id"], v["name"], v.get("repository"))
+            for k, v in _CURATED.items()}
+PROJECT_CAVEATS = {k: v["caveat"] for k, v in _CURATED.items()
+                   if isinstance(v.get("caveat"), str)}
+CG = "https://api.coingecko.com/api/v3/coins/"
+CG_SEARCH = "https://api.coingecko.com/api/v3/search?query="
+# One search plus every exact-symbol market check must fit the nine-request budget.
+MAX_MARKET_CANDIDATES = 8
 VERSION = "kdd-economic-v001"
 UTC = dt.timezone.utc
-# Curated project identities, NOT a general ticker resolver. A verified Kraken
-# pair identity is also required for every attribution.
-PROJECTS = {
-    # Identity references: Kraken asset pages + CoinGecko resolved coin IDs/names.
-    # Kraken's AssetPairs ONLINE binding is additionally required at runtime.
-    "BNB": ("binancecoin", "BNB", None),
-    "FET": ("fetch-ai", "Artificial Superintelligence Alliance", None),
-    "JUP": ("jupiter-exchange-solana", "Jupiter", None),
-    "RENDER": ("render-token", "Render", None),
-    # Shortlist identities: a ticker match alone is never sufficient.
-    "PEPE": ("pepe", "Pepe", None),
-    "PUMP": ("pump-fun", "Pump.fun", None),
-    "BTC": ("bitcoin", "Bitcoin", "bitcoin/bitcoin"),
-    "SOL": ("solana", "Solana", "anza-xyz/agave"),
-    "ADA": ("cardano", "Cardano", "IntersectMBO/cardano-node"),
-    "ETH": ("ethereum", "Ethereum", None),
-    "NEAR": ("near", "NEAR Protocol", None),
-    "SUI": ("sui", "Sui", None),
-    "XRP": ("ripple", "XRP", None),
-    "ONDO": ("ondo-finance", "Ondo", None),
-    "KAS": ("kaspa", "Kaspa", None),
-    "ICNT": ("impossible-cloud-network-token", "Impossible Cloud Network", None),
-}
-
-# Relevant primary-source cautions: never equate an exchange asset with a chain
-# contract without a separate wallet/network attestation.
-PROJECT_CAVEATS = {
-    "FET": ("CoinGecko tracks FET under the ASI Alliance name; Kraken's FET/ASI "
-            "migration support must be checked separately. Do not infer a migrated "
-            "wallet contract or 1:1 conversion from this price identifier."),
-    "RENDER": ("Kraken reports RNDR -> RENDER conversion (2024, Solana); "
-               "never attribute legacy RNDR to the new RENDER pair."),
-}
-# Reviewed identifiers (2026-11-08):
-# https://www.coingecko.com/en/coins/bnb
-# https://www.coingecko.com/en/coins/artificial-superintelligence-alliance
-# https://www.coingecko.com/en/coins/jupiter
-# https://www.coingecko.com/en/coins/render
-# https://www.coingecko.com/en/coins/pepe
-# https://www.coingecko.com/en/coins/pump-fun
-# https://support.kraken.com/articles/kraken-to-support-rndr-migration-to-render
-# https://support.kraken.com/articles/ocean-protocol-and-fet-migration
-CG = "https://api.coingecko.com/api/v3/coins/"
 
 # Capabilities, not observed flows or claims of institutional buying.
 # Entries labelled CONSULTABILE are references for GPT research only.
@@ -93,7 +80,11 @@ def sources_matrix():
 
 
 def canonical_token(token):
-    return "BTC" if token in ("XBT", "XXBT") else token
+    if token in ("XBT", "XXBT", "BTC"):
+        return "BTC"
+    if token in ("XDG", "XXDG", "DOGE"):
+        return "DOGE"
+    return token
 
 KNOWN_MACRO = {
     "Fed — politica monetaria": "www.federalreserve.gov",
@@ -127,40 +118,136 @@ def numeric(value):
     return value if math.isfinite(value) and value >= 0 else None
 
 
-def identify(token, pair, pair_key, *, catalog=None):
-    """Attribute an asset only through the exact ONLINE Kraken AssetPairs mapping.
+def _kraken_binding(token, pair, pair_key, catalog):
+    """Exact online REST key, wsname and base; never accept a guessed key."""
+    if not isinstance(token, str) or not isinstance(pair, str) or not isinstance(pair_key, str):
+        return None
+    if not isinstance(catalog, dict):
+        return None
+    observed = catalog.get(pair_key)
+    if not isinstance(observed, dict) or pair.count("/") != 1:
+        return None
+    base, quote = pair.split("/")
+    expected = canonical_token(token)
+    if (canonical_token(base) != expected or quote not in ("EUR", "USD", "USDC")
+            or observed.get("pair_key") != pair_key or observed.get("pair") != pair
+            or observed.get("base") != base or observed.get("quote") != quote):
+        return None
+    return observed
 
-    The caller must supply serve.spot_catalog() of the actual public response.
-    A plausible string or a boolean assertion cannot establish an identity.
-    """
+
+def _dynamic_valid(token, pair, record):
+    """Recheck stored independent market proof; an arbitrary CoinGecko ID fails."""
+    if not isinstance(record, dict) or record.get("metodo") != "KRAKEN_COINGECKO_MARKET":
+        return False
+    proof = record.get("prova_mercato")
+    if not isinstance(proof, dict) or not isinstance(pair, str) or pair.count("/") != 1:
+        return False
+    base, quote = pair.split("/")
+    coin_id = record.get("coingecko_id")
+    return bool(isinstance(coin_id, str) and re.fullmatch(r"[a-z0-9-]{2,120}", coin_id)
+                and isinstance(record.get("progetto"), str) and record["progetto"]
+                and proof.get("exchange") == "kraken"
+                and proof.get("is_stale") is False
+                and proof.get("is_anomaly") is False
+                and proof.get("symbol") == canonical_token(token)
+                and canonical_token(proof.get("base")) == canonical_token(base)
+                and proof.get("target") == quote
+                and proof.get("ricerca_url") == CG_SEARCH + canonical_token(token)
+                and proof.get("ticker_url") == CG + coin_id + "/tickers?exchange_ids=kraken"
+                and stamp(proof.get("verificato_utc")) is not None)
+
+
+def identify(token, pair, pair_key, *, catalog=None, discovered=None):
+    """Kraken ONLINE binding + curated data, or independently matched CoinGecko market."""
     base = {"stato": "NON_VERIFICATO", "token": token,
             "coppia": pair, "pair_key": pair_key,
+            "motivo": "IDENTITA_NON_ATTESTATA",
             "limite": "Nessuna attribuzione CoinGecko dal solo ticker"}
-    project_token = canonical_token(token)
-    if not isinstance(token, str) or project_token not in PROJECTS:
-        return base
-    if not isinstance(catalog, dict) or not isinstance(pair_key, str):
-        return base
-    observed = catalog.get(pair_key)
-    if not isinstance(observed, dict):
-        return base
-    valid_bases = ("BTC", "XBT") if project_token == "BTC" else (project_token,)
-    if (not isinstance(pair, str) or pair.count("/") != 1
-            or pair.split("/")[0] not in valid_bases
-            or pair.split("/")[1] not in ("EUR", "USD", "USDC")
-            or observed.get("pair_key") != pair_key
-            or observed.get("pair") != pair
-            or observed.get("base") != pair.split("/")[0]
-            or observed.get("quote") != pair.split("/")[1]):
-        return base
-    cg, name, repository = PROJECTS[project_token]
+    observed = _kraken_binding(token, pair, pair_key, catalog)
+    if observed is None:
+        return dict(base, motivo="COPPIA_KRAKEN_NON_VERIFICATA")
+    normalized = canonical_token(token)
+    if normalized in PROJECTS:
+        cg, name, repository = PROJECTS[normalized]
+        return dict(base, stato="IDENTITA_VERIFICATA_DA_CATALOGO",
+                    token_progetto=normalized, asset_base_kraken=observed["base"],
+                    progetto=name, coingecko_id=cg, repository_primario=repository,
+                    metodo="REGISTRO_CURATO", motivo=None,
+                    fonte_identita="Kraken AssetPairs ONLINE + kdd_project_catalog.json",
+                    limite=("Registry curato: chain/contract e negoziabilita conto non attestati. "
+                            + PROJECT_CAVEATS.get(normalized, "")))
+    if not _dynamic_valid(token, pair, discovered):
+        return dict(base, motivo="PROGETTO_NON_NEL_CATALOGO_CURATO")
     return dict(base, stato="IDENTITA_VERIFICATA_DA_CATALOGO",
-                token_progetto=project_token,
-                asset_base_kraken=observed["base"],
-                progetto=name, coingecko_id=cg, repository_primario=repository,
-                fonte_identita="Kraken pubblico /0/public/AssetPairs (online) + registro progetto curato",
-                limite=("Corrispondenza curata: chain/contract e negoziabilita conto non attestati. " +
-                        PROJECT_CAVEATS.get(project_token, "")))
+                token_progetto=normalized, asset_base_kraken=observed["base"],
+                coingecko_id=discovered["coingecko_id"],
+                progetto=discovered["progetto"], repository_primario=None,
+                metodo="KRAKEN_COINGECKO_MARKET",
+                prova_mercato=dict(discovered["prova_mercato"]),
+                motivo=None,
+                fonte_identita="Kraken AssetPairs ONLINE + CoinGecko search + market ticker Kraken",
+                limite="Attribuzione incrociata, non prova di chain/contract, migrazione o negoziabilita sul conto")
+
+
+def resolve_public(token, pair, search_result, market_results, now):
+    """Require EVERY exact-symbol search candidate checked against its Kraken market.
+
+    If CoinGecko's result list is too large or even one candidate was not
+    checked, the identity remains unresolved. Never choose the first hit.
+    """
+    blank = {"stato": "NON_VERIFICATO", "motivo": "RISULTATI_ASSENTI"}
+    if not isinstance(search_result, dict) or not isinstance(search_result.get("coins"), list):
+        return dict(blank, motivo="RICERCA_NON_DISPONIBILE")
+    exact = [c for c in search_result["coins"]
+             if isinstance(c, dict) and isinstance(c.get("symbol"), str)
+             and c["symbol"].upper() == canonical_token(token)
+             and isinstance(c.get("id"), str)
+             and re.fullmatch(r"[a-z0-9-]{2,120}", c["id"])
+             and isinstance(c.get("name"), str) and c["name"]]
+    if len(search_result["coins"]) >= 100:
+        return dict(blank, motivo="RISULTATI_RICERCA_PAGINATI_NON_ESAUSTIVI")
+    if not exact:
+        return blank
+    if len(exact) > MAX_MARKET_CANDIDATES:
+        return dict(blank, motivo="TICKER_OMONIMI_SUPERANO_BUDGET")
+    if len({c["id"] for c in exact}) != len(exact):
+        return dict(blank, motivo="TICKER_AMBIGUO_RICERCA_NON_ESAUSTIVA")
+    if not isinstance(market_results, dict) or any(c["id"] not in market_results
+                                                    or market_results[c["id"]] is None
+                                                    for c in exact):
+        return dict(blank, motivo="MERCATI_COINGECKO_NON_COMPLETI")
+    base, target = pair.split("/") if isinstance(pair, str) and pair.count("/") == 1 else ("", "")
+    matches = []
+    for coin in exact:
+        response = market_results[coin["id"]]
+        if (not isinstance(response, dict) or not isinstance(response.get("tickers"), list)
+                or (response.get("name") is not None and response.get("name") != coin["name"])):
+            return dict(blank, motivo="RISPOSTA_MARKET_NON_VALIDA")
+        if len(response["tickers"]) >= 100:
+            return dict(blank, motivo="MERCATI_PAGINATI_NON_ESAUSTIVI")
+        if any(isinstance(t, dict)
+               and isinstance(t.get("market"), dict)
+               and t["market"].get("identifier") == "kraken"
+               and canonical_token(t.get("base")) == canonical_token(base)
+               and t.get("target") == target
+               and t.get("is_anomaly") is False
+               and t.get("is_stale") is False
+               for t in response["tickers"]):
+            matches.append(coin)
+    if len(matches) != 1:
+        return dict(blank, motivo=("NESSUN_MERCATO_KRAKEN_CONFERMATO" if not matches
+                                  else "TICKER_AMBIGUO_SU_KRAKEN"))
+    coin = matches[0]
+    proof = {"exchange": "kraken", "symbol": canonical_token(token),
+             "is_stale": False, "is_anomaly": False,
+             "base": base, "target": target,
+             "ricerca_url": CG_SEARCH + canonical_token(token),
+             "ticker_url": CG + coin["id"] + "/tickers?exchange_ids=kraken",
+             "verificato_utc": now.isoformat(timespec="seconds")}
+    return {"stato": "RISOLTO", "metodo": "KRAKEN_COINGECKO_MARKET",
+            "coingecko_id": coin["id"], "progetto": coin["name"],
+            "prova_mercato": proof}
 
 def fundamentals(identity, payload, now, acquired):
     out = {"stato": "NON_VERIFICATO", "fonte": None, "rilevato_utc": None,
@@ -361,23 +448,31 @@ def at_read(source, positions, shortlist, now):
                 raise ValueError("Identita economica non valida")
             if identity.get("stato") == "IDENTITA_VERIFICATA_DA_CATALOGO":
                 project_token = canonical_token(row["token"])
-                if (project_token not in PROJECTS or
-                        identity.get("token_progetto", project_token) != project_token or
-                        identity.get("coingecko_id") != PROJECTS[project_token][0] or
-                        identity.get("progetto") != PROJECTS[project_token][1] or
-                        not identity.get("pair_key") or
-                        not isinstance(identity.get("coppia"), str) or
-                        identity["coppia"].count("/") != 1 or
-                        identity["coppia"].split("/")[0] not in (
-                            ("BTC", "XBT") if project_token == "BTC" else (project_token,)) or
-                        identity["coppia"].split("/")[1] not in ("EUR", "USD", "USDC") or
-                        identity.get("asset_base_kraken",
-                                     identity["coppia"].split("/")[0])
-                        != identity["coppia"].split("/")[0] or
-                        (name == "candidati" and
-                         identity["coppia"] != target.get("coppia_analisi"))):
+                pair = identity.get("coppia")
+                pair_ok = (isinstance(pair, str) and pair.count("/") == 1
+                           and canonical_token(pair.split("/")[0]) == project_token
+                           and pair.split("/")[1] in ("EUR", "USD", "USDC"))
+                is_curated = identity.get("metodo") in (None, "REGISTRO_CURATO")
+                correct_project = (
+                    identity.get("coingecko_id") == PROJECTS[project_token][0] and
+                    identity.get("progetto") == PROJECTS[project_token][1]
+                    if is_curated and project_token in PROJECTS else
+                    _dynamic_valid(row["token"], pair, identity)
+                    if not is_curated and project_token not in PROJECTS else False)
+                if (not pair_ok or not correct_project
+                        or identity.get("token_progetto", project_token) != project_token
+                        or not isinstance(identity.get("pair_key"), str)
+                        or not identity["pair_key"]
+                        or identity.get("asset_base_kraken", pair.split("/")[0] if pair_ok else None)
+                           != (pair.split("/")[0] if pair_ok else None)
+                        or (name == "candidati" and pair != target.get("coppia_analisi"))):
                     raise ValueError("Identita CoinGecko non attribuibile")
             row_copy = dict(row)
+            if identity.get("metodo") == "KRAKEN_COINGECKO_MARKET":
+                verified = stamp(identity["prova_mercato"].get("verificato_utc"))
+                if not verified or now-verified > dt.timedelta(days=7):
+                    row_copy["identita"] = dict(identity, stato="NON_VERIFICATO",
+                                               motivo="ATTESTAZIONE_IDENTITA_SCADUTA")
             for field in ("fondamentali", "evento"):
                 evidence = row.get(field)
                 if not isinstance(evidence, dict):
@@ -399,8 +494,15 @@ def at_read(source, positions, shortlist, now):
                     row_copy[field] = dict(evidence, stato=(
                         "VERIFICATO" if evidence["stato"] == "VERIFICATO" and now-t <= max_age
                         else "SCADUTO"))
+            if row_copy["identita"].get("stato") != "IDENTITA_VERIFICATA_DA_CATALOGO":
+                # An expired project binding cannot leave verified numerical
+                # fundamentals attached to the historical wallet position.
+                row_copy["fondamentali"] = dict(
+                    fundamentals({}, None, now, now), stato="NON_VERIFICATO_IDENTITA",
+                    motivo="ATTESTAZIONE_IDENTITA_SCADUTA")
+                row_copy["evento"] = release_event({}, None, now, now)
             row_copy["lettura_economica"] = decision_context(
-                identity, row_copy["fondamentali"], row_copy["evento"])
+                row_copy["identita"], row_copy["fondamentali"], row_copy["evento"])
             result[name].append(row_copy)
     result["copertura_fondamentali"] = {
         "posizioni_totali": len(result["posizioni"]),

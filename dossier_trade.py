@@ -291,154 +291,278 @@ def finanziamento_150_book(source, portfolio, *, saldo_recente, kraken_client=No
 
 def economic_evidence(source, wallet, four, candidates, now, *,
                       asset_pairs=None, previous=None):
-    """All rows, bounded public requests and fair multi-refresh fundamental coverage."""
+    """Patrimonio dinamico: catalogo Kraken reale, progetti curati o ricerca incrociata.
+
+    The previous dossier is a dated, local public-evidence cache, never a
+    substitute for the current Kraken AssetPairs binding or wallet snapshot.
+    """
+    import json
+    import urllib.error
     import kdd_economics as econ
     import serve
 
-    # Existing Kraken parser enforces ONLINE, exact REST key/wsname, aliases,
-    # and unique ownership. A candidate's own key is never a certificate.
     try:
         catalog = serve.spot_catalog(lambda endpoint: asset_pairs)
     except (ValueError, TypeError, KeyError, OSError, RuntimeError):
         catalog = {}
-    items = {"posizioni": [], "candidati": []}
+    prior = previous if isinstance(previous, dict) and previous.get("schema") == econ.VERSION else {}
+    prior_time = econ.stamp(prior.get("acquisito_utc"))
+    allowed_history = bool(prior_time and dt.timedelta(0) <= now-prior_time <= dt.timedelta(days=7))
+    # Only locally recorded public identities are retained; every new snapshot
+    # rechecks their exact REST key and pair against Kraken ONLINE AssetPairs.
+    previous_dynamic = {}
+    if allowed_history:
+        for old in prior.get("identita_dinamiche", [])[:100]:
+            if not isinstance(old, dict):
+                continue
+            token = old.get("token")
+            pair = old.get("coppia")
+            record = old.get("risoluzione")
+            proof = record.get("prova_mercato") if isinstance(record, dict) else None
+            verified = econ.stamp(proof.get("verificato_utc")) if isinstance(proof, dict) else None
+            if (isinstance(token, str) and verified
+                    and dt.timedelta(0) <= now-verified <= dt.timedelta(days=7)
+                    and econ._dynamic_valid(token, pair, record)):
+                previous_dynamic[(token, pair)] = record
+
     wallet_rows = wallet.get("posizioni") if isinstance(wallet, dict) else None
     wallet_rows = wallet_rows if isinstance(wallet_rows, list) else []
     four_rows = four.get("posizioni") if isinstance(four, dict) else None
     four_rows = four_rows if isinstance(four_rows, list) else []
+    items = {"posizioni": [], "candidati": []}
     for index, row in enumerate(wallet_rows):
         tf = four_rows[index] if index < len(four_rows) and isinstance(four_rows[index], dict) else {}
         token, valid = desk.wallet_symbol(row.get("token") if isinstance(row, dict) else None)
-        identity = econ.identify(token, tf.get("coppia"), tf.get("pair_key"),
-                                 catalog=catalog if valid and tf.get("token") == token else {})
+        pair, key = tf.get("coppia"), tf.get("pair_key")
+        identity = econ.identify(token, pair, key,
+                                 catalog=catalog if valid and tf.get("token") == token else {},
+                                 discovered=previous_dynamic.get((token, pair)))
         items["posizioni"].append({"indice": index, "token": token, "identita": identity})
     for index, row in enumerate(candidates):
         row = row if isinstance(row, dict) else {}
         token, valid = desk.wallet_symbol(row.get("token"))
-        pair = row.get("coppia_analisi")
-        key = row.get("kraken_pair_key")
-        identity = econ.identify(token, pair, key, catalog=catalog if valid else {})
+        pair, key = row.get("coppia_analisi"), row.get("kraken_pair_key")
+        identity = econ.identify(token, pair, key,
+                                 catalog=catalog if valid else {},
+                                 discovered=previous_dynamic.get((token, pair)))
         items["candidati"].append({"indice": index, "token": token,
                                    "coppia_analisi": pair, "identita": identity})
 
-    # Stable ID rotation: every verifiable project is acquired within
-    # ceil(unique_ids / 6) refreshes, independently of release requests and
-    # scanner rank. Persist only the next public project ID in the dossier.
-    unique_ids = sorted({row["identita"]["coingecko_id"]
-                         for group in items.values() for row in group
-                         if row["identita"].get("coingecko_id")})
-    prior = previous if isinstance(previous, dict) and previous.get("schema") == econ.VERSION else {}
+    # One unresolved unique token per cycle, deterministic rotation. Limit
+    # discovery to 1 search + up to 8 market checks (9 total). If more
+    # candidates appear, leave identity unresolved; never pick the first hit.
+    unresolved = {}
+    for group in ("posizioni", "candidati"):
+        for row in items[group]:
+            identity = row["identita"]
+            token = row["token"]
+            if (identity.get("motivo") == "PROGETTO_NON_NEL_CATALOGO_CURATO"
+                    and isinstance(token, str)):
+                key = (token, identity["coppia"])
+                unresolved.setdefault(key, identity["pair_key"])
+    pending_pairs = sorted(unresolved)
+    next_token = prior.get("prossimo_token_identita")
+    next_idx = next((i for i, item in enumerate(pending_pairs)
+                     if isinstance(next_token, str)
+                     and "|".join(item) >= next_token), 0)
+    chosen = pending_pairs[next_idx] if pending_pairs else None
+    next_token = ("|".join(pending_pairs[(next_idx+1) % len(pending_pairs)])
+                  if pending_pairs else None)
+    discovery_calls = 0
+    rate_limited = False
+    discovery_problem = None
+    resolved = None
+
+    def public_json(url, *, timeout=12):
+        nonlocal rate_limited
+        try:
+            return json.loads(desk.request(url, timeout=timeout).decode("utf-8")), None
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                rate_limited = True
+            return None, "HTTP_" + str(exc.code)
+        except (ValueError, OSError, RuntimeError, KeyError, TypeError) as exc:
+            return None, "ERRORE_" + type(exc).__name__
+
+    if chosen:
+        token, pair = chosen
+        key = unresolved[chosen]
+        discovery_calls += 1
+        search, error = public_json(econ.CG_SEARCH + econ.canonical_token(token))
+        if error:
+            discovery_problem = error
+        elif not isinstance(search, dict) or not isinstance(search.get("coins"), list):
+            discovery_problem = "RICERCA_NON_DISPONIBILE"
+        else:
+            exact = [c for c in search["coins"] if isinstance(c, dict)
+                     and isinstance(c.get("symbol"), str)
+                     and c["symbol"].upper() == econ.canonical_token(token)]
+            if len(search["coins"]) >= 100:
+                discovery_problem = "RISULTATI_RICERCA_PAGINATI_NON_ESAUSTIVI"
+            elif len(exact) > econ.MAX_MARKET_CANDIDATES:
+                discovery_problem = "TICKER_OMONIMI_SUPERANO_BUDGET"
+            else:
+                markets = {}
+                for coin in exact:
+                    coin_id = coin.get("id")
+                    if not isinstance(coin_id, str) or not __import__("re").fullmatch(
+                            r"[a-z0-9-]{2,120}", coin_id):
+                        discovery_problem = "ID_PROGETTO_NON_VALIDO"
+                        break
+                    if rate_limited:
+                        discovery_problem = "RINVIATO_RATE_LIMIT_HTTP_429"
+                        break
+                    discovery_calls += 1
+                    markets[coin_id], error = public_json(
+                        econ.CG + coin_id + "/tickers?exchange_ids=kraken")
+                    if error:
+                        discovery_problem = error
+                        break
+                    time.sleep(.35)
+                if discovery_problem is None:
+                    resolved = econ.resolve_public(token, pair, search, markets, now)
+                    if resolved.get("stato") != "RISOLTO":
+                        discovery_problem = resolved.get("motivo", "IDENTITA_NON_VERIFICATA")
+        if resolved and resolved.get("stato") == "RISOLTO":
+            # Preserve the exact market used as proof. The same token may be
+            # present in the owned wallet and scanner under different pairs:
+            # only the proved pair gets this resolution.
+            resolved["pair"] = pair
+            previous_dynamic[chosen] = resolved
+        for group in ("posizioni", "candidati"):
+            for row in items[group]:
+                if (row["token"], row["identita"].get("coppia")) != chosen:
+                    continue
+                prior_id = row["identita"]
+                identity = econ.identify(token, prior_id.get("coppia"),
+                                         prior_id.get("pair_key"), catalog=catalog,
+                                         discovered=resolved if resolved and
+                                         resolved.get("stato") == "RISOLTO" else None)
+                if identity["stato"] != "IDENTITA_VERIFICATA_DA_CATALOGO":
+                    identity["motivo"] = discovery_problem or "IDENTITA_NON_VERIFICATA"
+                row["identita"] = identity
+        time.sleep(.35)
+
+    # Carry forward previously authenticated public fundamentals for a
+    # disappearing/re-entering asset; never carry its quantity or valuation.
+    previous_cache = {}
+    if allowed_history:
+        old_rows = list(prior.get("cache_fondamentali", [])[:100])
+        for group in ("posizioni", "candidati"):
+            old_rows.extend(r for r in prior.get(group, []) if isinstance(r, dict))
+        for old in old_rows:
+            if not isinstance(old, dict):
+                continue
+            ident, data = old.get("identita"), old.get("fondamentali")
+            if not isinstance(ident, dict) or not isinstance(data, dict):
+                continue
+            observed = econ.stamp(data.get("rilevato_utc"))
+            acquired = econ.stamp(data.get("acquisito_utc"))
+            if (data.get("stato") != "VERIFICATO" or not observed or not acquired
+                    or acquired > now or not dt.timedelta(0) <= now-observed <= dt.timedelta(days=1)
+                    or ident.get("stato") != "IDENTITA_VERIFICATA_DA_CATALOGO"
+                    or data.get("fonte") != econ.CG + str(ident.get("coingecko_id"))):
+                continue
+            cache_key = (ident.get("token"), ident.get("coppia"),
+                         ident.get("pair_key"), ident.get("coingecko_id"))
+            previous_cache[cache_key] = {"identita": ident, "fondamentali": data}
+
+    unique_ids = sorted({row["identita"]["coingecko_id"] for group in items.values()
+                         for row in group if row["identita"].get("coingecko_id")})
     previous_next = prior.get("prossimo_id_fondamentali")
     start_at = next((i for i, cg in enumerate(unique_ids)
                      if isinstance(previous_next, str) and cg >= previous_next), 0)
+    # Max 6 acquisitions of fundamentals, reduced when discovery used API calls.
+    capacity = min(6, max(0, 9-discovery_calls))
     selected = [unique_ids[(start_at+i) % len(unique_ids)]
-                for i in range(min(6, len(unique_ids)))]
+                for i in range(min(capacity, len(unique_ids)))]
     selected_ids = set(selected)
     next_id = (unique_ids[(start_at+len(selected)) % len(unique_ids)]
                if unique_ids else None)
-
-    # Reuse only facts already acquired and validated locally, bound to this
-    # token, exact Kraken pair and CoinGecko ID, with unchanged upstream time.
-    # A cache hit is labelled and never refreshed merely by re-reading it.
-    previous_cache = {}
-    prior_time = econ.stamp(prior.get("acquisito_utc"))
-    if prior_time and dt.timedelta(0) <= now-prior_time <= dt.timedelta(days=1):
-        for group in ("posizioni", "candidati"):
-            for old in prior.get(group, []):
-                if not isinstance(old, dict):
-                    continue
-                ident = old.get("identita") or {}
-                data = old.get("fondamentali") or {}
-                if not isinstance(ident, dict) or not isinstance(data, dict):
-                    continue
-                when = econ.stamp(data.get("rilevato_utc"))
-                acquired = econ.stamp(data.get("acquisito_utc"))
-                if (data.get("stato") == "VERIFICATO"
-                        and when and acquired and acquired <= now
-                        and dt.timedelta(0) <= now-when <= dt.timedelta(days=1)
-                        and data.get("fonte") == econ.CG + str(ident.get("coingecko_id"))
-                        and ident.get("stato") == "IDENTITA_VERIFICATA_DA_CATALOGO"):
-                    key = (ident.get("token"), ident.get("coppia"),
-                           ident.get("pair_key"), ident.get("coingecko_id"))
-                    previous_cache[key] = data
-
-    cache, release_cache = {}, {}
-    source_failures = {}  # Public transport diagnostics; no API keys or response bodies.
-    cg_calls, release_calls = 0, 0
-    import urllib.error
-    rate_limited = False
+    cache, failures, cg_calls = {}, {}, 0
     for cg in selected:
         if rate_limited:
             cache[cg] = None
-            source_failures[cg] = "RINVIATO_RATE_LIMIT_HTTP_429"
-            continue  # A 429 must not trigger five more requests in this refresh.
+            failures[cg] = "RINVIATO_RATE_LIMIT_HTTP_429"
+            continue
         cg_calls += 1
-        try:
-            url = (econ.CG + cg +
-                   "?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false")
-            cache[cg] = json.loads(desk.request(url, timeout=12).decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            cache[cg] = None
-            source_failures[cg] = "HTTP_" + str(exc.code)
-            if exc.code == 429:
-                rate_limited = True
-        except (ValueError, OSError, RuntimeError, KeyError, TypeError) as exc:
-            cache[cg] = None
-            source_failures[cg] = "ERRORE_" + type(exc).__name__
+        url = (econ.CG + cg
+               + "?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false")
+        cache[cg], failures[cg] = public_json(url)
         time.sleep(.35)
+
+    release_cache, release_calls = {}, 0
     projects = sorted({row["identita"]["repository_primario"]
                        for group in items.values() for row in group
                        if row["identita"].get("repository_primario")})
-    for repo in projects[:3]:
+    for project_repo in projects[:min(3, max(0, 9-discovery_calls-cg_calls))]:
         release_calls += 1
         try:
-            url = "https://api.github.com/repos/" + repo + "/releases/latest"
-            release_cache[repo] = json.loads(desk.request(url, timeout=10).decode("utf-8"))
+            url = "https://api.github.com/repos/" + project_repo + "/releases/latest"
+            release_cache[project_repo] = json.loads(desk.request(url, timeout=10).decode("utf-8"))
         except (ValueError, OSError, RuntimeError, KeyError, TypeError):
-            release_cache[repo] = None
+            release_cache[project_repo] = None
 
     for group in ("posizioni", "candidati"):
         for row in items[group]:
             identity = row["identita"]
             cg = identity.get("coingecko_id")
             if cg is None:
-                fundamental = dict(econ.fundamentals(identity, None, now, now),
-                                   stato="NON_VERIFICATO_IDENTITA")
+                fund = dict(econ.fundamentals(identity, None, now, now),
+                            stato="NON_VERIFICATO_IDENTITA",
+                            motivo=identity.get("motivo"))
             else:
                 fresh = econ.fundamentals(identity, cache.get(cg), now, now)
-                old_key = (identity.get("token"), identity.get("coppia"),
-                           identity.get("pair_key"), cg)
+                cache_key = (identity.get("token"), identity.get("coppia"),
+                             identity.get("pair_key"), cg)
                 if fresh["stato"] == "VERIFICATO":
-                    fundamental = dict(fresh, origine="ACQUISIZIONE_PUBBLICA")
-                elif old_key in previous_cache:
-                    fundamental = dict(previous_cache[old_key],
-                                       origine="CACHE_LOCALE_FONTE_PUBBLICA",
-                                       riutilizzato_utc=now.isoformat(timespec="seconds"))
+                    fund = dict(fresh, origine="ACQUISIZIONE_PUBBLICA")
+                elif cache_key in previous_cache:
+                    # The same Kraken pair and CoinGecko project must still
+                    # be verified; values keep their upstream observation time.
+                    fund = dict(previous_cache[cache_key]["fondamentali"],
+                                origine="CACHE_LOCALE_FONTE_PUBBLICA",
+                                riutilizzato_utc=now.isoformat(timespec="seconds"))
                 elif cg not in selected_ids:
-                    fundamental = dict(fresh, stato="NON_ACQUISITO_PER_BUDGET")
+                    fund = dict(fresh, stato="NON_ACQUISITO_PER_BUDGET")
                 elif cache.get(cg) is None:
-                    fundamental = dict(fresh, stato="NON_DISPONIBILE_FONTE",
-                                       motivo=source_failures.get(cg, "RISPOSTA_NON_DISPONIBILE"))
+                    fund = dict(fresh, stato="NON_DISPONIBILE_FONTE",
+                                motivo=failures.get(cg, "RISPOSTA_NON_DISPONIBILE"))
                 else:
-                    fundamental = fresh
-            row["fondamentali"] = fundamental
-            repo = identity.get("repository_primario")
-            row["evento"] = econ.release_event(identity, release_cache.get(repo), now, now)
+                    fund = fresh
+            row["fondamentali"] = fund
+            repo_name = identity.get("repository_primario")
+            row["evento"] = econ.release_event(identity, release_cache.get(repo_name), now, now)
             row["lettura_economica"] = econ.decision_context(
                 identity, row["fondamentali"], row["evento"])
 
+    # Bounded PUBLIC-only persistence: identity and source cache, no balances,
+    # wallet quantities, T0 or private account data.
+    public_cache = dict(previous_cache)
+    for group in ("posizioni", "candidati"):
+        for row in items[group]:
+            identity, data = row["identita"], row["fondamentali"]
+            if data.get("stato") == "VERIFICATO":
+                key = (identity.get("token"), identity.get("coppia"),
+                       identity.get("pair_key"), identity.get("coingecko_id"))
+                public_cache[key] = {"identita": identity, "fondamentali": data}
+    dynamic_cache = [{"token": token, "coppia": pair, "risoluzione": record}
+                     for (token, pair), record in sorted(previous_dynamic.items())][:100]
     btc = next((r for r in four_rows if isinstance(r, dict) and r.get("token") == "BTC"), {})
     return {"schema": econ.VERSION, "acquisito_utc": now.isoformat(timespec="seconds"),
             "posizioni": items["posizioni"], "candidati": items["candidati"],
             "macro": econ.macro(source.get("feed"), now),
             "regime": econ.regime(btc, (source.get("coingecko_global") or {}), now),
             "fonti_economiche": econ.sources_matrix(),
+            "identita_dinamiche": dynamic_cache,
+            "prossimo_token_identita": next_token,
+            "cache_fondamentali": list(public_cache.values())[:100],
             "prossimo_id_fondamentali": next_id,
+            "richieste_identificazione": discovery_calls,
             "richieste_coingecko": cg_calls, "richieste_release": release_calls,
             "richieste_esterne_massime": 9,
-            "richieste_effettuate": cg_calls+release_calls,
-            "limite": "Nessun afflusso istituzionale, ordine, unlock o effetto macro dedotto"}
-
+            "richieste_effettuate": discovery_calls+cg_calls+release_calls,
+            "limite": "Risoluzione pubblica incrociata, non prova chain/contract, unlock, acquisti o ordini"}
 
 def collect(source=None, *, asset_pairs=None):
     """Prepara il dossier sullo snapshot appena acquisito, senza iniziare un'analisi GPT."""

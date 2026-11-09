@@ -71,6 +71,31 @@ class WalletPacketG0Tests(unittest.TestCase):
                       "secret":"SHOULD_NOT_EXPORT_PRIVATE_DOSSIER"}
         self.dump()
 
+    def test_asset_weights_never_rebrand_partial_total_as_entire_wallet(self):
+        partial = self.pack()
+        rows = partial["patrimonio"]["posizioni"]
+        self.assertTrue(all(x["peso_sul_intero_patrimonio_pct"] is None for x in rows))
+        self.assertIsNotNone(rows[0]["peso_sul_valorizzato_pct"])
+        self.assertIsNone(rows[2]["peso_sul_valorizzato_pct"])
+
+        self.snapshot["markets"]["SXT"] = {
+            "token": "SXT", "pair": "SXT/EUR", "pair_key": "SXTEUR", "prezzo_eur": 2}
+        self.report["posizioni"][2] = {
+            "token": "SXT", "quantita": "5", "prezzo_eur": 2,
+            "valore_eur": 10, "pl_non_realizzato_eur": None,
+            "decisione": "ESAME"}
+        self.report["totale_stimato_eur"] = 2014.2
+        self.report["totale_parziale"] = False
+        self.report["stato_totale"] = "COMPLETO"
+        self.dump()
+        complete = self.pack()
+        weights = [x["peso_sul_intero_patrimonio_pct"]
+                   for x in complete["patrimonio"]["posizioni"]]
+        self.assertTrue(all(x is not None for x in weights))
+        self.assertAlmostEqual(sum(float(x) for x in weights), 100, places=2)
+        self.assertTrue(all(x["peso_stato"] == "TOTALE_COMPLETO"
+                            for x in complete["patrimonio"]["posizioni"]))
+
     def dump(self):
         for name,doc in [("portafoglio.json",self.portfolio), ("ultimo_report.json",self.report),
                          ("ultima_rilevazione.json",self.snapshot), ("dossier_multifonte.json",self.dossier)]:

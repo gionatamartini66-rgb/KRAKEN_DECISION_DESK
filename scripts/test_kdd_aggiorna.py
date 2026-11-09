@@ -203,6 +203,8 @@ class UpdateTests(unittest.TestCase):
         name="kdd_economics.py"
         self.assertIn(name,kdd.PY_FILES)
         self.assertIn("test_kdd_economics.py",kdd.PY_FILES)
+        self.assertIn("kdd_project_catalog.json", kdd.DATA_FILES)
+        self.assertIn("kdd_project_catalog.json", kdd.FILES)
         self.assertIn(name,kdd.FILES)
         (self.live/name).unlink()
         with contextlib.redirect_stdout(io.StringIO()) as output:
