@@ -32,51 +32,8 @@ PROJECT_CAVEATS = {k: v["caveat"] for k, v in _CURATED.items()
                    if isinstance(v.get("caveat"), str)}
 CG = "https://api.coingecko.com/api/v3/coins/"
 CG_SEARCH = "https://api.coingecko.com/api/v3/search?query="
-VERSION = VERSION = "kdd-economic-v001"
+VERSION = "kdd-economic-v001"
 UTC = dt.timezone.utc
-# Curated project identities, NOT a general ticker resolver. A verified Kraken
-# pair identity is also required for every attribution.
-PROJECTS = {
-    # Identity references: Kraken asset pages + CoinGecko resolved coin IDs/names.
-    # Kraken's AssetPairs ONLINE binding is additionally required at runtime.
-    "BNB": ("binancecoin", "BNB", None),
-    "FET": ("fetch-ai", "Artificial Superintelligence Alliance", None),
-    "JUP": ("jupiter-exchange-solana", "Jupiter", None),
-    "RENDER": ("render-token", "Render", None),
-    # Shortlist identities: a ticker match alone is never sufficient.
-    "PEPE": ("pepe", "Pepe", None),
-    "PUMP": ("pump-fun", "Pump.fun", None),
-    "BTC": ("bitcoin", "Bitcoin", "bitcoin/bitcoin"),
-    "SOL": ("solana", "Solana", "anza-xyz/agave"),
-    "ADA": ("cardano", "Cardano", "IntersectMBO/cardano-node"),
-    "ETH": ("ethereum", "Ethereum", None),
-    "NEAR": ("near", "NEAR Protocol", None),
-    "SUI": ("sui", "Sui", None),
-    "XRP": ("ripple", "XRP", None),
-    "ONDO": ("ondo-finance", "Ondo", None),
-    "KAS": ("kaspa", "Kaspa", None),
-    "ICNT": ("impossible-cloud-network-token", "Impossible Cloud Network", None),
-}
-
-# Relevant primary-source cautions: never equate an exchange asset with a chain
-# contract without a separate wallet/network attestation.
-PROJECT_CAVEATS = {
-    "FET": ("CoinGecko tracks FET under the ASI Alliance name; Kraken's FET/ASI "
-            "migration support must be checked separately. Do not infer a migrated "
-            "wallet contract or 1:1 conversion from this price identifier."),
-    "RENDER": ("Kraken reports RNDR -> RENDER conversion (2024, Solana); "
-               "never attribute legacy RNDR to the new RENDER pair."),
-}
-# Reviewed identifiers (2026-11-08):
-# https://www.coingecko.com/en/coins/bnb
-# https://www.coingecko.com/en/coins/artificial-superintelligence-alliance
-# https://www.coingecko.com/en/coins/jupiter
-# https://www.coingecko.com/en/coins/render
-# https://www.coingecko.com/en/coins/pepe
-# https://www.coingecko.com/en/coins/pump-fun
-# https://support.kraken.com/articles/kraken-to-support-rndr-migration-to-render
-# https://support.kraken.com/articles/ocean-protocol-and-fet-migration
-CG = "https://api.coingecko.com/api/v3/coins/"
 
 # Capabilities, not observed flows or claims of institutional buying.
 # Entries labelled CONSULTABILE are references for GPT research only.
