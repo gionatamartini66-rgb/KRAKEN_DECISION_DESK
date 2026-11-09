@@ -148,6 +148,8 @@ def _dynamic_valid(token, pair, record):
     return bool(isinstance(coin_id, str) and re.fullmatch(r"[a-z0-9-]{2,120}", coin_id)
                 and isinstance(record.get("progetto"), str) and record["progetto"]
                 and proof.get("exchange") == "kraken"
+                and proof.get("is_stale") is False
+                and proof.get("is_anomaly") is False
                 and proof.get("symbol") == canonical_token(token)
                 and canonical_token(proof.get("base")) == canonical_token(base)
                 and proof.get("target") == quote
@@ -238,6 +240,7 @@ def resolve_public(token, pair, search_result, market_results, now):
                                   else "TICKER_AMBIGUO_SU_KRAKEN"))
     coin = matches[0]
     proof = {"exchange": "kraken", "symbol": canonical_token(token),
+             "is_stale": False, "is_anomaly": False,
              "base": base, "target": target,
              "ricerca_url": CG_SEARCH + canonical_token(token),
              "ticker_url": CG + coin["id"] + "/tickers?exchange_ids=kraken",
