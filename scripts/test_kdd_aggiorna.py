@@ -248,7 +248,9 @@ class UpdateTests(unittest.TestCase):
         with patch.object(kdd, 'capability_preflight'), \
              patch.object(kdd, 'command', side_effect=subprocess_with_clean_r5_environment), \
              contextlib.redirect_stdout(io.StringIO()):
-            kdd.isolated_test(self.root)
+            # apply() prepares the README fingerprint and private fixtures;
+            # testing isolated_test(self.root) skips that required preparation.
+            kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=True)
         self.assertEqual(len(r5_seen), 1)
         self.assertIn('from scripts.kdd_android_regressions import main',
                       ' '.join(r5_seen[0]))
