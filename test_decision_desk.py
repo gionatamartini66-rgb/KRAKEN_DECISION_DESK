@@ -1111,6 +1111,235 @@ class DeskTests(unittest.TestCase):
         self.assertEqual([x[0] for x in saved],['dossier_stato.json'])
         self.assertFalse(any('piano_gpt' in name for name,_ in saved))
 
+    def test_decision_readiness_separates_wallet_from_external_shortlist(self):
+        """Fresh, reconciled wallet remains examinable when candidates are incomplete."""
+        import dossier_trade
+        snap=d.NOW().isoformat(timespec='seconds')
+        quality={'portafoglio_noto':True,'stato_totale':'COMPLETO',
+                 'stato_quantita':'COMPLETE','saldo_recente_verificato':True,
+                 'posizioni_registrate':2,'posizioni_valorizzate':2,
+                 'posizioni_incomplete':0,'stato_saldo':{'acquisizione_saldo_utc':snap}}
+        portfolio_rows=[{'indice':0,'token':'BTC'},{'indice':1,'token':'ETH'}]
+        observed=[{'indice':i,'token':token,
+                   'identita':{'stato':'IDENTITA_VERIFICATA_DA_CATALOGO'},
+                   'fondamentali':{'stato':'VERIFICATO'}}
+                  for i,token in enumerate(('BTC','ETH'))]
+        missing_candidate={'indice':0,'token':'MON','coppia_analisi':'MON/USD',
+                           'identita':{'stato':'IDENTITA_VERIFICATA_DA_CATALOGO'},
+                           'fondamentali':{'stato':'NON_ACQUISITO_PER_BUDGET'}}
+        dossier={'kraken_istantanea_utc':snap,'creato_utc':snap,
+                 'candidati':[{'token':'MON','coppia_analisi':'MON/USD',
+                               'livelli_15m':{'ok':True},'livelli_1h':{'ok':True},
+                               'fondamentali_coingecko':{'errore':'legacy mapping'},
+                               'flusso_spot_kraken':{'stato':'NON_DISPONIBILE'}}],
+                 'qualita_patrimonio':quality,
+                 'patrimonio_4tf':{'posizioni':portfolio_rows},
+                 'fotografia_portafoglio_sha256':'f'*64,
+                 'evidenze_economiche':{'posizioni':observed,
+                                       'candidati':[missing_candidate]},
+                 'fonti_esterne':{},'contesto_derivati_btc':{}}
+        with unittest.mock.patch.object(dossier_trade,'collect',return_value=dossier), \
+             unittest.mock.patch.object(d,'save') as saver:
+            state=d.prepara_dossier_aggiornamento({'rilevazione_utc':snap})
+        self.assertEqual(state['idoneita_analisi_patrimoniale'],'IDONEA')
+        self.assertEqual(state['stato'],'PRONTO_PER_ESAME_GPT_CON_LIMITI')
+        self.assertEqual(state['stato_fonti_mercato'],'PARZIALE')
+        self.assertEqual(state['copertura_economica_patrimonio']['fondamentali_verificati'],2)
+        self.assertEqual(state['copertura_economica_patrimonio']['stato'],
+                         'VERIFICATA_ALLA_RILEVAZIONE')
+        self.assertEqual(len(state['lacune_shortlist_economica']),1)
+        self.assertFalse(any('Fondamentali non verificati: BTC' in reason
+                             for reason in state['motivi_incompletezza']))
+        saver.assert_called_once()
+
+        # Even when a candidate is fully verified via new economic evidence,
+        # the old curated-only field must not falsely mark its fundamentals absent.
+        dossier['evidenze_economiche']['candidati'][0]['fondamentali']['stato']='VERIFICATO'
+        dossier['candidati'][0]['flusso_spot_kraken']['stato']='COMPLETO_4H'
+        with unittest.mock.patch.object(dossier_trade,'collect',return_value=dossier), \
+             unittest.mock.patch.object(d,'save'):
+            second=d.prepara_dossier_aggiornamento({'rilevazione_utc':snap})
+        self.assertEqual(second['stato_fonti_mercato'],'COMPLETO')
+        self.assertEqual(second['idoneita_analisi_patrimoniale'],'IDONEA')
+        self.assertNotIn('Fondamentali non verificati: MON',
+                         second['motivi_incompletezza'])
+        self.assertEqual(second['lacune_shortlist_economica'],[])
+
+    def test_decision_readiness_never_promotes_invalid_wallet(self):
+        import dossier_trade
+        snap=d.NOW().isoformat(timespec='seconds')
+        dossier={'kraken_istantanea_utc':snap,'creato_utc':snap,
+                 'candidati':[],'qualita_patrimonio':{
+                    'portafoglio_noto':False,'stato_totale':'PARZIALE',
+                    'saldo_recente_verificato':False},
+                 'patrimonio_4tf':{'posizioni':[]},
+                 'fotografia_portafoglio_sha256':None,
+                 'evidenze_economiche':{'posizioni':[],'candidati':[]},
+                 'fonti_esterne':{},'contesto_derivati_btc':{}}
+        with unittest.mock.patch.object(dossier_trade,'collect',return_value=dossier), \
+             unittest.mock.patch.object(d,'save'):
+            result=d.prepara_dossier_aggiornamento({'rilevazione_utc':snap})
+        self.assertEqual(result['idoneita_analisi_patrimoniale'],'NON_IDONEA')
+        self.assertEqual(result['stato'],'PARZIALE')
+
+    def test_decision_wallet_invariants_and_read_time_age_remain_fail_closed(self):
+        """Scanner deficits may limit GPT evidence; wallet deficits still block it."""
+        import copy
+        import dossier_trade
+        snap=d.NOW().isoformat(timespec='seconds')
+        wallet={'posizioni':[{'token':'BTC','quantita':'1'}],
+                'fonte_quantita':'Kraken BalanceEx API privata SOLA LETTURA, '+snap,
+                'data_ora_saldo_privato_utc':snap}
+        digest=d.fotografia_portafoglio_sha256(wallet)
+        quality={'portafoglio_noto':True,'stato_totale':'COMPLETO',
+                 'stato_quantita':'COMPLETE','saldo_recente_verificato':True,
+                 'posizioni_registrate':1,'posizioni_valorizzate':1,
+                 'posizioni_incomplete':0,
+                 'stato_saldo':{'acquisizione_saldo_utc':snap}}
+        dossier={'kraken_istantanea_utc':snap,'creato_utc':snap,
+                 'candidati':[], 'qualita_patrimonio':quality,
+                 'patrimonio_4tf':{'posizioni':[{'token':'BTC','indice':0}]},
+                 'fotografia_portafoglio_sha256':digest,
+                 'fonti_esterne':{},'contesto_derivati_btc':{}}
+        def compose(row):
+            with unittest.mock.patch.object(dossier_trade,'collect',return_value=row), \
+                 unittest.mock.patch.object(d,'save'):
+                return d.prepara_dossier_aggiornamento({'rilevazione_utc':snap})
+        ready=compose(dossier)
+        self.assertEqual(ready['idoneita_analisi_patrimoniale'],'IDONEA')
+        self.assertEqual(ready['stato'],'PRONTO_PER_ESAME_GPT_CON_LIMITI')
+        self.assertIn('Nessun candidato', ' '.join(ready['motivi_incompletezza']))
+        problems=[
+            ('wallet non noto',{'portafoglio_noto':False}),
+            ('quantita parziali',{'stato_quantita':'INCOMPLETE'}),
+            ('totale assente',{'stato_totale':'PARZIALE'}),
+            ('saldo non fresco',{'saldo_recente_verificato':False}),
+            ('numero posizioni incoerente',{'posizioni_registrate':2}),
+            ('valorizzazione incompleta',{'posizioni_valorizzate':0}),
+            ('posizioni incomplete',{'posizioni_incomplete':1}),
+            ('conteggio in formato non valido',{'posizioni_registrate':True}),
+        ]
+        for reason,changed in problems:
+            forged=copy.deepcopy(dossier)
+            forged['qualita_patrimonio'].update(changed)
+            with self.subTest(reason=reason):
+                result=compose(forged)
+                self.assertEqual(result['idoneita_analisi_patrimoniale'],'NON_IDONEA')
+                self.assertTrue(result['motivi_patrimoniali'])
+        no_hash=copy.deepcopy(dossier)
+        no_hash['fotografia_portafoglio_sha256']=None
+        self.assertEqual(compose(no_hash)['idoneita_analisi_patrimoniale'],'NON_IDONEA')
+        wrong_hash=copy.deepcopy(dossier)
+        wrong_hash['fotografia_portafoglio_sha256']='not-a-sha'
+        self.assertEqual(compose(wrong_hash)['idoneita_analisi_patrimoniale'],'NON_IDONEA')
+        wrong_snap=copy.deepcopy(dossier)
+        wrong_snap['kraken_istantanea_utc']=(d.NOW()-dt.timedelta(minutes=4)).isoformat()
+        self.assertEqual(compose(wrong_snap)['idoneita_analisi_patrimoniale'],
+                         'NON_IDONEA')
+        # The dossier identity must match the current wallet at the report
+        # and its market timestamp must still be recent at that exact read.
+        def stored(name,default=None):
+            return ready if name=='dossier_stato.json' else dossier
+        report={'rilevazione_utc':snap}
+        at=dt.datetime.fromisoformat(snap)
+        with unittest.mock.patch.object(d,'load',side_effect=stored), \
+             unittest.mock.patch.object(d,'NOW',return_value=at):
+            current=d.stato_dossier_per_report(report,portfolio=wallet)
+        self.assertEqual(current['idoneita_analisi_patrimoniale'],'IDONEA')
+        with unittest.mock.patch.object(d,'load',side_effect=stored), \
+             unittest.mock.patch.object(d,'NOW',return_value=at+dt.timedelta(minutes=61)):
+            late=d.stato_dossier_per_report(report,portfolio=wallet)
+        self.assertEqual(late['idoneita_analisi_patrimoniale'],'NON_IDONEA')
+        self.assertEqual(late['stato_fonti_mercato'],'SCADUTO')
+        changed_wallet=copy.deepcopy(wallet)
+        changed_wallet['posizioni'][0]['quantita']='2'
+        with unittest.mock.patch.object(d,'load',side_effect=stored), \
+             unittest.mock.patch.object(d,'NOW',return_value=at):
+            mismatch=d.stato_dossier_per_report(report,portfolio=changed_wallet)
+        self.assertEqual(mismatch['stato'],'NON_ALLINEATO_PATRIMONIO')
+        self.assertEqual(mismatch['idoneita_analisi_patrimoniale'],'NON_IDONEA')
+
+    def test_gpt_packet_keeps_complete_wallet_and_missing_candidate_evidence(self):
+        """Real packet and bridge preserve holdings plus candidate omissions."""
+        import kdd_economics as econ
+        from scripts import kdd_wallet_packet_g0 as wallet_packet
+        from scripts import kdd_bridge_g2 as bridge
+        with unittest.mock.patch.dict('sys.modules',
+                                      {'kdd_wallet_packet_g0':wallet_packet}):
+            from scripts import test_kdd_wallet_packet_g0 as packet_fixture
+        fixture=packet_fixture.WalletPacketG0Tests(
+            'test_asset_weights_never_rebrand_partial_total_as_entire_wallet')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture._analytic_fixture()
+        stamp=packet_fixture.T
+        iso=stamp.isoformat()
+        fixture.snapshot['markets']['SXT']={
+            'token':'SXT','pair':'SXT/EUR','pair_key':'SXTEUR','prezzo_eur':2}
+        fixture.report['posizioni'][2]={
+            'token':'SXT','quantita':'5','prezzo_eur':2,'valore_eur':10,
+            'pl_non_realizzato_eur':None,'decisione':'ESAME'}
+        fixture.report['totale_stimato_eur']=2014.2
+        fixture.report['totale_parziale']=False
+        fixture.report['stato_totale']='COMPLETO'
+        holdings=[]
+        for i,position in enumerate(fixture.portfolio['posizioni']):
+            token=position['token']
+            key=token+'EUR'
+            ident=econ.identify(token, token+'/EUR', key, catalog={
+                key:{'pair_key':key,'pair':token+'/EUR',
+                     'base':token,'quote':'EUR'}})
+            payload=None
+            if i==0 and ident['stato']=='IDENTITA_VERIFICATA_DA_CATALOGO':
+                payload={'id':ident['coingecko_id'],'symbol':token.lower(),
+                         'name':ident['progetto'],'market_data':{
+                             'last_updated':iso,'market_cap':{'usd':5000},
+                             'fully_diluted_valuation':{'usd':7000},
+                             'circulating_supply':200,'total_supply':250}}
+            holdings.append({'indice':i,'token':token,'identita':ident,
+                             'fondamentali':econ.fundamentals(ident,payload,stamp,stamp),
+                             'evento':econ.release_event(ident,None,stamp,stamp)})
+        ident=econ.identify('SOL','SOL/USD','SOLUSD',catalog={
+            'SOLUSD':{'pair_key':'SOLUSD','pair':'SOL/USD',
+                      'base':'SOL','quote':'USD'}})
+        missing_fund=econ.fundamentals(ident,None,stamp,stamp)
+        fixture.dossier['evidenze_economiche']={
+            'schema':econ.VERSION,'acquisito_utc':iso,
+            'posizioni':holdings,
+            'candidati':[{'indice':0,'token':'SOL',
+                          'coppia_analisi':'SOL/USD',
+                          'identita':ident,'fondamentali':missing_fund,
+                          'evento':econ.release_event(ident,None,stamp,stamp)}],
+            'macro':econ.macro([],stamp),
+            'fonti_economiche':econ.sources_matrix(),
+            'regime':{'stato':'INDETERMINATO','qualita':'INSUFFICIENTE'}}
+        fixture.dump()
+        packet=wallet_packet.build(fixture.root,now=stamp)
+        self.assertEqual(packet['patrimonio']['stato_totale'],'COMPLETO')
+        self.assertFalse(packet['patrimonio']['totale_parziale'])
+        self.assertEqual(packet['patrimonio']['n_posizioni'],3)
+        economic=packet['evidenze_multifonte']['economia']
+        self.assertEqual(len(economic['posizioni']),3)
+        self.assertEqual(economic['candidati'][0]['fondamentali']['stato'],
+                         'NON_VERIFICATO')
+        self.assertIsNone(economic['candidati'][0]['fondamentali']['capitalizzazione_usd'])
+        self.assertTrue(economic['candidati'][0]['fondamentali']['limite'])
+        bundle={'schema':bridge.SCHEMA_BUNDLE,'packet':packet,
+                'packet_sha256':bridge.digest(packet),
+                'preparato_utc':iso}
+        read=bridge.read_context(json.loads(json.dumps(bundle)),now=stamp)
+        self.assertEqual(read['n_posizioni'],3)
+        self.assertFalse(read['totale_parziale'])
+        coverage=read['evidenze_economiche_alla_lettura']['copertura_fondamentali']
+        self.assertEqual(coverage['posizioni_totali'],3)
+        self.assertEqual(coverage['candidati_totali'],1)
+        self.assertEqual(coverage['candidati_verificati_alla_lettura'],0)
+        self.assertEqual(read['evidenze_economiche_alla_lettura']['candidati'][0]
+                         ['fondamentali']['stato'],'NON_VERIFICATO')
+        later=bridge.read_context(bundle,now=stamp+dt.timedelta(minutes=61))
+        self.assertNotEqual(later['mercato']['stato'],'RECENTE')
+        self.assertNotEqual(later['saldo']['stato'],'RECENTE')
+
     def test_auto_dossier_failure_never_claims_fresh_data(self):
         import dossier_trade
         data={'rilevazione_utc':'2026-10-18T11:00:00+00:00'}
