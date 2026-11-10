@@ -10,16 +10,6 @@ KDD è **personale, privato, non commerciale e non destinato alla commercializza
 
 **Rigore non significa lentezza, ma nemmeno corsa:** eseguire tutti i passi **necessari e utili**, senza saltare verifiche significative e senza replicare attività che non aggiungono prova. Dopo le riparazioni circoscritte, il gate sostanziale è il funzionamento reale della catena **Samsung/Termux ↔ FolderSync ↔ Google Drive privato ↔ ChatGPT/autore ↔ KDD**, senza gesto manuale di sincronizzazione nel ciclo avviato in chat, seguito da analisi, proposta, scelta esplicita, archivio e riesame. La CI e i filesystem simulati non provano l'automazione FolderSync su Android né la bontà di una decisione. Nessun ordine automatico e nessuna riduzione delle autorizzazioni separate per merge, deploy o uso di dati privati.
 
-## 0-ter. Desktop Commander: strumento temporaneo di costruzione, mai dipendenza del KDD — decisione dell'autore, 10/11/2026
-
-**Il KDD deve funzionare ordinariamente sul Samsung/Termux anche con Desktop Commander (DC) del tutto spento, scollegato o privo di crediti.** DC non è una dipendenza, un servizio, un avviatore obbligatorio, una fonte dati, un componente del circuito GPT/Drive/FolderSync, un monitor permanente né un requisito per l'utente. Progettare e verificare il programma come autonomo rispetto a DC.
-
-**Uso ammesso di DC da parte delle chat tecniche:** esclusivamente quando serve intervenire materialmente sul dispositivo **per costruzione, installazione, diagnosi di un guasto concreto o collaudo Android non replicabile altrove**, sempre nel perimetro del GO dell'autore. Terminato l'intervento, disconnettere DC senza interrompere il KDD. Una prova di autonomia va svolta quando pertinente, senza utilizzare DC come infrastruttura del runtime.
-
-**Uso da evitare:** interrogazioni ripetute per semplice curiosità, lettura del repository e dei documenti già disponibili su GitHub, audit astratti, monitoraggio quotidiano, aggiornamenti di stato e prove che si possono eseguire in GitHub Actions o su copie isolate senza collegarsi al Samsung. Per tali attività preferire GitHub, CI, documentazione e test sintetici locali disponibili. Quando DC è davvero necessario, raggruppare le operazioni, fissare un obiettivo concreto, limitare le chiamate e lasciarne l'esito nei documenti canonici: **i crediti sono risorse dell'autore da preservare**.
-
-Questa regola vincola Supervisione, Costruttrice, Red Team e qualsiasi chat di subentro. **Non elimina** i controlli necessari prima di un deploy reale né autorizza modifiche al telefono senza GO. La disponibilità di DC non deve mai diventare un motivo per perpetuare microcontrolli o rimandare lo sviluppo sostanziale dei 29 requisiti.
-
 ## 0-bis. Gate di collaudo integrale prima di decisioni operative — decisione vincolante dell'autore, 09/11/2026
 
 **Fino a quando il KDD non sarà pronto, funzionante e verificato in tutti i suoi 29 punti canonici, ogni proposta, scenario o indicazione prodotta dal KDD o discussa con GPT nell'ambito del progetto ha esclusivamente valore di PROVA DI FUNZIONALITÀ.** Una simulazione credibile, un dossier idoneo, una PR con CI verde, una proposta convincente o una prova in chat non equivalgono al completamento del sistema.
