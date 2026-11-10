@@ -1068,6 +1068,12 @@ def prepara_dossier_aggiornamento(data, *, asset_pairs=None):
         status['preparato_utc']=dossier['creato_utc']
     except Exception as exc:
         status['motivi_incompletezza']=[type(exc).__name__+': '+str(exc)[:180]]
+        # A malformed, mismatched or stale input must explicitly remain
+        # ineligible even when candidate collection aborted before quality
+        # fields could be evaluated.
+        status['idoneita_analisi_patrimoniale'] = 'NON_IDONEA'
+        status['stato_fonti_mercato'] = 'NON_VERIFICABILE'
+        status['motivi_patrimoniali'] = ['Dossier patrimoniale non verificabile']
     save('dossier_stato.json', status)
     return status
 
