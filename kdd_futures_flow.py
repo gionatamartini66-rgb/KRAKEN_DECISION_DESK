@@ -259,7 +259,9 @@ def _read_funding(row, now):
     if observed > now:
         raise ValueError("future funding source time")
     if row["stato"] == "SCADUTO":
-        if set(row) != {"stato", "osservato_utc", "limite"} or row.get("limite") != "Funding storico: numeri soppressi":
+        if (set(row) != {"stato", "osservato_utc", "limite"}
+                or row.get("limite") not in ("Funding storico: numeri soppressi",
+                                             "Numeri storici soppressi: aggiornare la fonte")):
             raise ValueError("invalid stale funding")
         return {"stato": "SCADUTO", "osservato_utc": _stamp(observed),
                 "limite": "Numeri storici soppressi: aggiornare la fonte"}
@@ -288,7 +290,9 @@ def _read_history(row, now):
     if observed > now:
         raise ValueError("future execution source time")
     if row["stato"] == "SCADUTO":
-        if set(row) != {"stato", "osservato_utc", "limite"} or row.get("limite") != "Campione storico: numeri soppressi":
+        if (set(row) != {"stato", "osservato_utc", "limite"}
+                or row.get("limite") not in ("Campione storico: numeri soppressi",
+                                             "Numeri storici soppressi: aggiornare la fonte")):
             raise ValueError("invalid stale execution sample")
         return {"stato": "SCADUTO", "osservato_utc": _stamp(observed),
                 "limite": "Numeri storici soppressi: aggiornare la fonte"}
@@ -317,7 +321,12 @@ def at_read(source, now):
                 or not _same(source.get("heatmap"), HEATMAP)):
             return {"strumento": SYMBOL, "stato": "NON_VERIFICATO",
                     "motivo": "Fonte, contratto o descrizioni non attribuibili"}
+        # Preserve already verified source identity for the packet -> GPT bridge:
+        # the second at_read must apply the same provenance checks, not lose them.
         out = {"strumento": SYMBOL, "stato": "EVIDENZE_CON_LIMITI",
+               "fonte_ticker": BASE + "tickers",
+               "fonte_trades": BASE + "history?symbol=" + SYMBOL,
+               "richieste_pubbliche_massime": 2,
                "copertura": COVERAGE, "heatmap": dict(HEATMAP)}
         for name, verifier in (("funding", _read_funding), ("esecuzioni", _read_history)):
             try:

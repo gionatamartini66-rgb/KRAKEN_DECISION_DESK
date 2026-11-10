@@ -187,7 +187,7 @@ class FuturesFlowTests(unittest.TestCase):
                 self.assertEqual(flow.at_read(forged, self.now)["esecuzioni"]
                                  ["stato"], "NON_VERIFICATO")
         for field, bad in (("size", "-1"), ("size", "Infinity"),
-                           ("price", "NaN"), ("type", "liquidation")):
+                           ("price", "NaN"), ("type", "fill")):
             forged = copy.deepcopy(sample)
             forged["esecuzioni"]["trade_normalizzati"][0][field] = bad
             self.assertEqual(flow.at_read(forged, self.now)["esecuzioni"]
@@ -361,12 +361,53 @@ class FuturesFlowTests(unittest.TestCase):
                         self.assertEqual(read["funding"]["motivo"],
                                          "FUNDING_FUORI_SOGLIA_INGEGNERISTICA")
 
+    def test_futures_two_read_passes_provenance_fresh_stale_and_tampered(self):
+        import copy
+        source = self._fresh()
+        first = flow.at_read(source, self.now)
+        self.assertEqual(first["stato"], "EVIDENZE_CON_LIMITI")
+        self.assertEqual(first["fonte_ticker"], flow.BASE + "tickers")
+        self.assertEqual(first["fonte_trades"],
+                         flow.BASE + "history?symbol=" + flow.SYMBOL)
+        self.assertEqual(first["richieste_pubbliche_massime"], 2)
+        second = flow.at_read(json.loads(json.dumps(first)), self.now)
+        self.assertEqual(second["funding"]["stato"], "OSSERVATO")
+        self.assertEqual(second["esecuzioni"]["stato"], "CAMPIONE_RECENTE")
+        self.assertEqual(second, first)
+        old = flow.at_read(first, self.now + dt.timedelta(minutes=18))
+        old_again = flow.at_read(json.loads(json.dumps(old)),
+                                 self.now + dt.timedelta(minutes=18))
+        self.assertEqual(old_again["funding"]["stato"], "SCADUTO")
+        self.assertEqual(old_again["esecuzioni"]["stato"], "SCADUTO")
+        self.assertEqual(old_again, old)
+        self.assertNotIn("funding_rate_grezzo", old_again["funding"])
+        self.assertNotIn("n_liquidazioni_nel_campione", old_again["esecuzioni"])
+        for field, poison in (("fonte_ticker", "https://wrong.example"),
+                              ("fonte_trades", "https://wrong.example"),
+                              ("richieste_pubbliche_massime", 999)):
+            modified = copy.deepcopy(first)
+            modified[field] = poison
+            self.assertEqual(flow.at_read(modified, self.now)["stato"],
+                             "NON_VERIFICATO")
+        modified = copy.deepcopy(first)
+        modified["funding"]["funding_rate_grezzo"] = "1E+1000"
+        self.assertEqual(flow.at_read(modified, self.now)["funding"]["stato"],
+                         "NON_VERIFICATO")
+        modified = copy.deepcopy(first)
+        modified["esecuzioni"]["n_liquidazioni_nel_campione"] = 99
+        self.assertEqual(flow.at_read(modified, self.now)["esecuzioni"]["stato"],
+                         "NON_VERIFICATO")
+
+
     def test_real_producer_serialized_packet_and_bridge_revalidate(self):
         import copy
         import dossier_trade
         from scripts import kdd_wallet_packet_g0 as wallet
         from scripts import kdd_bridge_g2 as bridge
-        from scripts import test_kdd_wallet_packet_g0 as fixture_mod
+        # The legacy fixture imports the packet module by its top-level name.
+        # Reuse the already-loaded package module without external PYTHONPATH.
+        with patch.dict("sys.modules", {"kdd_wallet_packet_g0": wallet}):
+            from scripts import test_kdd_wallet_packet_g0 as fixture_mod
 
         fixture = fixture_mod.WalletPacketG0Tests(
             "test_wallet_first_all_assets_even_if_quote_missing")
@@ -404,6 +445,10 @@ class FuturesFlowTests(unittest.TestCase):
                     "preparato_utc": moment.isoformat(timespec="seconds")}
         wire = json.loads(json.dumps(bundle(pkt)))
         current = bridge.read_context(wire, now=moment)
+        self.assertEqual(current["flusso_futures_alla_lettura"]["funding"]
+                         ["stato"], "OSSERVATO")
+        self.assertEqual(current["flusso_futures_alla_lettura"]["esecuzioni"]
+                         ["stato"], "CAMPIONE_RECENTE")
         self.assertEqual(current["flusso_futures_alla_lettura"]["esecuzioni"]
                          ["n_liquidazioni_nel_campione"], 1)
         stale = bridge.read_context(wire, now=moment+dt.timedelta(minutes=18))
