@@ -935,17 +935,77 @@ def prepara_dossier_aggiornamento(data, *, asset_pairs=None):
             raise ValueError("Dossier riferito ad altro snapshot")
         rows=dossier.get('candidati',[])
         status['token_analizzati']=[x['token'] for x in rows]
+        # Economic coverage and the external shortlist are different questions.
+        # This is descriptive evidence at dossier time, not a GPT decision.
+        economic = dossier.get('evidenze_economiche')
+        economic = economic if isinstance(economic, dict) else {}
+        econ_positions = economic.get('posizioni')
+        econ_candidates = economic.get('candidati')
+        econ_positions = econ_positions if isinstance(econ_positions, list) else None
+        econ_candidates = econ_candidates if isinstance(econ_candidates, list) else None
+        four_positions = (dossier.get('patrimonio_4tf') or {}).get('posizioni') or []
+        aligned = bool(isinstance(four_positions, list) and four_positions
+                       and isinstance(econ_positions, list)
+                       and len(econ_positions) == len(four_positions)
+                       and all(isinstance(row, dict)
+                               and row.get('indice') == i
+                               and row.get('token') == four_positions[i].get('token')
+                               for i, row in enumerate(econ_positions)))
+        verified_positions = sum(
+            isinstance(row.get('identita'), dict)
+            and row['identita'].get('stato') == 'IDENTITA_VERIFICATA_DA_CATALOGO'
+            and isinstance(row.get('fondamentali'), dict)
+            and row['fondamentali'].get('stato') == 'VERIFICATO'
+            for row in (econ_positions or []) if isinstance(row, dict)) if aligned else 0
+        status['copertura_economica_patrimonio'] = {
+            'stato': ('VERIFICATA_ALLA_RILEVAZIONE'
+                      if aligned and verified_positions == len(four_positions)
+                      else 'PARZIALE' if aligned else 'NON_ATTESTATA'),
+            'posizioni': len(four_positions),
+            'fondamentali_verificati': verified_positions,
+            'limite': ('Prove economiche locali datate; rivalutare identità, fonti '
+                       'e freschezza nel pacchetto GPT alla lettura')}
+        status['lacune_shortlist_economica'] = []
         if not rows:
             status['motivi_incompletezza'].append('Nessun candidato in questo campione di scanner')
-        for item in rows:
+        for index, item in enumerate(rows):
+            token = item['token']
             if not item.get('livelli_15m') or not item.get('livelli_1h'):
-                status['motivi_incompletezza'].append('Candele incomplete: '+item['token'])
-            fund=item.get('fondamentali_coingecko')
-            if not fund or fund.get('errore') or not fund.get('id'):
-                status['motivi_incompletezza'].append('Fondamentali non verificati: '+item['token'])
+                status['motivi_incompletezza'].append('Candele incomplete: '+token)
+            erow = (econ_candidates[index] if isinstance(econ_candidates, list)
+                    and index < len(econ_candidates) else None)
+            same_candidate = (isinstance(erow, dict)
+                              and erow.get('indice') == index
+                              and erow.get('token') == token
+                              and erow.get('coppia_analisi') == item.get('coppia_analisi'))
+            identity = erow.get('identita') if same_candidate else None
+            econ_fund = erow.get('fondamentali') if same_candidate else None
+            new_verified = (isinstance(identity, dict)
+                            and identity.get('stato') == 'IDENTITA_VERIFICATA_DA_CATALOGO'
+                            and isinstance(econ_fund, dict)
+                            and econ_fund.get('stato') == 'VERIFICATO')
+            if erow is not None:
+                if not same_candidate:
+                    status['lacune_shortlist_economica'].append(
+                        'Candidato economico non allineato: '+token)
+                elif not new_verified:
+                    status['lacune_shortlist_economica'].append(
+                        'Evidenza economica incompleta: '+token+' ('+
+                        (str(identity.get('motivo') or identity.get('stato'))
+                         if isinstance(identity, dict) and
+                            identity.get('stato') != 'IDENTITA_VERIFICATA_DA_CATALOGO'
+                         else str(econ_fund.get('stato') if isinstance(econ_fund, dict)
+                                  else 'FONTE_ASSENTE'))+')')
+            else:
+                status['lacune_shortlist_economica'].append(
+                    'Evidenza economica assente: '+token)
+            legacy_fund = item.get('fondamentali_coingecko')
+            if not new_verified and (not legacy_fund or legacy_fund.get('errore')
+                                     or not legacy_fund.get('id')):
+                status['motivi_incompletezza'].append('Fondamentali non verificati: '+token)
             flow=item.get('flusso_spot_kraken',{})
             if flow.get('stato') not in ('COMPLETO_4H','FINESTRA_4H_NON_COPERTA'):
-                status['motivi_incompletezza'].append('Trades spot non disponibili: '+item['token'])
+                status['motivi_incompletezza'].append('Trades spot non disponibili: '+token)
         for origin,details in dossier.get('fonti_esterne',{}).items():
             if isinstance(details,dict) and details.get('errore'):
                 status['motivi_incompletezza'].append('Fonte esterna assente: '+origin)
@@ -978,18 +1038,32 @@ def prepara_dossier_aggiornamento(data, *, asset_pairs=None):
         status['posizioni_incomplete'] = quality.get('posizioni_incomplete')
         status['zero_reale'] = quality.get('zero_reale', False)
         status['motivi_patrimoniali'] = []
-        if not quality.get('portafoglio_noto'):
+        if not quality.get('portafoglio_noto') or quality.get('stato_quantita') != 'COMPLETE':
             status['motivi_patrimoniali'].append('Identità o quantità non tutte valide')
         if quality.get('stato_totale') != 'COMPLETO':
             status['motivi_patrimoniali'].append('Controvalore EUR non completo')
+        # Full EUR valuation must cover the same nonempty set of positions.
+        # Candidate completeness never substitutes for these wallet invariants.
+        n = quality.get('posizioni_registrate')
+        if (type(n) is not int or n < 1
+                or type(quality.get('posizioni_valorizzate')) is not int
+                or quality['posizioni_valorizzate'] != n
+                or type(quality.get('posizioni_incomplete')) is not int
+                or quality['posizioni_incomplete'] != 0):
+            status['motivi_patrimoniali'].append('Copertura patrimoniale incompleta o incongruente')
         if not quality.get('saldo_recente_verificato'):
             status['motivi_patrimoniali'].append('Saldo Kraken attuale non attestato')
-        if not status['fotografia_portafoglio_sha256']:
+        if (not isinstance(status['fotografia_portafoglio_sha256'], str)
+                or re.fullmatch(r'[a-f0-9]{64}', status['fotografia_portafoglio_sha256']) is None):
             status['motivi_patrimoniali'].append('Fotografia patrimoniale non identificabile')
-        suitable = (market_complete and not status['motivi_patrimoniali'])
+        # A deficient external opportunity or derivative feed cannot invalidate
+        # otherwise verified holdings. A full economic recommendation still
+        # requires the GPT reader's independent source/time checks.
+        suitable = not status['motivi_patrimoniali']
         status['idoneita_analisi_patrimoniale'] = 'IDONEA' if suitable else 'NON_IDONEA'
-        status['stato'] = ('PARZIALE' if not market_complete else
-                           'PRONTO_PER_ESAME_GPT' if suitable else
+        status['stato'] = ('PRONTO_PER_ESAME_GPT' if suitable and market_complete else
+                           'PRONTO_PER_ESAME_GPT_CON_LIMITI' if suitable else
+                           'PARZIALE' if not market_complete else
                            'PRONTO_PER_ESAME_MERCATO')
         status['preparato_utc']=dossier['creato_utc']
     except Exception as exc:
