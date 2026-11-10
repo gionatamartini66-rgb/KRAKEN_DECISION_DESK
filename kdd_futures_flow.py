@@ -15,7 +15,15 @@ TYPES = frozenset(("fill", "liquidation", "assignment", "termination", "block"))
 UTC = dt.timezone.utc
 COVERAGE = "Solo perpetual BTC Kraken Futures, NON cross-exchange"
 FUNDING_UNIT = "Valore grezzo API Kraken; periodo/scaling percentuale non attestati"
-FUNDING_LIMIT = "Stima funding non equivale a pagamento realizzato o costo netto"
+# Engineering quarantine, NOT an official Kraken contractual maximum:
+# the published ticker example is around 1e-7 in raw API units; |x| > 1
+# is orders of magnitude beyond it. Reject rather than re-scale/round.
+MAX_ABS_FUNDING_RAW = Decimal("1")
+MAX_TRADE_ID = 2147483647  # Kraken /history trade_id: integer<int32>
+FUNDING_LIMIT = (
+    "Stima funding non equivale a pagamento realizzato o costo netto; "
+    "valori grezzi oltre +/-1 in quarantena (soglia ingegneristica, "
+    "NON massimo contrattuale Kraken)")
 TRADES_UNIT = "size contratto da attestare; prezzi USD, non volumi in USD"
 TRADES_LIMIT = (
     "Ultime <=100 esecuzioni in finestra variabile, fino a 7 giorni/riavvio motore; "
@@ -44,6 +52,17 @@ def _number(value, *, positive=False, signed=False):
     if not result.is_finite() or (not signed and (result <= 0 if positive else result < 0)):
         raise ValueError("nonfinite, negative or zero value")
     return result
+
+
+class FundingAnomaly(ValueError):
+    """Finite but implausibly large raw funding, distinct from missing data."""
+
+
+def _funding_value(value):
+    number = _number(value, signed=True)
+    if abs(number) > MAX_ABS_FUNDING_RAW:
+        raise FundingAnomaly("funding raw exceeds engineering quarantine threshold")
+    return number
 
 
 def _read(endpoint, request):
@@ -90,8 +109,8 @@ def _funding(data, now):
     last = _date(ticker["lastTime"])
     if last > observed or last > now:
         raise ValueError("future/incoherent lastTime")
-    current = _number(ticker["fundingRate"], signed=True)
-    predicted = _number(ticker["fundingRatePrediction"], signed=True)
+    current = _funding_value(ticker["fundingRate"])
+    predicted = _funding_value(ticker["fundingRatePrediction"])
     if not _fresh(observed, now):
         return {"stato": "SCADUTO", "osservato_utc": _stamp(observed),
                 "limite": "Funding storico: numeri soppressi"}
@@ -118,7 +137,7 @@ def _normalize_trades(trades, observed, now):
             raise ValueError("future trade timestamp")
         trade_id = row.get("trade_id")
         uid = row.get("uid")
-        if trade_id is not None and (type(trade_id) is not int or trade_id < 1):
+        if trade_id is not None and (type(trade_id) is not int or not 1 <= trade_id <= MAX_TRADE_ID):
             raise ValueError("invalid trade_id")
         if uid is not None and (not isinstance(uid, str) or not 1 <= len(uid) <= 128):
             raise ValueError("invalid uid")
@@ -218,6 +237,9 @@ def collect(now, *, request=None):
             ("esecuzioni", "history?symbol=" + SYMBOL, _history)):
         try:
             result[field] = parser(_read(endpoint, request), moment)
+        except FundingAnomaly:
+            result[field] = {"stato": "NON_VERIFICATO",
+                             "motivo": "FUNDING_FUORI_SOGLIA_INGEGNERISTICA"}
         except (OSError, ValueError, TypeError, KeyError, OverflowError,
                 ArithmeticError, UnicodeError) as exc:
             result[field] = {"stato": "NON_VERIFICATO", "motivo": type(exc).__name__}
@@ -244,8 +266,8 @@ def _read_funding(row, now):
     last = _date(row.get("ultimo_trade_utc"))
     if last > observed or last > now:
         raise ValueError("funding lastTime future or incoherent")
-    current = _number(row.get("funding_rate_grezzo"), signed=True)
-    predicted = _number(row.get("funding_rate_previsione_grezza"), signed=True)
+    current = _funding_value(row.get("funding_rate_grezzo"))
+    predicted = _funding_value(row.get("funding_rate_previsione_grezza"))
     expected = {"stato": "OSSERVATO", "osservato_utc": _stamp(observed),
                 "ultimo_trade_utc": _stamp(last),
                 "funding_rate_grezzo": str(current),
@@ -300,6 +322,9 @@ def at_read(source, now):
         for name, verifier in (("funding", _read_funding), ("esecuzioni", _read_history)):
             try:
                 out[name] = verifier(source.get(name), moment)
+            except FundingAnomaly:
+                out[name] = {"stato": "NON_VERIFICATO",
+                             "motivo": "FUNDING_FUORI_SOGLIA_INGEGNERISTICA"}
             except (ValueError, KeyError, TypeError, OverflowError, ArithmeticError):
                 out[name] = {"stato": "NON_VERIFICATO", "motivo": "CONTENUTO_NON_CONGRUENTE"}
         return out
