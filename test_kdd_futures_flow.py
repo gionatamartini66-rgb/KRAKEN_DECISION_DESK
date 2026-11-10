@@ -296,6 +296,71 @@ class FuturesFlowTests(unittest.TestCase):
         self.assertEqual(result["flusso_futures"]["esecuzioni"]["stato"], "NON_VERIFICATO")
         self.assertEqual(sum("/derivatives/api/v3/" in x for x in seen), 2)
 
+    def test_rt2_trade_id_int32_contract_at_collection_and_read(self):
+        import copy
+        for value in (1, 2147483647):
+            with self.subTest(accepted=value):
+                self.history["history"][0]["trade_id"] = value
+                observed = flow.collect(self.now, request=self.fake_request)
+                self.assertEqual(observed["esecuzioni"]["stato"], "CAMPIONE_RECENTE")
+                after_wire = json.loads(json.dumps(observed))
+                self.assertEqual(flow.at_read(after_wire, self.now)["esecuzioni"]
+                                 ["n_esecuzioni"], 3)
+        baseline = flow.collect(self.now, request=self.fake_request)
+        for value in (2147483648, 0, True, False, -1, "1"):
+            with self.subTest(rejected=repr(value)):
+                self.history["history"][0]["trade_id"] = value
+                captured = flow.collect(self.now, request=self.fake_request)
+                self.assertEqual(captured["esecuzioni"]["stato"], "NON_VERIFICATO")
+                poisoned = copy.deepcopy(baseline)
+                poisoned["esecuzioni"]["trade_normalizzati"][0]["trade_id"] = value
+                self.assertEqual(flow.at_read(poisoned, self.now)["esecuzioni"]
+                                 ["stato"], "NON_VERIFICATO")
+        self.history["history"][0]["trade_id"] = 2147483647
+        duplicate = copy.deepcopy(self.history["history"][0])
+        self.history["history"].append(duplicate)
+        observed = flow.collect(self.now, request=self.fake_request)
+        self.assertEqual(observed["esecuzioni"]["n_esecuzioni"], 3)
+        self.assertEqual(flow.at_read(observed, self.now)["esecuzioni"]["n_esecuzioni"], 3)
+
+    def test_rt2_raw_funding_engineering_quarantine_acquire_and_read(self):
+        import copy
+        # This is engineering anomaly quarantine, not Kraken's contractual limit.
+        self.assertEqual(str(flow.MAX_ABS_FUNDING_RAW), "1")
+        for field, persisted in (("fundingRate", "funding_rate_grezzo"),
+                                 ("fundingRatePrediction", "funding_rate_previsione_grezza")):
+            for value in ("0.000001", "-0.0123", "0", "1", "-1"):
+                with self.subTest(field=field, accepted=value):
+                    self._fresh()
+                    self.ticker["tickers"][0][field] = value
+                    captured = flow.collect(self.now, request=self.fake_request)
+                    self.assertEqual(captured["funding"]["stato"], "OSSERVATO")
+                    wire = json.loads(json.dumps(captured))
+                    read = flow.at_read(wire, self.now)
+                    self.assertEqual(read["funding"]["stato"], "OSSERVATO")
+                    self.assertEqual(read["funding"][persisted], value)
+            for bad in ("1.000000000001", "-1.000000000001", "1E+308",
+                        "1E+1000", "-1E+308", "NaN", "Infinity", True, None):
+                with self.subTest(field=field, rejected=repr(bad)):
+                    valid = self._fresh()
+                    self.ticker["tickers"][0][field] = bad
+                    captured = flow.collect(self.now, request=self.fake_request)
+                    self.assertEqual(captured["funding"]["stato"], "NON_VERIFICATO")
+                    if bad in ("1.000000000001", "-1.000000000001", "1E+308",
+                               "1E+1000", "-1E+308"):
+                        self.assertEqual(captured["funding"]["motivo"],
+                                         "FUNDING_FUORI_SOGLIA_INGEGNERISTICA")
+                    mutated = copy.deepcopy(valid)
+                    mutated["funding"][persisted] = bad
+                    after_wire = json.loads(json.dumps(mutated))
+                    read = flow.at_read(after_wire, self.now)
+                    self.assertEqual(read["funding"]["stato"], "NON_VERIFICATO")
+                    self.assertNotIn("funding_rate_grezzo", read["funding"])
+                    if bad in ("1.000000000001", "-1.000000000001", "1E+308",
+                               "1E+1000", "-1E+308"):
+                        self.assertEqual(read["funding"]["motivo"],
+                                         "FUNDING_FUORI_SOGLIA_INGEGNERISTICA")
+
     def test_real_producer_serialized_packet_and_bridge_revalidate(self):
         import copy
         import dossier_trade
@@ -363,6 +428,31 @@ class FuturesFlowTests(unittest.TestCase):
                          ["stato"], "NON_VERIFICATO")
         self.assertNotIn("n_liquidazioni_nel_campione",
                          context["flusso_futures_alla_lettura"]["esecuzioni"])
+        # Out-of-domain funding cannot recover a positive verdict after
+        # read-back of the serialized GPT handoff and renewed local digest.
+        poisoned_funding = copy.deepcopy(wire)
+        poisoned_funding["packet"]["evidenze_multifonte"]["derivati_btc"][
+            "flusso_futures"]["funding"]["funding_rate_grezzo"] = "1E+308"
+        poisoned_funding["packet_sha256"] = bridge.digest(poisoned_funding["packet"])
+        consumed = bridge.read_context(
+            json.loads(json.dumps(poisoned_funding)), now=moment)
+        self.assertEqual(consumed["flusso_futures_alla_lettura"]["funding"]
+                         ["stato"], "NON_VERIFICATO")
+        self.assertEqual(consumed["flusso_futures_alla_lettura"]["funding"]
+                         ["motivo"], "FUNDING_FUORI_SOGLIA_INGEGNERISTICA")
+        self.assertNotIn("funding_rate_grezzo",
+                         consumed["flusso_futures_alla_lettura"]["funding"])
+        # Dossier tamper, before packet build, also fails on real consumer.
+        fixture.dossier["contesto_derivati_btc"]["flusso_futures"][
+            "funding"]["funding_rate_previsione_grezza"] = "1E+1000"
+        fixture.dump()
+        bad_funding_packet = wallet.build(fixture.root, now=moment)
+        self.assertEqual(bad_funding_packet["evidenze_multifonte"]["derivati_btc"]
+                         ["flusso_futures"]["funding"]["stato"], "NON_VERIFICATO")
+        # Existing OI/CVD and other asset rows survive quarantine.
+        self.assertEqual(bad_funding_packet["evidenze_multifonte"]["derivati_btc"]
+                         ["open-interest"]["stato"], "DISPONIBILE")
+        self.assertEqual(bad_funding_packet["patrimonio"]["n_posizioni"], 3)
         # An old packet without Futures remains usable, but not verified.
         old = copy.deepcopy(wire)
         del old["packet"]["evidenze_multifonte"]["derivati_btc"]["flusso_futures"]
