@@ -2224,28 +2224,23 @@ class DeskTests(unittest.TestCase):
         self.assertTrue(isinstance(local.get('t0_sha256'),str) and
                         hashlib.sha256(original.read_bytes()).hexdigest()==local['t0_sha256'],
                         'Impronta T0 differente dalla copia originaria')
-        # Il solo hash in portafoglio.json non autentica T0: i due file
-        # potrebbero essere modificati insieme. Richiediamo un'impronta
-        # precedentemente attestata, recuperata da prova PRIVATA INDIPENDENTE.
-        # Non ricavarla di nuovo dal T0 corrente: sarebbe una verifica circolare.
+        # L'impronta nel portafoglio resta il controllo ordinario obbligatorio.
+        # Le attestazioni storiche esterne sono FACOLTATIVE: se disponibili
+        # devono comunque coincidere. Non ricavarle dal T0 corrente per
+        # fingere una verifica indipendente né bloccare il deploy se assenti.
         trusted=os.environ.get('KDD_T0_TRUSTED_SHA256','')
         proof=os.environ.get('KDD_T0_TRUSTED_PROOF','')
-        # Due rappresentazioni alternative della prova storica:
-        # hash originale privato, oppure prova SHA-256 ridotta a 96 bit
-        # derivata in modo deterministico dal medesimo hash. Entrambe devono
-        # provenire da una copia INDIPENDENTE, mai dal file corrente.
-        digest=hashlib.sha256(original.read_bytes()).hexdigest()
-        expected_proof=hashlib.sha256(
-            ('KDD-T0-20261024-VERIFICA-RETROSPETTIVA:'+digest).encode()
-        ).hexdigest()[:24]
-        valid_hash=re.fullmatch(r'[a-f0-9]{64}',trusted) is not None
-        valid_proof=re.fullmatch(r'[a-f0-9]{24}',proof) is not None
-        self.assertTrue(valid_hash or valid_proof,
-                        'ATTESTAZIONE T0 LOCALE ASSENTE: occorre riferimento storico indipendente; gate NON SUPERATO')
-        if valid_hash:
-            self.assertEqual(digest,trusted,
+        if trusted:
+            self.assertTrue(re.fullmatch(r'[a-f0-9]{64}',trusted) is not None,
+                            'Formato attestazione T0 SHA-256 non valido')
+            self.assertEqual(local['t0_sha256'],trusted,
                              'T0 locale diverso dall\'impronta storica indipendente')
-        if valid_proof:
+        if proof:
+            self.assertTrue(re.fullmatch(r'[a-f0-9]{24}',proof) is not None,
+                            'Formato attestazione T0 ridotta non valido')
+            expected_proof=hashlib.sha256(
+                ('KDD-T0-20261024-VERIFICA-RETROSPETTIVA:'+local['t0_sha256']).encode()
+            ).hexdigest()[:24]
             self.assertEqual(expected_proof,proof,
                              'T0 locale diverso dalla prova storica indipendente')
         snapshot=json.loads(original.read_text(encoding='utf-8'))
@@ -2260,8 +2255,8 @@ class DeskTests(unittest.TestCase):
             self.fail('Fotografia T0 non interpretabile: '+type(exc).__name__)
         # La fotografia originale mostra valori arrotondati ai centesimi:
         # il totale dell'interfaccia può discostarsi di un centesimo dalla
-        # somma delle righe. Non dichiararlo corruzione: l'autenticità
-        # resta vincolata all'impronta storica indipendente sopra.
+        # somma delle righe. La coerenza col T0 resta vincolata
+        # all'impronta nel portafoglio e, se presente, alla prova esterna.
         self.assertTrue(recorded.is_finite() and recorded>0 and
                         all(v.is_finite() and v>=0 for v in values) and
                         abs(sum(values,Decimal('0'))-recorded)<=Decimal('0.01'),
@@ -2274,6 +2269,77 @@ class DeskTests(unittest.TestCase):
                             isinstance(item.get('costo_medio_eur'),(int,float,str))
                             for item in local['posizioni']),
                         'Schema dei costi medi incoerente')
+
+    def test_t0_optional_external_attestation_synthetic_regression(self):
+        """Original T0 remains checked; outside evidence is optional but binding."""
+        from pathlib import Path
+        import hashlib
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            (root/'config.json').write_text('{}',encoding='utf-8')
+            history=root/'storico_portafoglio'
+            history.mkdir()
+            identifier='T0_2026-10-19_1900_KRAKEN_PRO'
+            original=history/(identifier+'.json')
+            snapshot={
+                'quantita_e_valori_schermata':[
+                    {'valore_eur_visualizzato':'12.40'},
+                    {'valore_eur_visualizzato':'17.60'}],
+                'valore_totale_fotografia_eur':'30.00'}
+            raw=json.dumps(snapshot,sort_keys=True).encode('utf-8')
+            original.write_bytes(raw)
+            digest=hashlib.sha256(raw).hexdigest()
+            private={
+                't0_id':identifier,'t0_sha256':digest,
+                'fonte_quantita':'Kraken BalanceEx - synthetic fixture',
+                'posizioni':[{'token':'TEST','costo_medio_eur':None}],
+                'liquidita_spot_api':{}}
+            portfolio=root/'portafoglio.json'
+            portfolio.write_text(json.dumps(private),encoding='utf-8')
+            proof=hashlib.sha256(
+                ('KDD-T0-20261024-VERIFICA-RETROSPETTIVA:'+digest).encode()
+            ).hexdigest()[:24]
+
+            def check(*,trusted='',external_proof=''):
+                with unittest.mock.patch.object(d,'DIR',root), \
+                     unittest.mock.patch.dict(os.environ,{
+                         'KDD_T0_TRUSTED_SHA256':trusted,
+                         'KDD_T0_TRUSTED_PROOF':external_proof}):
+                    self.test_local_t0_original_integrity_and_balances_are_separate()
+
+            check()                             # no external attestations
+            check(trusted=digest)                # independent hash present
+            check(external_proof=proof)          # independent reduced proof
+            check(trusted=digest,external_proof=proof)
+            for kwargs in (
+                    {'trusted':'0'*64},
+                    {'external_proof':'0'*24},
+                    {'trusted':'malformed'},
+                    {'external_proof':'malformed'},
+                    {'trusted':digest,'external_proof':'0'*24},
+                    {'trusted':'0'*64,'external_proof':proof}):
+                with self.subTest(kwargs=kwargs), self.assertRaises(AssertionError):
+                    check(**kwargs)
+
+            # Local original changed: the stored portfolio fingerprint catches it
+            # even when no outside evidence was provided.
+            changed=dict(snapshot)
+            changed['valore_totale_fotografia_eur']='31.00'
+            changed['quantita_e_valori_schermata']=[
+                {'valore_eur_visualizzato':'13.40'},
+                {'valore_eur_visualizzato':'17.60'}]
+            changed_raw=json.dumps(changed,sort_keys=True).encode('utf-8')
+            original.write_bytes(changed_raw)
+            with self.assertRaisesRegex(AssertionError,'Impronta T0 differente'):
+                check()
+
+            # If both the original and its locally stored hash are changed
+            # together, an independent historical proof still detects it.
+            private['t0_sha256']=hashlib.sha256(changed_raw).hexdigest()
+            portfolio.write_text(json.dumps(private),encoding='utf-8')
+            with self.assertRaisesRegex(AssertionError,'prova storica indipendente'):
+                check(external_proof=proof)
 
     def test_trade_flow_timestamp_is_after_api_response_not_snapshot_start(self):
         import flusso_spot as f
