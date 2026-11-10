@@ -707,6 +707,10 @@ def analytic_evidence(snapshot, dossier, positions, shortlist, now):
                          "SCADUTO" if ts["freschezza"] == "DA_AGGIORNARE" else "NON_VERIFICATO",
                          "valori": {k: _analytic_value(row.get(k)) for k in keys} if valid else None,
                          "unita": str(row.get("unita") or "unita contrattuale non verificata")[:120]}
+    # A source measured at collection time must be rechecked when GPT reads.
+    import kdd_futures_flow
+    futures["flusso_futures"] = kdd_futures_flow.at_read(
+        deriv.get("flusso_futures"), now)
     global_row = (dossier.get("fonti_esterne") or {}).get("coingecko_global")
     global_row = global_row if isinstance(global_row, dict) else {}
     stamp = global_row.get("aggiornato_sorgente_utc")
