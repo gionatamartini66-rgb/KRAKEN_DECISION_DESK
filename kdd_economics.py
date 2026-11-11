@@ -37,6 +37,34 @@ MAX_MARKET_CANDIDATES = 8
 VERSION = "kdd-economic-v001"
 UTC = dt.timezone.utc
 
+# Consultable source documents, NOT automatically acquired token-unlock data.
+# These links have a curated project binding and are never used to assert
+# current supply, scheduled vesting or the adoption of a software release.
+MONETARY_REFERENCES = {
+    "BTC": {"url": "https://bitcoin.org/en/faq#how-are-bitcoins-created",
+            "tema": "Emissione monetaria e limite di offerta Bitcoin"},
+    "SOL": {"url": "https://solana.com/staking",
+            "tema": "Politica di inflazione e ricompense staking Solana"},
+}
+
+
+def monetary_reference(identity):
+    token = canonical_token(identity.get("token"))
+    doc = MONETARY_REFERENCES.get(token)
+    verified = (identity.get("stato") == "IDENTITA_VERIFICATA_DA_CATALOGO"
+                and identity.get("metodo") == "REGISTRO_CURATO"
+                and token in PROJECTS)
+    return {"stato": "CONSULTABILE_NON_ACQUISITO" if doc and verified else "NON_DISPONIBILE",
+            "fonte": doc["url"] if doc and verified else None,
+            "tema": doc["tema"] if doc and verified else None,
+            "ultimo_controllo_documentale_utc": None,
+            "calendario_unlock_verificato": False,
+            "limite": ("Il documento di progetto va verificato alla lettura: non "
+                       "attesta quantità correnti, unlock datati o vesting."
+                       if doc and verified else
+                       "Nessuna fonte primaria di politica monetaria attribuita")}
+
+
 # Capabilities, not observed flows or claims of institutional buying.
 # Entries labelled CONSULTABILE are references for GPT research only.
 _SOURCE_MATRIX = (
@@ -255,7 +283,12 @@ def fundamentals(identity, payload, now, acquired):
            "capitalizzazione_usd": None, "fdv_usd": None,
            "offerta_circolante": None, "offerta_totale": None,
            "offerta_massima": None, "rapporto_fdv_cap": None,
+           "quota_circolante_su_totale_pct": None,
+           "emissione_residua_massima_su_circolante_pct": None,
+           "fonte_supply": "COINGECKO_AGGREGATORE_NON_SCHEDULE_PRIMARIO",
            "diluizione": "NON_CALCOLABILE", "unlock": "NON_VERIFICATO",
+           "vesting": "NON_VERIFICATO", "prossimo_unlock_utc": None,
+           "fonte_calendario_unlock": None,
            "limite": "Nessun calendario vesting deducibile dalla supply"}
     if identity.get("stato") != "IDENTITA_VERIFICATA_DA_CATALOGO" or not isinstance(payload, dict):
         return out
@@ -281,7 +314,21 @@ def fundamentals(identity, payload, now, acquired):
     out["stato"] = "VERIFICATO" if age <= 86400 else "SCADUTO"
     if values["capitalizzazione_usd"] and values["fdv_usd"]:
         out["rapporto_fdv_cap"] = round(values["fdv_usd"]/values["capitalizzazione_usd"], 4)
-    if values["offerta_massima"] is None:
+    circulating, total, maximum = (values["offerta_circolante"],
+                                   values["offerta_totale"],
+                                   values["offerta_massima"])
+    if (circulating is not None and total is not None
+            and total > 0 and 0 <= circulating <= total):
+        out["quota_circolante_su_totale_pct"] = round(100 * circulating / total, 4)
+    if (circulating is not None and circulating > 0
+            and maximum is not None and maximum >= circulating):
+        out["emissione_residua_massima_su_circolante_pct"] = round(
+            100 * (maximum - circulating) / circulating, 4)
+    if (circulating is not None and maximum is not None
+            and maximum > 0 and maximum < circulating):
+        out["diluizione"] = "SUPPLY_MAX_INFERIORE_AL_CIRCOLANTE_ANOMALIA"
+        out["limite"] = "Supply numericamente contraddittoria: non inferire emissione o unlock"
+    elif values["offerta_massima"] is None:
         out["diluizione"] = "MAX_NON_DICHIARATO_NON_EQUIVALE_A_ILLIMITATO"
     elif values["offerta_massima"] == 0:
         out["diluizione"] = "MAX_ZERO_DATO_ANOMALO"
@@ -302,37 +349,74 @@ def release_event(identity, release, now, acquired):
     link = release.get("html_url")
     expected = "https://github.com/" + repo + "/releases/tag/"
     published = stamp(release.get("published_at"))
+    tag = release.get("tag_name")
     if (not isinstance(link, str) or not link.startswith(expected)
-            or not published or published > now + dt.timedelta(minutes=2)
-            or not isinstance(release.get("name"), str)):
+            or len(link) <= len(expected) or not published
+            or not dt.timedelta(0) <= now-published + dt.timedelta(minutes=2)
+            or not isinstance(release.get("name"), str)
+            or release.get("draft") is True
+            or (tag is not None and (not isinstance(tag, str)
+                                     or link != expected + tag))):
         return out
-    out.update(stato="VERIFICATO" if (now-published).days <= 90 else "SCADUTO",
+    out.update(stato="VERIFICATO" if now-published <= dt.timedelta(days=90) else "SCADUTO",
                fonte=link, emittente=repo,
                pubblicato_utc=published.isoformat(timespec="seconds"),
                evento_utc=published.isoformat(timespec="seconds"),
-               sintesi=release["name"][:180])
+               sintesi=release["name"][:180],
+               tag=tag if isinstance(tag, str) else link[len(expected):],
+               pre_release=release.get("prerelease") is True,
+               adozione_rete="NON_VERIFICATA",
+               impatto_economico="NON_DIMOSTRATO",
+               condizione_riesame="Verificare adozione reale del software, contenuto release e fatti di rete")
     return out
 
 
 def macro(feed, now):
+    """Official, dated headlines anchor *questions*, never asserted price effects."""
     entries = []
     for row in (feed if isinstance(feed, list) else [])[:12]:
         if not isinstance(row, dict):
             continue
         source = row.get("fonte")
-        url = row.get("link")
+        url = row.get("link") or row.get("url")
         if source not in KNOWN_MACRO or not isinstance(url, str):
             continue
         parsed = urlparse(url)
-        trusted = parsed.scheme == "https" and parsed.hostname == KNOWN_MACRO[source]
-        published = stamp(row.get("data"))
-        fresh = bool(trusted and published and dt.timedelta(0) <= now-published <= dt.timedelta(days=14))
+        trusted = (parsed.scheme == "https" and parsed.hostname == KNOWN_MACRO[source]
+                   and parsed.username is None and parsed.password is None)
+        published = stamp(row.get("data") or row.get("pubblicato_utc"))
+        fresh = bool(trusted and published
+                     and dt.timedelta(0) <= now-published <= dt.timedelta(days=14))
         entries.append({"fonte": source, "url": url if trusted else None,
                         "titolo": str(row.get("titolo") or "")[:180],
                         "pubblicato_utc": published.isoformat(timespec="seconds") if published else None,
                         "stato": "VERIFICATO" if fresh else "SCADUTO" if trusted and published else "NON_VERIFICATO",
                         "impatto_asset": "NON_VALUTABILE"})
-    return {"fonti_ufficiali": entries,
+    scenarios = []
+    for key, allowed, hypothesis, counter, trigger in (
+        ("POLITICA_MONETARIA",
+         ("Fed — politica monetaria", "BCE — comunicati e discorsi",
+          "BCE — operazioni di mercato"),
+         "Una sorpresa monetaria potrebbe cambiare liquidita e costo del rischio.",
+         "Il contenuto potrebbe essere atteso dal mercato o compensato da altri fattori.",
+         "Verificare testo completo, consenso datato, tassi e reazione osservata."),
+        ("GEOPOLITICA_REGOLAZIONE",
+         ("Consiglio UE — comunicati",),
+         "Una decisione geopolitica o regolatoria potrebbe alterare accesso e rischio di controparte.",
+         "La misura potrebbe non riguardare la rete o la coppia dell'asset considerato.",
+         "Verificare campo di applicazione, data di efficacia e soggetti coinvolti.")):
+        evidence = next((row for row in entries
+                         if row["fonte"] in allowed and row["stato"] == "VERIFICATO"), None)
+        scenarios.append({"tipo": key,
+                          "stato": "IPOTESI_DA_VERIFICARE" if evidence else "NON_VALUTABILE",
+                          "fonte": evidence["url"] if evidence else None,
+                          "pubblicato_utc": evidence["pubblicato_utc"] if evidence else None,
+                          "titolo_osservato": evidence["titolo"] if evidence else None,
+                          "ipotesi": hypothesis,
+                          "controipotesi": counter,
+                          "condizione_di_riesame": trigger,
+                          "limite": "Il titolo non prova sorpresa, causalita o impatto su asset."})
+    return {"fonti_ufficiali": entries, "scenari_condizionali": scenarios,
             "ipotesi": "Una variazione inattesa della politica monetaria potrebbe modificare le condizioni di liquidita.",
             "controipotesi": "La variazione potrebbe essere gia incorporata nei prezzi o prevalerebbero altri fattori.",
             "condizione_di_riesame": "Confrontare decisione ufficiale, consenso datato e prezzi successivi.",
@@ -341,9 +425,15 @@ def macro(feed, now):
 
 
 def regime(btc_four, global_row, now):
+    """BTC 4H/1D plus independently observed aggregate capitalization/activity.
+
+    Two BTC frames are one price-signal family; they do not alone constitute
+    two independent confirmations. Dominance and turnover are descriptive,
+    not proxies for institutional flows or trade recommendations.
+    """
     out = {"stato": "INDETERMINATO", "qualita": "INSUFFICIENTE",
            "favorevoli": [], "contrari": [], "mancanti": [],
-           "invalidazione": "Riesaminare con chiusure 4H/1D e dati aggregati freschi",
+           "famiglie_osservate": [], "invalidazione": "Riesaminare con chiusure 4H/1D e dati aggregati freschi",
            "limite": "Classificazione descrittiva; non previsione o consiglio"}
     frames = btc_four.get("timeframe") if isinstance(btc_four, dict) else None
     if not isinstance(frames, dict):
@@ -358,32 +448,65 @@ def regime(btc_four, global_row, now):
     if len(trend) < 2 or any(x not in ("SALITA", "DISCESA", "LATERALE") for x in trend.values()):
         out["mancanti"].append("BTC 4H e 1D aggiornati e confrontabili")
         return out
+    out["famiglie_osservate"].append({
+        "famiglia": "TREND_BTC", "timeframe": ["4H", "1D"], "stato": "DISPONIBILE",
+        "osservazione": dict(trend), "limite": "Un unico mercato in due timeframe"})
     if trend["4H"] != trend["1D"]:
         out.update(stato="TRANSIZIONE", qualita="PARZIALE",
                    contrari=["BTC 4H e 1D discordanti"])
         return out
-    if trend["4H"] == "LATERALE":
-        out.update(stato="LATERALE", qualita="PARZIALE", favorevoli=["BTC 4H e 1D laterali"])
-        return out
-    if not isinstance(global_row, dict) or not stamp(global_row.get("aggiornato_sorgente_utc")):
+    if not isinstance(global_row, dict):
         out["mancanti"].append("CoinGecko globale datato")
         return out
-    updated = stamp(global_row["aggiornato_sorgente_utc"])
+    updated = stamp(global_row.get("aggiornato_sorgente_utc"))
     change = global_row.get("var_capitalizzazione_24h_pct")
-    if (updated > now + dt.timedelta(minutes=2) or now-updated > dt.timedelta(hours=2)
-            or not isinstance(change, (int, float)) or not math.isfinite(change)):
+    if (not updated or updated > now + dt.timedelta(minutes=2)
+            or now-updated > dt.timedelta(hours=2)
+            or not isinstance(change, (int, float)) or isinstance(change, bool)
+            or not math.isfinite(change)):
         out["mancanti"].append("Variazione capitalizzazione globale fresca")
         return out
-    direction = "RIALZISTA" if trend["4H"] == "SALITA" else "RIBASSISTA"
-    consistent = (change > 0 if direction == "RIALZISTA" else change < 0)
+    out["famiglie_osservate"].append({
+        "famiglia": "CAPITALIZZAZIONE_CRYPTO_AGGREGATA",
+        "fonte": global_row.get("fonte"),
+        "pubblicato_utc": updated.isoformat(timespec="seconds"),
+        "variazione_24h_pct": change,
+        "limite": "Aggregatore, non capitali istituzionali né flussi ETF."})
+    cap, volume = (numeric(global_row.get("capitalizzazione_totale_usd")),
+                   numeric(global_row.get("volume_24h_usd")))
+    if cap is not None and cap > 0 and volume is not None and 0 < volume <= cap*10:
+        out["famiglie_osservate"].append({
+            "famiglia": "ATTIVITA_AGGREGATA",
+            "turnover_24h_su_cap_pct": round(volume / cap * 100, 4),
+            "pubblicato_utc": updated.isoformat(timespec="seconds"),
+            "limite": "Rapporto tra volume riportato e capitalizzazione; non prova partecipazione netta o acquisti."})
+    else:
+        out["mancanti"].append("Volume aggregato 24h e rapporto volume/capitalizzazione attendibile")
     out["favorevoli"].append("BTC 4H/1D concordi: " + trend["4H"])
-    if consistent:
+    # Sideways BTC with a directional broad market is a contradiction, not a
+    # neutral regime. This threshold separates clearly directional changes
+    # from near-zero noise; it is an engineering rule, not a trading signal.
+    if trend["4H"] == "LATERALE":
+        if abs(change) > 1:
+            out.update(stato="TRANSIZIONE", qualita="PARZIALE",
+                       contrari=["BTC laterale mentre capitale aggregato varia oltre 1% in 24H"])
+        else:
+            out.update(stato="LATERALE", qualita="PARZIALE",
+                       favorevoli=out["favorevoli"] + ["Variazione aggregata contenuta"])
+        return out
+    direction = "RIALZISTA" if trend["4H"] == "SALITA" else "RIBASSISTA"
+    # Zero broad-market change is an abstention; it cannot confirm either
+    # direction. Never let missing/invalid volume stand in for confirmation.
+    if change == 0:
+        out.update(stato="INDETERMINATO", qualita="INSUFFICIENTE",
+                   contrari=["Capitalizzazione aggregata 24h senza direzione"])
+    elif (change > 0) == (direction == "RIALZISTA"):
         out.update(stato=direction, qualita="PARZIALE")
         out["favorevoli"].append("Capitalizzazione aggregata 24h concorde")
     else:
         out.update(stato="TRANSIZIONE", qualita="PARZIALE")
         out["contrari"].append("Capitalizzazione aggregata 24h contraria al trend BTC")
-    out["mancanti"].append("Partecipazione/volumi indipendenti e derivati con copertura")
+    out["mancanti"].append("Derivati con copertura e confronto partecipazione/volumi tra rilevazioni")
     return out
 
 
@@ -408,11 +531,15 @@ def decision_context(identity, fundamental, event):
         hypothesis = "La diluizione potenziale merita confronto con domanda e valore del progetto"
         opposite = "Supply e FDV da sole non determinano prezzo o calendario unlock"
     if event.get("stato") == "VERIFICATO":
-        issue += "; release software ufficiale documentata"
-        opposite += "; una release non prova un effetto economico"
+        issue += "; release software ufficiale documentata (" + str(event.get("tag") or "versione") + ")"
+        opposite += "; una release non prova adozione della rete o un effetto economico"
+    if fundamental.get("emissione_residua_massima_su_circolante_pct") is not None:
+        issue += "; emissione residua massima teorica pari al " + str(
+            fundamental["emissione_residua_massima_su_circolante_pct"]) + "% del circolante"
     return {"fatto": issue, "rischio_opportunita_ipotesi": hypothesis,
             "controipotesi": opposite,
-            "condizione_riesame": "Controllare nuovi dati supply, schedule primario e fatti specifici del progetto"}
+            "condizione_riesame": "Confrontare supply osservata e schedule primaria datata; "
+                                 "per release verificare adozione/rete e non solo annuncio"}
 
 
 def at_read(source, positions, shortlist, now):
@@ -501,6 +628,7 @@ def at_read(source, positions, shortlist, now):
                     fundamentals({}, None, now, now), stato="NON_VERIFICATO_IDENTITA",
                     motivo="ATTESTAZIONE_IDENTITA_SCADUTA")
                 row_copy["evento"] = release_event({}, None, now, now)
+            row_copy["politica_monetaria_primaria"] = monetary_reference(row_copy["identita"])
             row_copy["lettura_economica"] = decision_context(
                 row_copy["identita"], row_copy["fondamentali"], row_copy["evento"])
             result[name].append(row_copy)
@@ -522,15 +650,16 @@ def at_read(source, positions, shortlist, now):
     macro_data = source.get("macro")
     if not isinstance(macro_data, dict):
         raise ValueError("Macro mancante")
-    result["macro"] = dict(macro_data)
-    result["macro"]["fonti_ufficiali"] = []
-    for item in macro_data.get("fonti_ufficiali", []):
+    if not isinstance(macro_data.get("fonti_ufficiali"), list):
+        raise ValueError("Fonte macro non strutturata")
+    # Reconstruct read-time scenarios from the retained official headlines.
+    # A digest matching the packet does not freeze or authenticate a causal claim.
+    normalized = []
+    for item in macro_data["fonti_ufficiali"]:
         if not isinstance(item, dict):
             raise ValueError("Fonte macro non valida")
-        t = stamp(item.get("pubblicato_utc"))
-        state = ("VERIFICATO" if t and dt.timedelta(0) <= now-t <= dt.timedelta(days=14)
-                 and item.get("stato") == "VERIFICATO" else
-                 "SCADUTO" if t else "NON_VERIFICATO")
-        result["macro"]["fonti_ufficiali"].append(dict(item, stato=state,
-                                                       impatto_asset="NON_VALUTABILE"))
+        normalized.append({"fonte": item.get("fonte"), "link": item.get("url"),
+                           "titolo": item.get("titolo"),
+                           "data": item.get("pubblicato_utc")})
+    result["macro"] = macro(normalized, now)
     return result
