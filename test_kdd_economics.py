@@ -225,6 +225,258 @@ class EconomicEvidenceTests(unittest.TestCase):
         frames["4H"]["stato"]="SCADUTO"
         self.assertEqual(e.regime({"timeframe":frames},glob,T)["stato"],"INDETERMINATO")
 
+    def test_g2_primary_release_cases_and_supply_no_invented_unlock(self):
+        """Real primary-release metadata checked 11 Nov 2026; synthetic CoinGecko amounts."""
+        moment=dt.datetime(2026,11,11,8,tzinfo=dt.timezone.utc)
+        cases=[
+            ("BTC","bitcoin/bitcoin","v32.1","Bitcoin Core 32.1",
+             "2026-10-28T14:23:53Z"),
+            ("SOL","anza-xyz/agave","v4.4.1","Release v4.4.1",
+             "2026-11-05T18:33:50Z")]
+        for token,repo,tag,title,published in cases:
+            with self.subTest(token=token):
+                identity=self.ident(token)
+                event=e.release_event(identity,{"html_url":
+                    f"https://github.com/{repo}/releases/tag/{tag}",
+                    "tag_name":tag,"published_at":published,
+                    "name":title,"draft":False,"prerelease":False},moment,moment)
+                self.assertEqual(event["stato"],"VERIFICATO")
+                self.assertEqual(event["emittente"],repo)
+                self.assertEqual(event["tag"],tag)
+                self.assertEqual(event["adozione_rete"],"NON_VERIFICATA")
+                self.assertEqual(event["impatto_economico"],"NON_DIMOSTRATO")
+                self.assertTrue(event["condizione_riesame"])
+                ref=e.monetary_reference(identity)
+                self.assertEqual(ref["stato"],"CONSULTABILE_NON_ACQUISITO")
+                self.assertTrue(ref["fonte"].startswith("https://"))
+                self.assertFalse(ref["calendario_unlock_verificato"])
+                self.assertIsNone(ref["ultimo_controllo_documentale_utc"])
+                forbidden={"html_url":"https://github.com/fake/bitcoin/releases/tag/"+tag,
+                           "tag_name":tag,"published_at":published,"name":title}
+                self.assertEqual(e.release_event(identity,forbidden,moment,moment)
+                                 ["stato"],"NON_VERIFICATO")
+        ident=self.ident("BTC")
+        stats=e.fundamentals(ident,self.market(ident,max_supply=100),T,T)
+        self.assertEqual(stats["quota_circolante_su_totale_pct"],50)
+        self.assertEqual(stats["emissione_residua_massima_su_circolante_pct"],900)
+        self.assertIsNone(stats["prossimo_unlock_utc"])
+        self.assertIsNone(stats["fonte_calendario_unlock"])
+        self.assertEqual(stats["vesting"],"NON_VERIFICATO")
+        no_max=e.fundamentals(self.ident("SOL"),
+                             self.market(self.ident("SOL"),max_supply=None),T,T)
+        self.assertIsNone(no_max["emissione_residua_massima_su_circolante_pct"])
+        self.assertEqual(no_max["unlock"],"NON_VERIFICATO")
+        impossible=e.fundamentals(ident,self.market(ident,max_supply=5),T,T)
+        self.assertEqual(impossible["diluizione"],
+                         "SUPPLY_MAX_INFERIORE_AL_CIRCOLANTE_ANOMALIA")
+        self.assertIsNone(impossible["emissione_residua_massima_su_circolante_pct"])
+
+    def test_g2_macro_and_geopolitical_hypotheses_revoke_when_expired(self):
+        feed=[
+            {"fonte":"Fed — politica monetaria",
+             "link":"https://www.federalreserve.gov/newsevents/pressreleases/example.htm",
+             "data":T.isoformat(),"titolo":"Synthetic official policy topic"},
+            {"fonte":"Consiglio UE — comunicati",
+             "link":"https://www.consilium.europa.eu/en/press/example/",
+             "data":T.isoformat(),"titolo":"Synthetic council topic"}]
+        observed=e.macro(feed,T)
+        self.assertEqual(len(observed["scenari_condizionali"]),2)
+        self.assertTrue(all(row["stato"]=="IPOTESI_DA_VERIFICARE"
+                            for row in observed["scenari_condizionali"]))
+        self.assertTrue(all(row["controipotesi"] and row["condizione_di_riesame"]
+                            for row in observed["scenari_condizionali"]))
+        self.assertEqual(observed["sorpresa_vs_consenso"],"NON_VALUTABILE")
+        self.assertTrue(all(row["impatto_asset"]=="NON_VALUTABILE"
+                            for row in observed["fonti_ufficiali"]))
+        old=e.macro(feed,T+dt.timedelta(days=15))
+        self.assertTrue(all(row["stato"]=="NON_VALUTABILE"
+                            for row in old["scenari_condizionali"]))
+        forged=e.macro([{**feed[0],"link":"https://www.federalreserve.gov.evil.example/"}],T)
+        self.assertEqual(forged["scenari_condizionali"][0]["stato"],"NON_VALUTABILE")
+        # Re-validation is at GPT time, regardless of a stored optimistic label.
+        source,positions,shortlist=self.sample()
+        source["macro"]=observed
+        read=e.at_read(source,positions,shortlist,T+dt.timedelta(days=15))
+        self.assertTrue(all(row["stato"]=="NON_VALUTABILE"
+                            for row in read["macro"]["scenari_condizionali"]))
+
+    def test_g2_multifactor_regime_conflicts_and_observation_families(self):
+        frames={label:{"stato":"AGGIORNATO","figure_candlestick":{
+            "stato":"AGGIORNATO","trend_precedente":"SALITA"}}
+            for label in ("4H","1D")}
+        global_row={"fonte":"https://api.coingecko.com/api/v3/global",
+                    "aggiornato_sorgente_utc":T.timestamp(),
+                    "var_capitalizzazione_24h_pct":1.25,
+                    "capitalizzazione_totale_usd":200000,
+                    "volume_24h_usd":12000}
+        bullish=e.regime({"timeframe":frames},global_row,T)
+        self.assertEqual(bullish["stato"],"RIALZISTA")
+        self.assertEqual([x["famiglia"] for x in bullish["famiglie_osservate"]],
+                         ["TREND_BTC","CAPITALIZZAZIONE_CRYPTO_AGGREGATA",
+                          "ATTIVITA_AGGREGATA"])
+        self.assertTrue(bullish["mancanti"])
+        global_row["var_capitalizzazione_24h_pct"]=-2
+        self.assertEqual(e.regime({"timeframe":frames},global_row,T)["stato"],
+                         "TRANSIZIONE")
+        frames["1D"]["figure_candlestick"]["trend_precedente"]="DISCESA"
+        self.assertEqual(e.regime({"timeframe":frames},global_row,T)["stato"],
+                         "TRANSIZIONE")
+        frames["1D"]["stato"]="SCADUTO"
+        self.assertEqual(e.regime({"timeframe":frames},global_row,T)["stato"],
+                         "INDETERMINATO")
+        frames["1D"]["stato"]="AGGIORNATO"
+        frames["1D"]["figure_candlestick"]["trend_precedente"]="SALITA"
+        global_row["aggiornato_sorgente_utc"]=(T-dt.timedelta(hours=3)).timestamp()
+        self.assertEqual(e.regime({"timeframe":frames},global_row,T)["stato"],
+                         "INDETERMINATO")
+
+    def test_g2_source_dossier_packet_bridge_historical_roster_and_zec(self):
+        """Ten token identities from the 08/11 roster; all amounts are invented."""
+        import json
+        from unittest import mock
+        import dossier_trade as producer
+        from scripts import kdd_wallet_packet_g0 as wallet_packet
+        from scripts import kdd_bridge_g2 as bridge
+        with mock.patch.dict("sys.modules", {"kdd_wallet_packet_g0": wallet_packet}):
+            from scripts import test_kdd_wallet_packet_g0 as fixture_mod
+        fixture=fixture_mod.WalletPacketG0Tests(
+            "test_asset_weights_never_rebrand_partial_total_as_entire_wallet")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        tokens=["BNB","FET","JUP","NEAR","RENDER","SOL","SUI","ETH","BTC","XRP"]
+        pairs={token+"EUR":{"wsname":token+"/EUR","status":"online"}
+               for token in tokens+["ZEC"]}
+        iso=T.isoformat()
+        fixture.portfolio["posizioni"]=[
+            {"token":token,"quantita":"1","disponibile_spot":"1","costo_medio_eur":None}
+            for token in tokens]
+        fixture.snapshot["markets"]={
+            token:{"token":token,"pair":token+"/EUR","pair_key":token+"EUR",
+                   "prezzo_eur":float((i+1)*10)}
+            for i,token in enumerate(tokens)}
+        fixture.report["posizioni"]=[
+            {"token":token,"quantita":"1","prezzo_eur":float((i+1)*10),
+             "valore_eur":float((i+1)*10),"pl_non_realizzato_eur":None,
+             "decisione":"ESAME"} for i,token in enumerate(tokens)]
+        fixture.report["totale_stimato_eur"]=550.0
+        fixture.report["totale_parziale"]=False
+        fixture.report["stato_totale"]="COMPLETO"
+        fixture.snapshot["schede_v02"]=[
+            {"token":"ZEC","coppia_analisi":"ZEC/EUR","categoria":"confronto",
+             "esito":"DA_VERIFICARE"}]
+        fixture.dossier["candidati"]=[
+            {"token":"ZEC","coppia_analisi":"ZEC/EUR",
+             "flusso_spot_kraken":{"stato":"NON_DISPONIBILE"},
+             "fondamentali_coingecko":{"stato":"NON_VERIFICATO"}}]
+        fixture.dossier["grafici_4h"]={}
+        btc_frames={label:{"stato":"AGGIORNATO",
+                           "figure_candlestick":{"stato":"AGGIORNATO",
+                                                "trend_precedente":"SALITA"}}
+                    for label in ("4H","1D")}
+        four={"posizioni":[
+            dict({"token":token,"coppia":token+"/EUR","pair_key":token+"EUR"},
+                 **({"timeframe":btc_frames} if token=="BTC" else {}))
+            for token in tokens]}
+        zec_search={"coins":[
+            {"id":"zcash","symbol":"zec","name":"Zcash"},
+            {"id":"binance-peg-zcash-token","symbol":"zec","name":"Pegged Zcash"}]}
+        zec_markets={
+            "zcash":{"tickers":[
+                {"market":{"identifier":"kraken"},"base":"ZEC","target":"EUR",
+                 "is_stale":False,"is_anomaly":False}]},
+            "binance-peg-zcash-token":{"tickers":[]}}
+        proof=e.resolve_public("ZEC","ZEC/EUR",zec_search,zec_markets,T)
+        self.assertEqual(proof["stato"],"RISOLTO")
+        proof["pair"]="ZEC/EUR"
+        previous={"schema":e.VERSION,"acquisito_utc":iso,
+                  "identita_dinamiche":[{"token":"ZEC","coppia":"ZEC/EUR",
+                                         "risoluzione":proof}]}
+        release_metadata={
+            "bitcoin/bitcoin":{"html_url":
+                "https://github.com/bitcoin/bitcoin/releases/tag/v32.1",
+                "tag_name":"v32.1","published_at":"2026-10-28T14:23:53Z",
+                "name":"Bitcoin Core 32.1"},
+            "anza-xyz/agave":{"html_url":
+                "https://github.com/anza-xyz/agave/releases/tag/v4.4.1",
+                "tag_name":"v4.4.1","published_at":"2026-11-05T18:33:50Z",
+                "name":"Release v4.4.1"}}
+        def upstream(url, timeout=12):
+            if "/releases/latest" in url:
+                repo=url.split("/repos/")[1].split("/releases/")[0]
+                return json.dumps(release_metadata[repo]).encode()
+            if "/search?" in url or "/tickers?" in url:
+                raise AssertionError("ZEC identity was already independently resolved")
+            coin=url.split("/coins/")[1].split("?")[0]
+            if coin=="zcash":
+                raise OSError("ZEC source unavailable in this controlled sample")
+            token=next((token for token in tokens if e.PROJECTS[token][0]==coin),None)
+            if token is None:
+                raise OSError("No attributable source")
+            ident=self.ident(token)
+            return json.dumps(self.market(ident, max_supply=(
+                None if token=="SOL" else 21000000))).encode()
+        source={"feed":[],
+                "coingecko_global":{
+                    "fonte":"https://api.coingecko.com/api/v3/global",
+                    "aggiornato_sorgente_utc":T.timestamp(),
+                    "var_capitalizzazione_24h_pct":1.2,
+                    "capitalizzazione_totale_usd":1000000,
+                    "volume_24h_usd":80000}}
+        with mock.patch.object(producer.desk,"request",side_effect=upstream), \
+             mock.patch.object(producer.time,"sleep"):
+            economics=producer.economic_evidence(
+                source,fixture.portfolio,four,[
+                    {"token":"ZEC","coppia_analisi":"ZEC/EUR",
+                     "kraken_pair_key":"ZECEUR"}],T,
+                asset_pairs=pairs,previous=previous)
+        self.assertLessEqual(economics["richieste_effettuate"],9)
+        self.assertEqual(len(economics["posizioni"]),10)
+        self.assertEqual(len(economics["candidati"]),1)
+        self.assertEqual(economics["regime"]["stato"],"RIALZISTA")
+        bytoken={row["token"]:row for row in economics["posizioni"]}
+        self.assertEqual(bytoken["BTC"]["evento"]["tag"],"v32.1")
+        self.assertEqual(bytoken["SOL"]["evento"]["tag"],"v4.4.1")
+        self.assertEqual(bytoken["BTC"]["evento"]["stato"],"VERIFICATO")
+        self.assertEqual(bytoken["SOL"]["evento"]["stato"],"VERIFICATO")
+        self.assertEqual(bytoken["SOL"]["politica_monetaria_primaria"]["stato"],
+                         "CONSULTABILE_NON_ACQUISITO")
+        self.assertEqual(economics["candidati"][0]["identita"]["coingecko_id"],
+                         "zcash")
+        self.assertNotEqual(economics["candidati"][0]["fondamentali"]["stato"],
+                            "VERIFICATO")
+        fixture.dossier["evidenze_economiche"]=economics
+        fixture.dump()
+        packet=wallet_packet.build(fixture.root,now=T)
+        self.assertEqual(packet["patrimonio"]["n_posizioni"],10)
+        self.assertEqual(packet["patrimonio"]["stato_totale"],"COMPLETO")
+        self.assertEqual(len(packet["evidenze_multifonte"]["economia"]["posizioni"]),10)
+        self.assertEqual(packet["evidenze_multifonte"]["economia"]["candidati"][0]
+                         ["identita"]["coingecko_id"],"zcash")
+        bundle={"schema":bridge.SCHEMA_BUNDLE,"packet":packet,
+                "packet_sha256":bridge.digest(packet),"preparato_utc":iso}
+        at_gpt=bridge.read_context(json.loads(json.dumps(bundle)),now=T)
+        self.assertEqual(at_gpt["n_posizioni"],10)
+        rows=at_gpt["evidenze_economiche_alla_lettura"]
+        self.assertEqual(len(rows["posizioni"]),10)
+        self.assertEqual(len(rows["candidati"]),1)
+        self.assertEqual(rows["posizioni"][tokens.index("BTC")]["evento"]["tag"],"v32.1")
+        self.assertEqual(rows["posizioni"][tokens.index("SOL")]["evento"]["tag"],"v4.4.1")
+        self.assertIsNone(rows["candidati"][0]["fondamentali"]["prossimo_unlock_utc"])
+        self.assertEqual(rows["candidati"][0]["fondamentali"]["stato"],
+                         "NON_ACQUISITO_PER_BUDGET" if
+                         economics["candidati"][0]["fondamentali"]["stato"]==
+                         "NON_ACQUISITO_PER_BUDGET" else
+                         economics["candidati"][0]["fondamentali"]["stato"])
+        old=bridge.read_context(bundle,now=T+dt.timedelta(days=3))
+        self.assertNotEqual(old["mercato"]["stato"],"RECENTE")
+        self.assertEqual(old["evidenze_economiche_alla_lettura"]["regime"]
+                         ["qualita"],"SCADUTO")
+        changed=copy.deepcopy(bundle)
+        changed["packet"]["evidenze_multifonte"]["economia"]["candidati"][0]["token"]="BTC"
+        changed["packet_sha256"]=bridge.digest(changed["packet"])
+        with self.assertRaises(bridge.BridgeError):
+            bridge.read_context(changed,now=T)
+
     def sample(self):
         positions=[{"token":"BTC"},{"token":"SOL"}]
         shortlist=[{"token":"ADA","coppia_analisi":"ADA/EUR"}]

@@ -542,6 +542,9 @@ def economic_evidence(source, wallet, four, candidates, now, *,
             row["fondamentali"] = fund
             repo_name = identity.get("repository_primario")
             row["evento"] = econ.release_event(identity, release_cache.get(repo_name), now, now)
+            # A curated primary monetary-policy URL is a research reference,
+            # NOT a newly acquired unlock/vesting schedule.
+            row["politica_monetaria_primaria"] = econ.monetary_reference(identity)
             row["lettura_economica"] = econ.decision_context(
                 identity, row["fondamentali"], row["evento"])
 
