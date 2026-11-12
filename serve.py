@@ -19,7 +19,8 @@ TOKEN = secrets.token_urlsafe(28)
 REFRESH_LOCK = threading.Lock()
 STATE_LOCK = threading.Lock()
 JOB_STATE = {"stato": "mai_avviato", "avvio_utc": None,
-             "fine_utc": None, "durata_secondi": 0}
+             "fine_utc": None, "durata_secondi": 0,
+             "handoff_stato": "non_eseguito", "handoff_file": None}
 
 
 def job_snapshot():
@@ -30,14 +31,29 @@ def job_snapshot():
 def _refresh_worker():
     started = time.monotonic()
     outcome = "riuscito"
+    handoff_stato, handoff_file = "non_eseguito", None
     try:
         desk.refresh()
     except Exception as exc:
         outcome = "errore"
         print("Aggiornamento fallito:", type(exc).__name__, str(exc), flush=True)
+    else:
+        # A refresh riuscito, prepara l'handoff con il produttore canonico.
+        # FolderSync lo trasferira secondo la propria pianificazione: qui NON
+        # attestiamo ricezione su Drive e NON tocchiamo files gia esportati.
+        try:
+            from scripts import kdd_drive_exchange as exchange
+            handoff_file = exchange.prepare_export(require_recent=True)
+            handoff_stato = "pronto_per_foldersync"
+        except Exception as exc:
+            # Un errore di esportazione non cancella il refresh gia riuscito.
+            handoff_stato = "non_preparato"
+            print("Dossier automatico non preparato:", type(exc).__name__,
+                  str(exc), flush=True)
     finally:
         with STATE_LOCK:
-            JOB_STATE.update(stato=outcome,
+            JOB_STATE.update(stato=outcome, handoff_stato=handoff_stato,
+                             handoff_file=handoff_file,
                              fine_utc=dt.datetime.now(dt.timezone.utc).isoformat(),
                              durata_secondi=round(time.monotonic() - started, 1))
         REFRESH_LOCK.release()
@@ -48,7 +64,8 @@ def start_refresh():
     if not REFRESH_LOCK.acquire(blocking=False):
         return False
     with STATE_LOCK:
-        JOB_STATE.update(stato="in_corso",
+        JOB_STATE.update(stato="in_corso", handoff_stato="non_eseguito",
+                         handoff_file=None,
                          avvio_utc=dt.datetime.now(dt.timezone.utc).isoformat(),
                          fine_utc=None, durata_secondi=0)
     try:
@@ -705,6 +722,12 @@ def with_controls(page: str, result: str = "") -> str:
         "occupato": "Un aggiornamento è già in corso: attendi, non occorre ripremere.",
     }
     message = labels.get(result, "Aggiornamento in corso: attendi..." if running else "")
+    handoff = job_snapshot()
+    if not running and handoff["stato"] == "riuscito":
+        if handoff["handoff_stato"] == "pronto_per_foldersync":
+            message += " Dossier preparato per FolderSync (ricezione su Drive da verificare)."
+        elif handoff["handoff_stato"] == "non_preparato":
+            message += " Dossier NON preparato: nessun nuovo invio attestato. Apri /gpt per verificare."
     disabled = " disabled" if running else ""
     toolbar = (
         "<section style='margin:18px 0;padding:16px;background:#22334e;border-radius:12px'>"
