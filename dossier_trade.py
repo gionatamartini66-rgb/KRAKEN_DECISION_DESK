@@ -684,12 +684,28 @@ def collect(source=None, *, asset_pairs=None):
     btc = next((r for r in (analisi_patrimonio.get("posizioni") or [])
                 if r.get("token") == "BTC"), {})
     economic["regime"] = econ.regime(btc, external.get("coingecko_global"), now)
+    # One additional public-only evidence family. No private balances, amounts,
+    # addresses or the on-chain prototypes #9-14 ever enter these requests.
+    # Manual/legacy dossier creation without a real refresh has no new-source
+    # claim; the packet/bridge will preserve explicit NOT_ACQUIRED rows.
+    import kdd_network_defi
+    network_defi = None
+    if isinstance(source.get("orari_fonti"), dict) and source["orari_fonti"].get("composizione_kdd_utc"):
+        holdings_for_sources = [
+            {"token": row.get("token")}
+            for row in economic.get("posizioni", []) if isinstance(row, dict)]
+        candidates_for_sources = [
+            {"token": row.get("token"), "coppia_analisi": row.get("coppia_analisi")}
+            for row in candidates if isinstance(row, dict)]
+        network_defi = kdd_network_defi.collect(
+            now, holdings_for_sources, candidates_for_sources)
     dossier={
         "schema":3,"creato_utc":desk.NOW().isoformat(timespec="seconds"),
         "kraken_istantanea_utc":source["rilevazione_utc"],"eta_kraken_minuti_al_dossier":round(age,2),
         "regime":{"trend_eur":source.get("trends",{}),"btc_spot_eur":source.get("markets",{}).get("BTC")},
         "candidati":candidates,"grafici_4h":quattro_ore,
         "evidenze_economiche":economic,
+        "evidenze_rete_defi": network_defi,
         "patrimonio_4tf":analisi_patrimonio,
         "finanziamento_150_book_pubblico":finanziamento_book,
         "ricerca_setup":source.get("ricerca_setup",{}),

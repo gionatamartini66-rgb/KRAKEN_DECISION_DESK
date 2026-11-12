@@ -188,6 +188,17 @@ def _summary(normalized, observed, now):
     bins.sort(key=lambda b: Decimal(b["volume_size_grezzo"]), reverse=True)
     largest = sorted(trades, key=lambda x: x["size"], reverse=True)[:3]
     latest, earliest = trades[0]["t"], trades[-1]["t"]
+    total_size = sum((x["size"] for x in trades), Decimal(0))
+    liquidation_size = sum((x["size"] for x in trades
+                            if x["type"] == "liquidation"), Decimal(0))
+    top3_size = sum((x["size"] for x in largest), Decimal(0))
+    per_type = {
+        typ: {"n": sum(x["type"] == typ for x in trades),
+              "size_grezza": str(sum((x["size"] for x in trades
+                                     if x["type"] == typ), Decimal(0)))}
+        for typ in sorted(TYPES)
+    }
+    span = Decimal(str((latest-earliest).total_seconds()))
     return {
         "stato": ("CAMPIONE_RECENTE" if _fresh(latest, now) and _fresh(observed, now)
                   else "SCADUTO"),
@@ -199,6 +210,21 @@ def _summary(normalized, observed, now):
         "n_liquidazioni_nel_campione": sum(x["type"] == "liquidation" for x in trades),
         "n_block_nel_campione": sum(x["type"] == "block" for x in trades),
         "n_assignment_nel_campione": sum(x["type"] == "assignment" for x in trades),
+        "distribuzione_esecuzioni_per_tipo": per_type,
+        "size_totale_campione_grezza": str(total_size),
+        "quota_size_liquidazioni_pct": str((100*liquidation_size/total_size).quantize(
+            Decimal("0.001"))),
+        "quota_size_top3_pct": str((100*top3_size/total_size).quantize(
+            Decimal("0.001"))),
+        "intensita_esecuzioni_minuto_nel_campione": (
+            str((60*Decimal(len(trades))/span).quantize(Decimal("0.001")))
+            if span >= 60 else None),
+        "price_range_campione_pct": str((100*(hi-lo)/lo).quantize(Decimal("0.001"))),
+        "lettura_rischio": {
+            "ipotesi": "Concentrazione delle size e liquidazioni possono segnalare discontinuita nel solo campione.",
+            "controipotesi": "Un tape di massimo 100 esecuzioni non documenta l'intero mercato o la leva globale.",
+            "condizione_riesame": "Ripetere il campione con copertura temporale e confronto OI/funding.",
+            "limite": "Size grezza senza conversione contrattuale; nessun soggetto identificabile, heatmap o flusso istituzionale attribuito."},
         "profilo_volumi_campione": bins[:5],
         "tre_maggiori_esecuzioni": [
             {"prezzo": str(x["price"]), "size_grezza": str(x["size"]),
