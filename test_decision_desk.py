@@ -283,7 +283,11 @@ class DeskTests(unittest.TestCase):
             started.set()
             release.wait(2.0)
         try:
-            with unittest.mock.patch.object(serve.desk,'refresh', side_effect=fake_refresh):
+            # Il test isola la coda refresh: la pubblicazione del dossier
+            # viene provata separatamente, senza dipendere dal filesystem Termux.
+            with unittest.mock.patch.object(serve.desk,'refresh', side_effect=fake_refresh), \
+                 unittest.mock.patch('scripts.kdd_drive_exchange.prepare_export',
+                                     return_value='kdd_handoff_fixture.json'):
                 self.assertTrue(serve.start_refresh())
                 self.assertTrue(started.wait(1.0))
                 self.assertEqual(serve.job_snapshot()['stato'],'in_corso')
@@ -309,7 +313,9 @@ class DeskTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual(serve.job_snapshot()['stato'],'errore')
         # La richiesta successiva può essere avviata dopo un errore.
-        with unittest.mock.patch.object(serve.desk,'refresh',return_value=None):
+        with unittest.mock.patch.object(serve.desk,'refresh',return_value=None), \
+             unittest.mock.patch('scripts.kdd_drive_exchange.prepare_export',
+                                 return_value='kdd_handoff_fixture.json'):
             self.assertTrue(serve.start_refresh())
             for _ in range(100):
                 if serve.job_snapshot()['stato'] != 'in_corso':
