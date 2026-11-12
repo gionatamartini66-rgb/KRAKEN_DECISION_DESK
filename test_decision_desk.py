@@ -319,7 +319,7 @@ class DeskTests(unittest.TestCase):
 
     def test_refresh_auto_prepares_handoff_but_does_not_claim_drive_delivery(self):
         import time
-        with unittest.mock.patch.object(serve.desk, 'refresh', return_value=None), \\
+        with unittest.mock.patch.object(serve.desk, 'refresh', return_value=None), \
              unittest.mock.patch('scripts.kdd_drive_exchange.prepare_export',
                                  return_value='kdd_handoff_test.json') as export:
             self.assertTrue(serve.start_refresh())
@@ -337,7 +337,7 @@ class DeskTests(unittest.TestCase):
 
     def test_refresh_export_failure_keeps_success_and_does_not_claim_delivery(self):
         import time
-        with unittest.mock.patch.object(serve.desk, 'refresh', return_value=None), \\
+        with unittest.mock.patch.object(serve.desk, 'refresh', return_value=None), \
              unittest.mock.patch('scripts.kdd_drive_exchange.prepare_export',
                                  side_effect=OSError('cartella non disponibile')):
             self.assertTrue(serve.start_refresh())
@@ -355,7 +355,7 @@ class DeskTests(unittest.TestCase):
     def test_refresh_failed_does_not_auto_export(self):
         import time
         with unittest.mock.patch.object(serve.desk, 'refresh',
-                                        side_effect=ConnectionError('offline')), \\
+                                        side_effect=ConnectionError('offline')), \
              unittest.mock.patch('scripts.kdd_drive_exchange.prepare_export') as export:
             self.assertTrue(serve.start_refresh())
             for _ in range(100):
