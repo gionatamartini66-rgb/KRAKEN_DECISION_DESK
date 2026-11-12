@@ -317,6 +317,55 @@ class DeskTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual(serve.job_snapshot()['stato'],'riuscito')
 
+    def test_refresh_auto_prepares_handoff_but_does_not_claim_drive_delivery(self):
+        import time
+        with unittest.mock.patch.object(serve.desk, 'refresh', return_value=None), \
+             unittest.mock.patch('scripts.kdd_drive_exchange.prepare_export',
+                                 return_value='kdd_handoff_test.json') as export:
+            self.assertTrue(serve.start_refresh())
+            for _ in range(100):
+                if serve.job_snapshot()['stato'] != 'in_corso':
+                    break
+                time.sleep(0.01)
+            job = serve.job_snapshot()
+            self.assertEqual(job['stato'], 'riuscito')
+            self.assertEqual(job['handoff_stato'], 'pronto_per_foldersync')
+            self.assertEqual(job['handoff_file'], 'kdd_handoff_test.json')
+            export.assert_called_once_with(require_recent=True)
+            self.assertIn('ricezione su Drive da verificare',
+                          serve.with_controls('<h2>1 · Decisioni e posizioni</h2>', 'ok'))
+
+    def test_refresh_export_failure_keeps_success_and_does_not_claim_delivery(self):
+        import time
+        with unittest.mock.patch.object(serve.desk, 'refresh', return_value=None), \
+             unittest.mock.patch('scripts.kdd_drive_exchange.prepare_export',
+                                 side_effect=OSError('cartella non disponibile')):
+            self.assertTrue(serve.start_refresh())
+            for _ in range(100):
+                if serve.job_snapshot()['stato'] != 'in_corso':
+                    break
+                time.sleep(0.01)
+            job = serve.job_snapshot()
+            self.assertEqual(job['stato'], 'riuscito')
+            self.assertEqual(job['handoff_stato'], 'non_preparato')
+            self.assertIsNone(job['handoff_file'])
+            self.assertIn('Dossier NON preparato',
+                          serve.with_controls('<h2>1 · Decisioni e posizioni</h2>', 'ok'))
+
+    def test_refresh_failed_does_not_auto_export(self):
+        import time
+        with unittest.mock.patch.object(serve.desk, 'refresh',
+                                        side_effect=ConnectionError('offline')), \
+             unittest.mock.patch('scripts.kdd_drive_exchange.prepare_export') as export:
+            self.assertTrue(serve.start_refresh())
+            for _ in range(100):
+                if serve.job_snapshot()['stato'] != 'in_corso':
+                    break
+                time.sleep(0.01)
+            self.assertEqual(serve.job_snapshot()['stato'], 'errore')
+            self.assertEqual(serve.job_snapshot()['handoff_stato'], 'non_eseguito')
+            export.assert_not_called()
+
     def test_browser_status_poll_and_refresh(self):
         page="<html><h2>1 · Decisioni e posizioni</h2></html>"
         old=serve.job_snapshot()['stato']

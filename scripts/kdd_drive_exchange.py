@@ -377,8 +377,15 @@ def prepare_chat():
     return path, bridge.digest(original), original["packet_sha256"]
 
 
-def prepare_export():
+def prepare_export(*, require_recent=False):
     original, _ = _prepare_private_origin()
+    if require_recent:
+        # Per l'handoff automatico evitare fotografie gia vecchie alla pubblicazione.
+        # Il salvataggio privato resta intatto anche se il trasferimento e rifiutato.
+        context = bridge.read_context(original)
+        if (context["mercato"]["stato"] != "RECENTE"
+                or context["saldo"]["stato"] != "RECENTE"):
+            raise bridge.BridgeError("Saldo o mercato non recenti: handoff automatico non preparato")
     return export_bundle(original)
 
 
