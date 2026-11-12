@@ -76,10 +76,10 @@ class DriveUIHandoffTests(unittest.TestCase):
 
     def test_auto_export_rejects_stale_without_writing_shared_folder(self):
         with mock.patch.object(exchange, '_prepare_private_origin',
-                               return_value=({'schema': 'fixture'}, None)), \\
+                               return_value=({'schema': 'fixture'}, None)), \
              mock.patch.object(bridge, 'read_context', return_value={
                  'mercato': {'stato': 'DA_AGGIORNARE'},
-                 'saldo': {'stato': 'RECENTE'}}), \\
+                 'saldo': {'stato': 'RECENTE'}}), \
              mock.patch.object(exchange, 'export_bundle') as write:
             with self.assertRaisesRegex(bridge.BridgeError, 'non recenti'):
                 exchange.prepare_export(require_recent=True)
