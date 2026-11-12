@@ -31,8 +31,9 @@ class RoadmapContractTests(unittest.TestCase):
                                                 "Un timeframe facoltativo", 1))
 
     def test_checkbox_without_go_stops(self):
+        # KDD-01 e stato formalmente chiuso il 12/11: mutare un ID aperto.
         with self.assertRaises(contract.GateError):
-            contract.parse(self.content.replace("- [ ] KDD-01", "- [x] KDD-01", 1))
+            contract.parse(self.content.replace("- [ ] KDD-02", "- [x] KDD-02", 1))
 
     def test_status_complete_without_checkbox_stops(self):
         item = next(line for line in self.content.splitlines() if "KDD-02 |" in line)
@@ -40,19 +41,22 @@ class RoadmapContractTests(unittest.TestCase):
             contract.parse(self.content.replace(item, item.replace("| PARZIALE |", "| COMPLETO |"), 1))
 
     def test_complete_needs_proof_and_author_go(self):
-        item = next(line for line in self.content.splitlines() if "KDD-01 |" in line)
-        changed = item.replace("- [ ]", "- [x]").replace("| PRESENTE_DA_ACCETTARE |",
+        item = next(line for line in self.content.splitlines()
+                    if line.startswith("| - [ ] KDD-02 |"))
+        changed = item.replace("- [ ]", "- [x]").replace("| PARZIALE |",
                                                           "| COMPLETO |")
         with self.assertRaises(contract.GateError):
             contract.parse(self.content.replace(item, changed, 1))
 
     def test_complete_with_proof_and_author_go_is_structurally_valid(self):
-        item = next(line for line in self.content.splitlines() if "KDD-01 |" in line)
+        item = next(line for line in self.content.splitlines()
+                    if line.startswith("| - [ ] KDD-02 |"))
         changed = (item.replace("- [ ]", "- [x]")
-                       .replace("| PRESENTE_DA_ACCETTARE |", "| COMPLETO |")
-                       .replace("**E**:", "PROVA: PR #21 + refresh reale 02/11; GO-AUTORE: decisione-autore-ref-123; **E**:", 1))
+                       .replace("| PARZIALE |", "| COMPLETO |")
+                       .replace("CODICE/TEST:",
+                                "PROVA: fixture strutturale indipendente; GO-AUTORE: decisione-test-sintetica; CODICE/TEST:", 1))
         self.assertEqual(contract.parse(self.content.replace(item, changed, 1))
-                         ["KDD-01"][2], "COMPLETO")
+                         ["KDD-02"][2], "COMPLETO")
 
     def test_pr_requires_mandate_and_exact_ids(self):
         base = "a" * 40
@@ -205,15 +209,18 @@ class RoadmapContractTests(unittest.TestCase):
 
     def test_branch_cannot_invent_new_completo_even_with_fake_go_marker(self):
         before = self.content
-        line = next(x for x in before.splitlines() if "KDD-01 |" in x)
+        line = next(x for x in before.splitlines()
+                    if x.startswith("| - [ ] KDD-02 |"))
         completed = (line.replace("- [ ]", "- [x]")
-                         .replace("| PRESENTE_DA_ACCETTARE |", "| COMPLETO |")
-                         .replace("**E**:", "PROVA: result-verified-123; GO-AUTORE: fake-author-decision-123; **E**:", 1))
+                         .replace("| PARZIALE |", "| COMPLETO |")
+                         .replace("CODICE/TEST:",
+                                  "PROVA: result-verified-123; GO-AUTORE: fake-author-decision-123; CODICE/TEST:", 1))
         after = before.replace(line, completed, 1)
+        self.assertNotEqual(after, before)
         with self.assertRaises(contract.GateError):
             self._technical_gate(
                 head_text=after, changed_files="ROADMAP_KDD.md\n",
-                mode="DOCUMENTALE", ids="KDD-01")
+                mode="DOCUMENTALE", ids="KDD-02")
 
 
 if __name__ == "__main__":
