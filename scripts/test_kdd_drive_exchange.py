@@ -74,6 +74,17 @@ class DriveUIHandoffTests(unittest.TestCase):
         self.assertIn(sha,page)
         self.assertEqual(bridge.load_archive(),{})
 
+    def test_auto_export_rejects_stale_without_writing_shared_folder(self):
+        with mock.patch.object(exchange, '_prepare_private_origin',
+                               return_value=({'schema': 'fixture'}, None)), \\
+             mock.patch.object(bridge, 'read_context', return_value={
+                 'mercato': {'stato': 'DA_AGGIORNARE'},
+                 'saldo': {'stato': 'RECENTE'}}), \\
+             mock.patch.object(exchange, 'export_bundle') as write:
+            with self.assertRaisesRegex(bridge.BridgeError, 'non recenti'):
+                exchange.prepare_export(require_recent=True)
+            write.assert_not_called()
+
     def test_export_failure_does_not_claim_drive_delivery(self):
         missing=self.original.home/"folder-not-configured"
         with mock.patch.object(exchange,"EXCHANGE_ROOT",missing):
