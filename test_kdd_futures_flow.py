@@ -46,6 +46,15 @@ class FuturesFlowTests(unittest.TestCase):
         self.assertEqual(result["esecuzioni"]["n_liquidazioni_nel_campione"], 1)
         self.assertEqual(result["esecuzioni"]["n_block_nel_campione"], 1)
         self.assertEqual(result["esecuzioni"]["n_esecuzioni"], 3)
+        # KDD-16: significant sampled concentration and liquidation size,
+        # NOT a cross-exchange heatmap, open positions or identified whales.
+        self.assertEqual(result["esecuzioni"]["size_totale_campione_grezza"], "1.1")
+        self.assertEqual(result["esecuzioni"]["quota_size_top3_pct"], "100.000")
+        self.assertEqual(result["esecuzioni"]["quota_size_liquidazioni_pct"], "18.182")
+        self.assertEqual(result["esecuzioni"]["distribuzione_esecuzioni_per_tipo"]
+                         ["liquidation"]["n"], 1)
+        self.assertIsNotNone(result["esecuzioni"]["intensita_esecuzioni_minuto_nel_campione"])
+        self.assertIn("controipotesi", result["esecuzioni"]["lettura_rischio"])
         self.assertEqual(sum(x["n_esecuzioni"] for x in
                              result["esecuzioni"]["profilo_volumi_campione"]), 3)
         self.assertEqual(result["heatmap"]["stato"], "NON_DISPONIBILE")
@@ -57,6 +66,22 @@ class FuturesFlowTests(unittest.TestCase):
         self.assertEqual(expired["esecuzioni"]["stato"], "SCADUTO")
         self.assertNotIn("funding_rate_grezzo", expired["funding"])
         self.assertNotIn("n_liquidazioni_nel_campione", expired["esecuzioni"])
+
+    def test_sample_liquidation_share_is_recomputed_not_self_attested(self):
+        import copy
+        fresh=self._fresh()
+        observed=fresh["esecuzioni"]
+        self.assertEqual(observed["quota_size_liquidazioni_pct"],"18.182")
+        altered=copy.deepcopy(fresh)
+        altered["esecuzioni"]["quota_size_liquidazioni_pct"]="99.999"
+        self.assertEqual(flow.at_read(altered,self.now)["esecuzioni"]["stato"],
+                         "NON_VERIFICATO")
+        altered=copy.deepcopy(fresh)
+        altered["esecuzioni"]["distribuzione_esecuzioni_per_tipo"]["liquidation"]["n"]=99
+        self.assertEqual(flow.at_read(altered,self.now)["esecuzioni"]["stato"],
+                         "NON_VERIFICATO")
+        stale=flow.at_read(fresh,self.now+dt.timedelta(minutes=20))
+        self.assertNotIn("quota_size_liquidazioni_pct",stale["esecuzioni"])
 
     def test_zero_observed_liquidations_is_only_sample_zero(self):
         for row in self.history["history"]:

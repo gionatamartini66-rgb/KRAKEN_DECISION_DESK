@@ -748,6 +748,12 @@ def analytic_evidence(snapshot, dossier, positions, shortlist, now):
             economic = kdd_economics.at_read(economic, positions, shortlist, now)
         except (ValueError, TypeError, KeyError, OverflowError) as exc:
             raise PacketError("Evidenza economica non attribuibile") from exc
+    import kdd_network_defi
+    try:
+        network_defi = kdd_network_defi.at_read(
+            dossier.get("evidenze_rete_defi"), positions, shortlist, now)
+    except (ValueError, TypeError, KeyError, OverflowError) as exc:
+        raise PacketError("Evidenza rete/DeFi non attribuibile") from exc
     return {"stato": "EVIDENZE_CON_LIMITI",
             "benchmark_copertura": {"fonte": "Binance Spot pubblico", **bn_time,
                 "stato": str(bn.get("status") or "MANCANTE")[:35],
@@ -755,6 +761,7 @@ def analytic_evidence(snapshot, dossier, positions, shortlist, now):
                 "token_con_dati": sum(1 for x in bn_rows if isinstance(x, dict) and x.get("status") == "OK"),
                 "limite": "Il pacchetto espone solo token posseduti o candidati; quote non equivalenti."},
             "titoli_contesto": feed, "economia": economic,
+            "rete_defi": network_defi,
             "benchmark_binance": benchmark,
             "candidati": candidates, "derivati_btc": futures, "contesto": context,
             "limite": "Evidenze descrittive, non ordini o segnali operativi."}

@@ -766,6 +766,15 @@ def read_context(bundle, *, now=None, expected_sha256=None):
     futures_at_read = kdd_futures_flow.at_read(
         derivatives.get("flusso_futures") if isinstance(derivatives, dict) else None,
         moment)
+    # Same public evidence reinterpreted at actual GPT read; stale source
+    # numbers are suppressed, all wallet/candidate identities remain present.
+    import kdd_network_defi
+    try:
+        network_at_read = kdd_network_defi.at_read(
+            multifonte.get("rete_defi") if isinstance(multifonte,dict) else None,
+            rows, pkt.get("opportunita_esterne_scanner") or [], moment)
+    except (ValueError, TypeError, KeyError, OverflowError) as exc:
+        raise BridgeError("Evidenze on-chain/DeFi non verificabili") from exc
     return {"schema": "kdd_gpt_read_context_v001", "snapshot_id": digest(pkt),
             "snapshot_utc": pkt["rilevazione_kdd_utc"],
             "letto_utc": moment.isoformat(timespec="seconds"),
@@ -774,6 +783,7 @@ def read_context(bundle, *, now=None, expected_sha256=None):
             "copertura": observations,
             "evidenze_economiche_alla_lettura": economic_read,
             "flusso_futures_alla_lettura": futures_at_read,
+            "rete_defi_alla_lettura": network_at_read,
             "totale_parziale": bool(section.get("totale_parziale")) or partial,
             "book_150_alla_lettura": stato_book_150_alla_lettura(
                 pkt, moment, mercato_stato=market_status["stato"],
