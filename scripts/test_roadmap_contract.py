@@ -112,7 +112,7 @@ class RoadmapContractTests(unittest.TestCase):
         self.assertEqual(len(rows), 29)
         self.assertEqual(
             contract.plain(rows["KDD-05"][1]),
-            "Liquidità operativa indicativa di circa 150 USDC, finanziamento e alternative")
+            "Disponibilità e finanziamento flessibile delle opportunità Spot, con alternative e costi")
         self.assertEqual(
             [contract.plain(row[1]) for row in rows.values()], contract.TITLES)
         current_line = next(line for line in self.content.splitlines()
@@ -120,7 +120,7 @@ class RoadmapContractTests(unittest.TestCase):
         old = self.content.replace(
             current_line,
             current_line.replace(
-                "Liquidità operativa indicativa di circa 150 USDC, finanziamento e alternative",
+                "Disponibilità e finanziamento flessibile delle opportunità Spot, con alternative e costi",
                 "Liquidità USDC e scenari per almeno 150 EUR equivalenti"),
             1)
         self.assertNotEqual(old, self.content)
