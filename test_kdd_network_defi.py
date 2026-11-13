@@ -334,7 +334,8 @@ class NetworkDefiTests(unittest.TestCase):
         economic={"schema":econ.VERSION,"acquisito_utc":ISO,
                   "posizioni":selected,"candidati":[],
                   "regime":{"stato":"INDETERMINATO","qualita":"INSUFFICIENTE"},
-                  "macro":econ.macro([],T)}
+                  "macro":econ.macro([],T),
+                  "fonti_economiche":econ.sources_matrix()}
         mock_source={"rilevazione_utc":ISO,"schede_v02":[],
                      "markets":fx.snapshot["markets"],
                      "feed":[],"orari_fonti":{"composizione_kdd_utc":ISO}}
