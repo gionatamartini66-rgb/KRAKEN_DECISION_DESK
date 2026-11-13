@@ -405,7 +405,12 @@ def _attached(positions, economic_rows):
         if ("coppia_analisi" in row and
                 source.get("coppia_analisi")!=row.get("coppia_analisi")):
             raise ValueError("coppia rete/economia discordante")
-        result.append(dict(row,identita=source.get("identita")))
+        copy=dict(row)
+        # An unknown new candidate has no identity object at collection.
+        # Do not manufacture an explicit null identity on packet re-read.
+        if "identita" in source:
+            copy["identita"]=source["identita"]
+        result.append(copy)
     return result
 
 
