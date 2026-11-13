@@ -122,7 +122,9 @@ class NetworkDefiTests(unittest.TestCase):
                  "saldo_recente_verificato":False,"portafoglio_noto":True,
                  "fotografia_portafoglio_sha256":"a"*64,
                  "portafoglio_letto_utc":ISO}
-        economics={"schema":"fixture","posizioni":[{"token":"SUI"},{"token":"SOL"}],
+        economics={"schema":"fixture","posizioni":[
+                      {"indice":0,"token":"SUI","identita":{"token":"SUI","stato":"NON_VERIFICATO"}},
+                      {"indice":1,"token":"SOL","identita":{"token":"SOL","stato":"NON_VERIFICATO"}}],
                    "candidati":[]}
         saved={}
         original=evidence.collect
