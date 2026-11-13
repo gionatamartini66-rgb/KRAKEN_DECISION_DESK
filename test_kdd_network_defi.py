@@ -185,11 +185,13 @@ class NetworkDefiTests(unittest.TestCase):
             "SOL":{"token":"SOL","pair":"SOL/EUR","pair_key":"SOLEUR","prezzo_eur":2000}}
         fixture.report["posizioni"][0]["token"]="SUI"
         fixture.report["posizioni"][1]["token"]="SOL"
-        fixture.snapshot["schede_v02"]=[{"token":"SUI","coppia_analisi":"SUI/EUR",
-                                        "esito":"RIESAME","categoria":"confronto"}]
+        fixture.snapshot["schede_v02"]=[
+            {"token":"SUI","coppia_analisi":"SUI/EUR","esito":"RIESAME","categoria":"confronto"},
+            {"token":"PEPE","coppia_analisi":"PEPE/EUR","esito":"RIESAME","categoria":"confronto"}]
         fixture.dossier["candidati"]=[]
         rows=[{"token":"SUI"},{"token":"SOL"},{"token":"SXT"}]
-        shortlist=[{"token":"SUI","coppia_analisi":"SUI/EUR"}]
+        shortlist=[{"token":"SUI","coppia_analisi":"SUI/EUR"},
+                   {"token":"PEPE","coppia_analisi":"PEPE/EUR"}]
         # Use a coherent synthetic observation time for all four source files.
         moment=T
         iso=moment.isoformat()
@@ -216,20 +218,29 @@ class NetworkDefiTests(unittest.TestCase):
             return record
         economics = {"schema":econ.VERSION,"acquisito_utc":iso,
                      "posizioni":[econ_row(token,i) for i,token in enumerate(("SUI","SOL","SXT"))],
-                     "candidati":[econ_row("SUI",0,candidate=True)],
+                     "candidati":[econ_row("SUI",0,candidate=True),
+                                  econ_row("PEPE",1,candidate=True)],
                      "regime":{"stato":"INDETERMINATO","qualita":"PARZIALE"},
                      "fonti_economiche":econ.sources_matrix(),
                      "macro":econ.macro([],moment)}
+        pepe = economics["candidati"][1]
+        pepe["network_metadata"] = evidence.coin_network_metadata(
+            pepe["identita"], {"id":"pepe","symbol":"pepe","name":"Pepe",
+                               "platforms":{"ethereum":Kdd17AssetIdentityG2Tests.ETH}},moment)
         fixture.dossier["evidenze_economiche"] = economics
         fixture.dossier["evidenze_rete_defi"]=evidence.collect(
-            moment,rows,shortlist,fetch=fake_fetch,economics=economics)
+            moment,rows,shortlist,fetch=Kdd17AssetIdentityG2Tests().fetch,
+            economics=economics)
         fixture.dump()
         p=packet.build(fixture.root,now=moment)
         self.assertEqual(len(p["patrimonio"]["posizioni"]),3)
         network=p["evidenze_multifonte"]["rete_defi"]
         self.assertEqual(len(network["posizioni"]),3)
-        self.assertEqual(len(network["candidati"]),1)
+        self.assertEqual(len(network["candidati"]),2)
         self.assertEqual(network["asset_reti"]["posizioni"][0]["tipo"],"NATIVO")
+        self.assertEqual(network["asset_reti"]["candidati"][1]["tipo"],"TOKEN_CON_CONTRATTO")
+        self.assertEqual(network["asset_reti"]["candidati"][1]["osservazioni_contratti"][0]
+                         ["osservazione"]["stato"],"OSSERVATO_CON_LIMITI")
         self.assertEqual(network["asset_reti"]["posizioni"][2]["tipo"],"NON_VERIFICATO")
         bundle={"schema":bridge.SCHEMA_BUNDLE,"packet":p,
                 "packet_sha256":bridge.digest(p),"preparato_utc":iso}
@@ -238,6 +249,9 @@ class NetworkDefiTests(unittest.TestCase):
                          ["onchain"]["stato"],"OSSERVATO_CON_LIMITI")
         self.assertEqual(reading["rete_defi_alla_lettura"]["asset_reti"]["posizioni"][1]
                          ["tipo"],"NATIVO")
+        self.assertEqual(reading["rete_defi_alla_lettura"]["asset_reti"]["candidati"][1]
+                         ["osservazioni_contratti"][0]["osservazione"]["valori"]
+                         ["supply_unita_minima"],"420690000000000000000000000000000000000")
         late=bridge.read_context(bundle,now=moment+dt.timedelta(minutes=40))
         self.assertIsNone(late["rete_defi_alla_lettura"]["posizioni"][0]
                           ["defi"]["valori"])
