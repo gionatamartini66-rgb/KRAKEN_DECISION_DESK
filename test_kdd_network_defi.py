@@ -380,5 +380,97 @@ class IdentityBoundNetworkTests(unittest.TestCase):
             evidence.at_read(source,[{"token":"BTC"},{"token":"ZEC"}],[],T,
                              economia={"posizioni":stages[1],"candidati":[]})
 
+
+    def test_dossier_producer_packet_bridge_native_and_mint(self):
+        """The production dossier adapter and both genuine consumers, synthetic upstream."""
+        from scripts import kdd_wallet_packet_g0 as packet
+        from scripts import kdd_bridge_g2 as bridge
+        from scripts import test_kdd_wallet_packet_g0 as packet_fixture
+        import dossier_trade as producer
+        import patrimonio_4tf
+        import kdd_economics
+
+        fixture=packet_fixture.WalletPacketG0Tests(
+            "test_asset_weights_never_rebrand_partial_total_as_entire_wallet")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        moment=T
+        iso=moment.isoformat()
+        fixture.portfolio["posizioni"][0]["token"]="BTC"
+        fixture.portfolio["posizioni"][1]["token"]="JUP"
+        fixture.portfolio["data_ora_saldo_privato_utc"]=iso
+        fixture.portfolio["fonte_quantita"]="Kraken BalanceEx API privata SOLA LETTURA, "+iso
+        fixture.report["rilevazione_utc"]=iso
+        fixture.report["posizioni"][0]["token"]="BTC"
+        fixture.report["posizioni"][1]["token"]="JUP"
+        fixture.snapshot["rilevazione_utc"]=iso
+        fixture.snapshot["markets"]={
+            "BTC":{"token":"BTC","pair":"BTC/EUR","pair_key":"BTCEUR","prezzo_eur":1},
+            "JUP":{"token":"JUP","pair":"JUP/EUR","pair_key":"JUPEUR","prezzo_eur":2000}}
+        fixture.snapshot["schede_v02"]=[
+            {"token":"JUP","coppia_analisi":"JUP/EUR",
+             "esito":"RIESAME","categoria":"solo test"}]
+        economic={"schema":"economia_test_pubblica",
+                  "posizioni":[self.row("BTC"),self.row("JUP"),
+                              {"token":"SXT","identita":{"stato":"NON_VERIFICATO"}}],
+                  "candidati":[dict(self.row("JUP"),coppia_analisi="JUP/EUR")]}
+        source=dict(fixture.snapshot,orari_fonti={"composizione_kdd_utc":iso})
+        quality={"stato_saldo":{"portafoglio_aggiornato_da_api_private":False},
+                 "saldo_recente_verificato":False,"portafoglio_noto":True,
+                 "fotografia_portafoglio_sha256":"a"*64,
+                 "portafoglio_letto_utc":iso}
+        saved={}
+        original=evidence.collect
+        def public_collection(t,holdings,candidates):
+            return original(t,holdings,candidates,fetch=self.public)
+        with mock.patch.object(producer.desk,"NOW",return_value=T), \
+             mock.patch.object(producer.desk,"load",
+                 side_effect=lambda name,default=None: fixture.portfolio
+                     if name=="portafoglio.json" else {}), \
+             mock.patch.object(producer.desk,"save",
+                 side_effect=lambda name,value: saved.__setitem__(name,value)), \
+             mock.patch.object(producer.desk,"qualita_portafoglio",return_value=quality), \
+             mock.patch.object(producer,"recupera_4h",return_value={}), \
+             mock.patch.object(producer,"global_context",return_value={"errore":"offline"}), \
+             mock.patch.object(producer,"derivatives_context",
+                               return_value={"strumento":"PF_XBTUSD"}), \
+             mock.patch.object(patrimonio_4tf,"collect",return_value={"posizioni":[]}), \
+             mock.patch.object(producer,"finanziamento_150_book",return_value={}), \
+             mock.patch.object(producer,"economic_evidence",return_value=copy.deepcopy(economic)), \
+             mock.patch.object(evidence,"collect",side_effect=public_collection):
+            actual_dossier=producer.collect(source=source,asset_pairs={})
+        mint="JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"
+        observed=actual_dossier["evidenze_rete_defi"]
+        self.assertEqual(observed["fonti_rete"]["bitcoin"]["stato"],"OSSERVATO")
+        self.assertEqual(observed["fonti_contratti"][mint]["stato"],"OSSERVATO")
+        self.assertEqual(saved["dossier_multifonte.json"]["evidenze_rete_defi"],
+                         observed)
+        # Use the existing fully consistent wallet/report fixtures while
+        # transporting the actual producer's public-only dossier segment.
+        fixture.dossier["kraken_istantanea_utc"]=iso
+        fixture.dossier["evidenze_rete_defi"]=observed
+        fixture.dossier["evidenze_economiche"]=economic
+        fixture.dump()
+        with mock.patch.object(kdd_economics,"at_read",return_value=economic):
+            pkt=packet.build(fixture.root,now=T)
+            data=pkt["evidenze_multifonte"]["rete_defi"]
+            self.assertEqual(data["posizioni"][0]["onchain"]["valori"]["altezza"],
+                             930120)
+            self.assertEqual(data["posizioni"][1]["onchain"]["valori"]["mint"],mint)
+            handoff={"schema":bridge.SCHEMA_BUNDLE,"packet":pkt,
+                     "packet_sha256":bridge.digest(pkt),"preparato_utc":iso}
+            context=bridge.read_context(handoff,now=T)
+            self.assertEqual(context["rete_defi_alla_lettura"]["posizioni"][1]
+                             ["onchain"]["tipologia"],"TOKEN_CON_MINT")
+            stale=bridge.read_context(handoff,now=T+dt.timedelta(minutes=50))
+            self.assertIsNone(stale["rete_defi_alla_lettura"]["posizioni"][0]
+                              ["onchain"]["valori"])
+            modified=copy.deepcopy(handoff)
+            modified["packet"]["evidenze_multifonte"]["rete_defi"]["sorgente"] \
+                ["fonti_contratti"][mint]["fonte"]="https://forged.invalid"
+            modified["packet_sha256"]=bridge.digest(modified["packet"])
+            with self.assertRaises(bridge.BridgeError):
+                bridge.read_context(modified,now=T)
+
 if __name__=="__main__":
     unittest.main()
