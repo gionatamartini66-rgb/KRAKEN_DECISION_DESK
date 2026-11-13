@@ -218,6 +218,7 @@ class NetworkDefiTests(unittest.TestCase):
                      "posizioni":[econ_row(token,i) for i,token in enumerate(("SUI","SOL","SXT"))],
                      "candidati":[econ_row("SUI",0,candidate=True)],
                      "regime":{"stato":"INDETERMINATO","qualita":"PARZIALE"},
+                     "fonti_economiche":econ.sources_matrix(),
                      "macro":econ.macro([],moment)}
         fixture.dossier["evidenze_economiche"] = economics
         fixture.dossier["evidenze_rete_defi"]=evidence.collect(
