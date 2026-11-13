@@ -883,6 +883,66 @@ def alternative_liquidazione_150_lorda(positions: list, total, *,
 
 
 
+
+def scenari_concentrazione_150_lordi(positions, total, alternative, *, completo):
+    """KDD-04: confronto puramente aritmetico del patrimonio dopo ogni riduzione.
+
+    Mantiene il denominatore originario per confrontare asset e liquidita
+    teorica. Non introduce raccomandazioni o presunzioni su bid/fee/USDC.
+    """
+    result = {
+        "stato": "INDICATIVO" if completo else "NON_CALCOLABILE_INTEGRALMENTE",
+        "base": "valore_eur_posizioni_senza_liquidita",
+        "alternativa_senza_operazione": {
+            "liquidita_teorica_lorda_eur": "0",
+            "concentrazione_top2_post_pct": None,
+        },
+        "alternative": [],
+        "limite": ("Riduzioni puramente teoriche a prezzi EUR indicativi: "
+                   "non sono bid, ordini, fee personali, ne USDC accreditati. "
+                   "Il patrimonio include solo le posizioni Spot valorizzate."),
+    }
+    if not completo:
+        return result
+    original = [Decimal(amount(p.get("valore_eur"), "valore posizione"))
+                for p in positions]
+    base = Decimal(amount(total, "totale EUR"))
+    if base <= 0 or len(original) != len(alternative["alternative"]):
+        raise PacketError("Scenari patrimoniali incoerenti")
+    def pct(value):
+        return format((value * 100 / base).quantize(Decimal("0.01")), "f")
+    result["alternativa_senza_operazione"]["concentrazione_top2_post_pct"] = pct(
+        sum(sorted(original, reverse=True)[:2], Decimal(0)))
+    for i, item in enumerate(alternative["alternative"]):
+        record = {
+            "indice": i, "token": positions[i]["token"],
+            "stato": "NON_VERIFICABILE",
+            "riduzione_teorica_lorda_eur": None,
+            "quota_asset_post_su_patrimonio_originario_pct": None,
+            "concentrazione_top2_post_su_patrimonio_originario_pct": None,
+            "peso_liquidita_teorica_su_patrimonio_originario_pct": None,
+            "quota_investita_residua_su_patrimonio_originario_pct": None,
+            "usdc_effettivi": None,
+        }
+        gross = item.get("liquidita_teorica_ricavata_eur")
+        if gross is not None and item.get("token") == positions[i]["token"]:
+            reduction = Decimal(amount(gross, "riduzione lorda"))
+            if reduction < 0 or reduction > original[i]:
+                raise PacketError("Riduzione incoerente con la posizione")
+            after = list(original)
+            after[i] -= reduction
+            record.update(
+                stato="SIMULAZIONE_LORDA_NON_ESEGUIBILE",
+                riduzione_teorica_lorda_eur=format(reduction, "f"),
+                quota_asset_post_su_patrimonio_originario_pct=pct(after[i]),
+                concentrazione_top2_post_su_patrimonio_originario_pct=pct(
+                    sum(sorted(after, reverse=True)[:2], Decimal(0))),
+                peso_liquidita_teorica_su_patrimonio_originario_pct=pct(reduction),
+                quota_investita_residua_su_patrimonio_originario_pct=pct(base-reduction))
+        result["alternative"].append(record)
+    return result
+
+
 def book_150_per_gpt(dossier, positions, wallet_sha, snapshot_utc, now):
     """Valida origine, righe, coppia e ora della stima book prima di esporla a GPT."""
     fallback = {"stato": "NON_ATTESTATO", "righe": [],
@@ -1022,11 +1082,14 @@ def quadro_economico_per_gpt(positions: list, cash: dict, total, *, mercato_stat
     else:
         cash_status = "PRESENTE_PER_VALUTA_EQUIVALENZA_EUR_NON_ATTESTATA"
 
+    alternatives = alternative_liquidazione_150_lorda(
+        positions, total, mercato_stato=mercato_stato, saldo_stato=saldo_stato)
     return {
         "stato": "INDICATIVO" if complete else "NON_CALCOLABILE_INTEGRALMENTE",
         "base": "valore_eur_posizioni_senza_liquidita",
-        "alternative_liberazione_150_lordi": alternative_liquidazione_150_lorda(
-            positions, total, mercato_stato=mercato_stato, saldo_stato=saldo_stato),
+        "alternative_liberazione_150_lordi": alternatives,
+        "scenari_patrimonio_150_lordi": scenari_concentrazione_150_lordi(
+            positions, total, alternatives, completo=complete),
         "quote_posizioni": quote,
         "concentrazione_top2_pct": format(pct_top2, "f") if pct_top2 is not None else None,
         "concentrazione_top3_pct": format(pct_top3, "f") if pct_top3 is not None else None,
