@@ -128,8 +128,8 @@ class NetworkDefiTests(unittest.TestCase):
                    "candidati":[]}
         saved={}
         original=evidence.collect
-        def from_public(t,holdings,candidates):
-            return original(t,holdings,candidates,fetch=fake_fetch)
+        def from_public(t,holdings,candidates,**kwargs):
+            return original(t,holdings,candidates,fetch=fake_fetch,**kwargs)
         with mock.patch.object(producer.desk,"NOW",return_value=T), \
              mock.patch.object(producer.desk,"load",
                  side_effect=lambda name,default=None: wallet if name=="portafoglio.json" else {}), \
@@ -244,6 +244,10 @@ class Kdd17AssetIdentityG2Tests(unittest.TestCase):
         return {"posizioni": positions_out, "candidati": candidates_out}
 
     def fetch(self, url, payload=None):
+        if url == evidence.CONTRACT_ENDPOINTS["solana"] and payload and payload.get("method") == "getTokenSupply":
+            return {"jsonrpc": "2.0", "id": 1, "result": {
+                "context": {"slot": 400000000},
+                "value": {"amount": "1000000000000", "decimals": 6}}}
         if url in evidence.SOURCES.values():
             return fake_fetch(url, payload)
         if url == evidence.NATIVE_ENDPOINTS["bitcoin"]:
