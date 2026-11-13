@@ -312,7 +312,7 @@ class IdentityBoundNetworkTests(unittest.TestCase):
         self.assertEqual(context["posizioni"][7]["onchain"]["stato"],
                          "MULTICHAIN_DA_RISOLVERE")
         self.assertEqual(context["candidati"][1]["onchain"]["stato"],
-                         "CHAIN_NON_ATTESTATA")
+                         "NON_COPERTO")
         self.assertEqual(context["candidati"][0]["onchain"]["contratto"],mint)
         again=evidence.at_read(context,minimal,minimal_c,T,economia=econ)
         self.assertEqual(again["posizioni"][0]["onchain"]["valori"]["altezza"],930120)
@@ -372,7 +372,7 @@ class IdentityBoundNetworkTests(unittest.TestCase):
                 self.assertEqual(len(read["posizioni"]),len(holdings))
                 if i==1:
                     self.assertEqual(read["posizioni"][1]["onchain"]["stato"],
-                                     "CHAIN_NON_ATTESTATA")
+                                     "NON_COPERTO")
                 if i==2:
                     self.assertEqual(read["posizioni"][1]["onchain"]["tipologia"],
                                      "TOKEN_CON_MINT")
