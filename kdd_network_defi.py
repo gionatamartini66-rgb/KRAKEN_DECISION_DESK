@@ -317,3 +317,447 @@ def at_read(source, positions, candidates, now):
             "candidati":[_economic_row(x,sources,acquired) for x in external],
             "limite":"Reti/TVL pubblici, nessuna attribuzione al portafoglio privato; "
                      "provenienza P08/P09 non autenticata e metriche da confrontare nel tempo."}
+
+
+# --- KDD-17: one identity-bound multi-network extension. ---
+# The #53 public Sui/Solana/DeFi producers and validators above are preserved.
+# New blocks and SPL mint reports are observations of PUBLIC networks, never
+# an assertion that KDD's private holding resides at a particular address.
+import kdd_economics as _economics
+
+NETWORK_ADAPTERS = {
+    "bitcoin": ("https://blockstream.info/api/blocks", "BLOCKSTREAM_ESPLORA"),
+    "ethereum": ("https://ethereum-rpc.publicnode.com", "EVM_RPC"),
+    "bsc": ("https://bsc-dataseed.bnbchain.org", "EVM_RPC"),
+    "near": ("https://rpc.mainnet.near.org", "NEAR_RPC"),
+    "xrpl": ("https://xrplcluster.com/", "XRPL_RPC"),
+}
+TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+MAX_EXTENDED_SOURCES = 10
+_LEGACY_COLLECT = collect
+_LEGACY_AT_READ = at_read
+
+
+def _binding(row):
+    """Never turn Kraken/CoinGecko ticker correspondence alone into a chain."""
+    token = row.get("token")
+    identity = row.get("identita")
+    project_token = _economics.canonical_token(token)
+    base = {"stato": "NON_VERIFICATO", "tipo": "NON_ATTRIBUITO",
+            "rete": None, "contratto": None, "progetto_id": None}
+    if not isinstance(identity, dict):
+        return dict(base, motivo="PROVA_IDENTITA_PROGETTO_ASSENTE")
+    if identity.get("stato") != "IDENTITA_VERIFICATA_DA_CATALOGO":
+        return dict(base, motivo="IDENTITA_PROGETTO_NON_VERIFICATA")
+    if identity.get("metodo") == "KRAKEN_COINGECKO_MARKET":
+        if _economics._dynamic_valid(token, identity.get("coppia"), identity):
+            return dict(base, stato="PROGETTO_DINAMICO_IDENTIFICATO",
+                        progetto_id=identity.get("coingecko_id"),
+                        motivo="CHAIN_E_CONTRATTO_NON_ATTESTATI")
+        return dict(base, motivo="PROVA_DINAMICA_NON_VALIDA")
+    curated = _economics._CURATED.get(project_token)
+    pair = identity.get("coppia")
+    if (identity.get("metodo") != "REGISTRO_CURATO" or not isinstance(curated,dict)
+            or identity.get("coingecko_id") != curated.get("id")
+            or not isinstance(pair,str) or pair.count("/")!=1
+            or _economics.canonical_token(pair.split("/")[0]) != project_token
+            or pair.split("/")[1] not in ("EUR","USD","USDC")
+            or not isinstance(identity.get("pair_key"),str)
+            or not identity["pair_key"]
+            or identity.get("asset_base_kraken") != pair.split("/")[0]
+            or identity.get("token_progetto") != project_token):
+        return dict(base, motivo="BINDING_KRAKEN_PROGETTO_DISCORDANTE")
+    chain = curated.get("onchain")
+    if not isinstance(chain,dict):
+        return dict(base, progetto_id=curated["id"],
+                    motivo="ASSOCIAZIONE_CHAIN_NON_DOCUMENTATA")
+    kind, network = chain.get("tipo"),chain.get("rete")
+    if kind == "MULTICHAIN_DA_RISOLVERE":
+        return dict(base, stato="MULTICHAIN_DA_RISOLVERE",
+                    tipo=kind, progetto_id=curated["id"],
+                    motivo="RETI_E_DEPLOYMENT_DA_VERIFICARE")
+    if kind not in ("NATIVO","TOKEN_CONTRATTO") or not isinstance(network,str):
+        return dict(base, motivo="METADATI_CHAIN_NON_VALIDI")
+    if not isinstance(chain.get("documentazione"),str) or not chain["documentazione"].startswith("https://"):
+        return dict(base, motivo="FONTE_CHAIN_NON_DOCUMENTATA")
+    if kind=="TOKEN_CONTRATTO":
+        if (network!="solana" or chain.get("standard")!="SPL_MINT"
+                or not isinstance(chain.get("contratto"),str)
+                or not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}",chain["contratto"])):
+            return dict(base, motivo="MINT_NON_ATTESTATO")
+    return {"stato":"ASSOCIAZIONE_CURATA_CON_LIMITI",
+            "tipo":kind, "rete":network,
+            "contratto":chain.get("contratto") if kind=="TOKEN_CONTRATTO" else None,
+            "progetto_id":curated["id"],
+            "documentazione":chain["documentazione"],
+            "limite":"Kraken+progetto+fonte documentale, NON prova crittografica di address/wallet"}
+
+
+def _attached(positions, economic_rows):
+    if economic_rows is None:
+        return positions
+    if not isinstance(economic_rows,list) or len(economic_rows)!=len(positions):
+        raise ValueError("cardinalita identita rete incongruente")
+    result=[]
+    for row,source in zip(positions,economic_rows):
+        if not isinstance(row,dict) or not isinstance(source,dict) or source.get("token")!=row.get("token"):
+            raise ValueError("token rete/economia discordante")
+        if ("coppia_analisi" in row and
+                source.get("coppia_analisi")!=row.get("coppia_analisi")):
+            raise ValueError("coppia rete/economia discordante")
+        copy=dict(row)
+        # An unknown new candidate has no identity object at collection.
+        # Do not manufacture an explicit null identity on packet re-read.
+        if "identita" in source:
+            copy["identita"]=source["identita"]
+        result.append(copy)
+    return result
+
+
+def _bound_roster(rows,candidate=False):
+    old=_roster(rows,candidate=candidate)
+    for out,source in zip(old,rows):
+        if isinstance(source,dict) and "identita" in source:
+            out["binding"]=_binding(source)
+    return old
+
+
+def _new_source(url, kind, *, state="NON_ACQUISITO", reason="ASSET_NON_PRESENTE"):
+    return {"fonte":url,"tipo_fonte":kind,"stato":state,
+            "osservato_utc":None,"valori":None,"unita":None,
+            "copertura":"Rete pubblica, NON movimenti wallet/indirizzi Kraken",
+            "motivo":reason,"limite":"Endpoint pubblico non equivale ad autenticazione upstream P08/P09"}
+
+
+def _rpc(fetch,url,method,params):
+    data=fetch(url,{"jsonrpc":"2.0","id":1,"method":method,"params":params})
+    if (not isinstance(data,dict) or data.get("error") or data.get("id")!=1
+            or "result" not in data):
+        raise ValueError("public RPC error or wrong id")
+    return data["result"]
+
+
+def _hex(value):
+    if not isinstance(value,str) or not re.fullmatch(r"0x[0-9a-fA-F]{1,18}",value):
+        raise ValueError("invalid RPC hex integer")
+    return int(value,16)
+
+
+def _hash(value,evm=False):
+    rule=r"0x[0-9a-fA-F]{64}" if evm else r"[0-9a-fA-F]{64}"
+    if not isinstance(value,str) or not re.fullmatch(rule,value):
+        raise ValueError("invalid block hash")
+    return value
+
+
+def _new_network_record(network,now,fetch):
+    url,kind=NETWORK_ADAPTERS[network]
+    record=_new_source(url,kind)
+    if network=="bitcoin":
+        blocks=fetch(url)
+        if not isinstance(blocks,list) or not 1<=len(blocks)<=10 or not isinstance(blocks[0],dict):
+            raise ValueError("Bitcoin blocks list invalid")
+        top=blocks[0]
+        observed=dt.datetime.fromtimestamp(_integer(top.get("timestamp")),UTC)
+        values={"altezza":_integer(top.get("height")),
+                "tx_blocco":_integer(top.get("tx_count")),
+                "hash":_hash(top.get("id"))}
+        units={"altezza":"blocchi","tx_blocco":"transazioni nel blocco"}
+    elif network in ("ethereum","bsc"):
+        expected=1 if network=="ethereum" else 56
+        chainid=_hex(_rpc(fetch,url,"eth_chainId",[]))
+        if chainid!=expected:
+            raise ValueError("EVM chain id mismatched")
+        tag="finalized" if network=="ethereum" else "latest"
+        block=_rpc(fetch,url,"eth_getBlockByNumber",[tag,False])
+        if not isinstance(block,dict) or not isinstance(block.get("transactions"),list):
+            raise ValueError("EVM block invalid")
+        observed=dt.datetime.fromtimestamp(_hex(block.get("timestamp")),UTC)
+        values={"altezza":_hex(block.get("number")),
+                "tx_blocco":len(block["transactions"]),
+                "hash":_hash(block.get("hash"),evm=True),
+                "chain_id":chainid}
+        units={"altezza":"blocchi","tx_blocco":"transazioni nel blocco","chain_id":"EVM chain ID"}
+    elif network=="near":
+        block=_rpc(fetch,url,"block",{"finality":"final"})
+        header=block.get("header") if isinstance(block,dict) else None
+        if not isinstance(header,dict):
+            raise ValueError("NEAR header absent")
+        observed=dt.datetime.fromtimestamp(_integer(header.get("timestamp"))/1_000_000_000,UTC)
+        h=header.get("hash")
+        if not isinstance(h,str) or not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,60}",h):
+            raise ValueError("NEAR block hash invalid")
+        values={"altezza":_integer(header.get("height")),"hash":h}
+        units={"altezza":"blocchi finalizzati"}
+    else:
+        result=_rpc(fetch,url,"ledger",[{"ledger_index":"validated",
+                                         "transactions":False,"api_version":2}])
+        ledger=result.get("ledger") if isinstance(result,dict) else None
+        if (not isinstance(result,dict) or result.get("validated") is not True
+                or not isinstance(ledger,dict)):
+            raise ValueError("XRPL ledger not validated")
+        observed=_timestamp(ledger.get("close_time_iso"))
+        values={"altezza":_integer(result.get("ledger_index")),
+                "hash":_hash(result.get("ledger_hash")),
+                "xrp_totali":str(_number(ledger.get("total_coins"))/Decimal(1_000_000))}
+        units={"altezza":"ledger validati","xrp_totali":"XRP rete, non saldo wallet"}
+    if not dt.timedelta(minutes=-2)<=now-observed<=dt.timedelta(hours=3):
+        raise ValueError("network timestamp stale or future")
+    record.update(stato="OSSERVATO",osservato_utc=observed.isoformat(timespec="seconds"),
+                  valori=values,unita=units,motivo=None)
+    return record
+
+
+def _new_mint_record(mint,now,fetch):
+    record=_new_source(SOL_URL,"SOLANA_SPL_MINT")
+    amount=_rpc(fetch,SOL_URL,"getTokenSupply",[mint,{"commitment":"finalized"}])
+    info=_rpc(fetch,SOL_URL,"getAccountInfo",[mint,{"commitment":"finalized",
+                                                     "encoding":"jsonParsed"}])
+    if not isinstance(amount,dict) or not isinstance(info,dict):
+        raise ValueError("Solana mint RPC shape")
+    av=amount.get("value")
+    iv=info.get("value")
+    parsed=(iv.get("data") or {}).get("parsed") if isinstance(iv,dict) else None
+    content=parsed.get("info") if isinstance(parsed,dict) else None
+    if (not isinstance(av,dict) or not isinstance(content,dict)
+            or iv.get("owner")!=TOKEN_PROGRAM or parsed.get("type")!="mint"):
+        raise ValueError("not a standard SPL mint")
+    slot=_integer(amount.get("context",{}).get("slot"))
+    slot2=_integer(info.get("context",{}).get("slot"))
+    decimals=_integer(av.get("decimals"))
+    raw=_integer(av.get("amount"))
+    if (decimals>18 or decimals!=_integer(content.get("decimals"))
+            or slot2<slot-1000):
+        raise ValueError("SPL mint decimals or slot inconsistent")
+    total=Decimal(raw)/(Decimal(10)**decimals)
+    record.update(stato="OSSERVATO",valori={
+        "mint":mint,"slot_finalized":slot,"slot_info":slot2,
+        "supply_grezza":str(raw),"decimali":decimals,
+        "supply_token":str(total),"token_program":TOKEN_PROGRAM},
+        unita={"supply_token":"unita SPL token; non offerta circolante",
+               "supply_grezza":"base units","slot_finalized":"slot Solana"},
+        copertura="Supply del MINT SPL documentato; NON posizioni Kraken o holders unici",
+        motivo=None)
+    return record
+
+
+def _collect_extended(raw,now,fetch):
+    bindings=[x.get("binding",{}) for x in raw["roster_posizioni"]+raw["roster_candidati"]]
+    networks={x.get("rete") for x in bindings
+              if x.get("stato")=="ASSOCIAZIONE_CURATA_CON_LIMITI"
+              and x.get("tipo")=="NATIVO" and x.get("rete") in NETWORK_ADAPTERS}
+    mints={x.get("contratto") for x in bindings
+           if x.get("stato")=="ASSOCIAZIONE_CURATA_CON_LIMITI"
+           and x.get("tipo")=="TOKEN_CONTRATTO" and x.get("rete")=="solana"}
+    if len(networks)+2*len(mints)+sum(x in ("ethereum","bsc") for x in networks)>MAX_EXTENDED_SOURCES:
+        raise ValueError("network request budget exceeded")
+    network_rows={}
+    for network,(url,kind) in NETWORK_ADAPTERS.items():
+        if network not in networks:
+            network_rows[network]=_new_source(url,kind)
+            continue
+        try:
+            network_rows[network]=_new_network_record(network,now,fetch)
+        except (ValueError,TypeError,KeyError,OSError,OverflowError,UnicodeError,
+                json.JSONDecodeError) as exc:
+            network_rows[network]=_new_source(url,kind,state="NON_DISPONIBILE",
+                                             reason=type(exc).__name__)
+    mint_rows={}
+    for mint in sorted(mints):
+        try:
+            mint_rows[mint]=_new_mint_record(mint,now,fetch)
+        except (ValueError,TypeError,KeyError,OSError,OverflowError,UnicodeError,
+                json.JSONDecodeError) as exc:
+            mint_rows[mint]=_new_source(SOL_URL,"SOLANA_SPL_MINT",
+                                         state="NON_DISPONIBILE",reason=type(exc).__name__)
+    raw["fonti_rete"]=network_rows
+    raw["fonti_contratti"]=mint_rows
+    raw["limite_onchain"]="Osservazioni di rete/mint, NON proof-of-ownership o attribuzione a exchange"
+    return raw
+
+
+def collect(now,positions,candidates,*,fetch=None):
+    """Existing #53 data + documented, identity-bound adapters (public only)."""
+    original=_LEGACY_COLLECT(now,positions,candidates,fetch=fetch)
+    original["roster_posizioni"]=_bound_roster(positions)
+    original["roster_candidati"]=_bound_roster(candidates,candidate=True)
+    return _collect_extended(original,_now(now),fetch or _http)
+
+
+def _checked_extended(key,record,now,acquired,*,mint=None):
+    url,kind=(NETWORK_ADAPTERS[key] if mint is None
+              else (SOL_URL,"SOLANA_SPL_MINT"))
+    if (not isinstance(record,dict) or record.get("fonte")!=url
+            or record.get("tipo_fonte")!=kind
+            or record.get("limite")!="Endpoint pubblico non equivale ad autenticazione upstream P08/P09"):
+        raise ValueError("extended source provenance invalid")
+    state=record.get("stato")
+    if state not in ("OSSERVATO","NON_ACQUISITO","NON_DISPONIBILE"):
+        raise ValueError("extended state invalid")
+    values, units=record.get("valori"),record.get("unita")
+    observed=_timestamp(record["osservato_utc"]) if record.get("osservato_utc") else None
+    if state!="OSSERVATO":
+        if values is not None or units is not None or observed is not None:
+            raise ValueError("unavailable extended source contains observations")
+        return dict(record)
+    if not isinstance(values,dict) or not isinstance(units,dict):
+        raise ValueError("extended source values malformed")
+    if mint is not None:
+        if (set(values)!={"mint","slot_finalized","slot_info",
+                          "supply_grezza","decimali","supply_token","token_program"}
+                or values.get("mint")!=mint or values.get("token_program")!=TOKEN_PROGRAM
+                or observed is not None):
+            raise ValueError("SPL mint identity altered")
+        dec=_integer(values["decimali"])
+        if dec>18 or _integer(values["slot_info"])+1000<_integer(values["slot_finalized"]):
+            raise ValueError("SPL decimals/slot")
+        if _number(values["supply_token"])!=Decimal(_integer(values["supply_grezza"]))/(10**dec):
+            raise ValueError("SPL supply altered")
+    else:
+        if _integer(values.get("altezza"))<1 or not isinstance(values.get("hash"),str):
+            raise ValueError("chain block invalid")
+        if key in ("ethereum","bsc"):
+            if (values.get("chain_id")!=(1 if key=="ethereum" else 56)
+                    or not re.fullmatch(r"0x[0-9a-fA-F]{64}",values["hash"])):
+                raise ValueError("EVM chain identity mismatch")
+            _integer(values.get("tx_blocco"))
+        elif key=="bitcoin":
+            _hash(values["hash"])
+            _integer(values.get("tx_blocco"))
+        elif key=="near":
+            if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,60}",values["hash"]):
+                raise ValueError("NEAR hash invalid")
+        else:
+            _hash(values["hash"])
+            _number(values.get("xrp_totali"))
+        if observed is None:
+            raise ValueError("chain native timestamp absent")
+    reference=observed or acquired
+    if reference>acquired+dt.timedelta(minutes=2):
+        raise ValueError("source observation after acquisition")
+    fresh=dt.timedelta(minutes=-2)<=now-reference<=dt.timedelta(minutes=30)
+    return dict(record,stato="OSSERVATO_CON_LIMITI" if fresh else "SCADUTO",
+                valori=values if fresh else None,unita=units if fresh else None,
+                motivo=None if fresh else "MISURA_SCADUTA_NON_USARE_PER_DECISIONI")
+
+
+def _enrich_row(row,network_rows,mint_rows):
+    binding=row.get("binding")
+    kind=binding.get("tipo") if isinstance(binding,dict) else None
+    status=binding.get("stato") if isinstance(binding,dict) else "NON_VERIFICATO"
+    if kind=="NATIVO" and status=="ASSOCIAZIONE_CURATA_CON_LIMITI":
+        network=binding["rete"]
+        if network in network_rows:
+            observed=network_rows[network]
+            return dict(row,onchain=dict(observed,tipologia="ASSET_NATIVO",
+                         rete=network,documentazione=binding["documentazione"],
+                         ipotesi="Un nuovo blocco/ledger descrive lo stato della rete.",
+                         controipotesi="Attivita aggregata non prova acquisti o vendite del token.",
+                         condizione_riesame="Confrontare campioni datati e provider indipendenti."),
+                        identita_onchain=binding)
+        # SUI/SOL legacy observation retained; no replacement of #53.
+        if network in ("sui","solana"):
+            return dict(row,identita_onchain=binding)
+        return dict(row,identita_onchain=binding,
+                    onchain={"stato":"FONTE_PUBBLICA_NON_INTEGRATA",
+                             "rete":network,"valori":None,"fonte":None,
+                             "documentazione":binding["documentazione"],
+                             "limite":"Rete nativa identificata, nessuna misura verificata",
+                             "condizione_riesame":"Integrare un endpoint pubblico documentato e validarne la risposta"})
+    if kind=="TOKEN_CONTRATTO" and status=="ASSOCIAZIONE_CURATA_CON_LIMITI":
+        item=mint_rows.get(binding["contratto"])
+        return dict(row,identita_onchain=binding,
+                    onchain=(dict(item,tipologia="TOKEN_CON_MINT",
+                                  rete=binding["rete"],contratto=binding["contratto"],
+                                  documentazione=binding["documentazione"],
+                                  ipotesi="Supply del mint osservato puo incidere sulla valutazione della diluizione.",
+                                  controipotesi="Supply totale del mint non equivale a circolante o a vendite.",
+                                  condizione_riesame="Confrontare supply datate e vesting verificato.")
+                             if item else {"stato":"NON_ACQUISITO","valori":None}))
+    reason=("MULTICHAIN_DA_RISOLVERE" if status=="MULTICHAIN_DA_RISOLVERE"
+            else "CHAIN_NON_ATTESTATA")
+    if "binding" in row:
+        return dict(row,identita_onchain=binding,
+                    onchain={"stato":reason,"valori":None,
+                             "limite":"Nessun contratto o network attribuito dal solo ticker"})
+    return row
+
+
+def _roster_still_attributable(stored,expected,economic_rows):
+    """A dated dynamic project proof may expire without erasing its asset row.
+
+    Only the recorded Kraken/CoinGecko match can be downgraded; no transition
+    from an unknown project to an asserted contract/network is ever permitted.
+    """
+    if not isinstance(stored,list) or len(stored)!=len(expected):
+        return False
+    for index,(old,new) in enumerate(zip(stored,expected)):
+        if old==new:
+            continue
+        if not isinstance(old,dict) or not isinstance(new,dict):
+            return False
+        a,b=old.get("binding"),new.get("binding")
+        identity=(economic_rows[index].get("identita")
+                  if economic_rows and index<len(economic_rows)
+                  and isinstance(economic_rows[index],dict) else None)
+        if (not isinstance(a,dict) or not isinstance(b,dict)
+                or not isinstance(identity,dict)
+                or {k:v for k,v in old.items() if k!="binding"}
+                    != {k:v for k,v in new.items() if k!="binding"}
+                or a.get("stato")!="PROGETTO_DINAMICO_IDENTIFICATO"
+                or a.get("progetto_id")!=identity.get("coingecko_id")
+                or b.get("stato")!="NON_VERIFICATO"
+                or identity.get("metodo")!="KRAKEN_COINGECKO_MARKET"
+                or identity.get("motivo")!="ATTESTAZIONE_IDENTITA_SCADUTA"):
+            return False
+    return True
+
+
+def at_read(source,positions,candidates,now,*,economia=None):
+    """Revalidate both #53 and new provenance/identity at packet and GPT read."""
+    moment=_now(now)
+    raw=source.get("sorgente") if isinstance(source,dict) and "sorgente" in source else source
+    if not isinstance(raw,dict) or "fonti_rete" not in raw:
+        return _LEGACY_AT_READ(source,positions,candidates,moment)
+    economic_rows=economia if isinstance(economia,dict) else None
+    pos=_attached(positions,economic_rows.get("posizioni") if economic_rows else None)
+    can=_attached(candidates,economic_rows.get("candidati") if economic_rows else None)
+    expected_pos=_bound_roster(pos)
+    expected_can=_bound_roster(can,candidate=True)
+    if (not _roster_still_attributable(raw.get("roster_posizioni"),expected_pos,
+                                        economic_rows.get("posizioni") if economic_rows else None)
+            or not _roster_still_attributable(raw.get("roster_candidati"),expected_can,
+                                              economic_rows.get("candidati") if economic_rows else None)):
+        raise ValueError("on-chain chain identity or dynamic roster changed")
+    # Old source is independently checked with exact #53 validators, then
+    # extended fields undergo a separate strict semantic check.
+    stripped=dict(raw,roster_posizioni=_roster(positions),
+                  roster_candidati=_roster(candidates,candidate=True))
+    base=_LEGACY_AT_READ(stripped,positions,candidates,moment)
+    if (not isinstance(raw.get("fonti_rete"),dict)
+            or set(raw["fonti_rete"])!=set(NETWORK_ADAPTERS)
+            or not isinstance(raw.get("fonti_contratti"),dict)
+            or raw.get("limite_onchain")!="Osservazioni di rete/mint, NON proof-of-ownership o attribuzione a exchange"):
+        raise ValueError("on-chain extended sources malformed")
+    acquired=_timestamp(raw["acquisito_utc"])
+    current={k:_checked_extended(k,record,moment,acquired)
+             for k,record in raw["fonti_rete"].items()}
+    mints={x["binding"]["contratto"] for x in expected_pos+expected_can
+           if isinstance(x.get("binding"),dict)
+           and x["binding"].get("stato")=="ASSOCIAZIONE_CURATA_CON_LIMITI"
+           and x["binding"].get("tipo")=="TOKEN_CONTRATTO"}
+    if set(raw["fonti_contratti"])!=mints:
+        raise ValueError("unexpected or missing token contract source")
+    mint_rows={mint:_checked_extended("solana",item,moment,acquired,mint=mint)
+               for mint,item in raw["fonti_contratti"].items()}
+    base["sorgente"]=raw
+    base["posizioni"]=[_enrich_row(dict(x,**({"binding":b["binding"]} if "binding" in b else {})),current,mint_rows)
+                        for x,b in zip(base["posizioni"],expected_pos)]
+    base["candidati"]=[_enrich_row(dict(x,**({"binding":b["binding"]} if "binding" in b else {})),current,mint_rows)
+                        for x,b in zip(base["candidati"],expected_can)]
+    base["fonti_rete"]={k:{"fonte":v["fonte"],"stato":v["stato"],
+                           "osservato_utc":v.get("osservato_utc")}
+                         for k,v in current.items()}
+    base["limite"]="Valori pubblici legati a identita economica curata e rete documentata; " \
+                   "P08/P09 upstream NON autenticato; nessun saldo wallet o transfer attribuito."
+    return base

@@ -210,5 +210,313 @@ class NetworkDefiTests(unittest.TestCase):
             bridge.read_context(poison,now=moment)
 
 
+
+class IdentityBoundNetworkTests(unittest.TestCase):
+    """All RPC payloads here are synthetic; no private balance or paid API."""
+
+    def ident(self,token):
+        import kdd_economics as econ
+        entry=econ._CURATED[token]
+        return {"stato":"IDENTITA_VERIFICATA_DA_CATALOGO",
+                "token":token,"token_progetto":token,
+                "metodo":"REGISTRO_CURATO","coingecko_id":entry["id"],
+                "progetto":entry["name"],"coppia":token+"/EUR",
+                "pair_key":token+"EUR","asset_base_kraken":token}
+
+    def row(self,token):
+        return {"token":token,"identita":self.ident(token)}
+
+    def public(self,url,payload=None):
+        t=int(T.timestamp())
+        if url=="https://blockstream.info/api/blocks":
+            return [{"id":"a"*64,"height":930120,"tx_count":1923,
+                     "timestamp":t-80}]
+        if url=="https://ethereum-rpc.publicnode.com":
+            method=payload["method"]
+            if method=="eth_chainId":
+                return {"jsonrpc":"2.0","id":1,"result":"0x1"}
+            self.assertEqual(method,"eth_getBlockByNumber")
+            self.assertEqual(payload["params"],["finalized",False])
+            return {"jsonrpc":"2.0","id":1,"result":{
+                "number":"0x1a9c00","timestamp":hex(t-90),
+                "hash":"0x"+"b"*64,"transactions":["0x01","0x02"]}}
+        if url=="https://bsc-dataseed.bnbchain.org":
+            if payload["method"]=="eth_chainId":
+                return {"jsonrpc":"2.0","id":1,"result":"0x38"}
+            self.assertEqual(payload["params"],["latest",False])
+            return {"jsonrpc":"2.0","id":1,"result":{
+                "number":"0x991a0","timestamp":hex(t-5),
+                "hash":"0x"+"c"*64,"transactions":["0x01"]}}
+        if url=="https://rpc.mainnet.near.org":
+            self.assertEqual(payload["method"],"block")
+            return {"jsonrpc":"2.0","id":1,"result":{
+                "header":{"height":143002003,"timestamp":str((t-4)*10**9),
+                          "hash":"5"*44}}}
+        if url=="https://xrplcluster.com/":
+            self.assertEqual(payload["method"],"ledger")
+            return {"jsonrpc":"2.0","id":1,"result":{
+                "status":"success","ledger_hash":"d"*64,"ledger_index":99012514,
+                "validated":True,"ledger":{"close_time_iso":(T-dt.timedelta(seconds=5)).isoformat(),
+                                           "total_coins":"99900000000000000"}}}
+        if url==evidence.SOL_URL:
+            self.assertEqual(payload["id"],1)
+            if payload["method"]=="getTokenSupply":
+                self.assertEqual(payload["params"][0],
+                                 "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN")
+                return {"jsonrpc":"2.0","id":1,"result":{
+                    "context":{"slot":30000000},
+                    "value":{"amount":"6861485685760334","decimals":6}}}
+            self.assertEqual(payload["method"],"getAccountInfo")
+            return {"jsonrpc":"2.0","id":1,"result":{
+                "context":{"slot":30000001},
+                "value":{"owner":evidence.TOKEN_PROGRAM,
+                         "data":{"parsed":{"type":"mint","info":{"decimals":6}}}}}}
+        raise AssertionError("unexpected source "+url)
+
+    def test_native_contract_multichain_and_new_candidate_to_gpt_consumer(self):
+        owned=[self.row(t) for t in ("BTC","ETH","BNB","NEAR","XRP","JUP","RENDER","FET")]
+        candidates=[dict(self.row("JUP"),coppia_analisi="JUP/EUR"),
+                    {"token":"ZEC","coppia_analisi":"ZEC/EUR"}]
+        calls=[]
+        def get(url,payload=None):
+            calls.append(url)
+            return self.public(url,payload)
+        collected=evidence.collect(T,owned,candidates,fetch=get)
+        self.assertEqual(len(calls),9)
+        self.assertEqual(set(collected["fonti_rete"]),set(evidence.NETWORK_ADAPTERS))
+        self.assertEqual(collected["fonti_rete"]["bitcoin"]["stato"],"OSSERVATO")
+        self.assertEqual(collected["fonti_rete"]["near"]["stato"],"OSSERVATO")
+        mint="JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"
+        self.assertEqual(collected["fonti_contratti"][mint]["stato"],"OSSERVATO")
+        minimal=[{"token":x["token"]} for x in owned]
+        minimal_c=[{"token":x["token"],"coppia_analisi":x["coppia_analisi"]}
+                   for x in candidates]
+        econ={"posizioni":owned,"candidati":candidates}
+        context=evidence.at_read(collected,minimal,minimal_c,T,economia=econ)
+        self.assertEqual([x["token"] for x in context["posizioni"]],
+                         ["BTC","ETH","BNB","NEAR","XRP","JUP","RENDER","FET"])
+        for i,network in enumerate(("bitcoin","ethereum","bsc","near","xrpl")):
+            row=context["posizioni"][i]["onchain"]
+            self.assertEqual(row["stato"],"OSSERVATO_CON_LIMITI")
+            self.assertEqual(row["tipologia"],"ASSET_NATIVO")
+            self.assertEqual(row["rete"],network)
+            self.assertIsNotNone(row["valori"]["altezza"])
+            self.assertIsNotNone(row["osservato_utc"])
+            self.assertIn("controipotesi",row)
+        self.assertEqual(context["posizioni"][5]["onchain"]["tipologia"],
+                         "TOKEN_CON_MINT")
+        self.assertEqual(context["posizioni"][5]["onchain"]["valori"]["supply_token"],
+                         "6861485685.760334")
+        self.assertEqual(context["posizioni"][6]["onchain"]["stato"],
+                         "MULTICHAIN_DA_RISOLVERE")
+        self.assertEqual(context["posizioni"][7]["onchain"]["stato"],
+                         "MULTICHAIN_DA_RISOLVERE")
+        self.assertEqual(context["candidati"][1]["onchain"]["stato"],
+                         "NON_COPERTO")
+        self.assertEqual(context["candidati"][0]["onchain"]["contratto"],mint)
+        again=evidence.at_read(context,minimal,minimal_c,T,economia=econ)
+        self.assertEqual(again["posizioni"][0]["onchain"]["valori"]["altezza"],930120)
+        expired=evidence.at_read(collected,minimal,minimal_c,
+                                   T+dt.timedelta(minutes=45),economia=econ)
+        self.assertEqual(expired["posizioni"][0]["onchain"]["stato"],"SCADUTO")
+        self.assertIsNone(expired["posizioni"][0]["onchain"]["valori"])
+        self.assertIsNone(expired["posizioni"][5]["onchain"]["valori"])
+
+    def test_ticker_collision_and_forged_mint_are_not_attested(self):
+        actual=self.row("JUP")
+        bad=copy.deepcopy(actual)
+        bad["identita"]["coingecko_id"]="wrong-jupiter"
+        raw=evidence.collect(T,[bad],[],fetch=self.public)
+        self.assertEqual(raw["roster_posizioni"][0]["binding"]["stato"],
+                         "NON_VERIFICATO")
+        self.assertEqual(raw["fonti_contratti"],{})
+        valid=evidence.collect(T,[actual],[],fetch=self.public)
+        forged=copy.deepcopy(valid)
+        forged["roster_posizioni"][0]["binding"]["contratto"]="fake-mint"
+        with self.assertRaises(ValueError):
+            evidence.at_read(forged,[{"token":"JUP"}],[],T,
+                             economia={"posizioni":[actual],"candidati":[]})
+        injected=copy.deepcopy(valid)
+        injected["fonti_contratti"]["FAKE_MINT"]=injected["fonti_contratti"][
+            "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"]
+        with self.assertRaises(ValueError):
+            evidence.at_read(injected,[{"token":"JUP"}],[],T,
+                             economia={"posizioni":[actual],"candidati":[]})
+
+    def test_source_unavailable_and_chainid_mismatch_fail_with_rows_preserved(self):
+        items=[self.row("ETH"),self.row("BTC"),self.row("JUP")]
+        def unavailable(url,payload=None):
+            if url=="https://ethereum-rpc.publicnode.com":
+                return {"jsonrpc":"2.0","id":1,"result":"0x38"}
+            if url=="https://blockstream.info/api/blocks":
+                raise OSError("offline")
+            return self.public(url,payload)
+        raw=evidence.collect(T,items,[],fetch=unavailable)
+        read=evidence.at_read(raw,[{"token":x["token"]} for x in items],[],T,
+                              economia={"posizioni":items,"candidati":[]})
+        self.assertEqual(len(read["posizioni"]),3)
+        self.assertEqual(read["posizioni"][0]["onchain"]["stato"],"NON_DISPONIBILE")
+        self.assertEqual(read["posizioni"][1]["onchain"]["stato"],"NON_DISPONIBILE")
+        self.assertIsNone(read["posizioni"][1]["onchain"]["valori"])
+        self.assertEqual(read["posizioni"][2]["onchain"]["stato"],"OSSERVATO_CON_LIMITI")
+
+    def test_new_asset_entry_exit_and_return_never_carries_old_chain_evidence(self):
+        stages=[[self.row("BTC")],[self.row("BTC"),
+                 {"token":"ZEC"}],[self.row("BTC"),self.row("JUP")]]
+        for i,holdings in enumerate(stages):
+            with self.subTest(stage=i):
+                source=evidence.collect(T,holdings,[],fetch=self.public)
+                rows=[{"token":x["token"]} for x in holdings]
+                read=evidence.at_read(source,rows,[],T,
+                                      economia={"posizioni":holdings,"candidati":[]})
+                self.assertEqual(len(read["posizioni"]),len(holdings))
+                if i==1:
+                    self.assertEqual(read["posizioni"][1]["onchain"]["stato"],
+                                     "NON_COPERTO")
+                if i==2:
+                    self.assertEqual(read["posizioni"][1]["onchain"]["tipologia"],
+                                     "TOKEN_CON_MINT")
+        with self.assertRaises(ValueError):
+            evidence.at_read(source,[{"token":"BTC"},{"token":"ZEC"}],[],T,
+                             economia={"posizioni":stages[1],"candidati":[]})
+
+
+    def test_dossier_producer_packet_bridge_native_and_mint(self):
+        """The production dossier adapter and both genuine consumers, synthetic upstream."""
+        from scripts import kdd_wallet_packet_g0 as packet
+        from scripts import kdd_bridge_g2 as bridge
+        from scripts import test_kdd_wallet_packet_g0 as packet_fixture
+        import dossier_trade as producer
+        import patrimonio_4tf
+        import kdd_economics
+
+        fixture=packet_fixture.WalletPacketG0Tests(
+            "test_asset_weights_never_rebrand_partial_total_as_entire_wallet")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        moment=T
+        iso=moment.isoformat()
+        fixture.portfolio["posizioni"][0]["token"]="BTC"
+        fixture.portfolio["posizioni"][1]["token"]="JUP"
+        fixture.portfolio["data_ora_saldo_privato_utc"]=iso
+        fixture.portfolio["fonte_quantita"]="Kraken BalanceEx API privata SOLA LETTURA, "+iso
+        fixture.report["rilevazione_utc"]=iso
+        fixture.report["posizioni"][0]["token"]="BTC"
+        fixture.report["posizioni"][1]["token"]="JUP"
+        fixture.snapshot["rilevazione_utc"]=iso
+        fixture.snapshot["markets"]={
+            "BTC":{"token":"BTC","pair":"BTC/EUR","pair_key":"BTCEUR","prezzo_eur":1},
+            "JUP":{"token":"JUP","pair":"JUP/EUR","pair_key":"JUPEUR","prezzo_eur":2000}}
+        fixture.snapshot["schede_v02"]=[
+            {"token":"JUP","coppia_analisi":"JUP/EUR",
+             "esito":"RIESAME","categoria":"solo test"}]
+        economic={"schema":"economia_test_pubblica",
+                  "posizioni":[self.row("BTC"),self.row("JUP"),
+                              {"token":"SXT","identita":{"stato":"NON_VERIFICATO"}}],
+                  "candidati":[dict(self.row("JUP"),coppia_analisi="JUP/EUR")]}
+        source=dict(fixture.snapshot,orari_fonti={"composizione_kdd_utc":iso})
+        quality={"stato_saldo":{"portafoglio_aggiornato_da_api_private":False},
+                 "saldo_recente_verificato":False,"portafoglio_noto":True,
+                 "fotografia_portafoglio_sha256":"a"*64,
+                 "portafoglio_letto_utc":iso}
+        saved={}
+        original=evidence.collect
+        def public_collection(t,holdings,candidates):
+            return original(t,holdings,candidates,fetch=self.public)
+        with mock.patch.object(producer.desk,"NOW",return_value=T), \
+             mock.patch.object(producer.desk,"load",
+                 side_effect=lambda name,default=None: fixture.portfolio
+                     if name=="portafoglio.json" else {}), \
+             mock.patch.object(producer.desk,"save",
+                 side_effect=lambda name,value: saved.__setitem__(name,value)), \
+             mock.patch.object(producer.desk,"qualita_portafoglio",return_value=quality), \
+             mock.patch.object(producer,"recupera_4h",return_value={}), \
+             mock.patch.object(producer,"global_context",return_value={"errore":"offline"}), \
+             mock.patch.object(producer,"derivatives_context",
+                               return_value={"strumento":"PF_XBTUSD"}), \
+             mock.patch.object(patrimonio_4tf,"collect",return_value={"posizioni":[]}), \
+             mock.patch.object(producer,"finanziamento_150_book",return_value={}), \
+             mock.patch.object(producer,"economic_evidence",return_value=copy.deepcopy(economic)), \
+             mock.patch.object(evidence,"collect",side_effect=public_collection):
+            actual_dossier=producer.collect(source=source,asset_pairs={})
+        mint="JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"
+        observed=actual_dossier["evidenze_rete_defi"]
+        self.assertEqual(observed["fonti_rete"]["bitcoin"]["stato"],"OSSERVATO")
+        self.assertEqual(observed["fonti_contratti"][mint]["stato"],"OSSERVATO")
+        self.assertEqual(saved["dossier_multifonte.json"]["evidenze_rete_defi"],
+                         observed)
+        # Use the existing fully consistent wallet/report fixtures while
+        # transporting the actual producer's public-only dossier segment.
+        fixture.dossier["kraken_istantanea_utc"]=iso
+        fixture.dossier["evidenze_rete_defi"]=observed
+        fixture.dossier["evidenze_economiche"]=economic
+        fixture.dump()
+        with mock.patch.object(kdd_economics,"at_read",return_value=economic):
+            pkt=packet.build(fixture.root,now=T)
+            data=pkt["evidenze_multifonte"]["rete_defi"]
+            self.assertEqual(data["posizioni"][0]["onchain"]["valori"]["altezza"],
+                             930120)
+            self.assertEqual(data["posizioni"][1]["onchain"]["valori"]["mint"],mint)
+            handoff={"schema":bridge.SCHEMA_BUNDLE,"packet":pkt,
+                     "packet_sha256":bridge.digest(pkt),"preparato_utc":iso}
+            context=bridge.read_context(handoff,now=T)
+            self.assertEqual(context["rete_defi_alla_lettura"]["posizioni"][1]
+                             ["onchain"]["tipologia"],"TOKEN_CON_MINT")
+            stale=bridge.read_context(handoff,now=T+dt.timedelta(minutes=50))
+            self.assertIsNone(stale["rete_defi_alla_lettura"]["posizioni"][0]
+                              ["onchain"]["valori"])
+            modified=copy.deepcopy(handoff)
+            modified["packet"]["evidenze_multifonte"]["rete_defi"]["sorgente"] \
+                ["fonti_contratti"][mint]["fonte"]="https://forged.invalid"
+            modified["packet_sha256"]=bridge.digest(modified["packet"])
+            with self.assertRaises(bridge.BridgeError):
+                bridge.read_context(modified,now=T)
+
+
+    def test_native_without_adapter_and_dynamic_proof_expiry_keep_every_asset(self):
+        import kdd_economics as economics
+        zec={
+            "token":"ZEC",
+            "identita":{
+                "stato":"IDENTITA_VERIFICATA_DA_CATALOGO",
+                "token":"ZEC","token_progetto":"ZEC",
+                "metodo":"KRAKEN_COINGECKO_MARKET",
+                "coingecko_id":"zcash","progetto":"Zcash",
+                "coppia":"ZEC/EUR","pair_key":"ZECEUR",
+                "asset_base_kraken":"ZEC",
+                "prova_mercato":{
+                    "exchange":"kraken","is_stale":False,"is_anomaly":False,
+                    "symbol":"ZEC","base":"ZEC","target":"EUR",
+                    "ricerca_url":economics.CG_SEARCH+"ZEC",
+                    "ticker_url":economics.CG+"zcash/tickers?exchange_ids=kraken",
+                    "verificato_utc":T.isoformat()}}}
+        rows=[self.row("ADA"),self.row("KAS"),zec]
+        raw=evidence.collect(T,rows,[],fetch=self.public)
+        self.assertEqual(raw["roster_posizioni"][2]["binding"]["stato"],
+                         "PROGETTO_DINAMICO_IDENTIFICATO")
+        viewed=evidence.at_read(raw,[{"token":x["token"]} for x in rows],[],T,
+                                economia={"posizioni":rows,"candidati":[]})
+        self.assertEqual(viewed["posizioni"][0]["onchain"]["stato"],
+                         "FONTE_PUBBLICA_NON_INTEGRATA")
+        self.assertEqual(viewed["posizioni"][0]["onchain"]["rete"],"cardano")
+        self.assertEqual(viewed["posizioni"][1]["onchain"]["rete"],"kaspa")
+        self.assertEqual(viewed["posizioni"][2]["onchain"]["stato"],
+                         "CHAIN_NON_ATTESTATA")
+        stale_rows=copy.deepcopy(rows)
+        stale_rows[2]["identita"]["stato"]="NON_VERIFICATO"
+        stale_rows[2]["identita"]["motivo"]="ATTESTAZIONE_IDENTITA_SCADUTA"
+        expired=evidence.at_read(raw,[{"token":x["token"]} for x in rows],[],
+                                 T+dt.timedelta(days=8),
+                                 economia={"posizioni":stale_rows,"candidati":[]})
+        self.assertEqual(len(expired["posizioni"]),3)
+        self.assertEqual(expired["posizioni"][2]["onchain"]["stato"],
+                         "CHAIN_NON_ATTESTATA")
+        poisoned=copy.deepcopy(stale_rows)
+        poisoned[2]["identita"]["coingecko_id"]="another-project"
+        with self.assertRaises(ValueError):
+            evidence.at_read(raw,[{"token":x["token"]} for x in rows],[],
+                             T+dt.timedelta(days=8),
+                             economia={"posizioni":poisoned,"candidati":[]})
+
 if __name__=="__main__":
     unittest.main()
