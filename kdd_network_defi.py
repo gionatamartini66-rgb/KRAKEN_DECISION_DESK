@@ -656,7 +656,14 @@ def _enrich_row(row,network_rows,mint_rows):
                          condizione_riesame="Confrontare campioni datati e provider indipendenti."),
                         identita_onchain=binding)
         # SUI/SOL legacy observation retained; no replacement of #53.
-        return dict(row,identita_onchain=binding)
+        if network in ("sui","solana"):
+            return dict(row,identita_onchain=binding)
+        return dict(row,identita_onchain=binding,
+                    onchain={"stato":"FONTE_PUBBLICA_NON_INTEGRATA",
+                             "rete":network,"valori":None,"fonte":None,
+                             "documentazione":binding["documentazione"],
+                             "limite":"Rete nativa identificata, nessuna misura verificata",
+                             "condizione_riesame":"Integrare un endpoint pubblico documentato e validarne la risposta"})
     if kind=="TOKEN_CONTRATTO" and status=="ASSOCIAZIONE_CURATA_CON_LIMITI":
         item=mint_rows.get(binding["contratto"])
         return dict(row,identita_onchain=binding,
