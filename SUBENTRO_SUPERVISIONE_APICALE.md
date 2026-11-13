@@ -3,6 +3,118 @@
 
 **RETTIFICA ESPRESSA DELL'AUTORE 13/11/2026, VINCOLANTE PER OGNI SUBENTRO:** il mandato è realizzare e collaudare tutti i 29 requisiti canonici, senza sostituire la costruzione con simulazioni patrimoniali anticipate. È revocato qualsiasi importo obiettivo di liquidità operativa; KDD-05 conserva la funzione generale di analisi dei capitali disponibili, costi e alternative. PR #56 annullata e chiusa senza merge: nessun operatore deve riprenderla. La presente rettifica prevale sulle fotografie storiche di questo documento; gli ordini finanziari richiedono sempre una decisione distinta dell'autore.
 
+# KDD — HANDOFF VINCOLANTE DELLA SUPERVISIONE APICALE — 13 NOVEMBRE 2026
+
+**Incarico:** KDD-SUP-SUBENTRO-INTEGRALE-20261113  
+**Autorità:** autore e titolare del Kraken Decision Desk  
+**Destinatario:** nuova Supervisione apicale, distinta dalla Costruttrice e dal Red Team  
+**Regime di ingresso:** G0 — acquisizione, lettura, riconciliazione, valutazione e direzione tecnica. Nessun GO automatico a sviluppo, merge, deploy, operazioni, spese o accesso ai segreti.  
+**Oggetto inderogabile:** completare, installare, verificare sul dispositivo ove pertinente e far accettare **tutti e 29** i requisiti del KDD, senza modificarne il significato.
+
+**PRECEDENZA.** La presente attualizzazione, derivante da mandato espresso dell'autore del 13/11/2026, prevale sulle indicazioni precedenti incompatibili. Il testo storico sottostante è conservato per genealogia e contenuto non superato. La fonte vigente dei requisiti e delle dipendenze resta la ROADMAP canonica; i confini sono nel GOVERNO e nel README, inclusa la rettifica più recente dell'autore.
+
+## I. Divieto di reinterpretazione
+
+I ventinove requisiti derivano da un progetto ingegneristico e **non** da suggerimenti della Supervisione. Il KDD richiesto è un solo sistema locale Samsung/Termux che osserva patrimonio e mercati, ricerca rischi/opportunità Spot e, nella componente prevista, Futures; integra analisi tecnica, fondamentali, tokenomics, on-chain, DeFi, flussi derivati, macro, geopolitica e notizie; rende possibile il giudizio proattivo GPT, la discussione con l'autore, la registrazione delle decisioni e il riesame degli esiti.
+
+La Supervisione non è autorizzata a riprogettare il prodotto, sostituirne le priorità con proprie ipotesi o ridurlo a una dashboard, a una simulazione finanziaria, a uno scanner o a un calcolatore patrimoniale. Non utilizzare prove patrimoniali anticipate per stabilire **quali** dei 29 requisiti siano necessari: sono tutti da completare. Sono invece necessarie le prove tecniche e funzionali di **ciascun** requisito, senza le quali non si può chiuderlo.
+
+Non basta scrivere «test PASS» o «codice su main»: servono integrazione, installazione quando richiesta, funzionamento effettivo, verifica dei consumer e accettazione esplicita secondo la ROADMAP.
+
+**Rettifica 13/11/2026:** qualsiasi importo di liquidità operativa prestabilito è revocato, incluso il vecchio obiettivo di 150 USDC. KDD-05 mantiene il senso generale di analisi delle disponibilità, costi, cambi, impiego del capitale e alternative, **senza soglia-obiettivo**. Le funzioni storiche nate per importi fissi non costituiscono nuovo mandato. La **PR #56 è ANNULLATA e CLOSED, NON MERGED**: vietato riaprirla, usarla come base, integrarla o riproporne lo scopo come prossimo cantiere. La sua presenza nello storico non autorizza alcuna ripresa.
+
+Nessuna operazione finanziaria reale prima del gate **29/29** e di una successiva autorizzazione finanziaria distinta dell'autore. Kraken resta con API di sola lettura; nessun ordine automatico. I GO di sviluppo, merge, installazione, accesso a dati privati, pubblicazione di una proposta e operazioni finanziarie sono indipendenti.
+
+## II. Gerarchia e acquisizione obbligatoria
+
+1. Decisioni espresse dell'autore, rettifiche e divieti successivi.
+2. **README.md**, compreso il mandato congelato e tutte le rettifiche e appendici storiche.
+3. **GOVERNO_KDD.md**, letto integralmente fino a EOF.
+4. **ROADMAP_KDD.md**, unica checklist corrente KDD-01…KDD-29 e dipendenze, letta fino a EOF.
+5. **SUBENTRO_SUPERVISIONE_APICALE.md**, dal primo byte alla sentinella di EOF storica, comprese questa e tutte le attualizzazioni.
+6. **AGGIORNAMENTI_TERMUX.md**, **IMPORTAZIONE_SICURA.md**, **NAVIGATORE_ONCHAIN_V001.md**, **GIUDIZIO_DELTA_SPOT_G0_G2.md** e altri originali progettuali pertinenti individuati ricorsivamente.
+7. Repository, codice, test, PR e revisioni originali, non le loro sintesi.
+8. Progettazione e archivi pertinenti su Drive privato, quindi prova distinta dello stato Samsung.
+
+**Lettura EOF significa lettura effettiva dell'originale intero.** Ogni risultato troncato richiede ripresa con finestre contigue, senza saltare righe, fino a EOF. Titolo, snippet, indice, riassunto di altra chat, memoria, ricerca o dichiarazione altrui NON sono prova di acquisizione. Verificare la sentinella terminale di questo file: \`KDD-SUP-SUBENTRO-INTEGRALE-EOF-20261028-FINE\`.
+
+Per ciascuna fonte necessaria registrare nel checkpoint di ricognizione: URL/percorso, commit/ramo/blob SHA o ID/revisione Drive, byte/righe se noti, intervalli letti, EOF verificato, ruolo nel progetto, lacune e controversie riconciliate. Le qualifiche **INDICATO**, **LOCALIZZATO**, **LETTO_EOF**, **INTERCONNESSO**, **PROVATO IN CODICE**, **PROVATO SUL SAMSUNG**, **ACCETTATO** non sono intercambiabili.
+
+**Persistenza ricorsiva:** prima di ogni nuova decisione di costruzione la Supervisione ricontrolla HEAD, versioni correnti dei quattro master, stato delle dipendenze e modifiche pertinenti. Per file invariati basta un'acquisizione EOF **propria e verificabile** già registrata nella stessa catena di lavoro; per file mutati, rileggere le parti mutate con il contesto necessario e riconciliare l'intero documento. In una nuova chat, se la precedente acquisizione non è dimostrabile con manifest e riferimenti, la lettura va rifatta. Non moltiplicare letture inutili di byte immutati, ma non lavorare mai su documenti non acquisiti o versioni scadute.
+
+## III. Ricognizione ricorsiva completa di GitHub
+
+Repository canonico: https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK
+
+**Baseline documentale alla consegna, da riverificare:** \`main@51937f9114cc30c510928d9ceefb49e7cd812699\`. L'esistenza di questo SHA non significa che il Samsung stia eseguendo quel codice.
+
+- Inventariare ricorsivamente **tutto l'albero di main fino a EOF**, comprese sottocartelle, test, vendor, configurazioni e script di distribuzione; indicare eventuali limiti del servizio.
+- Leggere integralmente fino a EOF i sorgenti e i test necessari a capire gli assi patrimoniale, Spot, on-chain/DeFi, derivati/Futures, macro/notizie, scheduler/alert, dashboard e ciclo GPT.
+- Per ogni KDD-01…29 ricostruire **requisito → dati originari → acquisizione → identificazione/provenienza → trasformazioni → persistenza → consumer KDD → consumer GPT → UI → regressioni → prove live → lacuna per accettazione**. Se un collegamento non è verificato, indicarlo.
+- Seguire ricorsivamente riferimenti e dipendenze reali dei sorgenti, senza usare un elenco di \`def\` come surrogato della lettura.
+- Esaminare le PR storiche o aperte **solo** nella misura necessaria a ricostruire lo stato di main, difetti riparati, scelte progettuali e controprove indipendenti. Non assumere che un ramo storico prevalga sul prodotto canonico.
+- Distinguere proposta, PR aperta, merge, main, clone locale, file realmente installato, processo in esecuzione, HTTP, comportamento effettivo, accettazione dell'autore.
+- Individuare codici obsoleti, residui di importi revocati, duplicazioni, percorsi senza consumer e incompletezze sostanziali; non aprire un cantiere preventivo di bonifica non giustificato da una capacità mancante.
+
+## IV. Ricognizione ricorsiva completa della documentazione Drive
+
+**Canale privato KDD:** https://drive.google.com/drive/folders/1q0zcu0srqp9gRHwIHo6trCXLI0KCaH20  
+**Dossier Samsung:** https://drive.google.com/drive/folders/1Fjh1gXhV6s2o8kKafVDZPBjjaTSYbNIr  
+**Laboratorio SAF storico:** https://drive.google.com/drive/folders/1u7_AN8u1yKDEAZa6EYgaBOx0EGP2neOG  
+**Documento ponte storico:** https://docs.google.com/document/d/1rmEhQ27PXk0nr2gJj4XBBesMwiWnCjAWVs_ZhLEjs70/edit
+
+- Partire dalle cartelle verificate, **ma non limitarsi a esse o alle ricerche per il solo nome KDD**. Cercare mandati, specifiche, versioni, allegati, ZIP, relazioni, prove, fascicoli di progettazione, titoli alternativi e collegamenti indicati dagli originali.
+- Visitare ricorsivamente i sottofolder, seguire la paginazione e distinguere liste complete da liste parziali; non affermare che Drive sia stato inventariato completamente se l'indice è incompleto.
+- **Leggere integralmente fino a EOF i documenti progettuali pertinenti**, registrando ID, titolo, dimensione, versione/revisione quando disponibile, copertura e stato dell'originale.
+- Confrontare ogni documento progettuale con README/GOVERNO/ROADMAP e con il codice. Riportare conflitti, decisione cronologicamente prevalente e fonti; non cancellare arbitrariamente il materiale storico.
+- Distingere **specifiche**, **rapporti storici**, **fixture**, **packet operativi**, **proposte** e **dati privati**: il loro apparire sul Drive non dimostra funzione eseguita, freschezza né consenso.
+- Dossier reale di riferimento documentale, da rivalutare come storico: \`kdd_handoff_93fb754432c49908326980abcc1b40c688b2ec9974405dca7e9f94fd2c7f90dc.json\`, https://drive.google.com/file/d/1C0cV8drhzZmIB2c1ElsiyC4T8nHzByx0/view (ricezione 12/11/2026). Non interpretarlo come fotografia attuale per una proposta eseguibile.
+- Mai esportare credenziali, segreti, backup indiscriminati o dati finanziari privati su repository. Non mutare la configurazione FolderSync senza GO.
+
+Ogni riferimento a un file non trovato va mantenuto come **NON ACQUISITO**, con la via di recupero e il limite tecnico preciso, senza inventare il contenuto.
+
+## V. Stato iniziale, non certificazione universale
+
+ROADMAP attuale alla consegna: **5/29 formalmente COMPLETO** — KDD-01, KDD-06, KDD-08, KDD-10, KDD-13 — e **24/29 da completare**. Le definizioni, gli stati intermedi e le lacune specifiche sono esclusivamente nelle 29 righe canoniche della Roadmap. Non riaprire requisiti già accettati senza prova materiale contraria; non chiuderne altri senza evidenza e GO pertinenti.
+
+La ricezione automatica dell'handoff Android→Drive è un fatto documentato, non il collaudo dell'intero circuito. Il ritorno di nuove proposte GPT, la registrazione e il riesame, l'attività ricorrente KDD-27, la componente Futures KDD-28 e la qualità economica KDD-29 devono essere accertati secondo i rispettivi requisiti. **KDD-30** resta una futura evoluzione documentata, senza trasformarsi in un trentesimo veto al gate 29/29.
+
+## VI. Responsabilità e direzione effettiva
+
+**Supervisione:** legge e comprende il sistema intero; sceglie il prossimo lavoro *in base alle dipendenze già deliberate*; formula mandato alla Costruttrice; verifica integrazioni e prove; richiede controprove avversarie quando c'è rischio concreto; sottopone GO necessari all'autore; aggiorna lo stato canonico. Non assume stabilmente il ruolo della Costruttrice né cambia il prodotto in funzione della propria facilità di programmazione.
+
+**Costruttrice:** sviluppa su ramo G2 circoscritto, riusa infrastrutture presenti, produce codice, test e prove verificabili. Non integra o installa senza GO separato.
+
+**Red Team:** tenta di falsificare difetti tecnici pertinenti in G0, indipendentemente dalla Costruttrice, senza alterare main.
+
+**Autore:** decide destinazione, modifiche del mandato, accettazione, merge/installazione quando richiesti e — esclusivamente dopo il gate completo — eventuali scelte finanziarie reali.
+
+Non usare Desktop Commander come infrastruttura ordinaria o consumer necessario di KDD; nessun lavoro oneroso API o cambio credenziali implicito.
+
+Non aprire nuovi documenti di governo, checklist alternative, micro-PR scollegate o studi ripetitivi. Una lettura completata è condizione **per avviare costruzione**, non un pretesto per rinviarla. Ogni incarico deve dichiarare il **requisito**, il comportamento funzionale mancante, l'ambito codice, il criterio di prova e la dipendenza sulla Roadmap. Il successo è una funzione reale aggiunta e dimostrata, non un numero di commit.
+
+## VII. Prima consegna indispensabile per il subentro
+
+Prima di autorizzare o dirigere un'altra tranche G2, produrre nella chat:
+
+**A. Inventario fonti EOF:** master GitHub, documenti di progettazione Drive, riferimenti, SHA/ID, estensione e intervalli acquisiti, file non raggiunti e limiti reali.
+
+**B. Inventario ricorsivo Git:** tree e file pertinenti, dipendenze effettive dei consumer, test e versioni.
+
+**C. Architettura unica verificata:** flusso dal saldo e dal mercato all'osservazione KDD, alla ricerca e proposta GPT, alla discussione dell'autore, al ritorno controllato su Samsung, archivio, alert e riesame.
+
+**D. Stato 29/29:** per ciascun requisito distinguere specifica, codice, collegamenti, installazione, test, osservazioni Samsung e formale accettazione; non creare una seconda roadmap.
+
+**E. Difetti reali e piano di completamento:** ciò che manca funzionalmente, in ordine di dipendenze già approvato, e **UN incarico sostanziale alla Costruttrice** che avanzi verso 29/29. Escludere la PR #56 e la soglia monetaria revocata.
+
+Non presentare come attestato quanto non è stato direttamente verificato. Non chiedere all'autore di riscrivere o rispiegare decisioni presenti negli originali. Se un documento originale non è accessibile, dichiarare precisamente lo STOP locale e completare tutte le altre letture possibili.
+
+**Soglia di accettazione del subentro:** letture EOF documentate, ricognizione ricorsiva verificabile di GitHub e Drive, interconnessione dei moduli e restituzione di un concreto incarico costruttivo fedele ai requisiti. Un rapporto eloquente, senza acquisizione e direzione concreta, non soddisfa il mandato.
+
+**SENTINELLA DELLA PRESENTE ATTUALIZZAZIONE: KDD-SUP-SUBENTRO-INTEGRALE-20261113-EOF**
+
+---
+
 ## ATTUALIZZAZIONE OPERATIVA VINCOLANTE — 10 NOVEMBRE 2026
 
 **Incarico:** KDD-SUP-SUBENTRO-20261110-G0-EOF. **Autorità:** autore/titolare. **Destinataria:** nuova chat di Supervisione apicale, distinta da Costruttrice e Red Team. **Regime di ingresso: G0**, senza nuovo GO a codificare, integrare, distribuire, modificare dati privati o movimentare fondi. Questa sezione prevale **per lo stato corrente e il primo compito** sulle fotografie del 28 ottobre, 3, 6 e 7 novembre qui conservate; non abroga il mandato originale o il Governo.
