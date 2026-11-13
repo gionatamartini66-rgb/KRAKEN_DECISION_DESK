@@ -691,14 +691,11 @@ def collect(source=None, *, asset_pairs=None):
     import kdd_network_defi
     network_defi = None
     if isinstance(source.get("orari_fonti"), dict) and source["orari_fonti"].get("composizione_kdd_utc"):
-        holdings_for_sources = [
-            {"token": row.get("token")}
-            for row in economic.get("posizioni", []) if isinstance(row, dict)]
-        candidates_for_sources = [
-            {"token": row.get("token"), "coppia_analisi": row.get("coppia_analisi")}
-            for row in candidates if isinstance(row, dict)]
+        # The economic producer already verified the Kraken trading pair and
+        # CoinGecko project independently. Transfer ONLY public identity proof;
+        # never send wallet balances, quantities or addresses to chain APIs.
         network_defi = kdd_network_defi.collect(
-            now, holdings_for_sources, candidates_for_sources)
+            now, economic.get("posizioni", []), economic.get("candidati", []))
     dossier={
         "schema":3,"creato_utc":desk.NOW().isoformat(timespec="seconds"),
         "kraken_istantanea_utc":source["rilevazione_utc"],"eta_kraken_minuti_al_dossier":round(age,2),

@@ -1,28 +1,60 @@
 {
   "schema": "kdd-project-catalog-v001",
-  "provenienza": "Corrispondenze curate già verificate in PR #45 (2026-11-08); non attestano chain/contract",
+  "provenienza": "Corrispondenze curate già verificate in PR #45 (2026-11-08); non attestano chain/contract; associazioni on-chain curate separatamente con fonte primaria; non attestano indirizzo Kraken o chain di custodia",
   "projects": {
     "BNB": {
       "id": "binancecoin",
-      "name": "BNB"
+      "name": "BNB",
+      "onchain": {
+        "tipo": "NATIVO",
+        "rete": "bsc",
+        "fonte_identita": "https://docs.bnbchain.org/bnb-smart-chain/overview/",
+        "limite": "BNB nativo BSC; la rete di prelievo Kraken non e attestata"
+      }
     },
     "FET": {
       "id": "fetch-ai",
       "name": "Artificial Superintelligence Alliance",
-      "caveat": "FET/ASI: controllare le migrazioni Kraken e chain/contract; non presumere conversioni."
+      "caveat": "FET/ASI: controllare le migrazioni Kraken e chain/contract; non presumere conversioni.",
+      "onchain": {
+        "tipo": "MULTICHAIN_NON_DISAMBIGUATO",
+        "rete": null,
+        "fonte_identita": null,
+        "limite": "FET/ASI e migrazioni: nessun contratto riconciliato con deposito Kraken"
+      }
     },
     "JUP": {
       "id": "jupiter-exchange-solana",
-      "name": "Jupiter"
+      "name": "Jupiter",
+      "onchain": {
+        "tipo": "TOKEN_CONTRATTO",
+        "rete": "solana",
+        "contratto": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+        "tipo_contratto": "SPL_MINT",
+        "fonte_identita": "https://discuss.jup.ag/t/jup-minting-and-accountability/464/",
+        "limite": "Mint da documentazione ufficiale Jupiter; supply SPL non attesta circolante ne liquidita"
+      }
     },
     "RENDER": {
       "id": "render-token",
       "name": "Render",
-      "caveat": "RNDR/RENDER: migrazione storica; non attribuire il vecchio RNDR al nuovo RENDER."
+      "caveat": "RNDR/RENDER: migrazione storica; non attribuire il vecchio RNDR al nuovo RENDER.",
+      "onchain": {
+        "tipo": "MULTICHAIN_NON_DISAMBIGUATO",
+        "rete": null,
+        "fonte_identita": null,
+        "limite": "RNDR Ethereum legacy e RENDER Solana: non inferire il mint dal ticker"
+      }
     },
     "PEPE": {
       "id": "pepe",
-      "name": "Pepe"
+      "name": "Pepe",
+      "onchain": {
+        "tipo": "TOKEN_CONTRATTO_NON_ATTESTATO",
+        "rete": null,
+        "fonte_identita": null,
+        "limite": "Ticker/ID economico non dimostrano contratto Ethereum"
+      }
     },
     "PUMP": {
       "id": "pump-fun",
@@ -31,37 +63,85 @@
     "BTC": {
       "id": "bitcoin",
       "name": "Bitcoin",
-      "repository": "bitcoin/bitcoin"
+      "repository": "bitcoin/bitcoin",
+      "onchain": {
+        "tipo": "NATIVO",
+        "rete": "bitcoin",
+        "fonte_identita": "https://bitcoin.org/en/faq",
+        "limite": "BTC nativo; nessun indirizzo di custodia attestato"
+      }
     },
     "SOL": {
       "id": "solana",
       "name": "Solana",
-      "repository": "anza-xyz/agave"
+      "repository": "anza-xyz/agave",
+      "onchain": {
+        "tipo": "NATIVO",
+        "rete": "solana",
+        "fonte_identita": "https://solana.com/docs",
+        "limite": "SOL nativo; non attribuire staking o indirizzi"
+      }
     },
     "ADA": {
       "id": "cardano",
       "name": "Cardano",
-      "repository": "IntersectMBO/cardano-node"
+      "repository": "IntersectMBO/cardano-node",
+      "onchain": {
+        "tipo": "NATIVO",
+        "rete": "cardano",
+        "fonte_identita": "https://developers.cardano.org/",
+        "limite": "ADA nativo Cardano; adattatore pubblico Koios non e un nodo di consenso dell'utente"
+      }
     },
     "ETH": {
       "id": "ethereum",
-      "name": "Ethereum"
+      "name": "Ethereum",
+      "onchain": {
+        "tipo": "NATIVO",
+        "rete": "ethereum",
+        "fonte_identita": "https://ethereum.org/en/developers/docs/intro-to-ethereum/",
+        "limite": "ETH nativo di Ethereum; custodia e rappresentazioni wrapped non attestate"
+      }
     },
     "NEAR": {
       "id": "near",
-      "name": "NEAR Protocol"
+      "name": "NEAR Protocol",
+      "onchain": {
+        "tipo": "NATIVO",
+        "rete": "near",
+        "fonte_identita": "https://docs.near.org/",
+        "limite": "NEAR nativo; wrapped non attribuiti"
+      }
     },
     "SUI": {
       "id": "sui",
-      "name": "Sui"
+      "name": "Sui",
+      "onchain": {
+        "tipo": "NATIVO",
+        "rete": "sui",
+        "fonte_identita": "https://docs.sui.io/",
+        "limite": "SUI nativo; la posizione Kraken non e un indirizzo pubblico"
+      }
     },
     "XRP": {
       "id": "ripple",
-      "name": "XRP"
+      "name": "XRP",
+      "onchain": {
+        "tipo": "NATIVO",
+        "rete": "xrpl",
+        "fonte_identita": "https://xrpl.org/docs",
+        "limite": "XRP nativo ledger; nessun wallet di custodia pubblico"
+      }
     },
     "ONDO": {
       "id": "ondo-finance",
-      "name": "Ondo"
+      "name": "Ondo",
+      "onchain": {
+        "tipo": "MULTICHAIN_NON_DISAMBIGUATO",
+        "rete": null,
+        "fonte_identita": null,
+        "limite": "Rappresentazioni multichain: nessun contratto verificato per il mercato Kraken"
+      }
     },
     "KAS": {
       "id": "kaspa",
