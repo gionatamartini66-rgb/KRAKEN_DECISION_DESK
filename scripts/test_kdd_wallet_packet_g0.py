@@ -374,6 +374,55 @@ class WalletPacketG0Tests(unittest.TestCase):
         self.assertEqual(result["esempio_150_finanziamento_stato"],
                          "NON_DETERMINABILE_SENZA_CAMBIO_SPREAD_E_COSTI")
 
+    def test_full_wallet_scenarios_compare_all_assets_on_same_denominator(self):
+        rows = [
+            {"indice": 0, "token": "BTC", "stato_identita": "VALIDA",
+             "quantita_spot": "6", "disponibile_spot": "6",
+             "prezzo_eur": "100", "valore_eur": "600",
+             "fonte_prezzo_eur": {"token": "BTC", "valuta": "EUR", "pair": "XBT/EUR"}},
+            {"indice": 1, "token": "ETH", "stato_identita": "VALIDA",
+             "quantita_spot": "3", "disponibile_spot": "3",
+             "prezzo_eur": "100", "valore_eur": "300",
+             "fonte_prezzo_eur": {"token": "ETH", "valuta": "EUR", "pair": "ETH/EUR"}},
+            {"indice": 2, "token": "SOL", "stato_identita": "VALIDA",
+             "quantita_spot": "1", "disponibile_spot": "1",
+             "prezzo_eur": "100", "valore_eur": "100",
+             "fonte_prezzo_eur": {"token": "SOL", "valuta": "EUR", "pair": "SOL/EUR"}},
+        ]
+        z = p.quadro_economico_per_gpt(rows, {}, "1000")
+        scenarios = z["scenari_patrimonio_150_lordi"]
+        self.assertEqual(scenarios["stato"], "INDICATIVO")
+        self.assertEqual(scenarios["alternativa_senza_operazione"]
+                         ["concentrazione_top2_post_pct"], "90.00")
+        btc, eth, sol = scenarios["alternative"]
+        self.assertEqual([x["token"] for x in scenarios["alternative"]],
+                         ["BTC", "ETH", "SOL"])
+        self.assertEqual(btc["concentrazione_top2_post_su_patrimonio_originario_pct"],
+                         "75.00")
+        self.assertEqual(eth["concentrazione_top2_post_su_patrimonio_originario_pct"],
+                         "75.00")
+        self.assertEqual(sol["concentrazione_top2_post_su_patrimonio_originario_pct"],
+                         "90.00")
+        self.assertEqual(sol["riduzione_teorica_lorda_eur"], "100")
+        self.assertEqual(sol["peso_liquidita_teorica_su_patrimonio_originario_pct"],
+                         "10.00")
+        self.assertEqual(btc["quota_investita_residua_su_patrimonio_originario_pct"],
+                         "85.00")
+        self.assertTrue(all(x["usdc_effettivi"] is None
+                            for x in scenarios["alternative"]))
+
+    def test_partial_or_duplicate_wallet_never_emits_full_scenarios(self):
+        pck = self.pack()
+        scenarios = pck["patrimonio"]["quadro_economico_per_gpt"]["scenari_patrimonio_150_lordi"]
+        self.assertEqual(scenarios["stato"], "NON_CALCOLABILE_INTEGRALMENTE")
+        self.assertEqual(scenarios["alternative"], [])
+        self.assertIsNone(scenarios["alternativa_senza_operazione"]
+                          ["concentrazione_top2_post_pct"])
+        rows = [{"token": "BTC", "valore_eur": "100"},
+                {"token": "BTC", "valore_eur": "100"}]
+        result = p.quadro_economico_per_gpt(rows, {}, "200")
+        self.assertEqual(result["scenari_patrimonio_150_lordi"]["alternative"], [])
+
     def test_economic_context_fails_closed_on_forged_total_duplicate_invalid_values(self):
         p1 = [{"token": "BTC", "valore_eur": "100"},
               {"token": "ETH", "valore_eur": "200"}]
