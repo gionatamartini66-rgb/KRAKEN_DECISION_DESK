@@ -359,6 +359,16 @@ def _qualified(identity, token):
                 and identity.get("fonte_identita"))
 
 
+def _supply_integer(value):
+    if isinstance(value, bool) or not (type(value) is int or
+            isinstance(value, str) and re.fullmatch(r"[0-9]{1,46}", value)):
+        raise ValueError("contract supply integer required")
+    n = int(value)
+    if not 0 <= n <= 10**45:
+        raise ValueError("contract supply outside bound")
+    return n
+
+
 def _contract_address(chain, address):
     return (isinstance(address, str) and
             bool((EVM_ADDRESS if chain in ("ethereum", "bsc")
@@ -547,7 +557,7 @@ def _probe_contract(chain, address, fetch, now):
             if not isinstance(value, dict) or type(value.get("decimals")) is not int or not 0 <= value["decimals"] <= 18:
                 raise ValueError("SPL supply schema")
             values = {"slot_finalized": _integer(result.get("context", {}).get("slot")),
-                      "supply_unita_minima": str(_integer(value.get("amount"))),
+                      "supply_unita_minima": str(_supply_integer(value.get("amount"))),
                       "decimali": value["decimals"], "unita": "mint SPL base units"}
         else:
             response = fetch(url, {"jsonrpc": "2.0", "id": 1,
@@ -561,7 +571,7 @@ def _probe_contract(chain, address, fetch, now):
             quantity = response.get("result") if isinstance(response, dict) and response.get("id") == 1 and not response.get("error") else None
             if not isinstance(quantity, str) or not re.fullmatch(r"0x[0-9a-fA-F]{1,64}", quantity):
                 raise ValueError("ERC20 totalSupply unavailable")
-            values = {"supply_unita_minima": str(_integer(int(quantity, 16))),
+            values = {"supply_unita_minima": str(_supply_integer(int(quantity, 16))),
                       "unita": "ERC20 contract base units; decimals not established"}
         return dict(blank, stato="OSSERVATO", valori=values)
     except (ValueError, KeyError, TypeError, OSError, OverflowError, UnicodeError) as exc:
@@ -666,7 +676,7 @@ def _read_assets(raw, owned, candidates, economic, now):
         if item["stato"] == "OSSERVATO":
             if not isinstance(v, dict):
                 raise ValueError("contract supply missing")
-            _integer(v.get("supply_unita_minima"))
+            _supply_integer(v.get("supply_unita_minima"))
             if key[0] == "solana":
                 _integer(v.get("slot_finalized"))
                 if type(v.get("decimali")) is not int or not 0 <= v["decimali"] <= 18:
