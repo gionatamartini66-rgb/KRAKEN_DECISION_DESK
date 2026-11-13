@@ -241,6 +241,8 @@ class NetworkDefiTests(unittest.TestCase):
         self.assertEqual(network["asset_reti"]["candidati"][1]["tipo"],"TOKEN_CON_CONTRATTO")
         self.assertEqual(network["asset_reti"]["candidati"][1]["osservazioni_contratti"][0]
                          ["osservazione"]["stato"],"OSSERVATO_CON_LIMITI")
+        self.assertEqual(network["asset_reti"]["candidati"][1]["ufficialita_contratto"],
+                         "NON_ATTESTATA")
         self.assertEqual(network["asset_reti"]["posizioni"][2]["tipo"],"NON_VERIFICATO")
         bundle={"schema":bridge.SCHEMA_BUNDLE,"packet":p,
                 "packet_sha256":bridge.digest(p),"preparato_utc":iso}
@@ -351,6 +353,10 @@ class Kdd17AssetIdentityG2Tests(unittest.TestCase):
         self.assertEqual(details["candidati"][0]["contratti_indicizzati"], [])
         self.assertEqual(details["contratti_indicizzati_totali"], 3)
         self.assertEqual(details["contratti_esaminati"], 2)
+        self.assertEqual(details["posizioni"][2]["ufficialita_contratto"], "NON_ATTESTATA")
+        self.assertEqual(details["posizioni"][2]["verifica_contratto_fonte_primaria"], "NON_ESEGUITA")
+        self.assertEqual(details["posizioni"][2]["rete_deposito_kraken"], "NON_ATTESTATA")
+        self.assertEqual(details["posizioni"][3]["ufficialita_contratto"], "NON_ATTESTATA")
         read = evidence.at_read(raw, owned, shortlist, T, economics=econ)["asset_reti"]
         self.assertEqual(read["posizioni"][0]["osservazione_nativa"]["stato"],
                          "OSSERVATO_CON_LIMITI")
@@ -361,7 +367,13 @@ class Kdd17AssetIdentityG2Tests(unittest.TestCase):
         self.assertEqual(read["posizioni"][2]["osservazioni_contratti"][0]["osservazione"]["valori"]["supply_unita_minima"],
                          "420690000000000000000000000000000000000")
         self.assertNotIn("quantita", json.dumps(details).lower())
-        self.assertIn("NON chain del saldo", details["limite"].replace("Contratti da aggregatore e RPC pubblici, non prova che Kraken custodisca sulla stessa rete", "NON chain del saldo"))
+        self.assertIn("nessuna attestazione primaria", details["limite"])
+        self.assertEqual(read["posizioni"][2]["osservazioni_contratti"][0]
+                         ["osservazione"]["ufficialita_contratto"], "NON_ATTESTATA")
+        forged = copy.deepcopy(raw)
+        forged["asset_reti"]["posizioni"][2]["ufficialita_contratto"] = "ATTESTATA"
+        with self.assertRaises(ValueError):
+            evidence.at_read(forged, owned, shortlist, T, economics=econ)
         late = evidence.at_read(raw, owned, shortlist, T + dt.timedelta(minutes=40),
                                 economics=econ)["asset_reti"]
         self.assertIsNone(late["posizioni"][0]["osservazione_nativa"]["valori"])
