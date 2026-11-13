@@ -122,10 +122,15 @@ class NetworkDefiTests(unittest.TestCase):
                  "saldo_recente_verificato":False,"portafoglio_noto":True,
                  "fotografia_portafoglio_sha256":"a"*64,
                  "portafoglio_letto_utc":ISO}
+        import kdd_economics as econ
+        def catalog_identity(token):
+            return econ.identify(token, token + "/EUR", token + "EUR",
+                                 catalog={token+"EUR": {
+                                     "pair": token+"/EUR", "pair_key": token+"EUR",
+                                     "base": token, "quote": "EUR"}})
         economics={"schema":"fixture","posizioni":[
-                      {"indice":0,"token":"SUI","identita":{"token":"SUI","stato":"NON_VERIFICATO"}},
-                      {"indice":1,"token":"SOL","identita":{"token":"SOL","stato":"NON_VERIFICATO"}}],
-                   "candidati":[]}
+                      {"indice":i,"token":token,"identita":catalog_identity(token)}
+                      for i,token in enumerate(("SUI","SOL"))],"candidati":[]}
         saved={}
         original=evidence.collect
         def from_public(t,holdings,candidates,**kwargs):
@@ -151,6 +156,10 @@ class NetworkDefiTests(unittest.TestCase):
                           ["roster_posizioni"]],["SUI","SOL"])
         self.assertEqual(dossier["evidenze_rete_defi"]["fonti"]["sui"]["stato"],
                          "OSSERVATO")
+        self.assertEqual(dossier["evidenze_rete_defi"]["asset_reti"]["posizioni"][0]["tipo"],
+                         "NATIVO")
+        self.assertEqual(dossier["evidenze_rete_defi"]["asset_reti"]["posizioni"][1]["tipo"],
+                         "NATIVO")
         self.assertIn("dossier_multifonte.json",saved)
         self.assertNotIn("PRIVATE_MUST_NOT_LEAK",
                          json.dumps(saved["dossier_multifonte.json"]))
@@ -189,19 +198,45 @@ class NetworkDefiTests(unittest.TestCase):
         fixture.snapshot["rilevazione_utc"]=iso
         fixture.report["rilevazione_utc"]=iso
         fixture.dossier["kraken_istantanea_utc"]=iso
+        import kdd_economics as econ
+        def identity(token):
+            if token == "SXT":
+                return {"token": token, "stato": "NON_VERIFICATO"}
+            return econ.identify(token, token+"/EUR", token+"EUR",
+                                 catalog={token+"EUR":{
+                                     "pair":token+"/EUR","pair_key":token+"EUR",
+                                     "base":token,"quote":"EUR"}})
+        def econ_row(token, idx, *, candidate=False):
+            ident = identity(token)
+            record = {"indice":idx, "token":token, "identita":ident,
+                      "fondamentali":econ.fundamentals(ident,None,moment,moment),
+                      "evento":econ.release_event(ident,None,moment,moment)}
+            if candidate:
+                record["coppia_analisi"] = token+"/EUR"
+            return record
+        economics = {"schema":econ.VERSION,"acquisito_utc":iso,
+                     "posizioni":[econ_row(token,i) for i,token in enumerate(("SUI","SOL","SXT"))],
+                     "candidati":[econ_row("SUI",0,candidate=True)],
+                     "regime":{"stato":"INDETERMINATO","qualita":"PARZIALE"},
+                     "macro":econ.macro([],moment)}
+        fixture.dossier["evidenze_economiche"] = economics
         fixture.dossier["evidenze_rete_defi"]=evidence.collect(
-            moment,rows,shortlist,fetch=fake_fetch)
+            moment,rows,shortlist,fetch=fake_fetch,economics=economics)
         fixture.dump()
         p=packet.build(fixture.root,now=moment)
         self.assertEqual(len(p["patrimonio"]["posizioni"]),3)
         network=p["evidenze_multifonte"]["rete_defi"]
         self.assertEqual(len(network["posizioni"]),3)
         self.assertEqual(len(network["candidati"]),1)
+        self.assertEqual(network["asset_reti"]["posizioni"][0]["tipo"],"NATIVO")
+        self.assertEqual(network["asset_reti"]["posizioni"][2]["tipo"],"NON_VERIFICATO")
         bundle={"schema":bridge.SCHEMA_BUNDLE,"packet":p,
                 "packet_sha256":bridge.digest(p),"preparato_utc":iso}
         reading=bridge.read_context(json.loads(json.dumps(bundle)),now=moment)
         self.assertEqual(reading["rete_defi_alla_lettura"]["posizioni"][0]
                          ["onchain"]["stato"],"OSSERVATO_CON_LIMITI")
+        self.assertEqual(reading["rete_defi_alla_lettura"]["asset_reti"]["posizioni"][1]
+                         ["tipo"],"NATIVO")
         late=bridge.read_context(bundle,now=moment+dt.timedelta(minutes=40))
         self.assertIsNone(late["rete_defi_alla_lettura"]["posizioni"][0]
                           ["defi"]["valori"])
