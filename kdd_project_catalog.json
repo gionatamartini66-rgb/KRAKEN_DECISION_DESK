@@ -1,24 +1,44 @@
 {
   "schema": "kdd-project-catalog-v001",
-  "provenienza": "Corrispondenze curate già verificate in PR #45 (2026-11-08); non attestano chain/contract",
+  "provenienza": "Identita progetti del catalogo curato PR #45; associazioni native/mint aggiunte da documenti di rete/progetto; Kraken/Coingecko non attestano per sé chain, contract o wallet",
   "projects": {
     "BNB": {
       "id": "binancecoin",
-      "name": "BNB"
+      "name": "BNB",
+      "onchain": {
+        "tipo": "NATIVO",
+        "rete": "bsc",
+        "documentazione": "https://docs.bnbchain.org/bnb-smart-chain/developers/json_rpc/json-rpc-endpoint/"
+      }
     },
     "FET": {
       "id": "fetch-ai",
       "name": "Artificial Superintelligence Alliance",
-      "caveat": "FET/ASI: controllare le migrazioni Kraken e chain/contract; non presumere conversioni."
+      "caveat": "FET/ASI: controllare le migrazioni Kraken e chain/contract; non presumere conversioni.",
+      "onchain": {
+        "tipo": "MULTICHAIN_DA_RISOLVERE",
+        "documentazione": null
+      }
     },
     "JUP": {
       "id": "jupiter-exchange-solana",
-      "name": "Jupiter"
+      "name": "Jupiter",
+      "onchain": {
+        "tipo": "TOKEN_CONTRATTO",
+        "rete": "solana",
+        "contratto": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+        "standard": "SPL_MINT",
+        "documentazione": "https://github.com/jup-ag/rfq-docs/blob/main/docs/api/tokens.md"
+      }
     },
     "RENDER": {
       "id": "render-token",
       "name": "Render",
-      "caveat": "RNDR/RENDER: migrazione storica; non attribuire il vecchio RNDR al nuovo RENDER."
+      "caveat": "RNDR/RENDER: migrazione storica; non attribuire il vecchio RNDR al nuovo RENDER.",
+      "onchain": {
+        "tipo": "MULTICHAIN_DA_RISOLVERE",
+        "documentazione": null
+      }
     },
     "PEPE": {
       "id": "pepe",
@@ -31,33 +51,68 @@
     "BTC": {
       "id": "bitcoin",
       "name": "Bitcoin",
-      "repository": "bitcoin/bitcoin"
+      "repository": "bitcoin/bitcoin",
+      "onchain": {
+        "tipo": "NATIVO",
+        "rete": "bitcoin",
+        "documentazione": "https://github.com/Blockstream/esplora/blob/master/API.md"
+      }
     },
     "SOL": {
       "id": "solana",
       "name": "Solana",
-      "repository": "anza-xyz/agave"
+      "repository": "anza-xyz/agave",
+      "onchain": {
+        "tipo": "NATIVO",
+        "rete": "solana",
+        "documentazione": "https://solana.com/docs/rpc/http"
+      }
     },
     "ADA": {
       "id": "cardano",
       "name": "Cardano",
-      "repository": "IntersectMBO/cardano-node"
+      "repository": "IntersectMBO/cardano-node",
+      "onchain": {
+        "tipo": "NATIVO",
+        "rete": "cardano",
+        "documentazione": "https://developers.cardano.org/docs/get-started/"
+      }
     },
     "ETH": {
       "id": "ethereum",
-      "name": "Ethereum"
+      "name": "Ethereum",
+      "onchain": {
+        "tipo": "NATIVO",
+        "rete": "ethereum",
+        "documentazione": "https://ethereum.publicnode.com/"
+      }
     },
     "NEAR": {
       "id": "near",
-      "name": "NEAR Protocol"
+      "name": "NEAR Protocol",
+      "onchain": {
+        "tipo": "NATIVO",
+        "rete": "near",
+        "documentazione": "https://docs.near.org/api/rpc/introduction"
+      }
     },
     "SUI": {
       "id": "sui",
-      "name": "Sui"
+      "name": "Sui",
+      "onchain": {
+        "tipo": "NATIVO",
+        "rete": "sui",
+        "documentazione": "https://docs.sui.io/references/sui-api/sui-graphql"
+      }
     },
     "XRP": {
       "id": "ripple",
-      "name": "XRP"
+      "name": "XRP",
+      "onchain": {
+        "tipo": "NATIVO",
+        "rete": "xrpl",
+        "documentazione": "https://xrpl.org/docs/tutorials/public-servers"
+      }
     },
     "ONDO": {
       "id": "ondo-finance",
@@ -65,7 +120,12 @@
     },
     "KAS": {
       "id": "kaspa",
-      "name": "Kaspa"
+      "name": "Kaspa",
+      "onchain": {
+        "tipo": "NATIVO",
+        "rete": "kaspa",
+        "documentazione": "https://kaspa.org/"
+      }
     },
     "ICNT": {
       "id": "impossible-cloud-network-token",

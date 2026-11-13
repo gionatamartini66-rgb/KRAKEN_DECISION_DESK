@@ -691,12 +691,16 @@ def collect(source=None, *, asset_pairs=None):
     import kdd_network_defi
     network_defi = None
     if isinstance(source.get("orari_fonti"), dict) and source["orari_fonti"].get("composizione_kdd_utc"):
+        # Project identity has already been bound to an observed Kraken pair
+        # and curated CoinGecko ID by economic_evidence. A ticker alone never
+        # selects a contract; the network adapter sees no wallet amounts.
         holdings_for_sources = [
-            {"token": row.get("token")}
+            {"token": row.get("token"), "identita": row.get("identita")}
             for row in economic.get("posizioni", []) if isinstance(row, dict)]
         candidates_for_sources = [
-            {"token": row.get("token"), "coppia_analisi": row.get("coppia_analisi")}
-            for row in candidates if isinstance(row, dict)]
+            {"token": row.get("token"), "coppia_analisi": row.get("coppia_analisi"),
+             "identita": row.get("identita")}
+            for row in economic.get("candidati", []) if isinstance(row, dict)]
         network_defi = kdd_network_defi.collect(
             now, holdings_for_sources, candidates_for_sources)
     dossier={
