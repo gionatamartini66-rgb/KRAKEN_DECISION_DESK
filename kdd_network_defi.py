@@ -331,10 +331,17 @@ NATIVE_IDS = {
 }
 PLATFORM_CHAINS = {"ethereum": "ethereum", "binance-smart-chain": "bsc",
                    "solana": "solana"}
+# Public endpoint/reference specifications (responses never authenticated by TLS alone):
+# BTC: https://github.com/Blockstream/esplora/blob/master/API.md
+# BSC: https://docs.bnbchain.org/bnb-smart-chain/developers/json_rpc/json-rpc-endpoint/
+# Solana SPL: https://solana.com/docs/rpc/http/gettokensupply
+# XRPL: https://xrpl.org/docs/references/http-websocket-apis/public-api-methods/ledger-methods/ledger
+# Ethereum JSON-RPC: https://ethereum.org/en/developers/docs/apis/json-rpc/
+# NEAR: https://docs.near.org/api/rpc/block
 NATIVE_ENDPOINTS = {
     "bitcoin": "https://blockstream.info/api/blocks",
     "ethereum": "https://ethereum-rpc.publicnode.com",
-    "bsc": "https://bsc-dataseed.binance.org",
+    "bsc": "https://bsc-dataseed.bnbchain.org",
     "near": "https://rpc.mainnet.near.org",
     "xrpl": "https://s1.ripple.com:51234",
 }
