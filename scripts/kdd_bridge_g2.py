@@ -772,7 +772,8 @@ def read_context(bundle, *, now=None, expected_sha256=None):
     try:
         network_at_read = kdd_network_defi.at_read(
             multifonte.get("rete_defi") if isinstance(multifonte,dict) else None,
-            rows, pkt.get("opportunita_esterne_scanner") or [], moment)
+            rows, pkt.get("opportunita_esterne_scanner") or [], moment,
+            economics=economic_read)
     except (ValueError, TypeError, KeyError, OverflowError) as exc:
         raise BridgeError("Evidenze on-chain/DeFi non verificabili") from exc
     return {"schema": "kdd_gpt_read_context_v001", "snapshot_id": digest(pkt),
