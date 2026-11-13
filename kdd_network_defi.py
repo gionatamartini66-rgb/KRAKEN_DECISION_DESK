@@ -683,6 +683,36 @@ def _enrich_row(row,network_rows,mint_rows):
     return row
 
 
+def _roster_still_attributable(stored,expected,economic_rows):
+    """A dated dynamic project proof may expire without erasing its asset row.
+
+    Only the recorded Kraken/CoinGecko match can be downgraded; no transition
+    from an unknown project to an asserted contract/network is ever permitted.
+    """
+    if not isinstance(stored,list) or len(stored)!=len(expected):
+        return False
+    for index,(old,new) in enumerate(zip(stored,expected)):
+        if old==new:
+            continue
+        if not isinstance(old,dict) or not isinstance(new,dict):
+            return False
+        a,b=old.get("binding"),new.get("binding")
+        identity=(economic_rows[index].get("identita")
+                  if economic_rows and index<len(economic_rows)
+                  and isinstance(economic_rows[index],dict) else None)
+        if (not isinstance(a,dict) or not isinstance(b,dict)
+                or not isinstance(identity,dict)
+                or {k:v for k,v in old.items() if k!="binding"}
+                    != {k:v for k,v in new.items() if k!="binding"}
+                or a.get("stato")!="PROGETTO_DINAMICO_IDENTIFICATO"
+                or a.get("progetto_id")!=identity.get("coingecko_id")
+                or b.get("stato")!="NON_VERIFICATO"
+                or identity.get("metodo")!="KRAKEN_COINGECKO_MARKET"
+                or identity.get("motivo")!="ATTESTAZIONE_IDENTITA_SCADUTA"):
+            return False
+    return True
+
+
 def at_read(source,positions,candidates,now,*,economia=None):
     """Revalidate both #53 and new provenance/identity at packet and GPT read."""
     moment=_now(now)
@@ -694,7 +724,10 @@ def at_read(source,positions,candidates,now,*,economia=None):
     can=_attached(candidates,economic_rows.get("candidati") if economic_rows else None)
     expected_pos=_bound_roster(pos)
     expected_can=_bound_roster(can,candidate=True)
-    if raw.get("roster_posizioni")!=expected_pos or raw.get("roster_candidati")!=expected_can:
+    if (not _roster_still_attributable(raw.get("roster_posizioni"),expected_pos,
+                                        economic_rows.get("posizioni") if economic_rows else None)
+            or not _roster_still_attributable(raw.get("roster_candidati"),expected_can,
+                                              economic_rows.get("candidati") if economic_rows else None)):
         raise ValueError("on-chain chain identity or dynamic roster changed")
     # Old source is independently checked with exact #53 validators, then
     # extended fields undergo a separate strict semantic check.
