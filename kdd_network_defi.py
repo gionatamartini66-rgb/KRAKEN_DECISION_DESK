@@ -317,3 +317,444 @@ def at_read(source, positions, candidates, now):
             "candidati":[_economic_row(x,sources,acquired) for x in external],
             "limite":"Reti/TVL pubblici, nessuna attribuzione al portafoglio privato; "
                      "provenienza P08/P09 non autenticata e metriche da confrontare nel tempo."}
+
+
+# KDD-17 G2/1: project-bound native chain and contract probes.
+# CoinGecko metadata is an attributed INDEX, not proof of origin or custody.
+# A network RPC can observe a contract, but cannot prove Kraken's custody chain.
+ASSET_SCHEMA = "kdd-asset-network-v001"
+NATIVE_IDS = {
+    "bitcoin": ("BTC", "bitcoin"), "ethereum": ("ETH", "ethereum"),
+    "binancecoin": ("BNB", "bsc"), "near": ("NEAR", "near"),
+    "ripple": ("XRP", "xrpl"), "solana": ("SOL", "solana"),
+    "sui": ("SUI", "sui"),
+}
+PLATFORM_CHAINS = {"ethereum": "ethereum", "binance-smart-chain": "bsc",
+                   "solana": "solana"}
+# Public endpoint/reference specifications (responses never authenticated by TLS alone):
+# BTC: https://github.com/Blockstream/esplora/blob/master/API.md
+# BSC: https://docs.bnbchain.org/bnb-smart-chain/developers/json_rpc/json-rpc-endpoint/
+# Solana SPL: https://solana.com/docs/rpc/http/gettokensupply
+# XRPL: https://xrpl.org/docs/references/http-websocket-apis/public-api-methods/ledger-methods/ledger
+# Ethereum JSON-RPC: https://ethereum.org/en/developers/docs/apis/json-rpc/
+# NEAR: https://docs.near.org/api/rpc/block
+NATIVE_ENDPOINTS = {
+    "bitcoin": "https://blockstream.info/api/blocks",
+    "ethereum": "https://ethereum-rpc.publicnode.com",
+    "bsc": "https://bsc-dataseed.bnbchain.org",
+    "near": "https://rpc.mainnet.near.org",
+    "xrpl": "https://s1.ripple.com:51234",
+}
+CONTRACT_ENDPOINTS = {"ethereum": NATIVE_ENDPOINTS["ethereum"],
+                      "bsc": NATIVE_ENDPOINTS["bsc"], "solana": SOL_URL}
+EVM_ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}\Z")
+SOL_MINT = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,44}\Z")
+CG_DETAILS = "https://api.coingecko.com/api/v3/coins/"
+MAX_CONTRACT_PROBES = 2
+MAX_NATIVE_SOURCES = 5
+
+
+def _qualified(identity, token):
+    """Economic identity (Kraken exact pair -> project ID), not ticker alone."""
+    return bool(isinstance(identity, dict)
+                and identity.get("stato") == "IDENTITA_VERIFICATA_DA_CATALOGO"
+                and identity.get("token") == token
+                and isinstance(identity.get("coingecko_id"), str)
+                and re.fullmatch(r"[a-z0-9-]{2,120}", identity["coingecko_id"])
+                and isinstance(identity.get("coppia"), str)
+                and isinstance(identity.get("pair_key"), str)
+                and identity.get("fonte_identita"))
+
+
+def _supply_integer(value):
+    if isinstance(value, bool) or not (type(value) is int or
+            isinstance(value, str) and re.fullmatch(r"[0-9]{1,46}", value)):
+        raise ValueError("contract supply integer required")
+    n = int(value)
+    if not 0 <= n <= 10**45:
+        raise ValueError("contract supply outside bound")
+    return n
+
+
+def _contract_address(chain, address):
+    return (isinstance(address, str) and
+            bool((EVM_ADDRESS if chain in ("ethereum", "bsc")
+                  else SOL_MINT if chain == "solana"
+                  else re.compile(r"(?!)")).fullmatch(address)))
+
+
+def coin_network_metadata(identity, payload, now):
+    """Extract bounded, untrusted network INDEX from an already-paid-for /coins ID fetch.
+
+    No extra CoinGecko query. Only an economically resolved Kraken project ID may
+    consume a matching CoinGecko /coins response. Missing/malformed data stays missing.
+    """
+    token = identity.get("token") if isinstance(identity, dict) else None
+    if not _qualified(identity, token) or not isinstance(payload, dict):
+        return None
+    import kdd_economics
+    if (payload.get("id") != identity["coingecko_id"]
+            or not isinstance(payload.get("symbol"), str)
+            or payload["symbol"].upper() != kdd_economics.canonical_token(token)
+            or payload.get("name") != identity.get("progetto")):
+        return None
+    platforms = payload.get("platforms")
+    if not isinstance(platforms, dict) or len(platforms) > 40:
+        return None
+    contracts = []
+    for platform, address in sorted(platforms.items()):
+        chain = PLATFORM_CHAINS.get(platform)
+        if chain and _contract_address(chain, address):
+            contracts.append({"rete": chain, "platform_id": platform,
+                              "contratto": address})
+    if len(contracts) > 12:
+        return None
+    return {"stato": "INDICE_COIN_GECKO", "token": token,
+            "coingecko_id": identity["coingecko_id"],
+            "coppia": identity["coppia"], "pair_key": identity["pair_key"],
+            "fonte": CG_DETAILS + identity["coingecko_id"],
+            "acquisito_utc": _now(now).isoformat(timespec="seconds"),
+            "contratti": contracts, "piattaforme_dichiarate": len(platforms),
+            "limite": "Indici CoinGecko, non attestazione primaria di contratto, bridge o rete di deposito Kraken"}
+
+
+def _metadata_valid(metadata, identity, acquired):
+    if not isinstance(metadata, dict) or not _qualified(identity, metadata.get("token")):
+        return False
+    if (metadata.get("stato") != "INDICE_COIN_GECKO"
+            or metadata.get("coingecko_id") != identity["coingecko_id"]
+            or metadata.get("coppia") != identity.get("coppia")
+            or metadata.get("pair_key") != identity.get("pair_key")
+            or metadata.get("fonte") != CG_DETAILS + identity["coingecko_id"]):
+        return False
+    try:
+        stamp = _timestamp(metadata.get("acquisito_utc"))
+    except (ValueError, TypeError):
+        return False
+    if not dt.timedelta(0) <= acquired-stamp <= dt.timedelta(days=1):
+        return False
+    contracts = metadata.get("contratti")
+    return (isinstance(contracts, list) and len(contracts) <= 12
+            and type(metadata.get("piattaforme_dichiarate")) is int
+            and 0 <= metadata["piattaforme_dichiarate"] <= 40
+            and all(isinstance(c, dict) and
+                    c.get("rete") == PLATFORM_CHAINS.get(c.get("platform_id"))
+                    and _contract_address(c.get("rete"), c.get("contratto"))
+                    for c in contracts)
+            and len({(c["rete"], c["contratto"]) for c in contracts}) == len(contracts))
+
+
+def _asset_roster(economics, positions, candidates, moment):
+    if not isinstance(economics, dict):
+        raise ValueError("economic identity binding absent")
+    rows = {}
+    for name, source, expected in (("posizioni", economics.get("posizioni"), positions),
+                                   ("candidati", economics.get("candidati"), candidates)):
+        if not isinstance(source, list) or len(source) != len(expected):
+            raise ValueError("economic roster differs from asset roster")
+        values = []
+        for i, (row, basis) in enumerate(zip(source, expected)):
+            if not isinstance(row, dict) or row.get("token") != basis["token"] or row.get("indice") != i:
+                raise ValueError("economic binding different from roster")
+            if name == "candidati" and row.get("coppia_analisi") != basis["coppia_analisi"]:
+                raise ValueError("candidate pair differs")
+            identity = row.get("identita")
+            qualified = _qualified(identity, basis["token"])
+            profile = row.get("network_metadata")
+            if profile is not None and (not qualified or not _metadata_valid(profile, identity, moment)):
+                raise ValueError("unattributable contract metadata")
+            native = NATIVE_IDS.get(identity.get("coingecko_id")) if qualified else None
+            if native and native[0] != basis["token"]:
+                native = None
+            contracts = list(profile["contratti"]) if qualified and profile else []
+            networks = sorted({x["rete"] for x in contracts} | ({native[1]} if native else set()))
+            values.append({"token": basis["token"],
+                           "coppia_analisi": basis.get("coppia_analisi") if name == "candidati" else None,
+                           "progetto_id": identity["coingecko_id"] if qualified else None,
+                           "fonte_identita": identity["fonte_identita"] if qualified else None,
+                           "coppia_identita": identity["coppia"] if qualified else None,
+                           "tipo": ("NON_VERIFICATO" if not qualified else
+                                    "MULTICHAIN" if len(networks) > 1 else
+                                    "NATIVO" if native and not contracts else
+                                    "TOKEN_CON_CONTRATTO" if contracts else "RETE_NON_DOCUMENTATA"),
+                           "reti_possibili": networks,
+                           "contratti_indicizzati": contracts,
+                           # CoinGecko is a candidate locator. An RPC response
+                           # cannot certify project ownership of the address.
+                           "ufficialita_contratto": "NON_ATTESTATA",
+                           "verifica_contratto_fonte_primaria": "NON_ESEGUITA",
+                           "rete_deposito_kraken": "NON_ATTESTATA",
+                           "fonte_contratti": profile["fonte"] if profile else None,
+                           "acquisito_metadati_utc": profile["acquisito_utc"] if profile else None,
+                           "limite": ("Indici CoinGecko di reti/contratti POSSIBILI. "
+                                      "La presenza di bytecode/supply su RPC NON certifica "
+                                      "che il contratto sia ufficiale del progetto, "
+                                      "ne attesta la rete di custodia Kraken.")})
+        rows[name] = values
+    return rows
+
+
+def _native_observe(chain, fetch, now):
+    url = NATIVE_ENDPOINTS[chain]
+    try:
+        if chain == "bitcoin":
+            response = fetch(url)
+            if not isinstance(response, list) or not response or not isinstance(response[0], dict):
+                raise ValueError("BTC blocks invalid")
+            block = response[0]
+            height, count = _integer(block.get("height")), _integer(block.get("tx_count"))
+            ts = dt.datetime.fromtimestamp(_integer(block.get("timestamp")), UTC)
+            if not re.fullmatch(r"[0-9a-f]{64}", str(block.get("id"))):
+                raise ValueError("BTC block hash invalid")
+            values = {"altezza_blocco": height, "transazioni_blocco": count,
+                      "blocco_hash": block["id"]}
+            unit = "altezza, numero transazioni nel solo blocco"
+        elif chain in ("ethereum", "bsc"):
+            response = fetch(url, {"jsonrpc": "2.0", "id": 1, "method": "eth_getBlockByNumber",
+                                   "params": ["latest", False]})
+            block = response.get("result") if isinstance(response, dict) and response.get("id") == 1 and not response.get("error") else None
+            if not isinstance(block, dict):
+                raise ValueError("EVM latest block invalid")
+            height = int(block["number"], 16)
+            ts = dt.datetime.fromtimestamp(int(block["timestamp"], 16), UTC)
+            if not re.fullmatch(r"0x[0-9a-fA-F]{64}", str(block.get("hash"))):
+                raise ValueError("EVM hash invalid")
+            values = {"altezza_blocco": _integer(height), "blocco_hash": block["hash"]}
+            unit = "altezza del blocco, non transazioni di wallet"
+        elif chain == "near":
+            response = fetch(url, {"jsonrpc": "2.0", "id": 1, "method": "block",
+                                   "params": {"finality": "final"}})
+            header = (response.get("result") or {}).get("header") if isinstance(response, dict) and response.get("id") == 1 and not response.get("error") else None
+            if not isinstance(header, dict) or not isinstance(header.get("hash"), str) or len(header["hash"]) < 25:
+                raise ValueError("NEAR final header invalid")
+            height = _integer(header.get("height"))
+            ts = dt.datetime.fromtimestamp(_integer(header.get("timestamp_nanosec")) / 10**9, UTC)
+            values = {"altezza_blocco": height, "blocco_hash": header["hash"][:100]}
+            unit = "altezza del blocco finalizzato"
+        else:
+            response = fetch(url, {"jsonrpc": "2.0", "id": 1, "method": "ledger",
+                                   "params": [{"ledger_index": "validated", "transactions": False}]})
+            result = response.get("result") if isinstance(response, dict) and response.get("id") == 1 and not response.get("error") else None
+            ledger = result.get("ledger") if isinstance(result, dict) else None
+            if not isinstance(ledger, dict) or result.get("status") != "success":
+                raise ValueError("XRP validated ledger invalid")
+            ts = _timestamp(ledger.get("close_time_iso"))
+            values = {"indice_ledger": _integer(result.get("ledger_index")),
+                      "ledger_hash": ledger.get("ledger_hash")}
+            if not isinstance(values["ledger_hash"], str) or not re.fullmatch(r"[A-F0-9]{64}", values["ledger_hash"]):
+                raise ValueError("XRP ledger hash invalid")
+            unit = "indice di ledger validato"
+        if ts > now + dt.timedelta(minutes=2):
+            raise ValueError("future block/ledger")
+        return {"stato": "OSSERVATO", "fonte": url, "osservato_utc": ts.isoformat(),
+                "valori": values, "unita": unit, "copertura": chain + " mainnet",
+                "motivo": None}
+    except (ValueError, KeyError, TypeError, OSError, OverflowError, UnicodeError) as exc:
+        return {"stato": "NON_DISPONIBILE", "fonte": url, "osservato_utc": None,
+                "valori": None, "unita": None, "copertura": chain + " mainnet",
+                "motivo": type(exc).__name__}
+
+
+def _probe_contract(chain, address, fetch, now):
+    url = CONTRACT_ENDPOINTS[chain]
+    blank = {"rete": chain, "contratto": address, "fonte": url,
+             "osservato_utc": None, "acquisito_utc": now.isoformat(timespec="seconds"),
+             "stato": "NON_DISPONIBILE", "valori": None, "motivo": None,
+             "copertura": "Contratto/mint pubblico; NON movimenti, wallet o depositi Kraken",
+             "ufficialita_contratto": "NON_ATTESTATA",
+             "verifica_contratto_fonte_primaria": "NON_ESEGUITA"}
+    try:
+        if chain == "solana":
+            response = fetch(url, {"jsonrpc": "2.0", "id": 1, "method": "getTokenSupply",
+                                   "params": [address, {"commitment": "finalized"}]})
+            if not isinstance(response, dict) or response.get("id") != 1 or response.get("error"):
+                raise ValueError("SPL RPC error")
+            result = response.get("result")
+            value = result.get("value") if isinstance(result, dict) else None
+            if not isinstance(value, dict) or type(value.get("decimals")) is not int or not 0 <= value["decimals"] <= 18:
+                raise ValueError("SPL supply schema")
+            values = {"slot_finalized": _integer(result.get("context", {}).get("slot")),
+                      "supply_unita_minima": str(_supply_integer(value.get("amount"))),
+                      "decimali": value["decimals"], "unita": "mint SPL base units"}
+        else:
+            response = fetch(url, {"jsonrpc": "2.0", "id": 1,
+                                   "method": "eth_getCode", "params": [address, "latest"]})
+            code = response.get("result") if isinstance(response, dict) and response.get("id") == 1 and not response.get("error") else None
+            if not isinstance(code, str) or code == "0x" or not re.fullmatch(r"0x(?:[0-9a-fA-F]{2})+", code):
+                raise ValueError("EVM contract code missing")
+            response = fetch(url, {"jsonrpc": "2.0", "id": 1,
+                                   "method": "eth_call",
+                                   "params": [{"to": address, "data": "0x18160ddd"}, "latest"]})
+            quantity = response.get("result") if isinstance(response, dict) and response.get("id") == 1 and not response.get("error") else None
+            if not isinstance(quantity, str) or not re.fullmatch(r"0x[0-9a-fA-F]{1,64}", quantity):
+                raise ValueError("ERC20 totalSupply unavailable")
+            values = {"supply_unita_minima": str(_supply_integer(int(quantity, 16))),
+                      "unita": "ERC20 contract base units; decimals not established"}
+        return dict(blank, stato="OSSERVATO", valori=values)
+    except (ValueError, KeyError, TypeError, OSError, OverflowError, UnicodeError) as exc:
+        return dict(blank, motivo=type(exc).__name__)
+
+
+def _collect_assets(now, positions, candidates, economic, previous, fetch):
+    rows = _asset_roster(economic, positions, candidates, now)
+    native = sorted({NATIVE_IDS[r["progetto_id"]][1] for family in rows.values()
+                     for r in family if r["progetto_id"] in NATIVE_IDS
+                     and NATIVE_IDS[r["progetto_id"]][0] == r["token"]
+                     and NATIVE_IDS[r["progetto_id"]][1] in NATIVE_ENDPOINTS})
+    sources = {chain: _native_observe(chain, fetch, now)
+               for chain in native[:MAX_NATIVE_SOURCES]}
+    contracts = sorted({(c["rete"], c["contratto"])
+                        for family in rows.values() for r in family
+                        for c in r["contratti_indicizzati"]
+                        if c["rete"] in CONTRACT_ENDPOINTS})
+    prior_cursor = previous.get("prossimo_contratto") if isinstance(previous, dict) else None
+    start = next((i for i,x in enumerate(contracts) if "|".join(x) >= prior_cursor),
+                 0) if isinstance(prior_cursor, str) else 0
+    selected = [contracts[(start+i) % len(contracts)]
+                for i in range(min(MAX_CONTRACT_PROBES, len(contracts)))]
+    probes = [_probe_contract(chain, address, fetch, now) for chain, address in selected]
+    return {"schema": ASSET_SCHEMA, "acquisito_utc": now.isoformat(timespec="seconds"),
+            "posizioni": rows["posizioni"], "candidati": rows["candidati"],
+            "fonti_native": sources, "sonde_contratto": probes,
+            "contratti_indicizzati_totali": len(contracts),
+            "contratti_esaminati": len(probes),
+            "prossimo_contratto": ("|".join(contracts[(start+len(selected)) % len(contracts)])
+                                  if contracts else None),
+            "limite": ("Contratti possibili da aggregatore e risposte RPC pubbliche; "
+                       "nessuna attestazione primaria di contratto ufficiale o rete di custodia Kraken")}
+
+
+def _read_assets(raw, owned, candidates, economic, now):
+    if not isinstance(raw, dict) or raw.get("schema") != ASSET_SCHEMA:
+        raise ValueError("unknown asset-network evidence schema")
+    acquired = _timestamp(raw.get("acquisito_utc"))
+    if acquired > now + dt.timedelta(minutes=2):
+        raise ValueError("future asset-network evidence")
+    expected = _asset_roster(economic, owned, candidates, acquired)
+    if raw.get("posizioni") != expected["posizioni"] or raw.get("candidati") != expected["candidati"]:
+        raise ValueError("asset identity/project/contract mutated or wrongly bound")
+    relevant = sorted({NATIVE_IDS[r["progetto_id"]][1] for family in expected.values()
+                       for r in family if r["progetto_id"] in NATIVE_IDS
+                       and NATIVE_IDS[r["progetto_id"]][0] == r["token"]
+                       and NATIVE_IDS[r["progetto_id"]][1] in NATIVE_ENDPOINTS})[:MAX_NATIVE_SOURCES]
+    sources = raw.get("fonti_native")
+    if not isinstance(sources, dict) or set(sources) != set(relevant):
+        raise ValueError("native source coverage invalid")
+    result_sources = {}
+    for chain, value in sources.items():
+        if not isinstance(value, dict) or value.get("fonte") != NATIVE_ENDPOINTS[chain] or value.get("stato") not in ("OSSERVATO", "NON_DISPONIBILE"):
+            raise ValueError("native source attribution invalid")
+        observed = _timestamp(value["osservato_utc"]) if value.get("osservato_utc") is not None else None
+        if observed and observed > acquired + dt.timedelta(minutes=2):
+            raise ValueError("future native measurement")
+        if value["stato"] == "OSSERVATO":
+            v = value.get("valori")
+            if not isinstance(v, dict) or not observed:
+                raise ValueError("native source metrics invalid")
+            if chain == "bitcoin":
+                _integer(v.get("altezza_blocco")); _integer(v.get("transazioni_blocco"))
+                if not re.fullmatch(r"[0-9a-f]{64}", str(v.get("blocco_hash"))):
+                    raise ValueError("BTC hash mismatch")
+            elif chain in ("ethereum", "bsc", "near"):
+                _integer(v.get("altezza_blocco"))
+                if not isinstance(v.get("blocco_hash"), str) or len(v["blocco_hash"]) < 25:
+                    raise ValueError("block hash invalid")
+            else:
+                _integer(v.get("indice_ledger"))
+                if not re.fullmatch(r"[A-F0-9]{64}", str(v.get("ledger_hash"))):
+                    raise ValueError("ledger hash invalid")
+        elif value.get("valori") is not None or observed is not None:
+            raise ValueError("unavailable native source has metrics")
+        fresh = bool(observed and dt.timedelta(minutes=-2) <= now-observed <= dt.timedelta(minutes=30))
+        result_sources[chain] = dict(value, stato=("OSSERVATO_CON_LIMITI" if fresh else
+                                "SCADUTO" if value["stato"] == "OSSERVATO" else
+                                "NON_DISPONIBILE"),
+                                     valori=value.get("valori") if fresh else None)
+    contracts = sorted({(c["rete"], c["contratto"])
+                        for family in expected.values() for r in family
+                        for c in r["contratti_indicizzati"]
+                        if c["rete"] in CONTRACT_ENDPOINTS})
+    if (raw.get("contratti_indicizzati_totali") != len(contracts)
+            or not isinstance(raw.get("sonde_contratto"), list)
+            or len(raw["sonde_contratto"]) > MAX_CONTRACT_PROBES
+            or raw.get("contratti_esaminati") != len(raw["sonde_contratto"])):
+        raise ValueError("contract coverage altered")
+    found = set()
+    probes = {}
+    for item in raw["sonde_contratto"]:
+        if not isinstance(item, dict):
+            raise ValueError("contract probe malformed")
+        key = (item.get("rete"), item.get("contratto"))
+        if key not in contracts or key in found or item.get("fonte") != CONTRACT_ENDPOINTS.get(key[0]):
+            raise ValueError("contract probe not attributable")
+        found.add(key)
+        if item.get("stato") not in ("OSSERVATO", "NON_DISPONIBILE") or item.get("osservato_utc") is not None or _timestamp(item.get("acquisito_utc")) != acquired:
+            raise ValueError("contract probe state/time invalid")
+        v = item.get("valori")
+        if item["stato"] == "OSSERVATO":
+            if not isinstance(v, dict):
+                raise ValueError("contract supply missing")
+            _supply_integer(v.get("supply_unita_minima"))
+            if key[0] == "solana":
+                _integer(v.get("slot_finalized"))
+                if type(v.get("decimali")) is not int or not 0 <= v["decimali"] <= 18:
+                    raise ValueError("SPL precision invalid")
+            elif set(v) != {"supply_unita_minima", "unita"}:
+                raise ValueError("EVM supply precision invalid")
+        elif v is not None:
+            raise ValueError("unavailable probe has metrics")
+        fresh = dt.timedelta(minutes=-2) <= now-acquired <= dt.timedelta(minutes=30)
+        probes[key] = dict(item, stato=("NON_DISPONIBILE" if item["stato"] != "OSSERVATO" else
+                           "OSSERVATO_CON_LIMITI" if fresh else "SCADUTO"),
+                           valori=v if fresh and item["stato"] == "OSSERVATO" else None)
+    def interpret(rows):
+        output = []
+        for row in rows:
+            native = NATIVE_IDS.get(row["progetto_id"])
+            chain = native[1] if native and native[0] == row["token"] else None
+            readings = []
+            for c in row["contratti_indicizzati"]:
+                key = (c["rete"], c["contratto"])
+                reading = probes.get(key)
+                readings.append(dict(c, osservazione=reading or {
+                    "stato": "NON_ESAMINATO_PER_BUDGET", "valori": None}))
+            observation = result_sources.get(chain) if chain else None
+            if chain in ("sui", "solana"):
+                observation = {"stato": "COPERTO_DA_FONTI_PREESISTENTI",
+                               "valori": None, "copertura": "Vedere fonti Sui/Solana PR #53"}
+            output.append(dict(row, osservazione_nativa=observation or {
+                "stato": "NON_COPERTO", "valori": None},
+                osservazioni_contratti=readings))
+        return output
+    return {"schema": ASSET_SCHEMA, "acquisito_utc": raw["acquisito_utc"],
+            "posizioni": interpret(expected["posizioni"]),
+            "candidati": interpret(expected["candidati"]),
+            "fonti_native": result_sources,
+            "limite": raw["limite"]}
+
+# Preserve the PR #53 public Sui/Solana/DeFi producer and reader verbatim,
+# enriching only their public output with independently bound asset evidence.
+_BASE_COLLECT = collect
+_BASE_AT_READ = at_read
+
+def collect(now, positions, candidates, *, fetch=None, economics=None, previous=None):
+    original = _BASE_COLLECT(now, positions, candidates, fetch=fetch)
+    if economics is not None:
+        old = previous.get("asset_reti") if isinstance(previous, dict) else None
+        original["asset_reti"] = _collect_assets(
+            _now(now), original["roster_posizioni"], original["roster_candidati"],
+            economics, old, fetch or _http)
+    return original
+
+
+def at_read(source, positions, candidates, now, *, economics=None):
+    result = _BASE_AT_READ(source, positions, candidates, now)
+    original = source.get("sorgente") if isinstance(source, dict) and "sorgente" in source else source
+    enriched = original.get("asset_reti") if isinstance(original, dict) else None
+    if enriched is not None:
+        if economics is None:
+            raise ValueError("economic identity required to consume contract evidence")
+        result["asset_reti"] = _read_assets(
+            enriched, _roster(positions), _roster(candidates, candidate=True),
+            economics, _now(now))
+    return result

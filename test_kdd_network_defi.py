@@ -122,12 +122,19 @@ class NetworkDefiTests(unittest.TestCase):
                  "saldo_recente_verificato":False,"portafoglio_noto":True,
                  "fotografia_portafoglio_sha256":"a"*64,
                  "portafoglio_letto_utc":ISO}
-        economics={"schema":"fixture","posizioni":[{"token":"SUI"},{"token":"SOL"}],
-                   "candidati":[]}
+        import kdd_economics as econ
+        def catalog_identity(token):
+            return econ.identify(token, token + "/EUR", token + "EUR",
+                                 catalog={token+"EUR": {
+                                     "pair": token+"/EUR", "pair_key": token+"EUR",
+                                     "base": token, "quote": "EUR"}})
+        economics={"schema":"fixture","posizioni":[
+                      {"indice":i,"token":token,"identita":catalog_identity(token)}
+                      for i,token in enumerate(("SUI","SOL"))],"candidati":[]}
         saved={}
         original=evidence.collect
-        def from_public(t,holdings,candidates):
-            return original(t,holdings,candidates,fetch=fake_fetch)
+        def from_public(t,holdings,candidates,**kwargs):
+            return original(t,holdings,candidates,fetch=fake_fetch,**kwargs)
         with mock.patch.object(producer.desk,"NOW",return_value=T), \
              mock.patch.object(producer.desk,"load",
                  side_effect=lambda name,default=None: wallet if name=="portafoglio.json" else {}), \
@@ -149,6 +156,10 @@ class NetworkDefiTests(unittest.TestCase):
                           ["roster_posizioni"]],["SUI","SOL"])
         self.assertEqual(dossier["evidenze_rete_defi"]["fonti"]["sui"]["stato"],
                          "OSSERVATO")
+        self.assertEqual(dossier["evidenze_rete_defi"]["asset_reti"]["posizioni"][0]["tipo"],
+                         "NATIVO")
+        self.assertEqual(dossier["evidenze_rete_defi"]["asset_reti"]["posizioni"][1]["tipo"],
+                         "NATIVO")
         self.assertIn("dossier_multifonte.json",saved)
         self.assertNotIn("PRIVATE_MUST_NOT_LEAK",
                          json.dumps(saved["dossier_multifonte.json"]))
@@ -174,11 +185,13 @@ class NetworkDefiTests(unittest.TestCase):
             "SOL":{"token":"SOL","pair":"SOL/EUR","pair_key":"SOLEUR","prezzo_eur":2000}}
         fixture.report["posizioni"][0]["token"]="SUI"
         fixture.report["posizioni"][1]["token"]="SOL"
-        fixture.snapshot["schede_v02"]=[{"token":"SUI","coppia_analisi":"SUI/EUR",
-                                        "esito":"RIESAME","categoria":"confronto"}]
+        fixture.snapshot["schede_v02"]=[
+            {"token":"SUI","coppia_analisi":"SUI/EUR","esito":"RIESAME","categoria":"confronto"},
+            {"token":"PEPE","coppia_analisi":"PEPE/EUR","esito":"RIESAME","categoria":"confronto"}]
         fixture.dossier["candidati"]=[]
         rows=[{"token":"SUI"},{"token":"SOL"},{"token":"SXT"}]
-        shortlist=[{"token":"SUI","coppia_analisi":"SUI/EUR"}]
+        shortlist=[{"token":"SUI","coppia_analisi":"SUI/EUR"},
+                   {"token":"PEPE","coppia_analisi":"PEPE/EUR"}]
         # Use a coherent synthetic observation time for all four source files.
         moment=T
         iso=moment.isoformat()
@@ -187,19 +200,60 @@ class NetworkDefiTests(unittest.TestCase):
         fixture.snapshot["rilevazione_utc"]=iso
         fixture.report["rilevazione_utc"]=iso
         fixture.dossier["kraken_istantanea_utc"]=iso
+        import kdd_economics as econ
+        def identity(token):
+            if token == "SXT":
+                return {"token": token, "stato": "NON_VERIFICATO"}
+            return econ.identify(token, token+"/EUR", token+"EUR",
+                                 catalog={token+"EUR":{
+                                     "pair":token+"/EUR","pair_key":token+"EUR",
+                                     "base":token,"quote":"EUR"}})
+        def econ_row(token, idx, *, candidate=False):
+            ident = identity(token)
+            record = {"indice":idx, "token":token, "identita":ident,
+                      "fondamentali":econ.fundamentals(ident,None,moment,moment),
+                      "evento":econ.release_event(ident,None,moment,moment)}
+            if candidate:
+                record["coppia_analisi"] = token+"/EUR"
+            return record
+        economics = {"schema":econ.VERSION,"acquisito_utc":iso,
+                     "posizioni":[econ_row(token,i) for i,token in enumerate(("SUI","SOL","SXT"))],
+                     "candidati":[econ_row("SUI",0,candidate=True),
+                                  econ_row("PEPE",1,candidate=True)],
+                     "regime":{"stato":"INDETERMINATO","qualita":"PARZIALE"},
+                     "fonti_economiche":econ.sources_matrix(),
+                     "macro":econ.macro([],moment)}
+        pepe = economics["candidati"][1]
+        pepe["network_metadata"] = evidence.coin_network_metadata(
+            pepe["identita"], {"id":"pepe","symbol":"pepe","name":"Pepe",
+                               "platforms":{"ethereum":Kdd17AssetIdentityG2Tests.ETH}},moment)
+        fixture.dossier["evidenze_economiche"] = economics
         fixture.dossier["evidenze_rete_defi"]=evidence.collect(
-            moment,rows,shortlist,fetch=fake_fetch)
+            moment,rows,shortlist,fetch=Kdd17AssetIdentityG2Tests().fetch,
+            economics=economics)
         fixture.dump()
         p=packet.build(fixture.root,now=moment)
         self.assertEqual(len(p["patrimonio"]["posizioni"]),3)
         network=p["evidenze_multifonte"]["rete_defi"]
         self.assertEqual(len(network["posizioni"]),3)
-        self.assertEqual(len(network["candidati"]),1)
+        self.assertEqual(len(network["candidati"]),2)
+        self.assertEqual(network["asset_reti"]["posizioni"][0]["tipo"],"NATIVO")
+        self.assertEqual(network["asset_reti"]["candidati"][1]["tipo"],"TOKEN_CON_CONTRATTO")
+        self.assertEqual(network["asset_reti"]["candidati"][1]["osservazioni_contratti"][0]
+                         ["osservazione"]["stato"],"OSSERVATO_CON_LIMITI")
+        self.assertEqual(network["asset_reti"]["candidati"][1]["ufficialita_contratto"],
+                         "NON_ATTESTATA")
+        self.assertEqual(network["asset_reti"]["posizioni"][2]["tipo"],"NON_VERIFICATO")
         bundle={"schema":bridge.SCHEMA_BUNDLE,"packet":p,
                 "packet_sha256":bridge.digest(p),"preparato_utc":iso}
         reading=bridge.read_context(json.loads(json.dumps(bundle)),now=moment)
         self.assertEqual(reading["rete_defi_alla_lettura"]["posizioni"][0]
                          ["onchain"]["stato"],"OSSERVATO_CON_LIMITI")
+        self.assertEqual(reading["rete_defi_alla_lettura"]["asset_reti"]["posizioni"][1]
+                         ["tipo"],"NATIVO")
+        self.assertEqual(reading["rete_defi_alla_lettura"]["asset_reti"]["candidati"][1]
+                         ["osservazioni_contratti"][0]["osservazione"]["valori"]
+                         ["supply_unita_minima"],"420690000000000000000000000000000000000")
         late=bridge.read_context(bundle,now=moment+dt.timedelta(minutes=40))
         self.assertIsNone(late["rete_defi_alla_lettura"]["posizioni"][0]
                           ["defi"]["valori"])
@@ -208,6 +262,166 @@ class NetworkDefiTests(unittest.TestCase):
         poison["packet_sha256"]=bridge.digest(poison["packet"])
         with self.assertRaises(bridge.BridgeError):
             bridge.read_context(poison,now=moment)
+
+
+class Kdd17AssetIdentityG2Tests(unittest.TestCase):
+    """Independent synthetic counterexamples for project, chain and contract evidence."""
+    ETH = "0x" + "1" * 40
+    BSC = "0x" + "2" * 40
+    MINT = "A" * 32
+
+    @staticmethod
+    def ident(token):
+        import kdd_economics as econ
+        return econ.identify(token, token + "/EUR", token + "EUR",
+                             catalog={token + "EUR": {
+                                 "pair_key": token + "EUR", "pair": token + "/EUR",
+                                 "base": token, "quote": "EUR"}})
+
+    def economic(self, positions, candidates, platforms=None):
+        import kdd_economics as econ
+        positions_out, candidates_out = [], []
+        for group, tokens, dest in (("posizioni", positions, positions_out),
+                                    ("candidati", candidates, candidates_out)):
+            for i, token in enumerate(tokens):
+                identity = self.ident(token)
+                payload = {"id": identity.get("coingecko_id"), "symbol": token.lower(),
+                           "name": identity.get("progetto"),
+                           "platforms": (platforms or {}).get(token, {})}
+                entry = {"indice": i, "token": token, "identita": identity,
+                         "network_metadata": evidence.coin_network_metadata(identity, payload, T)}
+                if group == "candidati":
+                    entry["coppia_analisi"] = token + "/EUR"
+                dest.append(entry)
+        return {"posizioni": positions_out, "candidati": candidates_out}
+
+    def fetch(self, url, payload=None):
+        if url == evidence.CONTRACT_ENDPOINTS["solana"] and payload and payload.get("method") == "getTokenSupply":
+            return {"jsonrpc": "2.0", "id": 1, "result": {
+                "context": {"slot": 400000000},
+                "value": {"amount": "1000000000000", "decimals": 6}}}
+        if url in evidence.SOURCES.values():
+            return fake_fetch(url, payload)
+        if url == evidence.NATIVE_ENDPOINTS["bitcoin"]:
+            return [{"height": 900000, "tx_count": 2378,
+                     "timestamp": int(T.timestamp()), "id": "a" * 64}]
+        if url in (evidence.NATIVE_ENDPOINTS["ethereum"],
+                   evidence.NATIVE_ENDPOINTS["bsc"]):
+            method = payload["method"]
+            if method == "eth_getBlockByNumber":
+                return {"jsonrpc": "2.0", "id": 1, "result": {
+                    "number": hex(21000000), "timestamp": hex(int(T.timestamp())),
+                    "hash": "0x" + "b" * 64}}
+            if method == "eth_getCode":
+                return {"jsonrpc": "2.0", "id": 1, "result": "0x60806040"}
+            if method == "eth_call":
+                return {"jsonrpc": "2.0", "id": 1,
+                        "result": hex(420690000000000000000000000000000000000)}
+        if url == evidence.CONTRACT_ENDPOINTS["solana"]:
+            if payload["method"] == "getTokenSupply":
+                return {"jsonrpc": "2.0", "id": 1, "result": {
+                    "context": {"slot": 400000000},
+                    "value": {"amount": "1000000000000", "decimals": 6}}}
+            return fake_fetch(url, payload)
+        if url == evidence.NATIVE_ENDPOINTS["near"]:
+            return {"jsonrpc": "2.0", "id": 1, "result": {"header": {
+                "height": 198000000, "timestamp_nanosec": str(int(T.timestamp()) * 10**9),
+                "hash": "b" * 44}}}
+        if url == evidence.NATIVE_ENDPOINTS["xrpl"]:
+            return {"jsonrpc": "2.0", "id": 1, "result": {
+                "status": "success", "ledger_index": 100000000,
+                "ledger": {"close_time_iso": T.isoformat(),
+                           "ledger_hash": "C" * 64}}}
+        raise AssertionError("unexpected public request: " + url)
+
+    def test_native_contract_multichain_ambiguous_new_asset_and_rotation(self):
+        positions = ["BTC", "ETH", "PEPE", "JUP", "NEAR", "XRP"]
+        candidates = ["NEW", "JUP"]
+        platforms = {"PEPE": {"ethereum": self.ETH, "binance-smart-chain": self.BSC},
+                     "JUP": {"solana": self.MINT}}
+        econ = self.economic(positions, candidates, platforms)
+        owned = [{"token": t} for t in positions]
+        shortlist = [{"token": t, "coppia_analisi": t + "/EUR"} for t in candidates]
+        raw = evidence.collect(T, owned, shortlist, fetch=self.fetch, economics=econ)
+        details = raw["asset_reti"]
+        self.assertEqual(len(details["posizioni"]), 6)
+        self.assertEqual(len(details["candidati"]), 2)
+        self.assertEqual([row["tipo"] for row in details["posizioni"]],
+                         ["NATIVO", "NATIVO", "MULTICHAIN",
+                          "TOKEN_CON_CONTRATTO", "NATIVO", "NATIVO"])
+        self.assertEqual(details["candidati"][0]["tipo"], "NON_VERIFICATO")
+        self.assertEqual(details["candidati"][0]["contratti_indicizzati"], [])
+        self.assertEqual(details["contratti_indicizzati_totali"], 3)
+        self.assertEqual(details["contratti_esaminati"], 2)
+        self.assertEqual(details["posizioni"][2]["ufficialita_contratto"], "NON_ATTESTATA")
+        self.assertEqual(details["posizioni"][2]["verifica_contratto_fonte_primaria"], "NON_ESEGUITA")
+        self.assertEqual(details["posizioni"][2]["rete_deposito_kraken"], "NON_ATTESTATA")
+        self.assertEqual(details["posizioni"][3]["ufficialita_contratto"], "NON_ATTESTATA")
+        read = evidence.at_read(raw, owned, shortlist, T, economics=econ)["asset_reti"]
+        self.assertEqual(read["posizioni"][0]["osservazione_nativa"]["stato"],
+                         "OSSERVATO_CON_LIMITI")
+        self.assertEqual(read["posizioni"][0]["osservazione_nativa"]["valori"]["altezza_blocco"],
+                         900000)
+        self.assertEqual(read["posizioni"][2]["osservazioni_contratti"][0]["osservazione"]["stato"],
+                         "OSSERVATO_CON_LIMITI")
+        self.assertEqual(read["posizioni"][2]["osservazioni_contratti"][0]["osservazione"]["valori"]["supply_unita_minima"],
+                         "420690000000000000000000000000000000000")
+        self.assertNotIn("quantita", json.dumps(details).lower())
+        self.assertIn("nessuna attestazione primaria", details["limite"])
+        self.assertEqual(read["posizioni"][2]["osservazioni_contratti"][0]
+                         ["osservazione"]["ufficialita_contratto"], "NON_ATTESTATA")
+        forged = copy.deepcopy(raw)
+        forged["asset_reti"]["posizioni"][2]["ufficialita_contratto"] = "ATTESTATA"
+        with self.assertRaises(ValueError):
+            evidence.at_read(forged, owned, shortlist, T, economics=econ)
+        late = evidence.at_read(raw, owned, shortlist, T + dt.timedelta(minutes=40),
+                                economics=econ)["asset_reti"]
+        self.assertIsNone(late["posizioni"][0]["osservazione_nativa"]["valori"])
+        self.assertIsNone(late["posizioni"][2]["osservazioni_contratti"][0]["osservazione"]["valori"])
+        # The third mint is not silently forgotten; it appears on the next run.
+        second = evidence.collect(T, owned, shortlist, fetch=self.fetch,
+                                  economics=econ, previous=raw)
+        self.assertIn(("solana", self.MINT),
+                      {(x["rete"], x["contratto"]) for x in second["asset_reti"]["sonde_contratto"]})
+        # Candidate leaves and re-enters: current roster, never a false balance.
+        shorter = evidence.collect(T, owned, [], fetch=self.fetch, economics={
+            "posizioni": econ["posizioni"], "candidati": []}, previous=second)
+        self.assertEqual(shorter["asset_reti"]["candidati"], [])
+        self.assertEqual(len(raw["asset_reti"]["candidati"]), 2)
+
+    def test_mismatched_coin_id_ticker_only_and_rpc_failure_fail_closed(self):
+        owned = [{"token": "PEPE"}, {"token": "BTC"}]
+        econ = self.economic(["PEPE", "BTC"], [], {"PEPE": {"ethereum": self.ETH}})
+        fake = {"id": "not-pepe", "symbol": "pepe", "name": "Pepe",
+                "platforms": {"ethereum": self.ETH}}
+        self.assertIsNone(evidence.coin_network_metadata(econ["posizioni"][0]["identita"],
+                                                         fake, T))
+        tamper = copy.deepcopy(econ)
+        tamper["posizioni"][0]["identita"]["stato"] = "NON_VERIFICATO"
+        with self.assertRaises(ValueError):
+            evidence.collect(T, owned, [], fetch=self.fetch, economics=tamper)
+        def down(url, payload=None):
+            if url in (evidence.NATIVE_ENDPOINTS["bitcoin"],
+                       evidence.CONTRACT_ENDPOINTS["ethereum"]):
+                raise OSError("offline")
+            return self.fetch(url, payload)
+        raw = evidence.collect(T, owned, [], fetch=down, economics=econ)
+        read = evidence.at_read(raw, owned, [], T, economics=econ)["asset_reti"]
+        self.assertEqual(read["posizioni"][1]["osservazione_nativa"]["stato"],
+                         "NON_DISPONIBILE")
+        self.assertEqual(read["posizioni"][0]["osservazioni_contratti"][0]["osservazione"]["stato"],
+                         "NON_DISPONIBILE")
+        self.assertIsNone(read["posizioni"][0]["osservazioni_contratti"][0]["osservazione"]["valori"])
+        mutated = copy.deepcopy(raw)
+        mutated["asset_reti"]["posizioni"][0]["contratti_indicizzati"][0]["contratto"] = self.BSC
+        with self.assertRaises(ValueError):
+            evidence.at_read(mutated, owned, [], T, economics=econ)
+        missing = copy.deepcopy(raw)
+        missing["asset_reti"]["sonde_contratto"][0]["stato"] = "OSSERVATO"
+        with self.assertRaises(ValueError):
+            evidence.at_read(missing, owned, [], T, economics=econ)
+        with self.assertRaises(ValueError):
+            evidence.at_read(raw, owned, [], T)
 
 
 if __name__=="__main__":

@@ -308,6 +308,7 @@ def economic_evidence(source, wallet, four, candidates, now, *,
     import json
     import urllib.error
     import kdd_economics as econ
+    import kdd_network_defi as onchain
     import serve
 
     try:
@@ -474,7 +475,8 @@ def economic_evidence(source, wallet, four, candidates, now, *,
                 continue
             cache_key = (ident.get("token"), ident.get("coppia"),
                          ident.get("pair_key"), ident.get("coingecko_id"))
-            previous_cache[cache_key] = {"identita": ident, "fondamentali": data}
+            previous_cache[cache_key] = {"identita": ident, "fondamentali": data,
+                                         "network_metadata": old.get("network_metadata")}
 
     unique_ids = sorted({row["identita"]["coingecko_id"] for group in items.values()
                          for row in group if row["identita"].get("coingecko_id")})
@@ -539,6 +541,13 @@ def economic_evidence(source, wallet, four, candidates, now, *,
                                 motivo=failures.get(cg, "RISPOSTA_NON_DISPONIBILE"))
                 else:
                     fund = fresh
+            # Reuse the exact /coins response already acquired by economics.
+            # Metadata is an index; neither chain custody nor contract authority.
+            previous_meta = previous_cache.get(cache_key, {}).get("network_metadata") if cg else None
+            metadata = onchain.coin_network_metadata(identity, cache.get(cg), now)
+            if metadata is None and onchain._metadata_valid(previous_meta, identity, now):
+                metadata = previous_meta
+            row["network_metadata"] = metadata
             row["fondamentali"] = fund
             repo_name = identity.get("repository_primario")
             row["evento"] = econ.release_event(identity, release_cache.get(repo_name), now, now)
@@ -557,7 +566,8 @@ def economic_evidence(source, wallet, four, candidates, now, *,
             if data.get("stato") == "VERIFICATO":
                 key = (identity.get("token"), identity.get("coppia"),
                        identity.get("pair_key"), identity.get("coingecko_id"))
-                public_cache[key] = {"identita": identity, "fondamentali": data}
+                public_cache[key] = {"identita": identity, "fondamentali": data,
+                                     "network_metadata": row.get("network_metadata")}
     dynamic_cache = [{"token": token, "coppia": pair, "risoluzione": record}
                      for (token, pair), record in sorted(previous_dynamic.items())][:100]
     btc = next((r for r in four_rows if isinstance(r, dict) and r.get("token") == "BTC"), {})
@@ -666,6 +676,7 @@ def collect(source=None, *, asset_pairs=None):
             asset_pairs = desk.kraken("AssetPairs")
         except (OSError, RuntimeError, TypeError, ValueError, KeyError):
             asset_pairs = {}
+    previous_dossier = {}
     try:
         previous_dossier = desk.load("dossier_multifonte.json", {})
         previous_economic = (previous_dossier or {}).get("evidenze_economiche")
@@ -698,7 +709,10 @@ def collect(source=None, *, asset_pairs=None):
             {"token": row.get("token"), "coppia_analisi": row.get("coppia_analisi")}
             for row in candidates if isinstance(row, dict)]
         network_defi = kdd_network_defi.collect(
-            now, holdings_for_sources, candidates_for_sources)
+            now, holdings_for_sources, candidates_for_sources,
+            economics=economic,
+            previous=(previous_dossier or {}).get("evidenze_rete_defi")
+            if isinstance(previous_dossier, dict) else None)
     dossier={
         "schema":3,"creato_utc":desk.NOW().isoformat(timespec="seconds"),
         "kraken_istantanea_utc":source["rilevazione_utc"],"eta_kraken_minuti_al_dossier":round(age,2),

@@ -751,7 +751,8 @@ def analytic_evidence(snapshot, dossier, positions, shortlist, now):
     import kdd_network_defi
     try:
         network_defi = kdd_network_defi.at_read(
-            dossier.get("evidenze_rete_defi"), positions, shortlist, now)
+            dossier.get("evidenze_rete_defi"), positions, shortlist, now,
+            economics=economic)
     except (ValueError, TypeError, KeyError, OverflowError) as exc:
         raise PacketError("Evidenza rete/DeFi non attribuibile") from exc
     return {"stato": "EVIDENZE_CON_LIMITI",
