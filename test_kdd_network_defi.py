@@ -472,5 +472,51 @@ class IdentityBoundNetworkTests(unittest.TestCase):
             with self.assertRaises(bridge.BridgeError):
                 bridge.read_context(modified,now=T)
 
+
+    def test_native_without_adapter_and_dynamic_proof_expiry_keep_every_asset(self):
+        import kdd_economics as economics
+        zec={
+            "token":"ZEC",
+            "identita":{
+                "stato":"IDENTITA_VERIFICATA_DA_CATALOGO",
+                "token":"ZEC","token_progetto":"ZEC",
+                "metodo":"KRAKEN_COINGECKO_MARKET",
+                "coingecko_id":"zcash","progetto":"Zcash",
+                "coppia":"ZEC/EUR","pair_key":"ZECEUR",
+                "asset_base_kraken":"ZEC",
+                "prova_mercato":{
+                    "exchange":"kraken","is_stale":False,"is_anomaly":False,
+                    "symbol":"ZEC","base":"ZEC","target":"EUR",
+                    "ricerca_url":economics.CG_SEARCH+"ZEC",
+                    "ticker_url":economics.CG+"zcash/tickers?exchange_ids=kraken",
+                    "verificato_utc":T.isoformat()}}}
+        rows=[self.row("ADA"),self.row("KAS"),zec]
+        raw=evidence.collect(T,rows,[],fetch=self.public)
+        self.assertEqual(raw["roster_posizioni"][2]["binding"]["stato"],
+                         "PROGETTO_DINAMICO_IDENTIFICATO")
+        viewed=evidence.at_read(raw,[{"token":x["token"]} for x in rows],[],T,
+                                economia={"posizioni":rows,"candidati":[]})
+        self.assertEqual(viewed["posizioni"][0]["onchain"]["stato"],
+                         "FONTE_PUBBLICA_NON_INTEGRATA")
+        self.assertEqual(viewed["posizioni"][0]["onchain"]["rete"],"cardano")
+        self.assertEqual(viewed["posizioni"][1]["onchain"]["rete"],"kaspa")
+        self.assertEqual(viewed["posizioni"][2]["onchain"]["stato"],
+                         "CHAIN_NON_ATTESTATA")
+        stale_rows=copy.deepcopy(rows)
+        stale_rows[2]["identita"]["stato"]="NON_VERIFICATO"
+        stale_rows[2]["identita"]["motivo"]="ATTESTAZIONE_IDENTITA_SCADUTA"
+        expired=evidence.at_read(raw,[{"token":x["token"]} for x in rows],[],
+                                 T+dt.timedelta(days=8),
+                                 economia={"posizioni":stale_rows,"candidati":[]})
+        self.assertEqual(len(expired["posizioni"]),3)
+        self.assertEqual(expired["posizioni"][2]["onchain"]["stato"],
+                         "CHAIN_NON_ATTESTATA")
+        poisoned=copy.deepcopy(stale_rows)
+        poisoned[2]["identita"]["coingecko_id"]="another-project"
+        with self.assertRaises(ValueError):
+            evidence.at_read(raw,[{"token":x["token"]} for x in rows],[],
+                             T+dt.timedelta(days=8),
+                             economia={"posizioni":poisoned,"candidati":[]})
+
 if __name__=="__main__":
     unittest.main()
