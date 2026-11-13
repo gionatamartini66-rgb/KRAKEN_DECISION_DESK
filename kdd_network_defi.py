@@ -479,9 +479,17 @@ def _asset_roster(economics, positions, candidates, moment):
                                     "TOKEN_CON_CONTRATTO" if contracts else "RETE_NON_DOCUMENTATA"),
                            "reti_possibili": networks,
                            "contratti_indicizzati": contracts,
+                           # CoinGecko is a candidate locator. An RPC response
+                           # cannot certify project ownership of the address.
+                           "ufficialita_contratto": "NON_ATTESTATA",
+                           "verifica_contratto_fonte_primaria": "NON_ESEGUITA",
+                           "rete_deposito_kraken": "NON_ATTESTATA",
                            "fonte_contratti": profile["fonte"] if profile else None,
                            "acquisito_metadati_utc": profile["acquisito_utc"] if profile else None,
-                           "limite": "Reti POSSIBILI del progetto, NON chain del saldo Kraken"})
+                           "limite": ("Indici CoinGecko di reti/contratti POSSIBILI. "
+                                      "La presenza di bytecode/supply su RPC NON certifica "
+                                      "che il contratto sia ufficiale del progetto, "
+                                      "ne attesta la rete di custodia Kraken.")})
         rows[name] = values
     return rows
 
@@ -552,7 +560,9 @@ def _probe_contract(chain, address, fetch, now):
     blank = {"rete": chain, "contratto": address, "fonte": url,
              "osservato_utc": None, "acquisito_utc": now.isoformat(timespec="seconds"),
              "stato": "NON_DISPONIBILE", "valori": None, "motivo": None,
-             "copertura": "Contratto/mint pubblico; NON movimenti, wallet o depositi Kraken"}
+             "copertura": "Contratto/mint pubblico; NON movimenti, wallet o depositi Kraken",
+             "ufficialita_contratto": "NON_ATTESTATA",
+             "verifica_contratto_fonte_primaria": "NON_ESEGUITA"}
     try:
         if chain == "solana":
             response = fetch(url, {"jsonrpc": "2.0", "id": 1, "method": "getTokenSupply",
@@ -610,7 +620,8 @@ def _collect_assets(now, positions, candidates, economic, previous, fetch):
             "contratti_esaminati": len(probes),
             "prossimo_contratto": ("|".join(contracts[(start+len(selected)) % len(contracts)])
                                   if contracts else None),
-            "limite": "Contratti da aggregatore e RPC pubblici, non prova che Kraken custodisca sulla stessa rete"}
+            "limite": ("Contratti possibili da aggregatore e risposte RPC pubbliche; "
+                       "nessuna attestazione primaria di contratto ufficiale o rete di custodia Kraken")}
 
 
 def _read_assets(raw, owned, candidates, economic, now):
