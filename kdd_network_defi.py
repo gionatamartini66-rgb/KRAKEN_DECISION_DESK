@@ -686,9 +686,9 @@ def _read_assets(raw, owned, candidates, economic, now):
         elif v is not None:
             raise ValueError("unavailable probe has metrics")
         fresh = dt.timedelta(minutes=-2) <= now-acquired <= dt.timedelta(minutes=30)
-        probes[key] = dict(item, stato=("OSSERVATO_CON_LIMITI" if fresh else
-                           "SCADUTO" if item["stato"] == "OSSERVATO" else
-                           "NON_DISPONIBILE"), valori=v if fresh else None)
+        probes[key] = dict(item, stato=("NON_DISPONIBILE" if item["stato"] != "OSSERVATO" else
+                           "OSSERVATO_CON_LIMITI" if fresh else "SCADUTO"),
+                           valori=v if fresh and item["stato"] == "OSSERVATO" else None)
     def interpret(rows):
         output = []
         for row in rows:
