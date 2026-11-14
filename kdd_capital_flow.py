@@ -22,7 +22,7 @@ ETH_EXPLORER = "https://eth.blockscout.com"
 HEX64 = re.compile(r"(?:0x)?[0-9a-fA-F]{64}\Z")
 EVM = re.compile(r"0x[0-9a-fA-F]{40}\Z")
 B58 = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,88}\Z")
-SUPPORTED = {"bitcoin", "ethereum", "bsc", "solana", "sui", "xrpl", "near"}
+SUPPORTED = {"bitcoin", "ethereum", "bsc", "solana", "sui", "xrpl", "near", "avalanche"}
 
 
 def _ts(value):
@@ -169,6 +169,116 @@ ETHPLORER = "https://api.ethplorer.io"
 BINPLORER = "https://api.binplorer.com"
 JUPITER_TOKENS = "https://api.jup.ag/tokens/v2/search?query="
 ETHPLORER_HISTORY_LIMIT = 20
+# Routescan keyless Data API: 2 req/s and 10,000/day. Only networks with
+# successful end-to-end public probes are activated here.
+ROUTESCAN = "https://api.routescan.io/v2/network/mainnet/evm/"
+ROUTESCAN_CHAINS = {"ethereum": "1", "avalanche": "43114"}
+
+
+def _routescan_urls(chain, contract):
+    chain_id = ROUTESCAN_CHAINS[chain]
+    base = ROUTESCAN + chain_id + "/"
+    transfers = (base + "erc20-transfers?tokenAddress=" + contract
+                 + "&sort=desc&limit=20")
+    holders = base + "erc20/" + contract + "/holders?limit=10"
+    return transfers, holders
+
+
+def _routescan_transfers(chain, contract, expected_decimals, fetch):
+    """Exact chain/contract and raw EVM units; secondary index, bounded page."""
+    url, _ = _routescan_urls(chain, contract)
+    data = fetch(url)
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list) or len(items) > 20:
+        raise ValueError("Routescan transfers unavailable or unbounded")
+    events = []
+    seen = set()
+    precision = expected_decimals
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if (str(item.get("chainId")) != ROUTESCAN_CHAINS[chain]
+                or str(item.get("tokenAddress", "")).lower() != contract.lower()):
+            continue
+        d = item.get("tokenDecimals")
+        if type(d) is not int or not 0 <= d <= 30:
+            continue
+        if precision is None:
+            precision = d
+        if d != precision:
+            continue
+        tx, origin, dest = item.get("txHash"), item.get("from"), item.get("to")
+        if not HEX64.fullmatch(str(tx)) or not EVM.fullmatch(str(origin)) or not EVM.fullmatch(str(dest)):
+            continue
+        try:
+            raw = _nat(item.get("amount"))
+            index = _nat(item.get("logIndex"))
+            block = _nat(item.get("blockNumber"))
+            when = _ts(item.get("timestamp")).isoformat()
+        except (ValueError, TypeError, OverflowError):
+            continue
+        key = (tx.lower(),index)
+        if key in seen:
+            continue
+        seen.add(key)
+        kind = ("MINT" if int(origin,16)==0 else "BURN" if int(dest,16)==0
+                else "TRASFERIMENTO")
+        events.append(_event(chain, contract, tx, index, raw, precision,
+                             url, block, when, origin, dest, kind))
+    return events, precision, url
+
+
+def _routescan_holders(chain, contract, decimals, previous, fetch):
+    """Bounded page of technical holder addresses, never economic owners."""
+    _, url = _routescan_urls(chain, contract)
+    data = fetch(url)
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list) or len(items)>MAX_HOLDERS:
+        raise ValueError("Routescan holders unavailable or unbounded")
+    old = {r["account"].lower(): int(r["unita_minima"])
+           for r in previous.get("detentori",[]) if isinstance(r,dict)
+           and isinstance(r.get("account"),str)
+           and isinstance(r.get("unita_minima"),str)
+           and r["unita_minima"].isdigit()}
+    holders=[]
+    for r in items:
+        if not isinstance(r,dict) or str(r.get("chainId"))!=ROUTESCAN_CHAINS[chain]:
+            continue
+        address=r.get("address")
+        if not EVM.fullmatch(str(address)):
+            continue
+        try:
+            raw=_nat(r.get("balance"))
+        except (ValueError,TypeError):
+            continue
+        prior=old.get(address.lower())
+        holders.append({"account":address,"unita_minima":str(raw),
+                        "decimali":decimals,
+                        "variazione_unita_minima":str(raw-prior) if prior is not None else None,
+                        "confronto_precedente_utc":previous.get("acquisito_utc") if prior is not None else None,
+                        "entita":{"stato":"ENTITA_NON_IDENTIFICATA"}})
+    return holders, url
+
+
+def _routescan_index(chain, contract, fetch, previous):
+    """Independent RPC-less route for a token on a verified indexed chain."""
+    events,decimals,source=_routescan_transfers(chain,contract,None,fetch)
+    if decimals is None:
+        raise ValueError("Routescan sample has no verified token precision")
+    holders=[]
+    holder_source=None
+    try:
+        holders,holder_source=_routescan_holders(chain,contract,decimals,previous,fetch)
+    except (OSError,ValueError,KeyError,TypeError,OverflowError):
+        pass
+    selected,total=_top(events)
+    return {"eventi":selected,"detentori":holders,"fonte_detentori":holder_source,
+            "elementi_esaminati":len(events),"eventi_distinti":total,
+            "periodo":{"tipo":"PAGINA_ROUTESCAN","catena":chain},
+            "copertura":"Routescan keyless: first indexed page, not complete transactions or owners.",
+            "fallback":"ROUTESCAN_INDEX"}
+
+
 
 
 def _ethplorer_history(contract, decimals, fetch, chain="ethereum"):
@@ -385,11 +495,18 @@ def _evm_token(chain, contract, url, fetch, native, previous):
                                      when, origin["hash"], dest["hash"], labels={
                                          "da": _tag(origin), "a": _tag(dest)}))
             fallback_label = "PAGINA_BLOCKSCOUT"
-        except (OSError, ValueError, KeyError, TypeError, OverflowError):
-            # Clear any incomplete page before switching indexes: no mix of
-            # sources or silent double counting.
-            events, source = _ethplorer_history(contract, decimals, fetch)
-            fallback_label = "PAGINA_ETHPLORER"
+        except (OSError, ValueError, KeyError, TypeError, OverflowError, AssertionError):
+            # Shared Blockscout may return 403. Prefer an independently
+            # verified chain-bound Routescan page over generic ticker indexes.
+            try:
+                events, checked_decimals, source = _routescan_transfers(
+                    chain, contract, decimals, fetch)
+                if checked_decimals != decimals:
+                    raise ValueError("Routescan precision mismatch")
+                fallback_label = "PAGINA_ROUTESCAN"
+            except (OSError, ValueError, KeyError, TypeError, OverflowError, AssertionError):
+                events, source = _ethplorer_history(contract, decimals, fetch)
+                fallback_label = "PAGINA_ETHPLORER"
     # Even when RPC Transfer logs work, the independent indexed page may
     # carry PUBLIC actor tags. Match tx+from+to+amount exactly: explorer
     # metadata may enrich attribution, but cannot replace an RPC fact.
@@ -453,11 +570,15 @@ def _evm_token(chain, contract, url, fetch, native, previous):
                                     "confronto_precedente_utc": previous.get("acquisito_utc") if before is not None else None,
                                     "entita": _tag(addr)})
             holders_source = h_url
-        except (OSError, ValueError, KeyError, TypeError, OverflowError):
+        except (OSError, ValueError, KeyError, TypeError, OverflowError, AssertionError):
             try:
-                holders, holders_source = _ethplorer_holders(contract, decimals, previous, fetch)
-            except (OSError, ValueError, KeyError, TypeError, OverflowError):
-                holders, holders_source = [], None
+                holders, holders_source = _routescan_holders(
+                    chain, contract, decimals, previous, fetch)
+            except (OSError, ValueError, KeyError, TypeError, OverflowError, AssertionError):
+                try:
+                    holders, holders_source = _ethplorer_holders(contract, decimals, previous, fetch)
+                except (OSError, ValueError, KeyError, TypeError, OverflowError):
+                    holders, holders_source = [], None
     selected,total = _top(events)
     return {"eventi": selected, "detentori": holders, "fonte_detentori": holders_source,
             "elementi_esaminati": len(events), "eventi_distinti": total,
@@ -759,7 +880,7 @@ def _targets(assets):
                     items[(chain,"NATIVE")]=True
             for indexed in row.get("contratti_indicizzati",[]):
                 chain=indexed["rete"]; addr=indexed["contratto"]
-                if chain in ("ethereum","bsc","solana"):
+                if chain in ("ethereum","bsc","solana","avalanche"):
                     items[(chain,addr)]=True
     return sorted(items)
 
@@ -767,6 +888,8 @@ def _targets(assets):
 def _probe(key, assets, fetch, previous):
     import kdd_network_defi as net
     chain,contract=key
+    if chain == "avalanche" and contract != "NATIVE":
+        return _routescan_index(chain, contract, fetch, previous)
     url = (net.CONTRACT_ENDPOINTS[chain] if contract!="NATIVE" else
            net.NATIVE_ENDPOINTS.get(chain,net.SOL_URL if chain=="solana" else net.SUI_URL))
     native = assets.get("fonti_native",{}).get(chain)
@@ -922,11 +1045,13 @@ def at_read(raw, asset_rows, economics, now):
                              + "?apiKey=freekey&limit=" + str(ETHPLORER_HISTORY_LIMIT))
             binplorer_url = (BINPLORER + "/getTokenHistory/" + key[1]
                              + "?apiKey=freekey&limit=" + str(ETHPLORER_HISTORY_LIMIT))
+            routescan_url = _routescan_urls(key[0],key[1])[0] if key[0] in ROUTESCAN_CHAINS and key[1]!="NATIVE" else None
             if ev["fonte"] != expected and not (key[0]=="bitcoin" and
                 ev["fonte"].startswith(block_prefix) and ev["fonte"].endswith("/txs")) and not (
                 key[0]=="ethereum" and key[1]!="NATIVE" and
                 ev["fonte"] in (indexed_url, ethplorer_url)) and not (
-                key[0]=="bsc" and key[1]!="NATIVE" and ev["fonte"]==binplorer_url):
+                key[0]=="bsc" and key[1]!="NATIVE" and ev["fonte"]==binplorer_url) and not (
+                key[0] in ROUTESCAN_CHAINS and key[1]!="NATIVE" and ev["fonte"]==routescan_url):
                 raise ValueError("event source incompatible with chain/contract")
             labels=ev.get("attribuzione")
             if not isinstance(labels,dict) or set(labels)!={"da","a"}:
@@ -963,7 +1088,7 @@ def at_read(raw, asset_rows, economics, now):
             if n and n[0]==row["token"] and n[1] in SUPPORTED:
                 refs.append((n[1],"NATIVE"))
             refs.extend((c["rete"],c["contratto"]) for c in row["contratti_indicizzati"]
-                        if c["rete"] in ("ethereum","bsc","solana"))
+                        if c["rete"] in ("ethereum","bsc","solana","avalanche"))
             observations=[]
             fundamentals=econ.get("fondamentali") if isinstance(econ,dict) else {}
             supply=fundamentals.get("offerta_circolante") if isinstance(fundamentals,dict) else None
