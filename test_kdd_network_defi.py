@@ -1227,6 +1227,25 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         self.assertTrue(any(chain=="ethereum" for chain,_ in observed))
         self.assertEqual(len(final[1]["asset_reti"]["flussi_capitale"]["posizioni"]),10)
         self.assertEqual(len(final[1]["asset_reti"]["flussi_capitale"]["candidati"]),1)
+        # Exit and re-entry: obsolete contracts disappear from target selection,
+        # without erasing the possibility of later public re-observation.
+        all_rows=final[1]["asset_reti"]
+        without_aave={"posizioni":[r for r in all_rows["posizioni"] if r["token"]!="AAVE"],
+                      "candidati":all_rows["candidati"],"fonti_native":{}}
+        departed=cap.collect(T+dt.timedelta(minutes=4),without_aave,
+                             {"posizioni":[{}]*9,"candidati":[{}]},
+                             final[0]["asset_reti"]["flussi_capitale"],fetch)
+        self.assertNotIn(("ethereum",platforms["AAVE"]["ethereum"]),
+                         cap._targets(without_aave))
+        self.assertEqual(departed["target_totali"],
+                         final[0]["asset_reti"]["flussi_capitale"]["target_totali"]-1)
+        returned=cap.collect(T+dt.timedelta(minutes=5),all_rows,
+                             {"posizioni":[{}]*10,"candidati":[{}]},
+                             departed,fetch)
+        self.assertIn(("ethereum",platforms["AAVE"]["ethereum"]),
+                      cap._targets(all_rows))
+        self.assertEqual(returned["target_totali"],
+                         final[0]["asset_reti"]["flussi_capitale"]["target_totali"])
         for r in final[1]["asset_reti"]["flussi_capitale"]["posizioni"]:
             self.assertEqual(r["contratto_ufficiale"],"NON_ATTESTATO")
 
@@ -1260,6 +1279,12 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         fixture.dump()
         prepared=packet.build(fixture.root,now=instant)
         self.assertEqual([r["token"] for r in prepared["patrimonio"]["posizioni"]],tokens)
+        for position in prepared["patrimonio"]["posizioni"]:
+            spot=position["mercato_spot_kraken"]
+            self.assertEqual(spot["coppia"],position["token"]+"/EUR")
+            self.assertEqual(spot["volume_24h_eur_stimato"],"1000000.0")
+            self.assertEqual(spot["spread_pct"],"0.4")
+            self.assertEqual(spot["book"],"NON_ACQUISITO_PER_QUESTA_COPPIA")
         self.assertEqual(len(prepared["evidenze_multifonte"]["rete_defi"]
                              ["asset_reti"]["flussi_capitale"]["posizioni"]),10)
         bundle={"schema":bridge.SCHEMA_BUNDLE,"packet":prepared,
@@ -1268,6 +1293,9 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         flow=result["rete_defi_alla_lettura"]["asset_reti"]["flussi_capitale"]
         self.assertEqual([r["token"] for r in flow["posizioni"]],tokens)
         self.assertEqual(flow["candidati"][0]["token"],"CAKE")
+        self.assertTrue(all(r.get("mercato_spot_kraken",{}).get("stato") ==
+                            "DISPONIBILE_ALLO_SNAPSHOT"
+                            for r in result["patrimonio"]["posizioni"]))
         self.assertTrue(any(s["stato"]=="OSSERVATO_CON_LIMITI"
                             for r in flow["posizioni"] for s in r["osservazioni"]))
         self.assertTrue(all(r["token"] in fixture.snapshot["markets"]
