@@ -22,7 +22,7 @@ ETH_EXPLORER = "https://eth.blockscout.com"
 HEX64 = re.compile(r"(?:0x)?[0-9a-fA-F]{64}\Z")
 EVM = re.compile(r"0x[0-9a-fA-F]{40}\Z")
 B58 = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,88}\Z")
-SUPPORTED = {"bitcoin", "ethereum", "bsc", "solana", "sui", "xrpl", "near", "avalanche"}
+SUPPORTED = {"bitcoin", "ethereum", "bsc", "solana", "sui", "xrpl", "near", "avalanche", "optimism"}
 
 
 def _ts(value):
@@ -438,7 +438,7 @@ def _evm_token(chain, contract, url, fetch, native, previous):
     if not isinstance(head, dict):
         # A new BSC contract does not require BNB to be held or its native
         # header to happen to fall within the upstream five-chain budget.
-        if chain!="bsc":
+        if chain not in ("bsc","optimism"):
             raise ValueError("EVM head unavailable")
         head={"altezza_blocco":_hex(_rpc(fetch,url,"eth_blockNumber",[]))}
     height = _nat(head["altezza_blocco"])
@@ -1033,7 +1033,7 @@ def _targets(assets):
                     items[(chain,"NATIVE")]=True
             for indexed in row.get("contratti_indicizzati",[]):
                 chain=indexed["rete"]; addr=indexed["contratto"]
-                if chain in ("ethereum","bsc","solana","avalanche"):
+                if chain in ("ethereum","bsc","solana","avalanche","optimism"):
                     items[(chain,addr)]=True
     return sorted(items)
 
@@ -1046,7 +1046,7 @@ def _probe(key, assets, fetch, previous):
     url = (net.CONTRACT_ENDPOINTS[chain] if contract!="NATIVE" else
            net.NATIVE_ENDPOINTS.get(chain,net.SOL_URL if chain=="solana" else net.SUI_URL))
     native = assets.get("fonti_native",{}).get(chain)
-    if chain in ("ethereum","bsc","avalanche"):
+    if chain in ("ethereum","bsc","avalanche","optimism"):
         return (_evm_native(chain,url,fetch,native) if contract=="NATIVE" else
                 _evm_token(chain,contract,url,fetch,native,previous))
     if chain=="solana":
@@ -1244,7 +1244,7 @@ def at_read(raw, asset_rows, economics, now):
             if n and n[0]==row["token"] and n[1] in SUPPORTED:
                 refs.append((n[1],"NATIVE"))
             refs.extend((c["rete"],c["contratto"]) for c in row["contratti_indicizzati"]
-                        if c["rete"] in ("ethereum","bsc","solana","avalanche"))
+                        if c["rete"] in ("ethereum","bsc","solana","avalanche","optimism"))
             observations=[]
             fundamentals=econ.get("fondamentali") if isinstance(econ,dict) else {}
             supply=fundamentals.get("offerta_circolante") if isinstance(fundamentals,dict) else None
