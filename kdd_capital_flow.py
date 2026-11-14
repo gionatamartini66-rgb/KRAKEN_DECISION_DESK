@@ -84,6 +84,10 @@ def _tag(address):
                               ("fund","FONDO"), ("treasury","TESORERIA"),
                               ("protocol","PROTOCOLLO"), ("market maker","MARKET_MAKER"))
                              if word in category_hint.lower()), None)
+            if category is None and re.search(
+                    r"\\b(?:binance|coinbase|kraken|bitfinex|okx|bybit|kucoin|bitstamp|bitget|gate\\.io)\\b",
+                    category_hint, re.I):
+                category = "EXCHANGE"
             if category:
                 return {"stato": "ETICHETTA_PUBBLICA", "classe": category,
                         "etichetta": value, "fonte": ETH_EXPLORER + "/api/v2/"}
@@ -803,7 +807,8 @@ def at_read(raw, asset_rows, economics, now):
                           "movimenti_interni_unita_minima":0,"eventi_ingresso":0,
                           "eventi_uscita":0,"eventi_interni":0}
                 for event in events:
-                    if event.get("tipo")!="TRASFERIMENTO":
+                    if (event.get("stato_alla_lettura")!="CAMPIONE_RECENTE"
+                            or event.get("tipo")!="TRASFERIMENTO"):
                         continue
                     labels=event.get("attribuzione") or {}
                     left=labels.get("da") or {}
@@ -820,7 +825,7 @@ def at_read(raw, asset_rows, economics, now):
                         if outgoing:
                             exchange["uscita_unita_minima"]+=int(event["unita_minima"])
                             exchange["eventi_uscita"]+=1
-                recognized=sum(1 for ev in events
+                recognized=sum(1 for ev in events if ev.get("stato_alla_lettura")=="CAMPIONE_RECENTE"
                                if any(v.get("stato")=="ETICHETTA_PUBBLICA"
                                       for v in (ev.get("attribuzione") or {}).values()
                                       if isinstance(v,dict)))
