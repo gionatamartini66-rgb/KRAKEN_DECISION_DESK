@@ -966,6 +966,78 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         self.assertEqual(next(s for s in raw["sonde"] if s["rete"]=="sui")
                          ["eventi"][0]["tipo"],"VARIAZIONE_NETTA_SALDO_NON_TRASFERIMENTO")
 
+    def test_optimism_dynamic_erc20_public_rpc_family(self):
+        import kdd_capital_flow as cap
+        import kdd_network_defi as net
+        addr=self.EVM_ADDR
+        token={"token":"NEW","progetto_id":"fresh-asset",
+               "contratti_indicizzati":[{"rete":"optimism","contratto":addr}]}
+        a={"posizioni":[token],"candidati":[],"fonti_native":{}}
+        called=[]
+        def fetch(url,payload=None):
+            self.assertEqual(url,net.CONTRACT_ENDPOINTS["optimism"])
+            method=payload["method"];called.append(method)
+            if method=="eth_blockNumber":return {"id":1,"result":hex(200)}
+            if method=="eth_call":return {"id":1,"result":"0x6"}
+            if method=="eth_getLogs":
+                data=payload["params"][0]
+                self.assertEqual(data["address"],addr)
+                self.assertEqual(data["toBlock"],hex(194))
+                topic=lambda x:"0x"+"0"*24+x[2:]
+                return {"id":1,"result":[{"address":addr,
+                    "transactionHash":"0x"+"a"*64,"blockNumber":hex(190),
+                    "logIndex":"0x0","removed":False,
+                    "topics":[cap.TOPIC_TRANSFER,topic(self.EVM_FROM),topic(self.EVM_TO)],
+                    "data":"0x"+format(1234567,"064x")}]}
+            raise AssertionError(method)
+        raw=cap.collect(T,a,{"posizioni":[{}],"candidati":[]},None,fetch)
+        self.assertEqual(raw["sonde"][0]["stato"],"OSSERVATO")
+        self.assertEqual(raw["richieste_effettuate"],3)
+        self.assertEqual(called,["eth_blockNumber","eth_call","eth_getLogs"])
+        seen=cap.at_read(raw,a,{"posizioni":[{}],"candidati":[]},T)
+        self.assertEqual(seen["posizioni"][0]["osservazioni"][0]["eventi"][0]["quantita"],"1.234567")
+        self.assertEqual(seen["posizioni"][0]["osservazioni"][0]["eventi"][0]["fonte"],net.CONTRACT_ENDPOINTS["optimism"])
+        ident=Kdd17AssetIdentityG2Tests.ident("PEPE")
+        profile=net.coin_network_metadata(ident,{"id":"pepe","symbol":"pepe","name":"Pepe",
+                       "platforms":{"optimistic-ethereum":addr}},T)
+        self.assertEqual(profile["contratti"][0]["rete"],"optimism")
+
+    def test_native_sol_system_transfer_when_largest_rpc_throttled(self):
+        import kdd_capital_flow as cap
+        import kdd_network_defi as net
+        assets={"posizioni":[{"token":"SOL","progetto_id":"solana",
+                               "contratti_indicizzati":[]}],
+                "candidati":[],"fonti_native":{}}
+        called=[]
+        def fetch(url,payload=None):
+            if url==net.SOL_URL:raise OSError("shared Solana RPC429")
+            self.assertEqual(url,cap.SOLANA_ALT_RPC)
+            method=payload["method"];called.append(method)
+            if method=="getSignaturesForAddress":
+                self.assertEqual(payload["params"][0],"1"*32)
+                return {"id":1,"result":[{"signature":"F"*64,"err":None}]}
+            if method=="getTransaction":
+                self.assertEqual(payload["params"][1]["maxSupportedTransactionVersion"],1)
+                return {"id":1,"result":{"slot":777,
+                    "blockTime":int(T.timestamp()),"meta":{"err":None,
+                    "innerInstructions":[]},"transaction":{"message":{
+                    "instructions":[{"program":"system","parsed":{
+                    "type":"transfer","info":{"lamports":1500000000,
+                    "source":"B"*32,"destination":"D"*32}}},
+                    {"program":"spl-token","parsed":{"type":"transfer","info":{
+                    "lamports":1000000000,"source":"B"*32,"destination":"D"*32}}}]}}}}
+            raise AssertionError(method)
+        raw=cap.collect(T,assets,{"posizioni":[{}],"candidati":[]},None,fetch)
+        record=raw["sonde"][0]
+        self.assertEqual(record["stato"],"OSSERVATO")
+        self.assertEqual(raw["richieste_effettuate"],3)
+        self.assertEqual(called,["getSignaturesForAddress","getTransaction"])
+        self.assertEqual(record["eventi"][0]["quantita"],"1.5")
+        self.assertEqual(len(record["eventi"]),1)
+        read=cap.at_read(raw,assets,{"posizioni":[{}],"candidati":[]},T)
+        self.assertEqual(read["posizioni"][0]["osservazioni"][0]["eventi"][0]["fonte"],
+                         cap.SOLANA_ALT_RPC)
+
     def test_near_final_shard_skips_empty_tx_root_and_rotates(self):
         import kdd_capital_flow as cap
         calls=[]
