@@ -966,6 +966,67 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         self.assertEqual(next(s for s in raw["sonde"] if s["rete"]=="sui")
                          ["eventi"][0]["tipo"],"VARIAZIONE_NETTA_SALDO_NON_TRASFERIMENTO")
 
+    def test_bsc_goplus_free_holder_fallback_after_429_and_rpc_logs_limit(self):
+        import kdd_capital_flow as cap
+        import kdd_network_defi as net
+        asset={"posizioni":[{"token":"BSCNEW","progetto_id":"new",
+                             "contratti_indicizzati":[{"rete":"bsc","contratto":self.EVM_ADDR}]}],
+               "candidati":[],"fonti_native":{}}
+        holder=self.EVM_FROM
+        def fetch(url,payload=None):
+            if url.startswith(cap.BINPLORER):
+                raise OSError("HTTP429")
+            if url.startswith(cap.GOPLUS_BSC):
+                return {"code":1,"message":"OK","result":{self.EVM_ADDR.lower():{
+                    "holder_count":"500000","holders":[{"address":holder,
+                    "balance":"1.250000000000000000","tag":"Exchange Public Label"}]}}}
+            if url==net.CONTRACT_ENDPOINTS["bsc"]:
+                method=payload["method"]
+                if method=="eth_blockNumber":return {"id":1,"result":hex(1000)}
+                if method=="eth_call":return {"id":1,"result":"0x12"}
+                if method=="eth_getLogs":return {"id":1,"error":{"code":-32005,"message":"limit exceeded"}}
+            raise AssertionError(url)
+        raw=cap.collect(T,asset,{"posizioni":[{}],"candidati":[]},None,fetch)
+        self.assertEqual(raw["richieste_effettuate"],6)
+        record=raw["sonde"][0]
+        self.assertEqual(record["stato"],"OSSERVATO")
+        self.assertEqual(record["eventi"],[])
+        self.assertEqual(record["detentori"][0]["unita_minima"],"1250000000000000000")
+        self.assertEqual(record["aggregato_detentori"]["numero_account"],500000)
+        self.assertEqual(record["detentori"][0]["entita"]["fonte"],
+                         cap.GOPLUS_BSC+"?contract_addresses="+self.EVM_ADDR)
+        read=cap.at_read(raw,asset,{"posizioni":[{}],"candidati":[]},T)
+        observed=read["posizioni"][0]["osservazioni"][0]
+        self.assertEqual(observed["stato"],"OSSERVATO_CON_LIMITI")
+        self.assertEqual(observed["flussi_exchange_campione"]["stato"],
+                         "NON_ATTRIBUIBILE_O_STORICO")
+        self.assertIsNone(observed["flussi_exchange_campione"]["ingresso_unita_minima"])
+
+    def test_second_solana_mint_signature_only_when_first_unrelated(self):
+        import kdd_capital_flow as cap
+        methods=[]
+        def fetch(url,payload=None):
+            self.assertEqual(url,cap.SOLANA_ALT_RPC)
+            method=payload["method"]
+            methods.append(method)
+            if method=="getSignaturesForAddress":
+                return {"id":1,"result":[{"signature":"E"*64,"err":None},
+                                          {"signature":"F"*64,"err":None}]}
+            if method=="getTransaction":
+                is_last=payload["params"][0]=="F"*64
+                return {"id":1,"result":{"slot":100,
+                        "blockTime":int(T.timestamp()),"meta":{"err":None,
+                        "innerInstructions":[]},"transaction":{"message":{"instructions":[{
+                        "parsed":{"type":"transferChecked","info":{
+                         "mint":self.MINT if is_last else "Z"*32,
+                         "source":self.HOLDER,"destination":"D"*32,
+                         "tokenAmount":{"amount":"7500000","decimals":6}}}}]}}}}
+            raise AssertionError(method)
+        result=cap._solana_recent_mint_transfer(self.MINT,fetch)
+        self.assertEqual(methods,["getSignaturesForAddress","getTransaction","getTransaction"])
+        self.assertEqual(result["eventi"][0]["quantita"],"7.5")
+        self.assertEqual(result["eventi_distinti"],1)
+
     def test_optimism_dynamic_erc20_public_rpc_family(self):
         import kdd_capital_flow as cap
         import kdd_network_defi as net
