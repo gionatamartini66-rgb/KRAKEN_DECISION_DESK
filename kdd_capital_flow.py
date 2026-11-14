@@ -1036,7 +1036,9 @@ def at_read(raw, asset_rows, economics, now):
                     or not isinstance(ev.get("fonte"),str)):
                 raise ValueError("capital event amount/source invalid")
             import kdd_network_defi as net
-            expected = (net.CONTRACT_ENDPOINTS[key[0]] if key[1]!="NATIVE"
+            expected = (_routescan_urls(key[0],key[1])[0]
+                        if key[0]=="avalanche" and key[1]!="NATIVE"
+                        else net.CONTRACT_ENDPOINTS[key[0]] if key[1]!="NATIVE"
                         else net.NATIVE_ENDPOINTS.get(key[0],
                             net.SOL_URL if key[0]=="solana" else net.SUI_URL))
             indexed_url = ETH_EXPLORER + "/api/v2/tokens/" + key[1] + "/transfers"
