@@ -357,7 +357,8 @@ NATIVE_IDS = {
     "sui": ("SUI", "sui"), "avalanche-2": ("AVAX", "avalanche"),
 }
 PLATFORM_CHAINS = {"ethereum": "ethereum", "binance-smart-chain": "bsc",
-                   "solana": "solana", "avalanche": "avalanche"}
+                   "solana": "solana", "avalanche": "avalanche",
+                   "optimistic-ethereum": "optimism"}
 # Avalanche token index is acquired by a verified free Routescan page;
 # no Avalanche RPC contract supply probe is implied or required.
 # Public endpoint/reference specifications (responses never authenticated by TLS alone):
@@ -376,7 +377,8 @@ NATIVE_ENDPOINTS = {
     "xrpl": "https://s1.ripple.com:51234",
 }
 CONTRACT_ENDPOINTS = {"ethereum": NATIVE_ENDPOINTS["ethereum"],
-                      "bsc": NATIVE_ENDPOINTS["bsc"], "solana": SOL_URL}
+                      "bsc": NATIVE_ENDPOINTS["bsc"], "solana": SOL_URL,
+                      "optimism": "https://mainnet.optimism.io"}
 EVM_ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}\Z")
 SOL_MINT = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,44}\Z")
 CG_DETAILS = "https://api.coingecko.com/api/v3/coins/"
@@ -408,7 +410,7 @@ def _supply_integer(value):
 
 def _contract_address(chain, address):
     return (isinstance(address, str) and
-            bool((EVM_ADDRESS if chain in ("ethereum", "bsc", "avalanche")
+            bool((EVM_ADDRESS if chain in ("ethereum", "bsc", "avalanche", "optimism")
                   else SOL_MINT if chain == "solana"
                   else re.compile(r"(?!)")).fullmatch(address)))
 
