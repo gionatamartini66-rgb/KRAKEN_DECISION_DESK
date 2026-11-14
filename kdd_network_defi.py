@@ -9,6 +9,8 @@ import datetime as dt
 from decimal import Decimal, InvalidOperation
 import json
 import re
+import threading
+import time
 import urllib.request
 
 UTC = dt.timezone.utc
@@ -25,6 +27,11 @@ SOURCES = {"sui": SUI_URL, "solana": SOL_URL, "chain_tvl": CHAIN_URL,
 KEYS = ("sui", "solana", "chain_tvl", "dex_sui")
 SYMBOL = re.compile(r"[A-Z0-9][A-Z0-9._-]{0,19}\Z")
 MAX_RESPONSE = 2_000_000
+# RpcNode public Ethereum: 1 request/second/IP, shared best-effort service.
+# https://rpcnode.dev/public-nodes (no API key; HTTP 429 on excess)
+ETH_PUBLIC_RPC = "https://public-ethereum-mainnet.rpcnode.dev"
+_ETH_RPC_LOCK = threading.Lock()
+_ETH_RPC_NEXT_AT = 0.0
 
 
 def _now(value):
@@ -70,6 +77,16 @@ def _http(url, payload=None):
         url, data=(json.dumps(payload).encode("utf-8") if payload is not None else None),
         headers={"Accept": "application/json", "Content-Type": "application/json"},
         method="POST" if payload is not None else "GET")
+    if url == ETH_PUBLIC_RPC:
+        # Enforce public-provider fair use across native and ERC-20 calls in
+        # this process. Another process/IP user may still trigger HTTP 429;
+        # preserve fail-closed errors rather than retrying or hiding them.
+        global _ETH_RPC_NEXT_AT
+        with _ETH_RPC_LOCK:
+            pause = _ETH_RPC_NEXT_AT - time.monotonic()
+            if pause > 0:
+                time.sleep(pause)
+            _ETH_RPC_NEXT_AT = time.monotonic() + 1.05
     with urllib.request.urlopen(request, timeout=9) as response:
         if response.geturl() != url:
             raise ValueError("public source redirect rejected")
@@ -340,7 +357,7 @@ PLATFORM_CHAINS = {"ethereum": "ethereum", "binance-smart-chain": "bsc",
 # NEAR: https://docs.near.org/api/rpc/block
 NATIVE_ENDPOINTS = {
     "bitcoin": "https://blockstream.info/api/blocks",
-    "ethereum": "https://ethereum-rpc.publicnode.com",
+    "ethereum": ETH_PUBLIC_RPC,
     "bsc": "https://bsc-dataseed.bnbchain.org",
     "near": "https://rpc.mainnet.near.org",
     "xrpl": "https://s1.ripple.com:51234",
@@ -534,15 +551,31 @@ def _native_observe(chain, fetch, now):
         else:
             response = fetch(url, {"jsonrpc": "2.0", "id": 1, "method": "ledger",
                                    "params": [{"ledger_index": "validated", "transactions": False}]})
-            result = response.get("result") if isinstance(response, dict) and response.get("id") == 1 and not response.get("error") else None
+            # XRPL HTTP JSON-RPC can omit the response id; if supplied it
+            # must still match our request. A successful result is not proof
+            # of finality unless the server explicitly marks it validated.
+            result = (response.get("result") if isinstance(response, dict)
+                      and response.get("id", 1) == 1 and not response.get("error")
+                      else None)
             ledger = result.get("ledger") if isinstance(result, dict) else None
-            if not isinstance(ledger, dict) or result.get("status") != "success":
+            if (not isinstance(ledger, dict) or result.get("validated") is not True
+                    or ledger.get("closed") is False
+                    or response.get("status") not in (None, "success")
+                    or result.get("status") not in (None, "success")
+                    or not (response.get("status") == "success"
+                            or result.get("status") == "success")):
                 raise ValueError("XRP validated ledger invalid")
-            ts = _timestamp(ledger.get("close_time_iso"))
-            values = {"indice_ledger": _integer(result.get("ledger_index")),
-                      "ledger_hash": ledger.get("ledger_hash")}
-            if not isinstance(values["ledger_hash"], str) or not re.fullmatch(r"[A-F0-9]{64}", values["ledger_hash"]):
+            index = _integer(result.get("ledger_index"))
+            if (ledger.get("ledger_index") is not None
+                    and _integer(ledger["ledger_index"]) != index):
+                raise ValueError("XRP ledger index mismatch")
+            ledger_hash = ledger.get("ledger_hash")
+            if not isinstance(ledger_hash, str) or not re.fullmatch(r"[A-F0-9]{64}", ledger_hash):
                 raise ValueError("XRP ledger hash invalid")
+            if result.get("ledger_hash") is not None and result["ledger_hash"] != ledger_hash:
+                raise ValueError("XRP ledger hash mismatch")
+            ts = _timestamp(ledger.get("close_time_iso"))
+            values = {"indice_ledger": index, "ledger_hash": ledger_hash}
             unit = "indice di ledger validato"
         if ts > now + dt.timedelta(minutes=2):
             raise ValueError("future block/ledger")

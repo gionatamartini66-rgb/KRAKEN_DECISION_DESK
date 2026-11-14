@@ -328,11 +328,132 @@ class Kdd17AssetIdentityG2Tests(unittest.TestCase):
                 "height": 198000000, "timestamp_nanosec": str(int(T.timestamp()) * 10**9),
                 "hash": "b" * 44}}}
         if url == evidence.NATIVE_ENDPOINTS["xrpl"]:
-            return {"jsonrpc": "2.0", "id": 1, "result": {
-                "status": "success", "ledger_index": 100000000,
+            return {"jsonrpc": "2.0", "status": "success", "result": {
+                "validated": True, "ledger_index": 100000000,
+                "ledger_hash": "C" * 64,
                 "ledger": {"close_time_iso": T.isoformat(),
+                           "ledger_index": "100000000", "closed": True,
                            "ledger_hash": "C" * 64}}}
         raise AssertionError("unexpected public request: " + url)
+
+    def test_ethereum_verified_public_rpc_endpoint_and_ip_rate_limit(self):
+        """Samsung-selected provider: shared 1rps/IP must include ERC-20 probes."""
+        endpoint = "https://public-ethereum-mainnet.rpcnode.dev"
+        self.assertEqual(evidence.NATIVE_ENDPOINTS["ethereum"], endpoint)
+        self.assertEqual(evidence.CONTRACT_ENDPOINTS["ethereum"], endpoint)
+        self.assertNotIn("ethereum-rpc.publicnode.com", evidence.NATIVE_ENDPOINTS.values())
+        clock = [100.0]
+        waits, requests = [], []
+
+        class Response:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def geturl(self):
+                return endpoint
+            def read(self, limit):
+                return b'{"jsonrpc":"2.0","id":1,"result":"0x60806040"}'
+
+        def sleep(seconds):
+            waits.append(seconds)
+            clock[0] += seconds
+
+        def urlopen(req, timeout):
+            requests.append((req.full_url, req.get_method(), timeout))
+            return Response()
+
+        payloads = [
+            {"jsonrpc": "2.0", "id": 1, "method": "eth_getBlockByNumber",
+             "params": ["latest", False]},
+            {"jsonrpc": "2.0", "id": 1, "method": "eth_getCode",
+             "params": [self.ETH, "latest"]},
+            {"jsonrpc": "2.0", "id": 1, "method": "eth_call",
+             "params": [{"to": self.ETH, "data": "0x18160ddd"}, "latest"]},
+        ]
+        with (mock.patch.object(evidence, "_ETH_RPC_NEXT_AT", 0.0),
+              mock.patch.object(evidence.time, "monotonic", side_effect=lambda: clock[0]),
+              mock.patch.object(evidence.time, "sleep", side_effect=sleep),
+              mock.patch.object(evidence.urllib.request, "urlopen", side_effect=urlopen)):
+            for payload in payloads:
+                result = evidence._http(endpoint, payload)
+                self.assertEqual(result["id"], 1)
+        self.assertEqual(requests, [(endpoint, "POST", 9)] * 3)
+        self.assertEqual(len(waits), 2)
+        self.assertTrue(all(seconds >= 1.0 for seconds in waits))
+
+    def test_xrpl_validated_response_without_id_and_fail_closed_variants(self):
+        """Actual HTTP shape lacks id: finality still requires validated=true."""
+        response = {
+            "status": "success", "type": "response",
+            "result": {
+                "ledger_index": 100000000, "ledger_hash": "C" * 64,
+                "validated": True,
+                "ledger": {"ledger_index": "100000000", "ledger_hash": "C" * 64,
+                           "close_time_iso": T.isoformat(), "closed": True},
+            },
+        }
+        def observe(value):
+            return evidence._native_observe("xrpl", lambda url, payload: copy.deepcopy(value), T)
+        success = observe(response)
+        self.assertEqual(success["stato"], "OSSERVATO")
+        self.assertEqual(success["valori"]["indice_ledger"], 100000000)
+        self.assertEqual(success["valori"]["ledger_hash"], "C" * 64)
+        self.assertEqual(success["osservato_utc"], T.isoformat())
+        # A correctly echoed id still works; a mismatched id must fail closed.
+        with_id = copy.deepcopy(response)
+        with_id["id"] = 1
+        self.assertEqual(observe(with_id)["stato"], "OSSERVATO")
+        # Preserve the older id+result.status dialect as well.
+        old_style = copy.deepcopy(with_id)
+        old_style.pop("status")
+        old_style["result"]["status"] = "success"
+        self.assertEqual(observe(old_style)["stato"], "OSSERVATO")
+        cases = []
+        for mutation in ("missing_validated", "not_validated", "numeric_validated",
+                         "wrong_id", "bad_status", "index_mismatch", "hash_mismatch",
+                         "bad_hash", "bad_timestamp", "open_ledger", "future_ledger"):
+            damaged = copy.deepcopy(response)
+            if mutation == "missing_validated":
+                del damaged["result"]["validated"]
+            elif mutation == "not_validated":
+                damaged["result"]["validated"] = False
+            elif mutation == "numeric_validated":
+                damaged["result"]["validated"] = 1
+            elif mutation == "wrong_id":
+                damaged["id"] = 5
+            elif mutation == "bad_status":
+                damaged["status"] = "error"
+            elif mutation == "index_mismatch":
+                damaged["result"]["ledger"]["ledger_index"] = "99999999"
+            elif mutation == "hash_mismatch":
+                damaged["result"]["ledger_hash"] = "D" * 64
+            elif mutation == "bad_hash":
+                damaged["result"]["ledger"]["ledger_hash"] = "fake"
+            elif mutation == "bad_timestamp":
+                damaged["result"]["ledger"]["close_time_iso"] = "invalid"
+            elif mutation == "open_ledger":
+                damaged["result"]["ledger"]["closed"] = False
+            elif mutation == "future_ledger":
+                damaged["result"]["ledger"]["close_time_iso"] = (T + dt.timedelta(minutes=3)).isoformat()
+            cases.append((mutation, observe(damaged)))
+        for label, outcome in cases:
+            with self.subTest(label=label):
+                self.assertEqual(outcome["stato"], "NON_DISPONIBILE")
+                self.assertIsNone(outcome["valori"])
+                self.assertIsNone(outcome["osservato_utc"])
+
+    def test_ethereum_http_error_stays_unavailable_without_contract_claims(self):
+        from urllib.error import HTTPError
+        def forbidden(url, payload=None):
+            raise HTTPError(url, 429, "rate limited", {"Retry-After": "1"}, None)
+        native = evidence._native_observe("ethereum", forbidden, T)
+        contract = evidence._probe_contract("ethereum", self.ETH, forbidden, T)
+        self.assertEqual(native["stato"], "NON_DISPONIBILE")
+        self.assertIsNone(native["valori"])
+        self.assertEqual(contract["stato"], "NON_DISPONIBILE")
+        self.assertIsNone(contract["valori"])
+        self.assertEqual(contract["ufficialita_contratto"], "NON_ATTESTATA")
 
     def test_native_contract_multichain_ambiguous_new_asset_and_rotation(self):
         positions = ["BTC", "ETH", "PEPE", "JUP", "NEAR", "XRP"]
