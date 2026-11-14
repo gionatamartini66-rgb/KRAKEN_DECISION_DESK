@@ -1298,6 +1298,11 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
                             for r in result["copertura"]))
         self.assertTrue(all(r["mercato_spot_kraken_alla_lettura"]["volume_24h_eur_stimato"]
                             == "1000000.0" for r in result["copertura"]))
+        tampered=copy.deepcopy(bundle)
+        tampered["packet"]["patrimonio"]["posizioni"][0]["mercato_spot_kraken"]["pair_key"]="FAKEPAIR"
+        tampered["packet_sha256"]=bridge.digest(tampered["packet"])
+        with self.assertRaises(bridge.BridgeError):
+            bridge.read_context(tampered,now=instant)
         self.assertTrue(any(s["stato"]=="OSSERVATO_CON_LIMITI"
                             for r in flow["posizioni"] for s in r["osservazioni"]))
         self.assertTrue(all(r["token"] in fixture.snapshot["markets"]
