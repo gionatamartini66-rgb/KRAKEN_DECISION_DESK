@@ -580,34 +580,51 @@ def _evm_token(chain, contract, url, fetch, native, previous):
                isinstance(h.get("unita_minima"), str) and
                h["unita_minima"].isdigit()}
     if chain == "ethereum":
-        h_url = ETH_EXPLORER + "/api/v2/tokens/" + contract + "/holders"
-        try:
-            answer = fetch(h_url)
-            items = answer.get("items") if isinstance(answer, dict) else None
-            if not isinstance(items, list) or len(items) > 100:
-                raise ValueError("Blockscout holder page invalid")
-            for h in items[:MAX_HOLDERS]:
-                if not isinstance(h, dict):
-                    continue
-                addr = h.get("address")
-                if isinstance(addr, dict) and EVM.fullmatch(str(addr.get("hash"))):
-                    qty = _nat(h.get("value"))
-                    before = earlier.get(addr["hash"].lower())
-                    holders.append({"account": addr["hash"], "unita_minima": str(qty),
-                                    "decimali": decimals,
-                                    "variazione_unita_minima": (str(qty-before) if before is not None else None),
-                                    "confronto_precedente_utc": previous.get("acquisito_utc") if before is not None else None,
-                                    "entita": _tag(addr)})
-            holders_source = h_url
-        except (OSError, ValueError, KeyError, TypeError, OverflowError, AssertionError):
+        # Follow the index that successfully supplied transfer data. Repeating
+        # blocked providers for holders wastes the same scarce 6-call budget.
+        # If the primary RPC succeeded, Blockscout tags remain optional.
+        if fallback_reason and fallback_label == "PAGINA_ETHPLORER":
+            try:
+                holders, holders_source = _ethplorer_holders(
+                    contract, decimals, previous, fetch)
+            except (OSError,ValueError,KeyError,TypeError,OverflowError):
+                pass
+        elif fallback_reason and fallback_label == "PAGINA_ROUTESCAN":
             try:
                 holders, holders_source = _routescan_holders(
                     chain, contract, decimals, previous, fetch)
-            except (OSError, ValueError, KeyError, TypeError, OverflowError, AssertionError):
+            except (OSError,ValueError,KeyError,TypeError,OverflowError):
+                pass
+        else:
+            h_url = ETH_EXPLORER + "/api/v2/tokens/" + contract + "/holders"
+            try:
+                answer = fetch(h_url)
+                items = answer.get("items") if isinstance(answer, dict) else None
+                if not isinstance(items, list) or len(items) > 100:
+                    raise ValueError("Blockscout holder page invalid")
+                for h in items[:MAX_HOLDERS]:
+                    if not isinstance(h, dict):
+                        continue
+                    addr = h.get("address")
+                    if isinstance(addr, dict) and EVM.fullmatch(str(addr.get("hash"))):
+                        qty = _nat(h.get("value"))
+                        before = earlier.get(addr["hash"].lower())
+                        holders.append({"account": addr["hash"], "unita_minima": str(qty),
+                                        "decimali": decimals,
+                                        "variazione_unita_minima": (str(qty-before) if before is not None else None),
+                                        "confronto_precedente_utc": previous.get("acquisito_utc") if before is not None else None,
+                                        "entita": _tag(addr)})
+                holders_source = h_url
+            except (OSError,ValueError,KeyError,TypeError,OverflowError,AssertionError):
                 try:
-                    holders, holders_source = _ethplorer_holders(contract, decimals, previous, fetch)
-                except (OSError, ValueError, KeyError, TypeError, OverflowError):
-                    holders, holders_source = [], None
+                    holders, holders_source = _routescan_holders(
+                        chain, contract, decimals, previous, fetch)
+                except (OSError,ValueError,KeyError,TypeError,OverflowError,AssertionError):
+                    try:
+                        holders, holders_source = _ethplorer_holders(
+                            contract, decimals, previous, fetch)
+                    except (OSError,ValueError,KeyError,TypeError,OverflowError):
+                        pass
     selected,total = _top(events)
     return {"eventi": selected, "detentori": holders, "fonte_detentori": holders_source,
             "elementi_esaminati": len(events), "eventi_distinti": total,
