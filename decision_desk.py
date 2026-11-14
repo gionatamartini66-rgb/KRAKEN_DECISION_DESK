@@ -180,6 +180,28 @@ def market_pairs_and_ticker(pairs, tickers):
             out[base] = row
     return out
 
+def wallet_spot_markets(legacy_eur, assembled, portfolio):
+    """Reuse the public Kraken multi-quote catalog for held USD/USDC-only assets.
+
+    Existing EUR market rows remain unchanged; no direct FX rate -> no row
+    from mercati_spot.assemble -> no fabricated EUR valuation.
+    """
+    result = dict(legacy_eur)
+    rows = portfolio.get('posizioni') if isinstance(portfolio,dict) else []
+    for row in rows if isinstance(rows,list) else []:
+        if not isinstance(row,dict):
+            continue
+        symbol, valid = wallet_symbol(row.get('token'))
+        if not valid:
+            continue
+        token = canonical(symbol)
+        multi = assembled.get(token) if isinstance(assembled,dict) else None
+        if token not in result and isinstance(multi,dict):
+            result[token] = dict(multi,
+                                 fonte_quotazione='Kraken Spot Ticker + cambio diretto Kraken')
+    return result
+
+
 def calc_trend(candles, spot):
     # L'ultima candela OHLC Kraken è in formazione. Non trattarla come chiusura ufficiale.
     closed = [num(r[4]) for r in candles[:-1] if len(r) > 4 and num(r[4]) > 0]
@@ -1163,13 +1185,7 @@ def refresh():
     # positions with no EUR market. Keep original EUR quotes unchanged.
     # A missing direct FX observation cannot create an invented EUR price:
     # mercati_spot.assemble omits such a market.
-    held = {canonical(wallet_symbol(row.get('token'))[0])
-            for row in (portfolio.get('posizioni') or [])
-            if isinstance(row,dict) and wallet_symbol(row.get('token'))[1]}
-    for asset in held:
-        if asset not in markets and asset in markets_multi:
-            markets[asset] = dict(markets_multi[asset],
-                                  fonte_quotazione="Kraken Spot Ticker + cambio diretto Kraken")
+    markets = wallet_spot_markets(markets, markets_multi, portfolio)
     tokens = sorted({'BTC','ETH','SOL'} |
                     {wallet_symbol(h.get('token'))[0]
                      for h in (portfolio.get('posizioni') or [])
