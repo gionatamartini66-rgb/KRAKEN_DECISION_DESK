@@ -373,7 +373,7 @@ def _bsc_public_index(contract, fetch, previous):
             "fallback":"BINPLORER_INDEX"}
 
 
-def _bsc_goplus_holders(contract, fetch):
+def _bsc_goplus_holders(contract, fetch, previous):
     """BSC holder balances from free GoPlus public index, not trade flows.
 
     balance is a decimal *token* quantity; precision must be read from
@@ -392,6 +392,11 @@ def _bsc_goplus_holders(contract, fetch):
         raise ValueError("GoPlus holder index absent")
     dec=_hex(_rpc(fetch,net.CONTRACT_ENDPOINTS["bsc"],"eth_call",
                   [{"to":contract,"data":"0x313ce567"},"latest"]),30)
+    older={h["account"].lower():int(h["unita_minima"])
+           for h in previous.get("detentori",[]) if isinstance(h,dict)
+           and isinstance(h.get("account"),str)
+           and isinstance(h.get("unita_minima"),str)
+           and h["unita_minima"].isdigit()}
     holders=[]
     for holder in source[:MAX_HOLDERS]:
         if not isinstance(holder,dict) or not EVM.fullmatch(str(holder.get("address"))):
@@ -409,9 +414,11 @@ def _bsc_goplus_holders(contract, fetch):
                 "fonte":url,"classe":"OPERATORE_NON_CLASSIFICATO"}
                if isinstance(tag,str) and tag.strip() else
                {"stato":"ENTITA_NON_IDENTIFICATA"})
+        old=older.get(holder["address"].lower())
         holders.append({"account":holder["address"],
                         "unita_minima":str(quantity),"decimali":dec,
-                        "variazione_unita_minima":None,
+                        "variazione_unita_minima":str(quantity-old) if old is not None else None,
+                        "confronto_precedente_utc":previous.get("acquisito_utc") if old is not None else None,
                         "entita":label})
     count=item.get("holder_count")
     try:
@@ -1169,7 +1176,7 @@ def _probe(key, assets, fetch, previous):
                 # Contract RPC Transfer may be rate-limited even after
                 # Binplorer 429; a *separate* verified GoPlus holder index
                 # is still useful, but cannot be reported as transfer flow.
-                return _bsc_goplus_holders(contract,fetch)
+                return _bsc_goplus_holders(contract,fetch,previous)
         return (_evm_native(chain,url,fetch,native) if contract=="NATIVE" else
                 _evm_token(chain,contract,url,fetch,native,previous))
     if chain=="solana":
