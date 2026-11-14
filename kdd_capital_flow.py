@@ -168,6 +168,7 @@ def _evm_native(chain, url, fetch, native):
 # Source: https://github.com/EverexIO/Ethplorer/wiki/ethplorer-api
 ETHPLORER = "https://api.ethplorer.io"
 BINPLORER = "https://api.binplorer.com"
+GOPLUS_BSC = "https://api.gopluslabs.io/api/v1/token_security/56"
 JUPITER_TOKENS = "https://api.jup.ag/tokens/v2/search?query="
 SOLANA_ALT_RPC = "https://public.rpc.solanavibestation.com"
 ETHPLORER_HISTORY_LIMIT = 20
@@ -370,6 +371,59 @@ def _bsc_public_index(contract, fetch, previous):
             "periodo":{"tipo":"PAGINA_BINPLORER"},
             "copertura":"BNB Chain: recent indexed transfers and up to ten holders; sample, not full exchange flows",
             "fallback":"BINPLORER_INDEX"}
+
+
+def _bsc_goplus_holders(contract, fetch):
+    """BSC holder balances from free GoPlus public index, not trade flows.
+
+    balance is a decimal *token* quantity; precision must be read from
+    the exact BSC ERC-20 contract before converting it to smallest units.
+    """
+    import kdd_network_defi as net
+    url=GOPLUS_BSC+"?contract_addresses="+contract
+    data=fetch(url)
+    rows=data.get("result") if isinstance(data,dict) else None
+    item=next((v for k,v in rows.items() if isinstance(k,str)
+               and k.lower()==contract.lower()),None) if isinstance(rows,dict) else None
+    if not isinstance(item,dict):
+        raise ValueError("GoPlus BSC exact contract index absent")
+    source=item.get("holders")
+    if not isinstance(source,list):
+        raise ValueError("GoPlus holder index absent")
+    dec=_hex(_rpc(fetch,net.CONTRACT_ENDPOINTS["bsc"],"eth_call",
+                  [{"to":contract,"data":"0x313ce567"},"latest"]),30)
+    holders=[]
+    for holder in source[:MAX_HOLDERS]:
+        if not isinstance(holder,dict) or not EVM.fullmatch(str(holder.get("address"))):
+            continue
+        try:
+            tokens=Decimal(str(holder.get("balance")))
+            raw=tokens*(Decimal(10)**dec)
+            if not tokens.is_finite() or tokens<0 or raw!=raw.to_integral_value():
+                continue
+            quantity=_nat(int(raw))
+        except (InvalidOperation,TypeError,ValueError,OverflowError):
+            continue
+        tag=holder.get("tag")
+        label=({"stato":"ETICHETTA_PUBBLICA","etichetta":tag[:80],
+                "fonte":url,"classe":"OPERATORE_NON_CLASSIFICATO"}
+               if isinstance(tag,str) and tag.strip() else
+               {"stato":"ENTITA_NON_IDENTIFICATA"})
+        holders.append({"account":holder["address"],
+                        "unita_minima":str(quantity),"decimali":dec,
+                        "variazione_unita_minima":None,
+                        "entita":label})
+    count=item.get("holder_count")
+    try:
+        count=_nat(str(count),10**12)
+    except ValueError:
+        count=None
+    return {"eventi":[],"detentori":holders,"fonte_detentori":url,
+            "aggregato_detentori":{"numero_account":count,
+                "fonte":url,"tipo":"AGGREGATO_BSC_GOPLUS_SECONDA_FONTE"},
+            "elementi_esaminati":len(source),"eventi_distinti":0,
+            "periodo":{"tipo":"TOP_HOLDERS_GOPLUS_BSC"},
+            "copertura":"GoPlus indica top holder e token balance; nessun trasferimento campionato o beneficial owner dedotto."}
 
 
 def _solana_jupiter_index(mint, fetch):
@@ -1108,6 +1162,14 @@ def _probe(key, assets, fetch, previous):
            net.NATIVE_ENDPOINTS.get(chain,net.SOL_URL if chain=="solana" else net.SUI_URL))
     native = assets.get("fonti_native",{}).get(chain)
     if chain in ("ethereum","bsc","avalanche","optimism"):
+        if chain=="bsc" and contract!="NATIVE":
+            try:
+                return _evm_token(chain,contract,url,fetch,native,previous)
+            except (OSError,ValueError,TypeError,KeyError,OverflowError):
+                # Contract RPC Transfer may be rate-limited even after
+                # Binplorer 429; a *separate* verified GoPlus holder index
+                # is still useful, but cannot be reported as transfer flow.
+                return _bsc_goplus_holders(contract,fetch)
         return (_evm_native(chain,url,fetch,native) if contract=="NATIVE" else
                 _evm_token(chain,contract,url,fetch,native,previous))
     if chain=="solana":
