@@ -435,7 +435,11 @@ def _evm_token(chain, contract, url, fetch, native, previous):
             pass  # native RPC fallback remains
     head = native.get("valori") if isinstance(native, dict) else None
     if not isinstance(head, dict):
-        raise ValueError("EVM head unavailable")
+        # A new BSC contract does not require BNB to be held or its native
+        # header to happen to fall within the upstream five-chain budget.
+        if chain!="bsc":
+            raise ValueError("EVM head unavailable")
+        head={"altezza_blocco":_hex(_rpc(fetch,url,"eth_blockNumber",[]))}
     height = _nat(head["altezza_blocco"])
     end = max(0, height - 6)
     start = max(0, end - 47)
