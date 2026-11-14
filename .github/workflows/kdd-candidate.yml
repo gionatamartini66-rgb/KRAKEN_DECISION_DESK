@@ -32,61 +32,64 @@ jobs:
         run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_funding_book_g2
       - name: Existing safe updater tests
         run: python -B scripts/test_kdd_aggiorna.py
-      - name: TEMP KDD17 bounded public provider discovery on PR64
+      - name: TEMP KDD17 public transfer and open index fallback check
         if: github.event_name == 'pull_request' && github.event.pull_request.number == 64
         continue-on-error: true
         timeout-minutes: 4
         run: |
           PYTHONPATH=.:scripts python - <<'PY'
-          import json,time,datetime as dt,urllib.parse
+          import json,time
           import kdd_network_defi as net
-          contract={
-              "polygon":("137","0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"),
-              "base":("8453","0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
-              "arbitrum":("42161","0xaf88d065e77c8cc2239327c5edb3a432268e5831"),
-              "optimism":("10","0x0b2c639c533813f4aa9d7837caf62653d097ff85")}
-          results=[];max_calls=24
-          def check(name,url,payload=None):
-              if len(results)>=max_calls:return
+          r=[];last_sig=None
+          mint="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+          bsc="0x55d398326f99059ff775485246999027b3197955"
+          contracts={
+             "bsc":("https://bsc.blockscout.com",bsc),
+             "base":("https://base.blockscout.com","0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
+             "polygon":("https://polygon.blockscout.com","0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"),
+             "arbitrum":("https://arbitrum.blockscout.com","0xaf88d065e77c8cc2239327c5edb3a432268e5831")}
+          def run(name,url,payload=None):
               t=time.monotonic()
               try:
                   out=net._http(url,payload)
-                  result=out.get("result") if payload and isinstance(out,dict) else out
                   if payload and (not isinstance(out,dict) or out.get("error") or "result" not in out):
-                      raise ValueError("RPC error "+str(out.get("error") if isinstance(out,dict) else out)[:100])
-                  rows=(result.get("items") or result.get("operations") or result.get("holders") or result.get("value")
-                        if isinstance(result,dict) else result)
-                  if not isinstance(rows,list):rows=None
-                  first=rows[0] if rows else None
-                  results.append({"name":name,"status":"OK","ms":round((time.monotonic()-t)*1000),
-                      "keys":list(result)[:12] if isinstance(result,dict) else None,
-                      "n":len(rows) if rows is not None else None,
-                      "firstkeys":list(first)[:20] if isinstance(first,dict) else None,
-                      "sample":{k:first.get(k) for k in ("txHash","tokenAddress","chainId","amount","tokenDecimals","timestamp","balance")}
-                                if isinstance(first,dict) else None})
+                      raise ValueError(str(out.get("error") if isinstance(out,dict) else out)[:110])
+                  obj=out["result"] if payload else out
+                  items=(obj.get("items") or obj.get("value")) if isinstance(obj,dict) else obj
+                  first=items[0] if isinstance(items,list) and items else None
+                  rec={"name":name,"status":"OK","ms":round(1000*(time.monotonic()-t)),
+                       "keys":list(obj)[:12] if isinstance(obj,dict) else None,
+                       "n":len(items) if isinstance(items,list) else None,
+                       "firstkeys":list(first)[:20] if isinstance(first,dict) else None}
+                  r.append(rec);return obj
               except Exception as ex:
-                  results.append({"name":name,"status":"FAIL","ms":round((time.monotonic()-t)*1000),
-                                  "err":type(ex).__name__+":"+str(getattr(ex,"code",str(ex)))[:90]})
-          for label,(chainid,address) in contract.items():
-              base="https://api.routescan.io/v2/network/mainnet/evm/"+chainid
-              check(label+"_erc20",base+"/erc20-transfers?tokenAddress="+address+"&sort=desc&limit=5")
-              check(label+"_holders",base+"/erc20/"+address+"/holders?limit=5")
-          for label,url,method,params in [
-            ("sol_vibe_largest","https://public.rpc.solanavibestation.com","getTokenLargestAccounts",["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",{"commitment":"finalized"}]),
-            ("sol_vibe_sig","https://public.rpc.solanavibestation.com","getSignaturesForAddress",["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",{"limit":1}]),
-            ("sol_chainstack","https://solana-mainnet.rpc.chainstack.com","getTokenLargestAccounts",["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",{"commitment":"finalized"}]),
-            ("sol_vibe_sollargest","https://public.rpc.solanavibestation.com","getLargestAccounts",[{"commitment":"finalized","filter":"circulating"}]),
-            ("bsc_bscscan_rpc","https://bsc-dataseed.bnbchain.org","eth_getLogs",[{"address":"0x55d398326f99059ff775485246999027b3197955","fromBlock":"latest","toBlock":"latest","topics":["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"]}]),
-            ("bsc_alt_rpc","https://bsc.publicnode.com","eth_blockNumber",[]),
-          ]:
-              check(label,url,{"jsonrpc":"2.0","id":1,"method":method,"params":params})
-          for label,url in [
-             ("xrpscan_labels","https://api.xrpscan.com/api/v1/names/well-known"),
-             ("xrpscan_rich","https://api.xrpscan.com/api/v1/balances"),
-             ("binplorer_holder","https://api.binplorer.com/getTopTokenHolders/0x55d398326f99059ff775485246999027b3197955?apiKey=freekey&limit=5"),
-             ("solanafm_info","https://api.solana.fm/v0/tokens/EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
-          ]:check(label,url)
-          print("KDD17_PROVIDER_DISCOVERY",json.dumps({"count":len(results),"items":results},ensure_ascii=False),flush=True)
+                  r.append({"name":name,"status":"FAIL","ms":round(1000*(time.monotonic()-t)),
+                           "reason":type(ex).__name__+":"+str(getattr(ex,"code",str(ex)))[:115]});return None
+          for chain,(url,addr) in contracts.items():
+              for suffix in ("/transfers","/holders"):
+                  run(chain+suffix,url+"/api/v2/tokens/"+addr+suffix)
+          url="https://public.rpc.solanavibestation.com"
+          def rpc(name,method,params):
+              return run(name,url,{"jsonrpc":"2.0","id":1,"method":method,"params":params})
+          sigs=rpc("sol_sig_mint","getSignaturesForAddress",[mint,{"limit":1,"commitment":"finalized"}])
+          if isinstance(sigs,list) and sigs:
+              tx=rpc("sol_tx_mint","getTransaction",[sigs[0]["signature"],{
+                   "encoding":"jsonParsed","commitment":"finalized","maxSupportedTransactionVersion":0}])
+              if isinstance(tx,dict):
+                  msg=(tx.get("transaction") or {}).get("message") or {}
+                  parsed=[a.get("parsed") for a in msg.get("instructions",[])
+                          if isinstance(a,dict) and isinstance(a.get("parsed"),dict)]
+                  r.append({"name":"sol_tx_mint_parsed","status":"LOCAL","slot":tx.get("slot"),
+                            "parsedtypes":[p.get("type") for p in parsed[:8]],
+                            "mint_checked":any(p.get("info",{}).get("mint")==mint for p in parsed)})
+          rpc("sol_largest_nometa","getLargestAccounts",[{"commitment":"finalized"}])
+          rpc("sol_supply","getTokenSupply",[mint,{"commitment":"finalized"}])
+          rpc("sol_largest_spl","getTokenLargestAccounts",[mint,{"commitment":"finalized"}])
+          # Native AVAX EVM RPC method checks, read-only.
+          ava="https://api.avax.network/ext/bc/C/rpc"
+          run("avalanche_eth_blockNumber",ava,{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]})
+          run("avalanche_block",ava,{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["latest",False]})
+          print("KDD17_LIVE_ALTS_2",json.dumps(r),flush=True)
           PY
 
   r5-historical-reference:
