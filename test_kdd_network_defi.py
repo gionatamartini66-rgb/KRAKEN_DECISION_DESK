@@ -597,6 +597,11 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
                 if method == "eth_getLogs":
                     self.assertEqual(payload["params"][0]["address"], self.EVM_ADDR)
                     return {"jsonrpc": "2.0", "id": 1, "result": [log, dict(log)]}
+            if url.endswith("/transfers"):
+                return {"items": [{"tx_hash":log["transactionHash"],
+                        "from":{"hash":self.EVM_FROM,"public_tags":[{"label":"Coinbase 1"}]},
+                        "to":{"hash":self.EVM_TO,"public_tags":[]},
+                        "total":{"value":"200000000"}}]}
             if url.endswith("/holders"):
                 return {"items": [{"address": {"hash": self.EVM_FROM,
                                                 "public_tags": [{"label": "Exchange"}]},
@@ -611,11 +616,19 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         self.assertEqual(probe["eventi"][0]["quantita"], "0.0000000002")
         self.assertEqual(probe["eventi"][0]["da"], self.EVM_FROM)
         self.assertEqual(probe["detentori"][0]["entita"]["classe"], "EXCHANGE")
+        self.assertEqual(probe["eventi"][0]["attribuzione"]["da"]["classe"],"EXCHANGE")
+        self.assertEqual(probe["eventi"][0]["fonte_attribuzione"], cap.ETH_EXPLORER+"/api/v2/tokens/"+self.EVM_ADDR+"/transfers")
         second=cap.collect(T, assets, self._econ(), raw, fetch)
         self.assertEqual(second["sonde"][0]["detentori"][0]["variazione_unita_minima"],"0")
+        assets["posizioni"][0]["osservazioni_contratti"]=[{
+            "rete":"ethereum","contratto":self.EVM_ADDR,
+            "osservazione":{"stato":"OSSERVATO_CON_LIMITI",
+                           "valori":{"supply_unita_minima":"1000000000"}}}]
         read = cap.at_read(raw, assets, self._econ(), T)
         record = read["posizioni"][0]["osservazioni"][0]
         self.assertEqual(record["stato"], "OSSERVATO_CON_LIMITI")
+        self.assertEqual(record["detentori"][0]["quota_supply_pct"],"50.0000")
+        self.assertEqual(record["flussi_exchange_campione"]["uscita_unita_minima"],200000000)
         self.assertEqual(record["eventi"][0]["stato_alla_lettura"], "CAMPIONE_RECENTE")
         self.assertIsNotNone(record["eventi"][0]["valore_usd_indicativo"])
         late = cap.at_read(raw, assets, self._econ(), T + dt.timedelta(minutes=40))
