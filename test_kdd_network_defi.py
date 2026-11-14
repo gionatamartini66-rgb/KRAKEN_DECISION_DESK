@@ -364,6 +364,29 @@ class Kdd17AssetIdentityG2Tests(unittest.TestCase):
                            "ledger_hash": "C" * 64}}}
         raise AssertionError("unexpected public request: " + url)
 
+    def test_unknown_kraken_asset_platforms_survive_index_and_gpt_reader(self):
+        import kdd_economics as econ
+        identity=self.ident("PEPE")
+        payload={"id":"pepe","symbol":"pepe","name":"Pepe",
+                 "platforms":{"tron":"T"*34,"base":"0x"+"a"*40}}
+        index=evidence.coin_network_metadata(identity,payload,T)
+        self.assertEqual(index["contratti"],[])
+        self.assertEqual(index["piattaforme_senza_fonte"],["base","tron"])
+        economic={"posizioni":[{"indice":0,"token":"PEPE","identita":identity,
+                               "network_metadata":index}],"candidati":[]}
+        raw=evidence._NETWORK_COLLECT_ASSETS(T,[{"token":"PEPE"}],[],
+                                            economic,None,lambda *args:None)
+        read=evidence._NETWORK_READ_ASSETS(raw,[{"token":"PEPE"}],[],economic,T)
+        row=read["posizioni"][0]
+        self.assertEqual(row["tipo"],"PIATTAFORMA_INDICIZZATA_SENZA_FONTE")
+        self.assertEqual(row["piattaforme_senza_fonte"],["base","tron"])
+        self.assertEqual(row["osservazione_nativa"]["stato"],"NON_COPERTO")
+        altered=copy.deepcopy(economic)
+        altered["posizioni"][0]["network_metadata"]["piattaforme_senza_fonte"]=["ethereum"]
+        with self.assertRaises(ValueError):
+            evidence._NETWORK_COLLECT_ASSETS(T,[{"token":"PEPE"}],[],
+                                             altered,None,lambda *args:None)
+
     def test_ethereum_verified_public_rpc_endpoint_and_ip_rate_limit(self):
         """Samsung-selected provider: shared 1rps/IP must include ERC-20 probes."""
         endpoint = "https://public-ethereum-mainnet.rpcnode.dev"
