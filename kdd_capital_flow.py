@@ -12,6 +12,7 @@ import re
 UTC = dt.timezone.utc
 SCHEMA = "kdd-capital-observatory-v001"
 MAX_TARGETS = 5
+MAX_HISTORY = 32  # bounded last public holder samples across target rotation
 MAX_EVENTS = 8
 MAX_HOLDERS = 10
 TOPIC_TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -651,6 +652,25 @@ def collect(now, assets, economics, previous, fetch):
               for i in range(min(MAX_TARGETS,len(targets)))]
     old_probes = {(r.get("rete"),r.get("asset_tecnico")):r
                   for r in old.get("sonde",[]) if isinstance(r,dict)}
+    # The 5-target rotation must not discard holder comparisons for the
+    # other targets. Reuse at most 32 bounded public observations for 7 days.
+    history = {}
+    for row in old.get("storico_detentori", [])[:MAX_HISTORY]:
+        if not isinstance(row, dict):
+            continue
+        key=(row.get("rete"),row.get("asset_tecnico"))
+        try:
+            age=moment-_ts(row.get("acquisito_utc"))
+        except (ValueError,TypeError):
+            continue
+        if (key in targets and dt.timedelta(0)<=age<=dt.timedelta(days=7)
+                and isinstance(row.get("detentori"),list)
+                and len(row["detentori"])<=20):
+            history[key]=row
+    for key,row in old_probes.items():
+        if (key in targets and row.get("stato")=="OSSERVATO"
+                and isinstance(row.get("detentori"),list)):
+            history[key]=row
     source = []
     for key in chosen:
         calls = [0]
@@ -658,7 +678,7 @@ def collect(now, assets, economics, previous, fetch):
             calls[0] += 1
             return fetch(url, payload)
         try:
-            result = _probe(key,assets,counted_fetch,old_probes.get(key,{}))
+            result = _probe(key,assets,counted_fetch,history.get(key,{}))
             state="OSSERVATO"
             reason=None
         except (OSError,ValueError,TypeError,KeyError,OverflowError,UnicodeError,
@@ -671,9 +691,16 @@ def collect(now, assets, economics, previous, fetch):
         source.append({"rete":key[0],"asset_tecnico":key[1],
                        "stato":state,"acquisito_utc":moment.isoformat(timespec="seconds"),
                        "motivo":reason,"richieste_effettuate":calls[0],**result})
+        if state=="OSSERVATO" and result.get("detentori"):
+            history[key]={"rete":key[0],"asset_tecnico":key[1],
+                          "acquisito_utc":moment.isoformat(timespec="seconds"),
+                          "detentori":result["detentori"][:20]}
+    historic = [history[key] for key in sorted(history)[:MAX_HISTORY]
+                if key in targets]
     return {"schema":SCHEMA,"acquisito_utc":moment.isoformat(timespec="seconds"),
             "sonde":source,"target_totali":len(targets),"target_interrogati":len(source),
             "richieste_effettuate":sum(s["richieste_effettuate"] for s in source),
+            "storico_detentori":historic,
             "prossimo_target":("|".join(targets[(index+len(chosen))%len(targets)])
                                if targets else None),
             "limite":"Campione rotante di reti/contratti, non osservatorio completo, "
