@@ -32,43 +32,72 @@ jobs:
         run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_funding_book_g2
       - name: Existing safe updater tests
         run: python -B scripts/test_kdd_aggiorna.py
-      - name: TEMP KDD17 public Routescan multichain and Kraken Spot schema verification
+      - name: TEMP KDD17 live producer for a fully different public multichain set
         if: github.event_name == 'pull_request' && github.event.pull_request.number == 64
         continue-on-error: true
-        timeout-minutes: 3
+        timeout-minutes: 4
         run: |
           PYTHONPATH=.:scripts python - <<'PY'
-          import json,urllib.request,urllib.parse,time
-          import kdd_network_defi as net
-          todo=[
-           ("routescan_eth_usdc_transfers","https://api.routescan.io/v2/network/mainnet/evm/1/erc20-transfers?tokenAddress=0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48&sort=desc&limit=5"),
-           ("routescan_eth_usdc_holders","https://api.routescan.io/v2/network/mainnet/evm/1/erc20/0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48/holders?limit=5"),
-           ("routescan_bsc_usdt_transfers","https://api.routescan.io/v2/network/mainnet/evm/56/erc20-transfers?tokenAddress=0x55d398326f99059ff775485246999027b3197955&sort=desc&limit=5"),
-           ("routescan_avalanche_usdc_transfers","https://api.routescan.io/v2/network/mainnet/evm/43114/erc20-transfers?tokenAddress=0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E&sort=desc&limit=5"),
-           ("routescan_base_usdc_transfers","https://api.routescan.io/v2/network/mainnet/evm/8453/erc20-transfers?tokenAddress=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913&sort=desc&limit=5"),
-           ("routescan_arbitrum_usdc_transfers","https://api.routescan.io/v2/network/mainnet/evm/42161/erc20-transfers?tokenAddress=0xaf88d065e77c8cc2239327c5edb3a432268e5831&sort=desc&limit=5"),
-           ("kraken_assetpairs","https://api.kraken.com/0/public/AssetPairs?pair=AAVEEUR%2CBONKEUR%2CLINKEUR%2CAVAXEUR%2CUNIEUR%2CUSDCEUR"),
-          ]
-          rec=[]
-          for name,url in todo:
+          import json,time,datetime as dt
+          import kdd_network_defi as net,kdd_capital_flow as cap
+          pairs="ADAEUR,AAVEEUR,AVAXEUR,BONKEUR,LINKEUR,UNIEUR,USDCEUR,PEPEEUR,ONDOEUR,PUMPEUR"
+          calls=[];now=dt.datetime.now(dt.timezone.utc);start=time.monotonic()
+          def fetch(url,payload=None):
               t=time.monotonic()
               try:
-                  data=net._http(url)
-                  items=data.get("items") if isinstance(data,dict) else None
-                  kr=data.get("result") if isinstance(data,dict) else None
-                  item=items[0] if isinstance(items,list) and items else None
-                  rec.append({"name":name,"status":"OK","elapsed_ms":round((time.monotonic()-t)*1000),
-                              "top_keys":list(data)[:12] if isinstance(data,dict) else None,
-                              "count":len(items) if isinstance(items,list) else None,
-                              "first_keys":list(item)[:18] if isinstance(item,dict) else None,
-                              "first_value":{k:item.get(k) for k in ("txHash","tokenAddress","tokenDecimals","amount","chainId","timestamp")}
-                                  if isinstance(item,dict) else None,
-                              "kraken_keys":list(kr)[:15] if isinstance(kr,dict) else None,
-                              "kraken_errors":data.get("error") if isinstance(data,dict) and name.startswith("kraken_") else None})
+                  obj=net._http(url,payload)
+                  calls.append({"host":url.split("/")[2],"method":payload.get("method") if isinstance(payload,dict) else "GET","status":"OK",
+                                "ms":round((time.monotonic()-t)*1000)})
+                  return obj
               except Exception as e:
-                  rec.append({"name":name,"status":"UNAVAILABLE","elapsed_ms":round((time.monotonic()-t)*1000),
-                              "error":type(e).__name__+":"+str(getattr(e,"code",str(e)))[:110]})
-          print("KDD17_ROUTES_SPOT_LIVE",json.dumps(rec),flush=True)
+                  calls.append({"host":url.split("/")[2],"method":payload.get("method") if isinstance(payload,dict) else "GET",
+                                "status":type(e).__name__,"code":getattr(e,"code",None),
+                                "ms":round((time.monotonic()-t)*1000)})
+                  raise
+          market={}
+          for name,path in [
+              ("AssetPairs","AssetPairs?pair="+pairs),
+              ("Ticker","Ticker?pair="+pairs),
+              ("Depth_AAVE","Depth?pair=AAVEEUR&count=5"),
+              ("Trades_AAVE","Trades?pair=AAVEEUR")]:
+              try:
+                  obj=fetch("https://api.kraken.com/0/public/"+path)
+                  v=obj.get("result") if isinstance(obj,dict) else None
+                  market[name]={"status":"OK" if not obj.get("error") else "ERROR","errors":obj.get("error"),
+                                "pairs":list(v)[:15] if isinstance(v,dict) else None,
+                                "fields_first":list(next(iter(v.values())))[:15] if isinstance(v,dict) and v and isinstance(next(iter(v.values())),dict) else None}
+              except Exception as e:
+                  market[name]={"status":"UNAVAILABLE","error":type(e).__name__}
+          usdc="0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+          bsc="0x55d398326f99059ff775485246999027b3197955"
+          ava="0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E"
+          jup="JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"
+          assets={"posizioni":[
+             {"token":"USDC","progetto_id":"usd-coin","contratti_indicizzati":[
+                 {"rete":"ethereum","contratto":usdc},{"rete":"avalanche","contratto":ava},
+                 {"rete":"bsc","contratto":bsc}]},
+             {"token":"BONK","progetto_id":"bonk","contratti_indicizzati":[
+                 {"rete":"solana","contratto":jup}]}],"candidati":[],"fonti_native":{}}
+          econ={"posizioni":[{},{}],"candidati":[]}
+          try:
+              raw=cap.collect(now,assets,econ,None,fetch)
+              read=cap.at_read(raw,assets,econ,now)
+              probes=[{"network":p["rete"],"source":p["asset_tecnico"],
+                       "status":p["stato"],"reason":p.get("motivo"),
+                       "calls":p["richieste_effettuate"],"events":len(p["eventi"]),
+                       "holders":len(p["detentori"]),"aggregate":(p.get("aggregato_detentori") or {}).get("numero_account"),
+                       "first_tx":p["eventi"][0]["tx"] if p["eventi"] else None}
+                      for p in raw["sonde"]]
+              chained={"status":"OK","summary":probes,
+                       "count_calls":raw["richieste_effettuate"],
+                       "max_calls":raw["limite_richieste_refresh"],
+                       "reader_rows":len(read["posizioni"]),
+                       "reader_status":[x["osservazioni"][0]["stato"] for x in read["posizioni"]]}
+          except Exception as e:
+              chained={"status":"ERROR","error":type(e).__name__+":"+str(e)[:160]}
+          print("KDD17_REPLACEMENT_LIVE",json.dumps({
+              "spot":market,"onchain":chained,"calls":calls,
+              "total_calls":len(calls),"elapsed_ms":round((time.monotonic()-start)*1000)},flush=True)
           PY
 
   r5-historical-reference:
