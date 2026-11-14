@@ -32,6 +32,9 @@ MAX_RESPONSE = 2_000_000
 ETH_PUBLIC_RPC = "https://public-ethereum-mainnet.rpcnode.dev"
 _ETH_RPC_LOCK = threading.Lock()
 _ETH_RPC_NEXT_AT = 0.0
+# Routescan public keyless tier: 2 rps; process-wide 0.55s between calls.
+_ROUTESCAN_LOCK = threading.Lock()
+_ROUTESCAN_NEXT_AT = 0.0
 
 
 def _now(value):
@@ -87,6 +90,13 @@ def _http(url, payload=None):
             if pause > 0:
                 time.sleep(pause)
             _ETH_RPC_NEXT_AT = time.monotonic() + 1.05
+    if url.startswith("https://api.routescan.io/v2/network/mainnet/evm/"):
+        global _ROUTESCAN_NEXT_AT
+        with _ROUTESCAN_LOCK:
+            pause = _ROUTESCAN_NEXT_AT-time.monotonic()
+            if pause>0:
+                time.sleep(pause)
+            _ROUTESCAN_NEXT_AT=time.monotonic()+0.55
     with urllib.request.urlopen(request, timeout=9) as response:
         if response.geturl() != url:
             raise ValueError("public source redirect rejected")
@@ -347,7 +357,9 @@ NATIVE_IDS = {
     "sui": ("SUI", "sui"),
 }
 PLATFORM_CHAINS = {"ethereum": "ethereum", "binance-smart-chain": "bsc",
-                   "solana": "solana"}
+                   "solana": "solana", "avalanche": "avalanche"}
+# Avalanche token index is acquired by a verified free Routescan page;
+# no Avalanche RPC contract supply probe is implied or required.
 # Public endpoint/reference specifications (responses never authenticated by TLS alone):
 # BTC: https://github.com/Blockstream/esplora/blob/master/API.md
 # BSC: https://docs.bnbchain.org/bnb-smart-chain/developers/json_rpc/json-rpc-endpoint/
@@ -395,7 +407,7 @@ def _supply_integer(value):
 
 def _contract_address(chain, address):
     return (isinstance(address, str) and
-            bool((EVM_ADDRESS if chain in ("ethereum", "bsc")
+            bool((EVM_ADDRESS if chain in ("ethereum", "bsc", "avalanche")
                   else SOL_MINT if chain == "solana"
                   else re.compile(r"(?!)")).fullmatch(address)))
 
