@@ -312,6 +312,7 @@ def _evm_token(chain, contract, url, fetch, native, previous):
                     holders.append({"account": addr["hash"], "unita_minima": str(qty),
                                     "decimali": decimals,
                                     "variazione_unita_minima": (str(qty-before) if before is not None else None),
+                                    "confronto_precedente_utc": previous.get("acquisito_utc") if before is not None else None,
                                     "entita": _tag(addr)})
             holders_source = h_url
         except (OSError, ValueError, KeyError, TypeError, AssertionError):
@@ -360,6 +361,7 @@ def _solana_token(mint, url, fetch, previous):
                         "decimali": decimals,
                         "quota_supply_pct": str((Decimal(raw)/total*100).quantize(Decimal(".0001"))) if total else None,
                         "variazione_unita_minima": change,
+                        "confronto_precedente_utc": previous.get("acquisito_utc") if old is not None else None,
                         "entita": {"stato": "ENTITA_NON_IDENTIFICATA"}})
     events = []
     if holders:
@@ -419,7 +421,8 @@ def _solana_native(url, fetch, previous):
         n = _nat(item.get("lamports"))
         old = previous_accounts.get(item["address"])
         holders.append({"account": item["address"], "unita_minima": str(n),
-                        "decimali": 9, "variazione_unita_minima": str(n-int(old)) if old else None,
+                        "decimali": 9, "variazione_unita_minima": str(n-int(old)) if old is not None else None,
+                        "confronto_precedente_utc": previous.get("acquisito_utc") if old is not None else None,
                         "entita": {"stato":"ENTITA_NON_IDENTIFICATA"}})
     return {"eventi": [], "detentori": holders, "fonte_detentori": url,
             "elementi_esaminati": len(rows), "eventi_distinti": 0,
