@@ -1159,6 +1159,17 @@ def refresh():
     markets_multi, rates = multi.assemble(
         pairs, tickers, min_vol=num(conf.get('scanner',{}).get('volume_24h_min_eur',500000)),
         max_spread=num(conf.get('scanner',{}).get('spread_massimo_pct',0.8)))
+    # Reuse the existing verified multi-quote Kraken Spot/FX catalog for
+    # positions with no EUR market. Keep original EUR quotes unchanged.
+    # A missing direct FX observation cannot create an invented EUR price:
+    # mercati_spot.assemble omits such a market.
+    held = {canonical(wallet_symbol(row.get('token'))[0])
+            for row in (portfolio.get('posizioni') or [])
+            if isinstance(row,dict) and wallet_symbol(row.get('token'))[1]}
+    for asset in held:
+        if asset not in markets and asset in markets_multi:
+            markets[asset] = dict(markets_multi[asset],
+                                  fonte_quotazione="Kraken Spot Ticker + cambio diretto Kraken")
     tokens = sorted({'BTC','ETH','SOL'} |
                     {wallet_symbol(h.get('token'))[0]
                      for h in (portfolio.get('posizioni') or [])
