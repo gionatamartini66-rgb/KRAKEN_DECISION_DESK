@@ -247,6 +247,42 @@ def _evm_token(chain, contract, url, fetch, native, previous):
                                          "da": _tag(origin), "a": _tag(dest)}))
         else:
             raise ValueError("RPC logs unavailable: " + fallback_reason)
+    # Even when RPC Transfer logs work, the independent indexed page may
+    # carry PUBLIC actor tags. Match tx+from+to+amount exactly: explorer
+    # metadata may enrich attribution, but cannot replace an RPC fact.
+    if chain == "ethereum" and not fallback_reason and events:
+        try:
+            label_url = ETH_EXPLORER + "/api/v2/tokens/" + contract + "/transfers"
+            tagged = fetch(label_url)
+            indexed = tagged.get("items") if isinstance(tagged,dict) else None
+            if not isinstance(indexed,list) or len(indexed)>100:
+                raise ValueError("indexed labels unavailable")
+            by_fact = {}
+            for item in indexed:
+                if not isinstance(item,dict):
+                    continue
+                fr, to = item.get("from"), item.get("to")
+                amount = item.get("total")
+                amount = amount.get("value") if isinstance(amount,dict) else None
+                if (not isinstance(fr,dict) or not isinstance(to,dict) or
+                        not EVM.fullmatch(str(fr.get("hash"))) or
+                        not EVM.fullmatch(str(to.get("hash")))):
+                    continue
+                try:
+                    q = _nat(amount)
+                except ValueError:
+                    continue
+                by_fact[(str(item.get("tx_hash")).lower(),
+                         fr["hash"].lower(),to["hash"].lower(),str(q))] = (fr,to)
+            for event in events:
+                key=(event["tx"].lower(),event["da"].lower(),event["a"].lower(),
+                     event["unita_minima"])
+                pair=by_fact.get(key)
+                if pair:
+                    event["attribuzione"]={"da":_tag(pair[0]),"a":_tag(pair[1])}
+                    event["fonte_attribuzione"]=label_url
+        except (OSError,ValueError,KeyError,TypeError,AssertionError):
+            pass
     holders = []
     holders_source = None
     earlier = {h["account"].lower(): int(h["unita_minima"]) for h in
