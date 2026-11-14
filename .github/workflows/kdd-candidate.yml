@@ -32,6 +32,38 @@ jobs:
         run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_funding_book_g2
       - name: Existing safe updater tests
         run: python -B scripts/test_kdd_aggiorna.py
+      - name: TEMP verify public Kraken USD USDC only Spot pairs
+        if: github.event_name == 'pull_request' && github.event.pull_request.number == 64
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          PYTHONPATH=.:scripts python - <<'PY'
+          import json,urllib.request
+          import mercati_spot as spot, serve
+          def get(endpoint):
+              with urllib.request.urlopen('https://api.kraken.com/0/public/'+endpoint,timeout=18) as r:
+                  x=json.load(r)
+              if x['error']:raise ValueError(x['error'])
+              return x['result']
+          pairs=get('AssetPairs')
+          tickers=get('Ticker')
+          groups={}
+          for key,row in pairs.items():
+              w=row.get('wsname','')
+              if '/' not in w or row.get('status')!='online': continue
+              b,q=w.split('/',1)
+              b=spot.ALIASES.get(b.upper(),b.upper())
+              if b in spot.EXCLUDE_BASE or q not in spot.QUOTES:continue
+              groups.setdefault(b,[]).append((q,key,w))
+          candidates={b:v for b,v in groups.items() if not any(x[0]=='EUR' for x in v)
+                      and any(x[0] in ('USD','USDC') for x in v)}
+          assembled,rates=spot.assemble(pairs,tickers)
+          verified=[(name,options,assembled[name]) for name,options in candidates.items() if name in assembled]
+          verified.sort(key=lambda x: -x[2].get('volume_24h_eur_stimato',0))
+          print('KDD17_USD_ONLY_KRAKEN',json.dumps({'rates':rates,
+              'total_candidate_symbols':len(candidates),
+              'verified':[{'token':b,'pairs':p,'selected':{k:row.get(k) for k in ('pair','pair_key','quote','prezzo_quote','prezzo_eur','eur_per_quote','conversione_fonte','volume_24h_eur_stimato')}} for b,p,row in verified[:35]]},ensure_ascii=False),flush=True)
+          PY
 
   r5-historical-reference:
     runs-on: ubuntu-latest
