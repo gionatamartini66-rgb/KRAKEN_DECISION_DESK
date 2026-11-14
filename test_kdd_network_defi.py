@@ -929,6 +929,40 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         self.assertTrue(any(x["osservazioni"][0]["stato"]=="RINVIATO_BUDGET"
                             for x in interpreted["candidati"]))
 
+    def test_public_request_budget_stops_rotation_without_zero_metrics(self):
+        import kdd_capital_flow as cap
+        contracts=["0x"+format(i+1,"040x") for i in range(6)]
+        assets={"posizioni":[], "candidati":[
+            {"token":"X"+str(i), "progetto_id":"other-"+str(i),
+             "coppia_analisi":"X"+str(i)+"/EUR",
+             "contratti_indicizzati":[{"rete":"ethereum","contratto":addr}]}
+            for i,addr in enumerate(contracts)],"fonti_native":{}}
+        calls=[]
+        def fetch(url,payload=None):
+            calls.append(url)
+            return {}
+        def expensive_probe(key,assets,fetch,previous):
+            for i in range(7):
+                fetch("https://test.example/public")
+            raise AssertionError("over-budget probe should not finish")
+        with mock.patch.object(cap,"_probe",side_effect=expensive_probe):
+            result=cap.collect(T,assets,{"posizioni":[],"candidati":[{}]*6},
+                               None,fetch)
+        self.assertEqual(result["richieste_effettuate"],15)
+        self.assertEqual(len(calls),15)
+        self.assertEqual(result["target_totali"],6)
+        self.assertEqual(result["target_interrogati"],3)
+        self.assertEqual([r["motivo"] for r in result["sonde"]],
+                         ["BUDGET_RICHIESTE"]*3)
+        self.assertEqual(result["prossimo_target"],"ethereum|"+contracts[3])
+        read=cap.at_read(result,assets,{"posizioni":[],"candidati":[{}]*6},T)
+        self.assertEqual(len(read["candidati"]),6)
+        self.assertEqual(read["candidati"][3]["osservazioni"][0]["stato"],
+                         "RINVIATO_BUDGET")
+        self.assertEqual(read["candidati"][0]["osservazioni"][0]["stato"],
+                         "NON_DISPONIBILE")
+        self.assertIsNone(read["candidati"][3]["osservazioni"][0].get("valori"))
+
     def test_dynamic_candidate_rotation_and_missing_attribution(self):
         import kdd_capital_flow as cap
         assets = {"posizioni": [],"candidati":[
