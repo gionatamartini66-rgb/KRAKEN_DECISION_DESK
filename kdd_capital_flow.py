@@ -160,6 +160,79 @@ def _evm_native(chain, url, fetch, native):
             "copertura": "Un blocco esaminato, non flussi globali; profondita 6 blocchi senza attestare finalita"}
 
 
+# Ethplorer's published `freekey` is a shared, no-cost public development
+# credential (not a private account key). Fair-use limits: 2 rps, 20/min.
+# Source: https://github.com/EverexIO/Ethplorer/wiki/ethplorer-api
+ETHPLORER = "https://api.ethplorer.io"
+ETHPLORER_HISTORY_LIMIT = 20
+
+
+def _ethplorer_history(contract, decimals, fetch):
+    """Indexed ERC-20 contract operations when direct logs/explorer are unavailable."""
+    url = (ETHPLORER + "/getTokenHistory/" + contract
+           + "?apiKey=freekey&limit=" + str(ETHPLORER_HISTORY_LIMIT))
+    data = fetch(url)
+    records = data.get("operations") if isinstance(data, dict) else None
+    if not isinstance(records, list) or len(records) > ETHPLORER_HISTORY_LIMIT:
+        raise ValueError("Ethplorer transfer sample unavailable")
+    events, seen = [], set()
+    for n, item in enumerate(records):
+        if not isinstance(item, dict):
+            continue
+        info = item.get("tokenInfo")
+        if not isinstance(info, dict) or str(info.get("address", "")).lower() != contract.lower():
+            continue
+        try:
+            precision = _nat(info.get("decimals"), 30)
+            if precision != decimals:
+                continue
+            qty = _nat(item.get("value"))
+            stamp = dt.datetime.fromtimestamp(_nat(item.get("timestamp"), 10**11), UTC).isoformat()
+        except (ValueError, TypeError, OverflowError):
+            continue
+        tx, origin, dest = item.get("transactionHash"), item.get("from"), item.get("to")
+        kind = {"transfer": "TRASFERIMENTO", "mint": "MINT",
+                "burn": "BURN"}.get(item.get("type"))
+        if (not kind or not HEX64.fullmatch(str(tx)) or
+                not EVM.fullmatch(str(origin)) or not EVM.fullmatch(str(dest))):
+            continue
+        key = (tx.lower(), origin.lower(), dest.lower(), str(qty))
+        if key in seen:
+            continue
+        seen.add(key)
+        events.append(_event("ethereum", contract, tx, n, qty, decimals,
+                             url, None, stamp, origin, dest, kind))
+    return events, url
+
+
+def _ethplorer_holders(contract, decimals, previous, fetch):
+    """Exact rawBalance only; no percentage inferred from an index's UI balance."""
+    url = ETHPLORER + "/getTopTokenHolders/" + contract + "?apiKey=freekey&limit=10"
+    data = fetch(url)
+    records = data.get("holders") if isinstance(data, dict) else None
+    if not isinstance(records, list) or len(records) > MAX_HOLDERS:
+        raise ValueError("Ethplorer holder page unavailable")
+    earlier = {h["account"].lower(): int(h["unita_minima"]) for h in
+               previous.get("detentori", []) if isinstance(h, dict)
+               and isinstance(h.get("account"), str)
+               and isinstance(h.get("unita_minima"), str) and h["unita_minima"].isdigit()}
+    rows = []
+    for item in records:
+        if not isinstance(item, dict) or not EVM.fullmatch(str(item.get("address"))):
+            continue
+        try:
+            qty = _nat(item.get("rawBalance"))
+        except (ValueError, TypeError):
+            continue  # never manufacture raw units from a rounded UI balance
+        addr = item["address"]
+        old = earlier.get(addr.lower())
+        rows.append({"account": addr, "unita_minima": str(qty), "decimali": decimals,
+                     "variazione_unita_minima": str(qty-old) if old is not None else None,
+                     "confronto_precedente_utc": previous.get("acquisito_utc") if old is not None else None,
+                     "entita": {"stato": "ENTITA_NON_IDENTIFICATA"}})
+    return rows, url
+
+
 def _evm_token(chain, contract, url, fetch, native, previous):
     head = native.get("valori") if isinstance(native, dict) else None
     if not isinstance(head, dict):
@@ -217,20 +290,22 @@ def _evm_token(chain, contract, url, fetch, native, previous):
                                  origin, dest, kind))
     except (OSError, ValueError, KeyError, TypeError, OverflowError) as exc:
         fallback_reason = type(exc).__name__
-        # An indexed explorer preserves transaction time when a shared RPC
-        # restricts eth_getLogs. It is a secondary *index*, not a primary RPC.
-        if chain == "ethereum":
-            base = ETH_EXPLORER + "/api/v2/tokens/" + contract
+        if chain != "ethereum":
+            raise ValueError("RPC logs unavailable: " + fallback_reason)
+        # Prioritize primary RPC, then Blockscout, then published no-cost
+        # Ethplorer history. All fallbacks are clearly *indexed* observations.
+        base = ETH_EXPLORER + "/api/v2/tokens/" + contract
+        try:
             data = fetch(base + "/transfers")
             rows = data.get("items") if isinstance(data, dict) else None
             if not isinstance(rows, list) or len(rows) > 100:
-                raise ValueError("explorer transfer response")
+                raise ValueError("Blockscout transfer page invalid")
             source = base + "/transfers"
             used_fallback = set()
             for idx, item in enumerate(rows):
                 if not isinstance(item, dict):
                     continue
-                tx = item.get("tx_hash")
+                tx = item.get("transaction_hash") or item.get("tx_hash")
                 amount = item.get("total")
                 amount = amount.get("value") if isinstance(amount, dict) else None
                 if not HEX64.fullmatch(str(tx)):
@@ -244,14 +319,18 @@ def _evm_token(chain, contract, url, fetch, native, previous):
                 _ts(when)
                 dedup_key = (tx.lower(), origin["hash"].lower(), dest["hash"].lower(), str(amount))
                 if item.get("log_index") is None and dedup_key in used_fallback:
-                    continue  # Explorer page lacks logIndex: avoid counting same item twice.
+                    continue
                 used_fallback.add(dedup_key)
                 events.append(_event(chain, contract, tx, item.get("log_index", idx),
                                      amount, decimals, source, item.get("block_number"),
                                      when, origin["hash"], dest["hash"], labels={
                                          "da": _tag(origin), "a": _tag(dest)}))
-        else:
-            raise ValueError("RPC logs unavailable: " + fallback_reason)
+            fallback_label = "PAGINA_BLOCKSCOUT"
+        except (OSError, ValueError, KeyError, TypeError, OverflowError):
+            # Clear any incomplete page before switching indexes: no mix of
+            # sources or silent double counting.
+            events, source = _ethplorer_history(contract, decimals, fetch)
+            fallback_label = "PAGINA_ETHPLORER"
     # Even when RPC Transfer logs work, the independent indexed page may
     # carry PUBLIC actor tags. Match tx+from+to+amount exactly: explorer
     # metadata may enrich attribution, but cannot replace an RPC fact.
@@ -277,7 +356,7 @@ def _evm_token(chain, contract, url, fetch, native, previous):
                     q = _nat(amount)
                 except ValueError:
                     continue
-                by_fact[(str(item.get("tx_hash")).lower(),
+                by_fact[(str(item.get("transaction_hash") or item.get("tx_hash")).lower(),
                          fr["hash"].lower(),to["hash"].lower(),str(q))] = (fr,to)
             for event in events:
                 key=(event["tx"].lower(),event["da"].lower(),event["a"].lower(),
@@ -301,7 +380,7 @@ def _evm_token(chain, contract, url, fetch, native, previous):
             answer = fetch(h_url)
             items = answer.get("items") if isinstance(answer, dict) else None
             if not isinstance(items, list) or len(items) > 100:
-                raise ValueError("holders page invalid")
+                raise ValueError("Blockscout holder page invalid")
             for h in items[:MAX_HOLDERS]:
                 if not isinstance(h, dict):
                     continue
@@ -315,12 +394,15 @@ def _evm_token(chain, contract, url, fetch, native, previous):
                                     "confronto_precedente_utc": previous.get("acquisito_utc") if before is not None else None,
                                     "entita": _tag(addr)})
             holders_source = h_url
-        except (OSError, ValueError, KeyError, TypeError, AssertionError):
-            pass
+        except (OSError, ValueError, KeyError, TypeError, OverflowError):
+            try:
+                holders, holders_source = _ethplorer_holders(contract, decimals, previous, fetch)
+            except (OSError, ValueError, KeyError, TypeError, OverflowError):
+                holders, holders_source = [], None
     selected,total = _top(events)
     return {"eventi": selected, "detentori": holders, "fonte_detentori": holders_source,
             "elementi_esaminati": len(events), "eventi_distinti": total,
-            "periodo": {"tipo": "RANGE_BLOCCHI" if not fallback_reason else "PAGINA_EXPLORER",
+            "periodo": {"tipo": "RANGE_BLOCCHI" if not fallback_reason else fallback_label,
                         "da_blocco": start if not fallback_reason else None,
                         "a_blocco": end if not fallback_reason else None},
             "copertura": ("Eventi Transfer ERC-20 nel range limitato; paginazione NON completa. "
@@ -758,9 +840,12 @@ def at_read(raw, asset_rows, economics, now):
                             net.SOL_URL if key[0]=="solana" else net.SUI_URL))
             indexed_url = ETH_EXPLORER + "/api/v2/tokens/" + key[1] + "/transfers"
             block_prefix = "https://blockstream.info/api/block/"
+            ethplorer_url = (ETHPLORER + "/getTokenHistory/" + key[1]
+                             + "?apiKey=freekey&limit=" + str(ETHPLORER_HISTORY_LIMIT))
             if ev["fonte"] != expected and not (key[0]=="bitcoin" and
                 ev["fonte"].startswith(block_prefix) and ev["fonte"].endswith("/txs")) and not (
-                key[0]=="ethereum" and key[1]!="NATIVE" and ev["fonte"]==indexed_url):
+                key[0]=="ethereum" and key[1]!="NATIVE" and
+                ev["fonte"] in (indexed_url, ethplorer_url)):
                 raise ValueError("event source incompatible with chain/contract")
             labels=ev.get("attribuzione")
             if not isinstance(labels,dict) or set(labels)!={"da","a"}:
