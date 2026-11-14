@@ -32,76 +32,64 @@ jobs:
         run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_funding_book_g2
       - name: Existing safe updater tests
         run: python -B scripts/test_kdd_aggiorna.py
-      - name: TEMP KDD17 multichain EVM RPC and native SOL public proof
+      - name: TEMP KDD17 new public producer end-to-end live measurement
         if: github.event_name == 'pull_request' && github.event.pull_request.number == 64
         continue-on-error: true
         timeout-minutes: 4
         run: |
           PYTHONPATH=.:scripts python - <<'PY'
-          import json,time
+          import json,datetime as dt,time
           import kdd_network_defi as net,kdd_capital_flow as cap
-          findings=[]
-          def probe(name,url,method,params):
-              t=time.monotonic()
+          now=dt.datetime.now(dt.timezone.utc)
+          urls=[
+            ("OPTUSDC","optimized-asset","optimism","0x0b2c639c533813f4aa9d7837caf62653d097ff85"),
+            ("SOL","solana","solana","NATIVE"),
+            ("SPLUSDC","usd-coin","solana","EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
+            ("AVAX","avalanche-2","avalanche","NATIVE"),
+            ("BSCUSDT","tether","bsc","0x55d398326f99059ff775485246999027b3197955"),
+            ("NEAR","near","near","NATIVE")]
+          reports=[]
+          for group in (urls[:3],urls[3:]):
+              rows=[{"token":token,"progetto_id":proj,
+                     "contratti_indicizzati":([] if address=="NATIVE" else
+                         [{"rete":chain,"contratto":address}])}
+                    for token,proj,chain,address in group]
+              native={}
+              if any(chain=="avalanche" and address=="NATIVE" for _,_,chain,address in group):
+                  native["avalanche"]=net._native_observe("avalanche",net._http,now)
+              assets={"posizioni":rows,"candidati":[],"fonti_native":native}
+              start=time.monotonic()
+              raw=cap.collect(now,assets,{"posizioni":[{} for _ in rows],
+                                          "candidati":[]},None,net._http)
               try:
-                  r=net._http(url,{"jsonrpc":"2.0","id":1,"method":method,"params":params})
-                  if not isinstance(r,dict) or r.get("error") or "result" not in r:
-                      raise ValueError(str(r.get("error") if isinstance(r,dict) else r)[:90])
-                  obj=r["result"]
-                  info={"name":name,"status":"OK","ms":round(1000*(time.monotonic()-t)),
-                        "count":len(obj) if isinstance(obj,list) else None,
-                        "shape":list(obj)[:14] if isinstance(obj,dict) else type(obj).__name__}
-                  if isinstance(obj,list) and obj and isinstance(obj[0],dict):
-                      info["first_keys"]=list(obj[0])[:14]
-                  findings.append(info);return obj
+                  read=cap.at_read(raw,assets,{"posizioni":[{} for _ in rows],
+                                               "candidati":[]},now)
+                  reader="OK"
               except Exception as e:
-                  findings.append({"name":name,"status":"FAIL","ms":round(1000*(time.monotonic()-t)),
-                                   "reason":type(e).__name__+":"+str(getattr(e,"code",str(e)))[:110]})
-                  return None
-          configs=[
-            ("base","https://mainnet.base.org","0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
-            ("arbitrum","https://arb1.arbitrum.io/rpc","0xaf88d065e77c8cc2239327c5edb3a432268e5831"),
-            ("optimism","https://mainnet.optimism.io","0x0b2c639c533813f4aa9d7837caf62653d097ff85"),
-            ("polygon","https://polygon-rpc.com","0x3c499c542cef5e3811e1192ce70d8cc03d5c3359")]
-          for label,url,token in configs:
-              height=probe(label+"_height",url,"eth_blockNumber",[])
-              if isinstance(height,str):
-                  try:
-                      n=int(height,16)
-                      probe(label+"_logs",url,"eth_getLogs",[{
-                          "address":token,"fromBlock":hex(n-10),"toBlock":hex(n-5),
-                          "topics":[cap.TOPIC_TRANSFER]}])
-                  except (ValueError,OverflowError):pass
-          s="https://public.rpc.solanavibestation.com"
-          sig=probe("sol_native_system_signatures",s,"getSignaturesForAddress",
-                    ["11111111111111111111111111111111",{"limit":1,"commitment":"finalized"}])
-          if isinstance(sig,list) and sig:
-              tx=probe("sol_native_v1_tx",s,"getTransaction",
-                   [sig[0]["signature"],{"encoding":"jsonParsed","commitment":"finalized",
-                                          "maxSupportedTransactionVersion":1}])
-              if isinstance(tx,dict):
-                  msg=(tx.get("transaction") or {}).get("message") or {}
-                  instructions=list(msg.get("instructions") or [])
-                  for item in (tx.get("meta") or {}).get("innerInstructions") or []:
-                      instructions.extend(item.get("instructions") or [])
-                  types=[x.get("parsed",{}).get("type") for x in instructions
-                         if isinstance(x,dict) and isinstance(x.get("parsed"),dict)]
-                  findings.append({"name":"sol_system_sample","status":"OBSERVED",
-                                   "system_transfer_count":types.count("transfer"),
-                                   "all_parsed":types[:20]})
-          for label,url in [
-              ("xrpl_analytics_rich","https://xrplanalytics.com/api/richlist?limit=10"),
-              ("xrpl_to_rich","https://api.xrpl.to/api/richlist?limit=10"),
-              ("goplus_bsc","https://api.gopluslabs.io/api/v1/token_security/56?contract_addresses=0x55d398326f99059ff775485246999027b3197955")]:
-              t=time.monotonic()
-              try:
-                  obj=net._http(url)
-                  findings.append({"name":label,"status":"OK","ms":round(1000*(time.monotonic()-t)),
-                    "keys":list(obj)[:12] if isinstance(obj,dict) else None})
-              except Exception as e:
-                  findings.append({"name":label,"status":"FAIL","ms":round(1000*(time.monotonic()-t)),
-                     "reason":type(e).__name__+":"+str(getattr(e,"code",str(e)))[:100]})
-          print("KDD17_EVM_SOL_NATIVE4",json.dumps(findings),flush=True)
+                  read=None;reader=type(e).__name__+":"+str(e)[:90]
+              items=[]
+              for i,s in enumerate(raw["sonde"]):
+                  events=s.get("eventi") or []
+                  first=events[0] if events else None
+                  items.append({"token":rows[i]["token"],"chain":s["rete"],
+                                "state":s["stato"],"reason":s.get("motivo"),
+                                "requests":s["richieste_effettuate"],
+                                "events":len(events),"holders":len(s.get("detentori") or []),
+                                "aggregate":bool(s.get("aggregato_detentori")),
+                                "first":{k:first.get(k) for k in ("tx","quantita","tipo","orario_utc","fonte")}
+                                        if first else None,
+                                "period":s.get("periodo")})
+              reports.append({"items":items,"calls":raw["richieste_effettuate"],
+                              "reader":reader,
+                              "seconds":round(time.monotonic()-start,3)})
+          try:
+              security=net._http("https://api.gopluslabs.io/api/v1/token_security/56?contract_addresses=0x55d398326f99059ff775485246999027b3197955")
+              entry=security.get("result",{}).get("0x55d398326f99059ff775485246999027b3197955",{})
+              reports.append({"goplus":"OK","result_fields":list(entry)[:60] if isinstance(entry,dict) else None,
+                              "holders_preview":entry.get("holders",[])[:2] if isinstance(entry,dict) and isinstance(entry.get("holders"),list) else None})
+          except Exception as ex:
+              reports.append({"goplus":"UNAVAILABLE","reason":type(ex).__name__})
+          print("KDD17_REAL_CODE_MEASUREMENT",json.dumps(reports,ensure_ascii=False),flush=True)
           PY
 
   r5-historical-reference:
