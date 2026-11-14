@@ -724,6 +724,62 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         self.assertEqual(historical["eventi"][0]["stato_alla_lettura"],"STORICO")
         self.assertIsNone(historical["flussi_exchange_campione"]["ingresso_unita_minima"])
 
+    def test_ethplorer_public_fallback_real_response_shape_and_exact_units(self):
+        """Verified free-index schema: operations/holders/rawBalance, no invented labels."""
+        from urllib.error import HTTPError
+        import kdd_capital_flow as cap
+        assets=self._assets(contract=self.EVM_ADDR)
+        observed=[]
+        def fetch(url,payload=None):
+            observed.append((url,payload["method"] if payload else "GET"))
+            if payload:
+                if payload["method"]=="eth_call":
+                    return {"jsonrpc":"2.0","id":1,"result":"0x12"}
+                if payload["method"]=="eth_getLogs":
+                    raise HTTPError(url,403,"forbidden",None,None)
+            if url.startswith(cap.ETH_EXPLORER):
+                raise HTTPError(url,403,"forbidden",None,None)
+            if url.startswith(cap.ETHPLORER+"/getTokenHistory/"):
+                return {"operations":[
+                    {"timestamp":int(T.timestamp()),"transactionHash":"0x"+"e"*64,
+                     "tokenInfo":{"address":self.EVM_ADDR,"decimals":"18"},
+                     "type":"transfer","value":"3000000000000000000",
+                     "from":self.EVM_FROM,"to":self.EVM_TO},
+                    {"timestamp":int(T.timestamp()),"transactionHash":"0x"+"e"*64,
+                     "tokenInfo":{"address":self.EVM_ADDR,"decimals":"18"},
+                     "type":"transfer","value":"3000000000000000000",
+                     "from":self.EVM_FROM,"to":self.EVM_TO},
+                    {"timestamp":int(T.timestamp()),"transactionHash":"0x"+"f"*64,
+                     "tokenInfo":{"address":self.EVM_TO,"decimals":"18"},
+                     "type":"transfer","value":"900000000000000000000",
+                     "from":self.EVM_FROM,"to":self.EVM_TO}]}
+            if url.startswith(cap.ETHPLORER+"/getTopTokenHolders/"):
+                return {"holders":[
+                    {"address":self.EVM_FROM, "balance":50.0,
+                     "rawBalance":"50000000000000000000","share":50.0},
+                    {"address":self.EVM_TO,"balance":5.0,"share":5.0}]}
+            raise AssertionError(url)
+        raw=cap.collect(T,assets,self._econ(),None,fetch)
+        self.assertEqual(raw["sonde"][0]["stato"],"OSSERVATO")
+        self.assertEqual(raw["sonde"][0]["periodo"]["tipo"],"PAGINA_ETHPLORER")
+        self.assertEqual(len(raw["sonde"][0]["eventi"]),1)
+        self.assertEqual(raw["sonde"][0]["eventi"][0]["quantita"],"3")
+        self.assertEqual(raw["sonde"][0]["detentori"][0]["unita_minima"],
+                         "50000000000000000000")
+        self.assertEqual(len(raw["sonde"][0]["detentori"]),1)  # rounded UI only skipped
+        self.assertEqual(raw["sonde"][0]["richieste_effettuate"],6)
+        reading=cap.at_read(raw,assets,self._econ(),T)["posizioni"][0]["osservazioni"][0]
+        self.assertEqual(reading["eventi"][0]["fonte"],cap.ETHPLORER+
+                         "/getTokenHistory/"+self.EVM_ADDR+"?apiKey=freekey&limit=20")
+        self.assertEqual(reading["flussi_exchange_campione"]["stato"],
+                         "NON_ATTRIBUIBILE_O_STORICO")
+        self.assertIsNone(reading["flussi_exchange_campione"]["ingresso_unita_minima"])
+        self.assertEqual(reading["operatori_etichettati_nel_campione"],0)
+        bad=copy.deepcopy(raw)
+        bad["sonde"][0]["eventi"][0]["fonte"]="https://api.ethplorer.io/getTokenHistory/"+self.EVM_TO+"?apiKey=freekey&limit=20"
+        with self.assertRaises(ValueError):
+            cap.at_read(bad,assets,self._econ(),T)
+
     def test_custodian_fund_protocol_labels_are_not_exchange_flows(self):
         """An identified institution is not automatically a known exchange."""
         import kdd_capital_flow as cap
