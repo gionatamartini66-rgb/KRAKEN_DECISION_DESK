@@ -655,7 +655,9 @@ def _solana_recent_mint_transfer(mint, fetch):
     events=[]
     scanned=0
     slots=[]
-    for signature in signatures[:1]:
+    for signature in signatures[:2]:
+        if events:  # do not spend a second getTransaction once the mint matches
+            break
         if not isinstance(signature,dict) or signature.get("err") is not None:
             continue
         txid=signature.get("signature")
