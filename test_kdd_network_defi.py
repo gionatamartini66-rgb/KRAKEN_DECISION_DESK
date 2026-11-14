@@ -228,8 +228,23 @@ class NetworkDefiTests(unittest.TestCase):
             pepe["identita"], {"id":"pepe","symbol":"pepe","name":"Pepe",
                                "platforms":{"ethereum":Kdd17AssetIdentityG2Tests.ETH}},moment)
         fixture.dossier["evidenze_economiche"] = economics
+        standard_fetch=Kdd17AssetIdentityG2Tests().fetch
+        def sample_capital_fetch(url, payload=None):
+            # Keep the original Sui/Solana supply source, but also exercise
+            # real-shaped capital events through dossier -> packet -> bridge.
+            if url==evidence.SUI_URL and payload and "transactions(" in payload.get("query",""):
+                return {"data":{"transactions":{"nodes":[{
+                    "digest":"A"*40,"effects":{"status":"SUCCESS","timestamp":iso,
+                    "checkpoint":{"sequenceNumber":"450"},
+                    "balanceChanges":{"nodes":[{
+                        "owner":{"address":"0x123"},"amount":"-1000000000",
+                        "coinType":{"repr":"0x2::sui::SUI"}}]}}}]}}}
+            if url==evidence.SOL_URL and payload and payload.get("method")=="getLargestAccounts":
+                return {"id":1,"result":{"context":{"slot":500},
+                    "value":[{"address":"B"*32,"lamports":2000000000}]}}
+            return standard_fetch(url,payload)
         fixture.dossier["evidenze_rete_defi"]=evidence.collect(
-            moment,rows,shortlist,fetch=Kdd17AssetIdentityG2Tests().fetch,
+            moment,rows,shortlist,fetch=sample_capital_fetch,
             economics=economics)
         fixture.dump()
         p=packet.build(fixture.root,now=moment)
@@ -244,6 +259,9 @@ class NetworkDefiTests(unittest.TestCase):
         self.assertEqual(network["asset_reti"]["candidati"][1]["ufficialita_contratto"],
                          "NON_ATTESTATA")
         self.assertEqual(network["asset_reti"]["posizioni"][2]["tipo"],"NON_VERIFICATO")
+        self.assertIn("flussi_capitale", network["asset_reti"])
+        self.assertEqual(len(network["asset_reti"]["flussi_capitale"]["posizioni"]),3)
+        self.assertEqual(len(network["asset_reti"]["flussi_capitale"]["candidati"]),2)
         bundle={"schema":bridge.SCHEMA_BUNDLE,"packet":p,
                 "packet_sha256":bridge.digest(p),"preparato_utc":iso}
         reading=bridge.read_context(json.loads(json.dumps(bundle)),now=moment)
@@ -254,6 +272,16 @@ class NetworkDefiTests(unittest.TestCase):
         self.assertEqual(reading["rete_defi_alla_lettura"]["asset_reti"]["candidati"][1]
                          ["osservazioni_contratti"][0]["osservazione"]["valori"]
                          ["supply_unita_minima"],"420690000000000000000000000000000000000")
+        self.assertEqual(len(reading["rete_defi_alla_lettura"]["asset_reti"]["flussi_capitale"]["posizioni"]),3)
+        self.assertEqual(len(reading["rete_defi_alla_lettura"]["asset_reti"]["flussi_capitale"]["candidati"]),2)
+        capital=reading["rete_defi_alla_lettura"]["asset_reti"]["flussi_capitale"]
+        sui=capital["posizioni"][0]["osservazioni"][0]
+        sol=capital["posizioni"][1]["osservazioni"][0]
+        self.assertEqual(sui["eventi"][0]["quantita"],"1")
+        self.assertEqual(sui["eventi"][0]["tipo"],"VARIAZIONE_NETTA_SALDO_NON_TRASFERIMENTO")
+        self.assertEqual(sui["eventi"][0]["stato_alla_lettura"],"CAMPIONE_RECENTE")
+        self.assertEqual(sol["detentori"][0]["unita_minima"],"2000000000")
+        self.assertEqual(sol["periodo"]["tipo"],"TOP20_ACCOUNT_SOL_FINALIZZATI")
         late=bridge.read_context(bundle,now=moment+dt.timedelta(minutes=40))
         self.assertIsNone(late["rete_defi_alla_lettura"]["posizioni"][0]
                           ["defi"]["valori"])
@@ -335,6 +363,29 @@ class Kdd17AssetIdentityG2Tests(unittest.TestCase):
                            "ledger_index": "100000000", "closed": True,
                            "ledger_hash": "C" * 64}}}
         raise AssertionError("unexpected public request: " + url)
+
+    def test_unknown_kraken_asset_platforms_survive_index_and_gpt_reader(self):
+        import kdd_economics as econ
+        identity=self.ident("PEPE")
+        payload={"id":"pepe","symbol":"pepe","name":"Pepe",
+                 "platforms":{"tron":"T"*34,"base":"0x"+"a"*40}}
+        index=evidence.coin_network_metadata(identity,payload,T)
+        self.assertEqual(index["contratti"],[])
+        self.assertEqual(index["piattaforme_senza_fonte"],["base","tron"])
+        economic={"posizioni":[{"indice":0,"token":"PEPE","identita":identity,
+                               "network_metadata":index}],"candidati":[]}
+        raw=evidence._NETWORK_COLLECT_ASSETS(T,[{"token":"PEPE"}],[],
+                                            economic,None,lambda *args:None)
+        read=evidence._NETWORK_READ_ASSETS(raw,[{"token":"PEPE"}],[],economic,T)
+        row=read["posizioni"][0]
+        self.assertEqual(row["tipo"],"PIATTAFORMA_INDICIZZATA_SENZA_FONTE")
+        self.assertEqual(row["piattaforme_senza_fonte"],["base","tron"])
+        self.assertEqual(row["osservazione_nativa"]["stato"],"NON_COPERTO")
+        altered=copy.deepcopy(economic)
+        altered["posizioni"][0]["network_metadata"]["piattaforme_senza_fonte"]=["ethereum"]
+        with self.assertRaises(ValueError):
+            evidence._NETWORK_COLLECT_ASSETS(T,[{"token":"PEPE"}],[],
+                                             altered,None,lambda *args:None)
 
     def test_ethereum_verified_public_rpc_endpoint_and_ip_rate_limit(self):
         """Samsung-selected provider: shared 1rps/IP must include ERC-20 probes."""
@@ -543,6 +594,1287 @@ class Kdd17AssetIdentityG2Tests(unittest.TestCase):
             evidence.at_read(missing, owned, [], T, economics=econ)
         with self.assertRaises(ValueError):
             evidence.at_read(raw, owned, [], T)
+
+
+
+class Kdd17CapitalMovementTests(unittest.TestCase):
+    """Synthetic protocol replies; no external calls or private account IDs."""
+
+    EVM_ADDR = "0x" + "1" * 40
+    EVM_FROM = "0x" + "2" * 40
+    EVM_TO = "0x" + "3" * 40
+    MINT = "A" * 32
+    HOLDER = "B" * 32
+
+    def _assets(self, chain="ethereum", contract=None):
+        return {"posizioni": [{"token": "PEPE" if contract else "BTC",
+                                "progetto_id": "pepe" if contract else "bitcoin",
+                                "coppia_analisi": None,
+                                "contratti_indicizzati":
+                                    [{"rete": chain, "contratto": contract}] if contract else []}],
+                "candidati": [],
+                "fonti_native": {
+                    "bitcoin": {"valori": {"blocco_hash": "a" * 64,
+                                           "transazioni_blocco": 300}},
+                    "ethereum": {"valori": {"altezza_blocco": 1000}},
+                    "bsc": {"valori": {"altezza_blocco": 1000}}}}
+
+    def _econ(self):
+        return {"posizioni": [{"fondamentali": {
+                    "stato": "VERIFICATO", "capitalizzazione_usd": 100000000,
+                    "offerta_circolante": 1000000, "fonte": "https://api.coingecko.com/api/v3/coins/pepe"}}],
+                "candidati": []}
+
+    def test_evm_real_block_timestamp_missing_and_historical_time_at_gpt_read(self):
+        import kdd_capital_flow as cap
+        import kdd_network_defi as net
+        from scripts import kdd_bridge_g2 as bridge
+        assets=self._assets(chain="optimism",contract=self.EVM_ADDR)
+        label=self.EVM_ADDR
+        block_time=[hex(int(T.timestamp()))]
+        def fetch(url,payload=None):
+            self.assertEqual(url,net.CONTRACT_ENDPOINTS["optimism"])
+            method=payload["method"]
+            if method=="eth_blockNumber":
+                return {"id":1,"result":hex(200)}
+            if method=="eth_call":
+                return {"id":1,"result":"0x12"}
+            if method=="eth_getLogs":
+                entry={"address":label,"transactionHash":"0x"+"f"*64,
+                       "blockNumber":hex(190),"logIndex":"0x0","removed":False,
+                       "topics":[cap.TOPIC_TRANSFER,
+                                 "0x"+"0"*24+self.EVM_FROM[2:],
+                                 "0x"+"0"*24+self.EVM_TO[2:]],
+                       "data":"0x"+format(2*10**18,"064x")}
+                if block_time[0] is not None:
+                    entry["blockTimestamp"]=block_time[0]
+                return {"id":1,"result":[entry]}
+            raise AssertionError(method)
+        def sample():
+            raw=cap.collect(T,assets,self._econ(),None,fetch)
+            self.assertEqual(raw["sonde"][0]["stato"],"OSSERVATO")
+            self.assertEqual(len(raw["sonde"][0]["eventi"]),1)
+            read=cap.at_read(raw,assets,self._econ(),T)
+            evt=read["posizioni"][0]["osservazioni"][0]["eventi"][0]
+            economic=bridge.capital_market_context(
+                {"asset_reti":{"flussi_capitale":read}},
+                [{"token":"PEPE","prezzo_eur":"1"}],
+                [{"mercato_spot_kraken_alla_lettura":{
+                    "stato":"DISPONIBILE","coppia":"PEPE/EUR",
+                    "volume_24h_eur_stimato":"1000"}}])
+            return evt,economic[0]["osservazioni"][0]["movimento_massimo_campionato"]
+        current,market=sample()
+        self.assertEqual(current["orario_utc"],T.isoformat())
+        self.assertEqual(current["stato_alla_lettura"],"CAMPIONE_RECENTE")
+        self.assertEqual(market["rapporto_volume_kraken_spot_24h_pct"],"0.20")
+        # No timestamp is not a historical event and not a recent event:
+        # acquisition freshness must not be silently assigned to the fact.
+        block_time[0]=None
+        unknown,market=sample()
+        self.assertIsNone(unknown["orario_utc"])
+        self.assertEqual(unknown["stato_alla_lettura"],"ORARIO_EVENTO_NON_VERIFICABILE")
+        self.assertEqual(unknown["quantita"],"2")
+        self.assertIsNone(unknown["valore_usd_indicativo"])
+        self.assertIsNone(market)
+        block_time[0]=hex(int((T-dt.timedelta(hours=3)).timestamp()))
+        historical,market=sample()
+        self.assertEqual(historical["stato_alla_lettura"],"STORICO")
+        self.assertEqual(historical["orario_utc"],(T-dt.timedelta(hours=3)).isoformat())
+        self.assertIsNone(market)
+        for invalid in ("now", T.isoformat(), "-0x1", True):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    cap._evm_log_time(invalid)
+
+    def test_erc20_real_transfer_logs_dedup_largest_and_supply_context(self):
+        import kdd_capital_flow as cap
+        topic = lambda addr: "0x" + "0" * 24 + addr[2:]
+        log = {"address": self.EVM_ADDR, "transactionHash": "0x" + "f" * 64,
+               "blockNumber": hex(983), "logIndex": "0x0",
+               "blockTimestamp":hex(int(T.timestamp())),
+               "removed": False, "topics": [cap.TOPIC_TRANSFER,
+                topic(self.EVM_FROM), topic(self.EVM_TO)],
+               "data": "0x" + format(200000000, "064x")}
+        seen = []
+        def fetch(url, payload=None):
+            seen.append((url, payload))
+            if payload:
+                method = payload["method"]
+                if method == "eth_call":
+                    return {"jsonrpc": "2.0", "id": 1, "result": "0x12"}
+                if method == "eth_getLogs":
+                    self.assertEqual(payload["params"][0]["address"], self.EVM_ADDR)
+                    return {"jsonrpc": "2.0", "id": 1, "result": [log, dict(log)]}
+            if url.endswith("/transfers"):
+                return {"items": [{"tx_hash":log["transactionHash"],
+                        "from":{"hash":self.EVM_FROM,"public_tags":[{"label":"Coinbase 1"}]},
+                        "to":{"hash":self.EVM_TO,"public_tags":[]},
+                        "total":{"value":"200000000"}}]}
+            if url.endswith("/holders"):
+                return {"items": [{"address": {"hash": self.EVM_FROM,
+                                                "public_tags": [{"label": "Exchange"}]},
+                                   "value": "500000000"}]}
+            raise OSError("not used")
+        assets = self._assets(contract=self.EVM_ADDR)
+        raw = cap.collect(T, assets, self._econ(), None, fetch)
+        self.assertEqual(raw["target_totali"], 1)
+        probe = raw["sonde"][0]
+        self.assertEqual(probe["stato"], "OSSERVATO")
+        self.assertEqual(len(probe["eventi"]), 1)
+        self.assertEqual(probe["eventi"][0]["quantita"], "0.0000000002")
+        self.assertEqual(probe["eventi"][0]["da"], self.EVM_FROM)
+        self.assertEqual(probe["detentori"][0]["entita"]["classe"], "EXCHANGE")
+        self.assertEqual(probe["eventi"][0]["attribuzione"]["da"]["classe"],"EXCHANGE")
+        self.assertEqual(probe["eventi"][0]["fonte_attribuzione"], cap.ETH_EXPLORER+"/api/v2/tokens/"+self.EVM_ADDR+"/transfers")
+        second=cap.collect(T, assets, self._econ(), raw, fetch)
+        self.assertEqual(second["sonde"][0]["detentori"][0]["variazione_unita_minima"],"0")
+        assets["posizioni"][0]["osservazioni_contratti"]=[{
+            "rete":"ethereum","contratto":self.EVM_ADDR,
+            "osservazione":{"stato":"OSSERVATO_CON_LIMITI",
+                           "valori":{"supply_unita_minima":"1000000000"}}}]
+        read = cap.at_read(raw, assets, self._econ(), T)
+        record = read["posizioni"][0]["osservazioni"][0]
+        self.assertEqual(record["stato"], "OSSERVATO_CON_LIMITI")
+        self.assertEqual(record["detentori"][0]["quota_supply_pct"],"50.0000")
+        self.assertEqual(record["flussi_exchange_campione"]["uscita_unita_minima"],200000000)
+        self.assertEqual(record["eventi"][0]["stato_alla_lettura"], "CAMPIONE_RECENTE")
+        self.assertIsNotNone(record["eventi"][0]["valore_usd_indicativo"])
+        late = cap.at_read(raw, assets, self._econ(), T + dt.timedelta(minutes=40))
+        self.assertIsNone(late["posizioni"][0]["osservazioni"][0]["eventi"][0]["valore_usd_indicativo"])
+        self.assertEqual(late["posizioni"][0]["osservazioni"][0]["stato"], "STORICO")
+        poison = copy.deepcopy(raw)
+        poison["sonde"][0]["eventi"][0]["quantita"] = "1"
+        with self.assertRaises(ValueError):
+            cap.at_read(poison, assets, self._econ(), T)
+        poison = copy.deepcopy(raw)
+        poison["sonde"][0]["asset_tecnico"] = self.EVM_TO
+        with self.assertRaises(ValueError):
+            cap.at_read(poison, assets, self._econ(), T)
+
+    def test_bitcoin_utxo_output_is_not_investor_and_sample_limited(self):
+        import kdd_capital_flow as cap
+        assets = self._assets()
+        def fetch(url, payload=None):
+            self.assertTrue(url.endswith("/" + "a" * 64 + "/txs"))
+            return [{"txid": "b" * 64, "status": {"confirmed": True,
+                      "block_hash": "a" * 64, "block_height": 800},
+                     "vin": [{"prevout": {"scriptpubkey_address": "bc1qtest"}}],
+                     "vout": [{"value": 100000000, "scriptpubkey_address": "bc1qdest"},
+                              {"value": 200000000, "scriptpubkey_address": "bc1qchange"}]},
+                    {"txid": "c" * 64, "status": {"confirmed": False},
+                     "vin": [], "vout": [{"value": 900000000,
+                                           "scriptpubkey_address": "bc1qpending"}]}]
+        raw = cap.collect(T, assets, self._econ(), None, fetch)
+        block = raw["sonde"][0]
+        self.assertEqual(block["stato"], "OSSERVATO")
+        self.assertEqual(len(block["eventi"]), 2)
+        self.assertEqual(block["eventi"][0]["quantita"], "2")
+        self.assertEqual(block["eventi"][0]["tipo"], "OUTPUT_UTXO")
+        self.assertIn("resto", block["copertura"])
+        self.assertEqual(block["periodo"]["transazioni_totali_blocco"], 300)
+
+    def test_explorer_transfer_tags_inbound_not_sale_and_historical_nonzero_unknown(self):
+        import kdd_capital_flow as cap
+        assets=self._assets(contract=self.EVM_ADDR)
+        tx="0x"+"d"*64
+        transfer={"tx_hash":tx,"timestamp":T.isoformat(),
+                  "from":{"hash":self.EVM_FROM,"public_tags":[]},
+                  "to":{"hash":self.EVM_TO,"public_tags":[{"label":"Example Exchange"}]},
+                  "total":{"value":"1000000000000000000"}}
+        def fetch(url,payload=None):
+            if payload:
+                if payload["method"]=="eth_call":
+                    return {"jsonrpc":"2.0","id":1,"result":"0x12"}
+                if payload["method"]=="eth_getLogs":
+                    raise OSError("RPC method denied")
+            if url.endswith("/transfers"):
+                return {"items":[transfer,dict(transfer)]}
+            if url.endswith("/holders"):
+                return {"items":[]}
+            raise AssertionError(url)
+        raw=cap.collect(T,assets,self._econ(),None,fetch)
+        self.assertEqual(raw["sonde"][0]["stato"],"OSSERVATO")
+        self.assertEqual(len(raw["sonde"][0]["eventi"]),1)
+        read=cap.at_read(raw,assets,self._econ(),T)["posizioni"][0]["osservazioni"][0]
+        self.assertEqual(read["flussi_exchange_campione"]["stato"],"CAMPIONE_ETICHETTATO_PARZIALE")
+        self.assertEqual(read["flussi_exchange_campione"]["ingresso_unita_minima"],10**18)
+        self.assertEqual(read["flussi_exchange_campione"]["uscita_unita_minima"],0)
+        self.assertIn("deposito non significa vendita",read["flussi_exchange_campione"]["limite"])
+        late=cap.at_read(raw,assets,self._econ(),T+dt.timedelta(minutes=45))["posizioni"][0]["osservazioni"][0]
+        self.assertEqual(late["eventi"][0]["stato_alla_lettura"],"STORICO")
+        self.assertIsNone(late["flussi_exchange_campione"]["flusso_netto_unita_minima"])
+        transfer["timestamp"]=(T-dt.timedelta(days=1)).isoformat()
+        old=cap.collect(T,assets,self._econ(),None,fetch)
+        historical=cap.at_read(old,assets,self._econ(),T)["posizioni"][0]["osservazioni"][0]
+        self.assertEqual(historical["eventi"][0]["stato_alla_lettura"],"STORICO")
+        self.assertIsNone(historical["flussi_exchange_campione"]["ingresso_unita_minima"])
+
+    def test_ethplorer_public_fallback_real_response_shape_and_exact_units(self):
+        """Verified free-index schema: operations/holders/rawBalance, no invented labels."""
+        from urllib.error import HTTPError
+        import kdd_capital_flow as cap
+        assets=self._assets(contract=self.EVM_ADDR)
+        observed=[]
+        def fetch(url,payload=None):
+            observed.append((url,payload["method"] if payload else "GET"))
+            if payload:
+                if payload["method"]=="eth_call":
+                    return {"jsonrpc":"2.0","id":1,"result":"0x12"}
+                if payload["method"]=="eth_getLogs":
+                    raise HTTPError(url,403,"forbidden",None,None)
+            if url.startswith(cap.ETH_EXPLORER):
+                raise HTTPError(url,403,"forbidden",None,None)
+            if url.startswith(cap.ETHPLORER+"/getTokenHistory/"):
+                return {"operations":[
+                    {"timestamp":int(T.timestamp()),"transactionHash":"0x"+"e"*64,
+                     "tokenInfo":{"address":self.EVM_ADDR,"decimals":"18"},
+                     "type":"transfer","value":"3000000000000000000",
+                     "from":self.EVM_FROM,"to":self.EVM_TO},
+                    {"timestamp":int(T.timestamp()),"transactionHash":"0x"+"e"*64,
+                     "tokenInfo":{"address":self.EVM_ADDR,"decimals":"18"},
+                     "type":"transfer","value":"3000000000000000000",
+                     "from":self.EVM_FROM,"to":self.EVM_TO},
+                    {"timestamp":int(T.timestamp()),"transactionHash":"0x"+"f"*64,
+                     "tokenInfo":{"address":self.EVM_TO,"decimals":"18"},
+                     "type":"transfer","value":"900000000000000000000",
+                     "from":self.EVM_FROM,"to":self.EVM_TO}]}
+            if url.startswith(cap.ETHPLORER+"/getTopTokenHolders/"):
+                return {"holders":[
+                    {"address":self.EVM_FROM, "balance":50.0,
+                     "rawBalance":"50000000000000000000","share":50.0},
+                    {"address":self.EVM_TO,"balance":5.0,"share":5.0}]}
+            raise AssertionError(url)
+        raw=cap.collect(T,assets,self._econ(),None,fetch)
+        self.assertEqual(raw["sonde"][0]["stato"],"OSSERVATO")
+        self.assertEqual(raw["sonde"][0]["periodo"]["tipo"],"PAGINA_ETHPLORER")
+        self.assertEqual(len(raw["sonde"][0]["eventi"]),1)
+        self.assertEqual(raw["sonde"][0]["eventi"][0]["quantita"],"3")
+        self.assertEqual(raw["sonde"][0]["detentori"][0]["unita_minima"],
+                         "50000000000000000000")
+        self.assertEqual(len(raw["sonde"][0]["detentori"]),1)  # rounded UI only skipped
+        self.assertEqual(raw["sonde"][0]["richieste_effettuate"],6)
+        reading=cap.at_read(raw,assets,self._econ(),T)["posizioni"][0]["osservazioni"][0]
+        self.assertEqual(reading["eventi"][0]["fonte"],cap.ETHPLORER+
+                         "/getTokenHistory/"+self.EVM_ADDR+"?apiKey=freekey&limit=20")
+        self.assertEqual(reading["flussi_exchange_campione"]["stato"],
+                         "NON_ATTRIBUIBILE_O_STORICO")
+        self.assertIsNone(reading["flussi_exchange_campione"]["ingresso_unita_minima"])
+        self.assertEqual(reading["operatori_etichettati_nel_campione"],0)
+        bad=copy.deepcopy(raw)
+        bad["sonde"][0]["eventi"][0]["fonte"]="https://api.ethplorer.io/getTokenHistory/"+self.EVM_TO+"?apiKey=freekey&limit=20"
+        with self.assertRaises(ValueError):
+            cap.at_read(bad,assets,self._econ(),T)
+
+    def test_custodian_fund_protocol_labels_are_not_exchange_flows(self):
+        """An identified institution is not automatically a known exchange."""
+        import kdd_capital_flow as cap
+        assets = self._assets(contract=self.EVM_ADDR)
+        for name, expected in (("Example Custodian", "CUSTODE"),
+                               ("Example Fund", "FONDO"),
+                               ("Example Protocol", "PROTOCOLLO")):
+            with self.subTest(name=name):
+                def fetch(url, payload=None):
+                    if payload:
+                        method = payload["method"]
+                        if method == "eth_call":
+                            return {"jsonrpc": "2.0", "id": 1, "result": "0x12"}
+                        if method == "eth_getLogs":
+                            raise OSError("RPC logs unavailable")
+                    if url.endswith("/transfers"):
+                        return {"items": [{"tx_hash": "0x" + "e" * 64,
+                            "timestamp": T.isoformat(),
+                            "from": {"hash": self.EVM_FROM, "public_tags": []},
+                            "to": {"hash": self.EVM_TO,
+                                   "public_tags": [{"label": name}]},
+                            "total": {"value": "1000000000000000000"}}]}
+                    if url.endswith("/holders"):
+                        return {"items": []}
+                    raise AssertionError(url)
+                raw = cap.collect(T, assets, self._econ(), None, fetch)
+                reading = cap.at_read(raw, assets, self._econ(), T)
+                observation = reading["posizioni"][0]["osservazioni"][0]
+                self.assertEqual(observation["eventi"][0]["attribuzione"]["a"]["classe"],
+                                 expected)
+                self.assertEqual(observation["operatori_etichettati_nel_campione"], 1)
+                flow = observation["flussi_exchange_campione"]
+                self.assertEqual(flow["stato"], "NON_ATTRIBUIBILE_O_STORICO")
+                for field in ("ingresso_unita_minima", "uscita_unita_minima",
+                              "flusso_netto_unita_minima"):
+                    self.assertIsNone(flow[field])
+                self.assertIn("NON zero", flow["limite"])
+
+    def test_solana_spl_holders_and_transfer_checked(self):
+        import kdd_capital_flow as cap
+        assets = {"posizioni": [{"token": "JUP", "progetto_id": "jupiter",
+                 "coppia_analisi": None,
+                 "contratti_indicizzati": [{"rete":"solana","contratto":self.MINT}]}],
+                 "candidati": [], "fonti_native": {}}
+        def fetch(url, payload=None):
+            method=payload["method"]
+            if method=="getTokenLargestAccounts":
+                return {"id":1,"result":{"context":{"slot":500},
+                     "value":[{"address":self.HOLDER,"amount":"5000000","decimals":6}]}}
+            if method=="getTokenSupply":
+                return {"id":1,"result":{"value":{"amount":"10000000","decimals":6}}}
+            if method=="getSignaturesForAddress":
+                return {"id":1,"result":[{"signature":"C"*64,"err":None}]}
+            if method=="getTransaction":
+                return {"id":1,"result":{"slot":500,"blockTime":int(T.timestamp()),
+                     "meta":{"err":None,"innerInstructions":[]},
+                     "transaction":{"message":{"instructions":[{"parsed":{
+                       "type":"transferChecked","info":{"mint":self.MINT,
+                       "source":self.HOLDER,"destination":"D"*32,
+                       "tokenAmount":{"amount":"250000","decimals":6}}}}]}}}}
+            raise AssertionError(method)
+        raw = cap.collect(T, assets, self._econ(), None, fetch)
+        p = raw["sonde"][0]
+        self.assertEqual(p["stato"],"OSSERVATO")
+        self.assertEqual(p["detentori"][0]["quota_supply_pct"],"50.0000")
+        self.assertEqual(p["eventi"][0]["quantita"],"0.25")
+        second=cap.collect(T,assets,self._econ(),raw,fetch)
+        self.assertEqual(second["sonde"][0]["detentori"][0]["variazione_unita_minima"],"0")
+
+    def test_sol_rpc_429_jupiter_holders_plus_real_shaped_mint_transfer(self):
+        import kdd_capital_flow as cap
+        import kdd_network_defi as net
+        assets={"posizioni":[{"token":"BONK","progetto_id":"bonk",
+                 "contratti_indicizzati":[{"rete":"solana","contratto":self.MINT}]}],
+                "candidati":[],"fonti_native":{}}
+        called=[]
+        def fetch(url,payload=None):
+            if url==net.SOL_URL:
+                raise OSError("HTTP429 getTokenLargestAccounts")
+            if url.startswith(cap.JUPITER_TOKENS):
+                return [{"id":self.MINT,"decimals":6,"holderCount":25000,
+                         "audit":{"topHoldersPercentage":28.5}}]
+            if url!=cap.SOLANA_ALT_RPC:
+                raise AssertionError(url)
+            called.append(payload["method"])
+            if payload["method"]=="getSignaturesForAddress":
+                return {"id":1,"result":[{"signature":"F"*64,"err":None}]}
+            if payload["method"]=="getTransaction":
+                self.assertEqual(payload["params"][1]["maxSupportedTransactionVersion"],1)
+                return {"id":1,"result":{"slot":500,
+                    "blockTime":int(T.timestamp()),"meta":{"err":None,
+                        "innerInstructions":[]},
+                    "transaction":{"message":{"instructions":[
+                        {"parsed":{"type":"transferChecked","info":{
+                            "mint":self.MINT,"source":self.HOLDER,
+                            "destination":"D"*32,
+                            "tokenAmount":{"amount":"2500000","decimals":6}}}},
+                        {"parsed":{"type":"transferChecked","info":{
+                            "mint":"Z"*32,"source":self.HOLDER,
+                            "destination":"D"*32,
+                            "tokenAmount":{"amount":"9000000","decimals":6}}}}]}}}}
+            raise AssertionError(payload["method"])
+        raw=cap.collect(T,assets,{"posizioni":[{}],"candidati":[]},None,fetch)
+        record=raw["sonde"][0]
+        self.assertEqual(record["stato"],"OSSERVATO")
+        self.assertEqual(raw["richieste_effettuate"],4)
+        self.assertEqual(called,["getSignaturesForAddress","getTransaction"])
+        self.assertEqual(record["aggregato_detentori"]["numero_account"],25000)
+        self.assertEqual(record["periodo"]["tipo"],"JUPITER_HOLDER_PLUS_MINT_TRANSFER")
+        self.assertEqual(len(record["eventi"]),1)
+        self.assertEqual(record["eventi"][0]["quantita"],"2.5")
+        read=cap.at_read(raw,assets,{"posizioni":[{}],"candidati":[]},T)
+        obs=read["posizioni"][0]["osservazioni"][0]
+        self.assertEqual(obs["eventi"][0]["fonte"],cap.SOLANA_ALT_RPC)
+        self.assertEqual(obs["aggregato_detentori"]["numero_account"],25000)
+        wrong=copy.deepcopy(raw)
+        wrong["sonde"][0]["eventi"][0]["asset_tecnico"]="Z"*32
+        with self.assertRaises(ValueError):
+            cap.at_read(wrong,assets,{"posizioni":[{}],"candidati":[]},T)
+
+    def test_xrp_sui_near_samples_and_source_outage_independent(self):
+        import kdd_capital_flow as cap
+        btc = self._assets()
+        assets = {"posizioni": [
+            {"token":"XRP","progetto_id":"ripple","contratti_indicizzati":[]},
+            {"token":"SUI","progetto_id":"sui","contratti_indicizzati":[]},
+            {"token":"NEAR","progetto_id":"near","contratti_indicizzati":[]},
+            btc["posizioni"][0]],"candidati":[],"fonti_native":btc["fonti_native"]}
+        def fetch(url,payload=None):
+            if "ripple.com" in url:
+                return {"status":"success","result":{"status":"success","validated":True,
+                    "ledger_index":100,"ledger":{"ledger_hash":"A"*64,
+                    "close_time_iso":T.isoformat(),"transactions":[{
+                      "tx":{"hash":"B"*64,"TransactionType":"Payment",
+                      "Account":"rSRC","Destination":"rDST","Amount":"999"},
+                      "meta":{"TransactionResult":"tesSUCCESS",
+                              "delivered_amount":"5000000"}}]}}}
+            if "sui.io" in url:
+                return {"data":{"transactions":{"nodes":[{
+                    "digest":"A"*40,"effects":{"status":"SUCCESS",
+                      "timestamp":T.isoformat(),"checkpoint":{"sequenceNumber":"450"},
+                      "balanceChanges":{"nodes":[{"owner":{"address":"0x123"},
+                      "amount":"-1000000000","coinType":{"repr":"0x2::sui::SUI"}}]}}}]}}}
+            if "near.org" in url:
+                if payload["method"]=="block":
+                    return {"id":1,"result":{"chunks":[{"chunk_hash":"A"*44}],
+                            "header":{"height":200}}}
+                if payload["method"]=="chunk":
+                    return {"id":1,"result":{"transactions":[{"hash":"D"*42,
+                           "signer_id":"sender.near","receiver_id":"receiver.near",
+                           "actions":[{"Transfer":{"deposit":"5000000000000000000000000"}}]}]}}
+            raise OSError("Bitcoin not available")
+        raw=cap.collect(T,assets,{"posizioni":[{}]*4,"candidati":[]},None,fetch)
+        statuses={(s["rete"],s["stato"]) for s in raw["sonde"]}
+        self.assertIn(("xrpl","OSSERVATO"),statuses)
+        self.assertIn(("sui","OSSERVATO"),statuses)
+        self.assertIn(("near","OSSERVATO"),statuses)
+        self.assertIn(("bitcoin","NON_DISPONIBILE"),statuses)
+        self.assertEqual(next(s for s in raw["sonde"] if s["rete"]=="xrpl")
+                         ["eventi"][0]["quantita"],"5")
+        self.assertEqual(next(s for s in raw["sonde"] if s["rete"]=="sui")
+                         ["eventi"][0]["tipo"],"VARIAZIONE_NETTA_SALDO_NON_TRASFERIMENTO")
+
+    def test_bsc_goplus_free_holder_fallback_after_429_and_rpc_logs_limit(self):
+        import kdd_capital_flow as cap
+        import kdd_network_defi as net
+        asset={"posizioni":[{"token":"BSCNEW","progetto_id":"new",
+                             "contratti_indicizzati":[{"rete":"bsc","contratto":self.EVM_ADDR}]}],
+               "candidati":[],"fonti_native":{}}
+        holder=self.EVM_FROM
+        announced_count=["500000"]
+        def fetch(url,payload=None):
+            if url.startswith(cap.BINPLORER):
+                raise OSError("HTTP429")
+            if url.startswith(cap.GOPLUS_BSC):
+                return {"code":1,"message":"OK","result":{self.EVM_ADDR.lower():{
+                    "holder_count":announced_count[0],"holders":[
+                       {"address":holder if i==0 else "0x"+format(i+100,"040x"),
+                        "balance":"1.250000000000000000" if i==0 else "1.000000000000000000",
+                        "tag":"Exchange Public Label" if i==0 else ""}
+                       for i in range(10)]}}}
+            if url==net.CONTRACT_ENDPOINTS["bsc"]:
+                method=payload["method"]
+                if method=="eth_blockNumber":return {"id":1,"result":hex(1000)}
+                if method=="eth_call":return {"id":1,"result":"0x12"}
+                if method=="eth_getLogs":return {"id":1,"error":{"code":-32005,"message":"limit exceeded"}}
+            raise AssertionError(url)
+        raw=cap.collect(T,asset,{"posizioni":[{}],"candidati":[]},None,fetch)
+        self.assertEqual(raw["richieste_effettuate"],6)
+        record=raw["sonde"][0]
+        self.assertEqual(record["stato"],"OSSERVATO")
+        self.assertEqual(record["eventi"],[])
+        self.assertEqual(record["detentori"][0]["unita_minima"],"1250000000000000000")
+        self.assertEqual(record["aggregato_detentori"]["numero_account"],500000)
+        self.assertEqual(len(record["detentori"]),10)
+        self.assertEqual(record["detentori"][0]["entita"]["fonte"],
+                         cap.GOPLUS_BSC+"?contract_addresses="+self.EVM_ADDR)
+        read=cap.at_read(raw,asset,{"posizioni":[{}],"candidati":[]},T)
+        observed=read["posizioni"][0]["osservazioni"][0]
+        self.assertEqual(observed["stato"],"OSSERVATO_CON_LIMITI")
+        self.assertEqual(observed["flussi_exchange_campione"]["stato"],
+                         "NON_ATTRIBUIBILE_O_STORICO")
+        self.assertIsNone(observed["flussi_exchange_campione"]["ingresso_unita_minima"])
+        # The *real* free GoPlus response reported total 0 despite listing
+        # ten holders. The ten balances survive; zero must not reach GPT.
+        announced_count[0]="0"
+        contradictory=cap.collect(T,asset,{"posizioni":[{}],"candidati":[]},None,fetch)
+        discrepant=contradictory["sonde"][0]
+        self.assertEqual(discrepant["stato"],"OSSERVATO")
+        self.assertEqual(len(discrepant["detentori"]),10)
+        self.assertEqual(discrepant["detentori"][0]["unita_minima"],"1250000000000000000")
+        aggregate=discrepant["aggregato_detentori"]
+        self.assertIsNone(aggregate["numero_account"])
+        self.assertEqual(aggregate["stato_numero_account"],"CONTEGGIO_INCOERENTE_CON_ELENCO")
+        reread=cap.at_read(contradictory,asset,{"posizioni":[{}],"candidati":[]},T)
+        propagated=reread["posizioni"][0]["osservazioni"][0]
+        self.assertEqual(len(propagated["detentori"]),10)
+        self.assertIsNone(propagated["aggregato_detentori"]["numero_account"])
+        from scripts import kdd_bridge_g2 as bridge
+        gpt=bridge.capital_market_context(
+            {"asset_reti":{"flussi_capitale":reread}},
+            [{"token":"BSCNEW","prezzo_eur":"1"}],
+            [{"mercato_spot_kraken_alla_lettura":{
+                "stato":"DISPONIBILE","coppia":"BSCNEW/EUR",
+                "volume_24h_eur_stimato":"1000"}}])
+        self.assertIsNone(gpt[0]["osservazioni"][0]["aggregato_detentori"]["numero_account"])
+        self.assertEqual(len(gpt[0]["osservazioni"][0]["variazioni_top_detentori"]),0)
+
+    def test_second_solana_mint_signature_only_when_first_unrelated(self):
+        import kdd_capital_flow as cap
+        methods=[]
+        def fetch(url,payload=None):
+            self.assertEqual(url,cap.SOLANA_ALT_RPC)
+            method=payload["method"]
+            methods.append(method)
+            if method=="getSignaturesForAddress":
+                return {"id":1,"result":[{"signature":"E"*64,"err":None},
+                                          {"signature":"F"*64,"err":None}]}
+            if method=="getTransaction":
+                is_last=payload["params"][0]=="F"*64
+                return {"id":1,"result":{"slot":100,
+                        "blockTime":int(T.timestamp()),"meta":{"err":None,
+                        "innerInstructions":[]},"transaction":{"message":{"instructions":[{
+                        "parsed":{"type":"transferChecked","info":{
+                         "mint":self.MINT if is_last else "Z"*32,
+                         "source":self.HOLDER,"destination":"D"*32,
+                         "tokenAmount":{"amount":"7500000","decimals":6}}}}]}}}}
+            raise AssertionError(method)
+        result=cap._solana_recent_mint_transfer(self.MINT,fetch)
+        self.assertEqual(methods,["getSignaturesForAddress","getTransaction","getTransaction"])
+        self.assertEqual(result["eventi"][0]["quantita"],"7.5")
+        self.assertEqual(result["eventi_distinti"],1)
+
+    def test_optimism_dynamic_erc20_public_rpc_family(self):
+        import kdd_capital_flow as cap
+        import kdd_network_defi as net
+        addr=self.EVM_ADDR
+        token={"token":"NEW","progetto_id":"fresh-asset",
+               "contratti_indicizzati":[{"rete":"optimism","contratto":addr}]}
+        a={"posizioni":[token],"candidati":[],"fonti_native":{}}
+        called=[]
+        def fetch(url,payload=None):
+            self.assertEqual(url,net.CONTRACT_ENDPOINTS["optimism"])
+            method=payload["method"];called.append(method)
+            if method=="eth_blockNumber":return {"id":1,"result":hex(200)}
+            if method=="eth_call":return {"id":1,"result":"0x6"}
+            if method=="eth_getLogs":
+                data=payload["params"][0]
+                self.assertEqual(data["address"],addr)
+                self.assertEqual(data["toBlock"],hex(194))
+                topic=lambda x:"0x"+"0"*24+x[2:]
+                return {"id":1,"result":[{"address":addr,
+                    "transactionHash":"0x"+"a"*64,"blockNumber":hex(190),
+                    "logIndex":"0x0","removed":False,
+                    "topics":[cap.TOPIC_TRANSFER,topic(self.EVM_FROM),topic(self.EVM_TO)],
+                    "data":"0x"+format(1234567,"064x")}]}
+            raise AssertionError(method)
+        raw=cap.collect(T,a,{"posizioni":[{}],"candidati":[]},None,fetch)
+        self.assertEqual(raw["sonde"][0]["stato"],"OSSERVATO")
+        self.assertEqual(raw["richieste_effettuate"],3)
+        self.assertEqual(called,["eth_blockNumber","eth_call","eth_getLogs"])
+        seen=cap.at_read(raw,a,{"posizioni":[{}],"candidati":[]},T)
+        self.assertEqual(seen["posizioni"][0]["osservazioni"][0]["eventi"][0]["quantita"],"1.234567")
+        self.assertEqual(seen["posizioni"][0]["osservazioni"][0]["eventi"][0]["fonte"],net.CONTRACT_ENDPOINTS["optimism"])
+        ident=Kdd17AssetIdentityG2Tests.ident("PEPE")
+        profile=net.coin_network_metadata(ident,{"id":"pepe","symbol":"pepe","name":"Pepe",
+                       "platforms":{"optimistic-ethereum":addr}},T)
+        self.assertEqual(profile["contratti"][0]["rete"],"optimism")
+
+    def test_native_sol_system_transfer_when_largest_rpc_throttled(self):
+        import kdd_capital_flow as cap
+        import kdd_network_defi as net
+        assets={"posizioni":[{"token":"SOL","progetto_id":"solana",
+                               "contratti_indicizzati":[]}],
+                "candidati":[],"fonti_native":{}}
+        called=[]
+        def fetch(url,payload=None):
+            if url==net.SOL_URL:raise OSError("shared Solana RPC429")
+            self.assertEqual(url,cap.SOLANA_ALT_RPC)
+            method=payload["method"];called.append(method)
+            if method=="getSignaturesForAddress":
+                self.assertEqual(payload["params"][0],"1"*32)
+                return {"id":1,"result":[{"signature":"F"*64,"err":None}]}
+            if method=="getTransaction":
+                self.assertEqual(payload["params"][1]["maxSupportedTransactionVersion"],1)
+                return {"id":1,"result":{"slot":777,
+                    "blockTime":int(T.timestamp()),"meta":{"err":None,
+                    "innerInstructions":[]},"transaction":{"message":{
+                    "instructions":[{"program":"system","parsed":{
+                    "type":"transfer","info":{"lamports":1500000000,
+                    "source":"B"*32,"destination":"D"*32}}},
+                    {"program":"spl-token","parsed":{"type":"transfer","info":{
+                    "lamports":1000000000,"source":"B"*32,"destination":"D"*32}}}]}}}}
+            raise AssertionError(method)
+        raw=cap.collect(T,assets,{"posizioni":[{}],"candidati":[]},None,fetch)
+        record=raw["sonde"][0]
+        self.assertEqual(record["stato"],"OSSERVATO")
+        self.assertEqual(raw["richieste_effettuate"],3)
+        self.assertEqual(called,["getSignaturesForAddress","getTransaction"])
+        self.assertEqual(record["eventi"][0]["quantita"],"1.5")
+        self.assertEqual(len(record["eventi"]),1)
+        read=cap.at_read(raw,assets,{"posizioni":[{}],"candidati":[]},T)
+        self.assertEqual(read["posizioni"][0]["osservazioni"][0]["eventi"][0]["fonte"],
+                         cap.SOLANA_ALT_RPC)
+
+    def test_near_final_shard_skips_empty_tx_root_and_rotates(self):
+        import kdd_capital_flow as cap
+        calls=[]
+        first="1"*32
+        def rpc(url,payload=None):
+            method=payload["method"]
+            if method=="block":
+                return {"id":1,"result":{"header":{"height":10},
+                     "chunks":[{"chunk_hash":"A"*44,"tx_root":first},
+                               {"chunk_hash":"B"*44,"tx_root":"C"*44},
+                               {"chunk_hash":"D"*44,"tx_root":"E"*44}]}}
+            if method=="chunk":
+                calls.append(payload["params"]["chunk_id"])
+                return {"id":1,"result":{"transactions":[{"hash":"X"*42,
+                  "signer_id":"sender.near","receiver_id":"receiver.near",
+                  "actions":[{"Transfer":{"deposit":"2500000000000000000000000"}}]}]}}
+            raise AssertionError(method)
+        url="https://rpc.mainnet.near.org"
+        rec=cap._near(url,rpc)
+        self.assertEqual(calls,["B"*44])  # 10 mod 2 selects first non-empty
+        self.assertEqual(rec["eventi"][0]["quantita"],"2.5")
+        self.assertEqual(rec["periodo"]["chunk_con_transazioni"],2)
+        self.assertEqual(rec["periodo"]["chunk_totali"],3)
+        def all_empty(url,payload=None):
+            if payload["method"]!="block":
+                raise AssertionError("empty shard must not trigger extra RPC")
+            return {"id":1,"result":{"header":{"height":11},
+                    "chunks":[{"chunk_hash":"A"*44,"tx_root":first}]}}
+        empty=cap._near(url,all_empty)
+        self.assertEqual(empty["eventi"],[])
+        self.assertEqual(empty["periodo"]["tipo"],"BLOCCO_TUTTI_CHUNK_SENZA_TX")
+
+    def test_avalanche_native_and_six_chain_upstream_rotation(self):
+        import kdd_network_defi as net
+        portfolio=[("AVAX","avalanche-2"),("BTC","bitcoin"),
+                   ("BNB","binancecoin"),("ETH","ethereum"),
+                   ("NEAR","near"),("XRP","ripple")]
+        positions=[{"token":token} for token,_ in portfolio]
+        econ={"posizioni":[{"indice":i,"token":token,
+            "identita":{"stato":"IDENTITA_VERIFICATA_DA_CATALOGO",
+                        "token":token,"coingecko_id":coin,
+                        "coppia":token+"/EUR","pair_key":token+"EUR",
+                        "fonte_identita":"Kraken Spot + CoinGecko"},
+            "network_metadata":None} for i,(token,coin) in enumerate(portfolio)],
+            "candidati":[]}
+        def fetch(url,payload=None):
+            if url==net.NATIVE_ENDPOINTS["avalanche"]:
+                self.assertEqual(payload["method"],"eth_getBlockByNumber")
+                return {"id":1,"result":{"number":hex(1000),
+                        "timestamp":hex(int(T.timestamp())),
+                        "hash":"0x"+"f"*64}}
+            return Kdd17AssetIdentityG2Tests().fetch(url,payload)
+        a=net._NETWORK_COLLECT_ASSETS(T,positions,[],econ,None,fetch)
+        self.assertEqual(set(a["fonti_native"]),
+                         {"avalanche","bitcoin","bsc","ethereum","near"})
+        self.assertEqual(a["prossima_rete_nativa"],"xrpl")
+        b=net._NETWORK_COLLECT_ASSETS(T+dt.timedelta(seconds=15),
+                                     positions,[],econ,a,fetch)
+        self.assertIn("xrpl",b["fonti_native"])
+        self.assertNotIn("near",b["fonti_native"])
+        self.assertEqual(b["prossima_rete_nativa"],"near")
+        read=net._NETWORK_READ_ASSETS(b,positions,[],econ,
+                                    T+dt.timedelta(seconds=15))
+        statuses={r["token"]:r["osservazione_nativa"]["stato"]
+                  for r in read["posizioni"]}
+        self.assertEqual(statuses["NEAR"],"RINVIATO_BUDGET")
+        self.assertEqual(statuses["XRP"],"OSSERVATO_CON_LIMITI")
+        self.assertEqual(statuses["AVAX"],"OSSERVATO_CON_LIMITI")
+        short=net._NETWORK_COLLECT_ASSETS(T,positions[:1],[],
+                                          {"posizioni":econ["posizioni"][:1],
+                                           "candidati":[]},None,fetch)
+        self.assertEqual(set(short["fonti_native"]),{"avalanche"})
+
+    def test_bsc_binplorer_429_rpc_fallback_without_bnb_position(self):
+        import kdd_capital_flow as cap
+        address=self.EVM_ADDR
+        assets={"posizioni":[{"token":"NEW","progetto_id":"new-token",
+                "contratti_indicizzati":[{"rete":"bsc","contratto":address}]}],
+                "candidati":[],"fonti_native":{}}
+        topic=lambda x:"0x"+"0"*24+x[2:]
+        called=[]
+        def fetch(url,payload=None):
+            if url.startswith(cap.BINPLORER):
+                raise OSError("HTTP429 Binplorer")
+            called.append(payload["method"])
+            method=payload["method"]
+            if method=="eth_blockNumber":
+                return {"id":1,"result":hex(1000)}
+            if method=="eth_call":
+                return {"id":1,"result":"0x12"}
+            if method=="eth_getLogs":
+                self.assertEqual(payload["params"][0]["address"],address)
+                return {"id":1,"result":[{
+                    "address":address,"transactionHash":"0x"+"f"*64,
+                    "blockNumber":hex(990),"logIndex":"0x0","removed":False,
+                    "topics":[cap.TOPIC_TRANSFER,topic(self.EVM_FROM),topic(self.EVM_TO)],
+                    "data":"0x"+format(1000000000000000000,"064x")}]}
+            raise AssertionError(method)
+        out=cap.collect(T,assets,{"posizioni":[{}],"candidati":[]},None,fetch)
+        self.assertEqual(out["sonde"][0]["stato"],"OSSERVATO")
+        self.assertEqual(out["sonde"][0]["eventi"][0]["quantita"],"1")
+        self.assertEqual(out["sonde"][0]["richieste_effettuate"],4)
+        self.assertEqual(called,["eth_blockNumber","eth_call","eth_getLogs"])
+        self.assertEqual(cap.at_read(out,assets,{"posizioni":[{}],"candidati":[]},T)
+                          ["posizioni"][0]["osservazioni"][0]["stato"],
+                         "OSSERVATO_CON_LIMITI")
+
+    def test_holders_comparison_survives_bounded_target_rotation(self):
+        import kdd_capital_flow as cap
+        contracts=["0x"+format(i+1, "040x") for i in range(6)]
+        assets={"posizioni":[],"candidati":[
+            {"token":"T"+str(i),"progetto_id":"project-"+str(i),
+             "coppia_analisi":"T"+str(i)+"/EUR",
+             "contratti_indicizzati":[{"rete":"ethereum","contratto":address}]}
+            for i,address in enumerate(contracts)],
+            "fonti_native":{"ethereum":{"valori":{"altezza_blocco":1000}}}}
+        economic={"posizioni":[],"candidati":[{} for _ in contracts]}
+        calls=[]
+        def fake_probe(key, assets, fetch, previous):
+            previous_rows=previous.get("detentori") or []
+            old=previous_rows[0]["unita_minima"] if previous_rows else None
+            calls.append((key[1],old))
+            qty=int(old)+1 if old is not None else 100
+            return {"eventi":[],"detentori":[{
+                "account":"0x"+"a"*40,"unita_minima":str(qty),"decimali":18,
+                "variazione_unita_minima":str(qty-int(old)) if old else None,
+                "entita":{"stato":"ENTITA_NON_IDENTIFICATA"}}],
+                "elementi_esaminati":1,"eventi_distinti":0,
+                "periodo":{"tipo":"TEST"},"copertura":"Synthetic holder snapshot"}
+        with mock.patch.object(cap,"_probe",side_effect=fake_probe):
+            first=cap.collect(T,assets,economic,None,lambda *args: None)
+            second=cap.collect(T+dt.timedelta(minutes=1),assets,economic,first,lambda *args: None)
+            third=cap.collect(T+dt.timedelta(minutes=2),assets,economic,second,lambda *args: None)
+        self.assertEqual([x["asset_tecnico"] for x in first["sonde"]],contracts[:5])
+        self.assertEqual(len(first["storico_detentori"]),5)
+        self.assertEqual(len(second["storico_detentori"]),6)
+        self.assertEqual(len(third["storico_detentori"]),6)
+        self.assertEqual(calls[6],(contracts[0],"100"))
+        self.assertTrue(any(key==contracts[4] and prior=="100" for key,prior in calls[10:]))
+        interpreted=cap.at_read(third,assets,economic,T+dt.timedelta(minutes=2))
+        self.assertEqual(len(interpreted["candidati"]),6)
+        self.assertTrue(any(x["osservazioni"][0]["stato"]=="RINVIATO_BUDGET"
+                            for x in interpreted["candidati"]))
+
+    def test_public_request_budget_stops_rotation_without_zero_metrics(self):
+        import kdd_capital_flow as cap
+        contracts=["0x"+format(i+1,"040x") for i in range(6)]
+        assets={"posizioni":[], "candidati":[
+            {"token":"X"+str(i), "progetto_id":"other-"+str(i),
+             "coppia_analisi":"X"+str(i)+"/EUR",
+             "contratti_indicizzati":[{"rete":"ethereum","contratto":addr}]}
+            for i,addr in enumerate(contracts)],"fonti_native":{}}
+        calls=[]
+        def fetch(url,payload=None):
+            calls.append(url)
+            return {}
+        def expensive_probe(key,assets,fetch,previous):
+            for i in range(7):
+                fetch("https://test.example/public")
+            raise AssertionError("over-budget probe should not finish")
+        with mock.patch.object(cap,"_probe",side_effect=expensive_probe):
+            result=cap.collect(T,assets,{"posizioni":[],"candidati":[{}]*6},
+                               None,fetch)
+        self.assertEqual(result["richieste_effettuate"],15)
+        self.assertEqual(len(calls),15)
+        self.assertEqual(result["target_totali"],6)
+        self.assertEqual(result["target_interrogati"],3)
+        self.assertEqual([r["motivo"] for r in result["sonde"]],
+                         ["BUDGET_RICHIESTE"]*3)
+        self.assertEqual(result["prossimo_target"],"ethereum|"+contracts[3])
+        read=cap.at_read(result,assets,{"posizioni":[],"candidati":[{}]*6},T)
+        self.assertEqual(len(read["candidati"]),6)
+        self.assertEqual(read["candidati"][3]["osservazioni"][0]["stato"],
+                         "RINVIATO_BUDGET")
+        self.assertEqual(read["candidati"][0]["osservazioni"][0]["stato"],
+                         "NON_DISPONIBILE")
+        self.assertIsNone(read["candidati"][3]["osservazioni"][0].get("valori"))
+
+    def test_routescan_ethereum_and_avalanche_without_native_wallet_assets(self):
+        """Live-verified Routescan schemas; both tokens have dynamic contracts."""
+        import kdd_capital_flow as cap
+        chains={"ethereum":("0x"+"1"*40,"1"),
+                "avalanche":("0x"+"2"*40,"43114")}
+        assets={"posizioni":[
+            {"token":"AAVE","progetto_id":"aave","coppia_analisi":None,
+             "contratti_indicizzati":[{"rete":"ethereum","contratto":chains["ethereum"][0]}]},
+            {"token":"AVAXUSDC","progetto_id":"usd-coin","coppia_analisi":None,
+             "contratti_indicizzati":[{"rete":"avalanche","contratto":chains["avalanche"][0]}]}],
+            "candidati":[],"fonti_native":{}} # No ETH or AVAX wallet position
+        def fetch(url,payload=None):
+            chain=next((ch for ch,(contract,number) in chains.items()
+                        if url.startswith(cap.ROUTESCAN+number+"/")),None)
+            if not chain:
+                raise AssertionError("unexpected source: "+url)
+            contract,chain_id=chains[chain]
+            if "erc20-transfers?" in url:
+                self.assertIn("tokenAddress="+contract,url)
+                return {"items":[{"chainId":chain_id,"blockNumber":25800000,
+                    "txHash":"0x"+("a" if chain=="ethereum" else "b")*64,
+                    "logIndex":0,"from":self.EVM_FROM,"to":self.EVM_TO,
+                    "timestamp":T.isoformat(),"amount":"123000000",
+                    "tokenAddress":contract,"tokenDecimals":6,
+                    "tokenSymbol":"USDC"}],"link":{"next":"opaque"}}
+            if url.endswith("/holders?limit=10"):
+                return {"items":[{"chainId":chain_id,"address":self.EVM_FROM,
+                                  "balance":"500000000"}],"link":{}}
+            raise AssertionError(url)
+        econ={"posizioni":[{},{}],"candidati":[]}
+        raw=cap.collect(T,assets,econ,None,fetch)
+        self.assertEqual(raw["target_totali"],2)
+        self.assertEqual(raw["richieste_effettuate"],4)
+        self.assertEqual([r["stato"] for r in raw["sonde"]],["OSSERVATO"]*2)
+        read=cap.at_read(raw,assets,econ,T)
+        for row,chain in zip(read["posizioni"],("ethereum","avalanche")):
+            record=row["osservazioni"][0]
+            self.assertEqual(record["rete"],chain)
+            self.assertEqual(record["eventi"][0]["quantita"],"123")
+            self.assertEqual(record["detentori"][0]["unita_minima"],"500000000")
+            self.assertEqual(record["eventi"][0]["fonte"],
+                cap._routescan_urls(chain,chains[chain][0])[0])
+            self.assertIsNone(record["flussi_exchange_campione"]["flusso_netto_unita_minima"])
+        self.assertEqual(read["posizioni"][1]["osservazioni"][0]["periodo"]["tipo"],
+                         "PAGINA_ROUTESCAN")
+
+    def test_routescan_wrong_contract_chain_and_unit_fail_closed(self):
+        import kdd_capital_flow as cap
+        contract="0x"+"5"*40
+        for bad_field in ("tokenAddress","chainId","tokenDecimals","amount"):
+            with self.subTest(bad_field=bad_field):
+                row={"chainId":"1","blockNumber":123,
+                     "txHash":"0x"+"a"*64,"logIndex":1,
+                     "from":self.EVM_FROM,"to":self.EVM_TO,
+                     "timestamp":T.isoformat(),"amount":"1000000",
+                     "tokenAddress":contract,"tokenDecimals":6}
+                row[bad_field]={"tokenAddress":"0x"+"9"*40,
+                                "chainId":"43114","tokenDecimals":18,
+                                "amount":"1.250"}[bad_field]
+                def fetch(url,payload=None):
+                    return {"items":[row],"link":{}}
+                events,precision,source=cap._routescan_transfers(
+                    "ethereum",contract,6,fetch)
+                self.assertEqual(events,[])
+
+    def test_bsc_new_candidate_binplorer_without_native_bnb_position(self):
+        import kdd_capital_flow as cap
+        contract=self.EVM_ADDR
+        asset={"posizioni":[],"candidati":[{"token":"NEWBSC",
+            "progetto_id":"unlisted-new-project","coppia_analisi":"NEWBSC/EUR",
+            "contratti_indicizzati":[{"rete":"bsc","contratto":contract}]}],
+            "fonti_native":{}}  # No BNB held; token still gets public evidence.
+        seen=[]
+        def fetch(url,payload=None):
+            seen.append(url)
+            if "/getTokenInfo/" in url:
+                return {"address":contract,"decimals":"18","symbol":"NEWBSC"}
+            if "/getTokenHistory/" in url:
+                return {"operations":[{"timestamp":int(T.timestamp()),
+                    "transactionHash":"0x"+"d"*64,
+                    "tokenInfo":{"address":contract,"decimals":"18"},
+                    "type":"transfer","value":"4000000000000000000",
+                    "from":self.EVM_FROM,"to":self.EVM_TO}]}
+            if "/getTopTokenHolders/" in url:
+                return {"holders":[{"address":self.EVM_FROM,
+                    "rawBalance":"8000000000000000000"}]}
+            raise OSError("unexpected source")
+        economics={"posizioni":[],"candidati":[{}]}
+        raw=cap.collect(T,asset,economics,None,fetch)
+        self.assertEqual(raw["target_totali"],1)
+        self.assertEqual(raw["sonde"][0]["stato"],"OSSERVATO")
+        self.assertEqual(raw["sonde"][0]["periodo"]["tipo"],"PAGINA_BINPLORER")
+        self.assertEqual(raw["sonde"][0]["eventi"][0]["quantita"],"4")
+        self.assertEqual(raw["sonde"][0]["detentori"][0]["unita_minima"],
+                         "8000000000000000000")
+        self.assertEqual(len(seen),3)
+        read=cap.at_read(raw,asset,economics,T)
+        obs=read["candidati"][0]["osservazioni"][0]
+        self.assertEqual(obs["stato"],"OSSERVATO_CON_LIMITI")
+        self.assertIsNone(obs["flussi_exchange_campione"]["ingresso_unita_minima"])
+        self.assertEqual(obs["eventi"][0]["quantita"],"4")
+
+    def test_sol_jupiter_index_when_largest_accounts_rpc_throttled(self):
+        import kdd_capital_flow as cap
+        mint=self.MINT
+        asset={"posizioni":[],"candidati":[{"token":"FUTURE",
+            "progetto_id":"future-sol-token","coppia_analisi":"FUTURE/EUR",
+            "contratti_indicizzati":[{"rete":"solana","contratto":mint}]}],
+            "fonti_native":{}}
+        def fetch(url,payload=None):
+            if url==evidence.CONTRACT_ENDPOINTS["solana"] and payload:
+                self.assertEqual(payload["method"],"getTokenLargestAccounts")
+                raise OSError("public RPC HTTP 429")
+            if url==cap.JUPITER_TOKENS+mint:
+                return [{"id":mint,"decimals":6,"holderCount":5000,
+                         "audit":{"topHoldersPercentage":12.4}}]
+            raise OSError("unexpected source")
+        econ={"posizioni":[],"candidati":[{}]}
+        raw=cap.collect(T,asset,econ,None,fetch)
+        self.assertEqual(raw["sonde"][0]["stato"],"OSSERVATO")
+        self.assertEqual(raw["sonde"][0]["eventi"],[])
+        self.assertEqual(raw["sonde"][0]["detentori"],[])
+        recent=cap.at_read(raw,asset,econ,T)["candidati"][0]["osservazioni"][0]
+        agg=recent["aggregato_detentori"]
+        self.assertEqual(agg["numero_account"],5000)
+        self.assertEqual(agg["quota_top_pct_indice"],"12.4")
+        self.assertEqual(agg["stato_alla_lettura"],"RECENTE")
+        self.assertEqual(recent["periodo"]["tipo"],"RIEPILOGO_JUPITER_TOKEN")
+        late=cap.at_read(raw,asset,econ,T+dt.timedelta(minutes=40))
+        self.assertEqual(late["candidati"][0]["osservazioni"][0]
+                         ["aggregato_detentori"]["stato_alla_lettura"],"STORICO")
+        def wrong_mint(url,payload=None):
+            if url==evidence.CONTRACT_ENDPOINTS["solana"]:
+                raise OSError("HTTP 429")
+            return [{"id":"WRONG","decimals":6,"holderCount":5000}]
+        bad=cap.collect(T,asset,econ,None,wrong_mint)
+        self.assertEqual(bad["sonde"][0]["stato"],"NON_DISPONIBILE")
+
+    def test_entirely_replaced_ten_asset_kraken_wallet_multichain_packet_gpt(self):
+        """No original holding: dynamic Kraken pairs, four index networks, fallbacks.
+        Kraken prices below are fixtures; all chain responses are invented.
+        """
+        import kdd_economics as econ
+        import kdd_capital_flow as cap
+        import mercati_spot as spot
+        import decision_desk as desk
+        from scripts import kdd_wallet_packet_g0 as packet
+        from scripts import kdd_bridge_g2 as bridge
+        from scripts import test_kdd_wallet_packet_g0 as packet_fixture
+        tokens=["LIGHTER","AAVE","AVAX","BONK","LINK","UNI","USDC","PEPE","ONDO","PUMP"]
+        original={"BTC","ETH","SOL","SUI","NEAR","JUP","RENDER","FET","BNB","XRP"}
+        self.assertFalse(original.intersection(tokens))
+        evm=lambda n:"0x"+format(n,"040x")
+        platforms={
+            "AAVE":{"ethereum":evm(11)},
+            "BONK":{"solana":"B"*32},
+            "LINK":{"ethereum":evm(12)},
+            "UNI":{"ethereum":evm(13)},
+            "USDC":{"ethereum":evm(14),"binance-smart-chain":evm(15),
+                    "avalanche":evm(16)},
+            "PEPE":{"ethereum":evm(17)},
+            "ONDO":{"ethereum":evm(18)},
+            "PUMP":{"solana":"C"*32},
+            "CAKE":{"binance-smart-chain":evm(19)}}
+        catalog={}
+        for token in tokens+["CAKE"]:
+            q="USD" if token=="LIGHTER" else "EUR"
+            catalog[token+q]={"pair_key":token+q,"pair":token+"/"+q,
+                                   "base":token,"quote":q}
+        def identity(token):
+            coin_id=token.lower()+"-synthetic-project"
+            quote="USD" if token=="LIGHTER" else "EUR"
+            discovered={"metodo":"KRAKEN_COINGECKO_MARKET",
+                        "coingecko_id":coin_id,"progetto":token+" Synthetic",
+                        "prova_mercato":{"exchange":"kraken","symbol":token,
+                           "base":token,"target":quote,"is_stale":False,
+                           "is_anomaly":False,
+                           "ricerca_url":econ.CG_SEARCH+token,
+                           "ticker_url":econ.CG+coin_id+"/tickers?exchange_ids=kraken",
+                           "verificato_utc":T.isoformat()}}
+            return econ.identify(token,token+"/"+quote,token+quote,
+                                 catalog=catalog,discovered=discovered)
+        def row(token,i,candidate=False):
+            ident=identity(token)
+            self.assertEqual(ident["stato"],"IDENTITA_VERIFICATA_DA_CATALOGO")
+            payload={"id":ident["coingecko_id"],"symbol":token.lower(),
+                     "name":ident["progetto"],"platforms":platforms.get(token,{})}
+            result={"indice":i,"token":token,"identita":ident,
+                    "network_metadata":evidence.coin_network_metadata(ident,payload,T),
+                    "fondamentali":econ.fundamentals(ident,None,T,T),
+                    "evento":econ.release_event(ident,None,T,T)}
+            if candidate:
+                result["coppia_analisi"]=token+"/EUR"
+            return result
+        economic={"schema":econ.VERSION,"acquisito_utc":T.isoformat(),
+                  "posizioni":[row(t,i) for i,t in enumerate(tokens)],
+                  "candidati":[row("CAKE",0,True)],
+                  "regime":{"stato":"INDETERMINATO","qualita":"PARZIALE"},
+                  "fonti_economiche":econ.sources_matrix(),
+                  "macro":econ.macro([],T)}
+        positions=[{"token":t} for t in tokens]
+        candidates=[{"token":"CAKE","coppia_analisi":"CAKE/EUR"}]
+        def fetch(url,payload=None):
+            if url in evidence.SOURCES.values():
+                if url==evidence.SOL_URL and payload and payload.get("method")!="getSupply":
+                    raise OSError("public Solana RPC 429")
+                return fake_fetch(url,payload)
+            if url==evidence.CONTRACT_ENDPOINTS["solana"]:
+                raise OSError("public Solana RPC 429")
+            if url in (evidence.CONTRACT_ENDPOINTS["bsc"],evidence.CONTRACT_ENDPOINTS["ethereum"]):
+                if payload["method"]=="eth_getCode":
+                    return {"id":1,"result":"0x608060"}
+                if payload["method"]=="eth_call":
+                    return {"id":1,"result":"0x18"}
+                raise OSError("block head deliberately not acquired")
+            if url.startswith(cap.ROUTESCAN):
+                number=url[len(cap.ROUTESCAN):].split("/")[0]
+                if "erc20-transfers?" in url:
+                    contract=url.split("tokenAddress=",1)[1].split("&",1)[0]
+                    return {"items":[{"chainId":number,"tokenAddress":contract,
+                          "txHash":"0x"+"d"*64,"logIndex":0,"blockNumber":999,
+                          "from":self.EVM_FROM,"to":self.EVM_TO,
+                          "amount":"7000000","tokenDecimals":6,
+                          "timestamp":T.isoformat()}]}
+                if "/holders?" in url:
+                    return {"items":[{"chainId":number,"address":self.EVM_FROM,
+                                      "balance":"28000000"}]}
+                raise AssertionError(url)
+            if url.startswith(cap.BINPLORER):
+                contract=url.split("?",1)[0].split("/")[-1]
+                if "/getTokenInfo/" in url:
+                    return {"address":contract,"decimals":"18"}
+                if "/getTokenHistory/" in url:
+                    return {"operations":[{"tokenInfo":{"address":contract,"decimals":"18"},
+                         "timestamp":int(T.timestamp()),"transactionHash":"0x"+"b"*64,
+                         "from":self.EVM_FROM,"to":self.EVM_TO,
+                         "type":"transfer","value":"3000000000000000000"}]}
+                if "/getTopTokenHolders/" in url:
+                    return {"holders":[{"address":self.EVM_FROM,
+                                        "rawBalance":"4000000000000000000"}]}
+            if url.startswith(cap.JUPITER_TOKENS):
+                mint=url[len(cap.JUPITER_TOKENS):]
+                return [{"id":mint,"decimals":6,"holderCount":2345,
+                        "audit":{"topHoldersPercentage":18.5}}]
+            raise OSError("unsupported public source")
+        previous=None
+        observed=set()
+        final=None
+        for minute in range(4):
+            instant=T+dt.timedelta(minutes=minute)
+            # Economic metadata is still valid; no new wallet quantities are
+            # ever sent to a public provider by these calls.
+            current=evidence.collect(instant,positions,candidates,fetch=fetch,
+                                      economics=economic,previous=previous)
+            self.assertLessEqual(current["asset_reti"]["flussi_capitale"]["richieste_effettuate"],15)
+            reader=evidence.at_read(current,positions,candidates,instant,economics=economic)
+            for source in current["asset_reti"]["flussi_capitale"]["sonde"]:
+                if source["stato"]=="OSSERVATO":
+                    observed.add((source["rete"],source["asset_tecnico"]))
+            previous=current
+            final=(current,reader)
+        self.assertGreaterEqual(len(observed),8)
+        self.assertTrue(any(chain=="avalanche" for chain,_ in observed))
+        self.assertTrue(any(chain=="bsc" for chain,_ in observed))
+        self.assertTrue(any(chain=="solana" for chain,_ in observed))
+        self.assertTrue(any(chain=="ethereum" for chain,_ in observed))
+        self.assertEqual(len(final[1]["asset_reti"]["flussi_capitale"]["posizioni"]),10)
+        self.assertEqual(len(final[1]["asset_reti"]["flussi_capitale"]["candidati"]),1)
+        # Exit and re-entry: obsolete contracts disappear from target selection,
+        # without erasing the possibility of later public re-observation.
+        all_rows=final[1]["asset_reti"]
+        without_aave={"posizioni":[r for r in all_rows["posizioni"] if r["token"]!="AAVE"],
+                      "candidati":all_rows["candidati"],"fonti_native":{}}
+        departed=cap.collect(T+dt.timedelta(minutes=4),without_aave,
+                             {"posizioni":[{}]*9,"candidati":[{}]},
+                             final[0]["asset_reti"]["flussi_capitale"],fetch)
+        self.assertNotIn(("ethereum",platforms["AAVE"]["ethereum"]),
+                         cap._targets(without_aave))
+        self.assertEqual(departed["target_totali"],
+                         final[0]["asset_reti"]["flussi_capitale"]["target_totali"]-1)
+        returned=cap.collect(T+dt.timedelta(minutes=5),all_rows,
+                             {"posizioni":[{}]*10,"candidati":[{}]},
+                             departed,fetch)
+        self.assertIn(("ethereum",platforms["AAVE"]["ethereum"]),
+                      cap._targets(all_rows))
+        self.assertEqual(returned["target_totali"],
+                         final[0]["asset_reti"]["flussi_capitale"]["target_totali"])
+        for r in final[1]["asset_reti"]["flussi_capitale"]["posizioni"]:
+            self.assertEqual(r["contratto_ufficiale"],"NON_ATTESTATO")
+
+        fixture=packet_fixture.WalletPacketG0Tests("test_asset_weights_never_rebrand_partial_total_as_entire_wallet")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.portfolio["posizioni"]=[
+            {"token":token,"quantita":"1","disponibile_spot":"1",
+             "costo_medio_eur":None} for token in tokens]
+        fixture.snapshot["rilevazione_utc"]=(T+dt.timedelta(minutes=3)).isoformat()
+        # LIGHTER/USD was confirmed in real public Kraken AssetPairs+Ticker
+        # on 14 Nov 2026 (Actions #43622245482); no LIGHTER/EUR was listed.
+        # Test the actual reusable assemble + FX path, not a made-up EUR pair.
+        fx_pairs={"ZEURZUSD":{"wsname":"EUR/USD","status":"online"}}
+        fx_ticks={"ZEURZUSD":{"a":["1.1"],"b":["1.1"],"c":["1.1"],
+                             "o":"1.1","v":["100","100"]}}
+        fx_pairs["LIGHTERUSD"]={"wsname":"LIGHTER/USD","status":"online"}
+        fx_ticks["LIGHTERUSD"]={"a":["11.0"],"b":["11.0"],"c":["11.0"],
+                               "o":"11.0","v":["100000","100000"]}
+        multi,rates=spot.assemble(fx_pairs,fx_ticks)
+        self.assertEqual(multi["LIGHTER"]["quote"],"USD")
+        self.assertEqual(multi["LIGHTER"]["conversione_fonte"],"EUR/USD")
+        self.assertEqual(multi["LIGHTER"]["prezzo_eur"],10.0)
+        fixture.snapshot["fx_rilevati"]=rates
+        old_eur={token:{"token":token,"pair":token+"/EUR",
+             "pair_key":token+"EUR","prezzo_eur":10.0,"volume_24h_eur_stimato":1000000.0,
+             "spread_pct":0.4} for token in tokens if token!="LIGHTER"}
+        fixture.snapshot["markets"]=desk.wallet_spot_markets(old_eur,multi,fixture.portfolio)
+        self.assertEqual(fixture.snapshot["markets"]["LIGHTER"]["pair"],"LIGHTER/USD")
+        fixture.snapshot["schede_v02"]=[{"token":"CAKE","coppia_analisi":"CAKE/EUR",
+                                        "esito":"RIESAME","categoria":"confronto"}]
+        fixture.report["rilevazione_utc"]=fixture.snapshot["rilevazione_utc"]
+        fixture.report["posizioni"]=[{"token":token,"quantita":"1",
+            "prezzo_eur":fixture.snapshot["markets"][token]["prezzo_eur"],
+            "valore_eur":fixture.snapshot["markets"][token]["prezzo_eur"],
+            "pl_non_realizzato_eur":None,"decisione":"ESAME"}
+            for token in tokens]
+        fixture.report["totale_stimato_eur"]=100
+        fixture.report["totale_parziale"]=False
+        fixture.report["stato_totale"]="COMPLETO"
+        instant=T+dt.timedelta(minutes=3)
+        iso=instant.isoformat()
+        fixture.portfolio["data_ora_saldo_privato_utc"]=iso
+        fixture.portfolio["fonte_quantita"]="Kraken BalanceEx API privata SOLA LETTURA, "+iso
+        fixture.dossier["kraken_istantanea_utc"]=iso
+        fixture.dossier["candidati"]=[{"token":"CAKE","coppia_analisi":"CAKE/EUR"}]
+        fixture.dossier["evidenze_economiche"]=economic
+        fixture.dossier["evidenze_rete_defi"]=final[0]
+        fixture.dump()
+        prepared=packet.build(fixture.root,now=instant)
+        self.assertEqual([r["token"] for r in prepared["patrimonio"]["posizioni"]],tokens)
+        for position in prepared["patrimonio"]["posizioni"]:
+            spot=position["mercato_spot_kraken"]
+            expected="LIGHTER/USD" if position["token"]=="LIGHTER" else position["token"]+"/EUR"
+            self.assertEqual(spot["coppia"],expected)
+            if position["token"]=="LIGHTER":
+                self.assertEqual(spot["valuta_quotazione"],"USD")
+                self.assertEqual(spot["conversione_fonte"],"EUR/USD")
+                self.assertEqual(position["fonte_prezzo_eur"]["prezzo_quote"],"11.0")
+            else:
+                self.assertEqual(spot["volume_24h_eur_stimato"],"1000000.0")
+            self.assertEqual(spot["spread_pct"],"0.0" if position["token"]=="LIGHTER" else "0.4")
+            self.assertEqual(spot["book"],"NON_ACQUISITO_PER_QUESTA_COPPIA")
+        self.assertEqual(len(prepared["evidenze_multifonte"]["rete_defi"]
+                             ["asset_reti"]["flussi_capitale"]["posizioni"]),10)
+        bundle={"schema":bridge.SCHEMA_BUNDLE,"packet":prepared,
+                "packet_sha256":bridge.digest(prepared),"preparato_utc":iso}
+        result=bridge.read_context(json.loads(json.dumps(bundle)),now=instant)
+        flow=result["rete_defi_alla_lettura"]["asset_reti"]["flussi_capitale"]
+        self.assertEqual(len(result["circolazione_capitale_vs_spot"]),10)
+        self.assertEqual([r["token"] for r in result["circolazione_capitale_vs_spot"]],tokens)
+        print("KDD17_REPLACED_WALLET_COVERAGE",json.dumps({
+            "portfolio_assets":len(tokens),"scanner_candidates":len(candidates),
+            "distinct_onchain_targets_observed_4_refreshes":len(observed),
+            "chains_observed":sorted({chain for chain,_ in observed}),
+            "spot_market_rows":len(fixture.snapshot["markets"]),
+            "packet_positions":len(prepared["patrimonio"]["posizioni"]),
+            "bridge_capital_vs_spot_rows":len(result["circolazione_capitale_vs_spot"]),
+            "calls_per_refresh_limit":cap.MAX_PUBLIC_CALLS},sort_keys=True))
+        self.assertEqual([r["token"] for r in flow["posizioni"]],tokens)
+        self.assertEqual(flow["candidati"][0]["token"],"CAKE")
+        self.assertTrue(all(r["mercato_spot_kraken_alla_lettura"]["stato"] ==
+                            "DISPONIBILE"
+                            for r in result["copertura"]))
+        lighter=next(x for x in result["copertura"] if x["token"]=="LIGHTER")
+        self.assertEqual(lighter["mercato_spot_kraken_alla_lettura"]["coppia"],"LIGHTER/USD")
+        self.assertEqual(lighter["mercato_spot_kraken_alla_lettura"]["valuta_quotazione"],"USD")
+        self.assertEqual(lighter["mercato_spot_kraken_alla_lettura"]["conversione_fonte"],"EUR/USD")
+        self.assertTrue(all(r["mercato_spot_kraken_alla_lettura"]["volume_24h_eur_stimato"]
+                            == "1000000.0" for r in result["copertura"]
+                            if r["token"]!="LIGHTER"))
+        tampered=copy.deepcopy(bundle)
+        tampered["packet"]["patrimonio"]["posizioni"][0]["mercato_spot_kraken"]["pair_key"]="FAKEPAIR"
+        tampered["packet_sha256"]=bridge.digest(tampered["packet"])
+        with self.assertRaises(bridge.BridgeError):
+            bridge.read_context(tampered,now=instant)
+        badfx=copy.deepcopy(bundle)
+        lighter_row=badfx["packet"]["patrimonio"]["posizioni"][0]
+        lighter_row["mercato_spot_kraken"]["eur_per_quote"]="1"
+        badfx["packet_sha256"]=bridge.digest(badfx["packet"])
+        with self.assertRaises(bridge.BridgeError):
+            bridge.read_context(badfx,now=instant)
+        missing_fx=copy.deepcopy(fixture.snapshot)
+        missing_fx["fx_rilevati"].pop("USD")
+        # A price already derived from an absent FX rate cannot be endorsed.
+        with self.assertRaises(packet.PacketError):
+            packet.brief_positions(fixture.portfolio,fixture.report,missing_fx,
+                                   fixture.dossier,True,
+                                   four_rows=packet.four_tf_evidence(
+                                      fixture.portfolio,fixture.report,fixture.dossier,
+                                      fixture.snapshot["rilevazione_utc"]),now=instant)
+        self.assertTrue(any(s["stato"]=="OSSERVATO_CON_LIMITI"
+                            for r in flow["posizioni"] for s in r["osservazioni"]))
+        self.assertTrue(all(r["token"] in fixture.snapshot["markets"]
+                            for r in flow["posizioni"]))
+
+    def test_assembled_usd_usdc_only_markets_and_missing_direct_fx(self):
+        """No invented USD/USDC parity and no mixed-currency daily trend."""
+        import mercati_spot as multi
+        import decision_desk as desk
+        def ticker(price,vol="100000"):
+            return {"a":[str(price)],"b":[str(price)],"c":[str(price)],
+                    "o":str(price),"v":[vol,vol]}
+        pairs={"EURUSD":{"wsname":"EUR/USD","status":"online"},
+               "USDCEUR":{"wsname":"USDC/EUR","status":"online"},
+               "SYNUSD":{"wsname":"SYN/USD","status":"online"},
+               "SUCUSDC":{"wsname":"SUC/USDC","status":"online"}}
+        tickers={"EURUSD":ticker(1.1),"USDCEUR":ticker(.9),
+                 "SYNUSD":ticker(11),"SUCUSDC":ticker(10)}
+        assembled,rates=multi.assemble(pairs,tickers,min_vol=0)
+        self.assertEqual(assembled["SYN"]["conversione_fonte"],"EUR/USD")
+        self.assertEqual(assembled["SUC"]["conversione_fonte"],"USDC/EUR")
+        self.assertEqual(assembled["SYN"]["prezzo_eur"],10)
+        self.assertEqual(assembled["SUC"]["prezzo_eur"],9)
+        wallet={"posizioni":[{"token":"SYN"},{"token":"SUC"},{"token":"GONE"}]}
+        snapshot=desk.wallet_spot_markets({},assembled,wallet)
+        self.assertEqual(set(snapshot),{"SYN","SUC"})
+        source={"rilevazione_utc":T.isoformat(),"markets":snapshot,
+                "trends":{},"feed":[],"problemi_feed":[]}
+        simulated={"posizioni":[{"token":"SYN","quantita":"2"},
+                                {"token":"SUC","quantita":"3"}]}
+        actual=desk.build_report(source,simulated,{}, {}, [])
+        self.assertEqual([r["prezzo_eur"] for r in actual["posizioni"]],[10,9])
+        self.assertEqual([r["valore_eur"] for r in actual["posizioni"]],[20,27])
+        self.assertEqual(actual["totale_stimato_eur"],47)
+        # OHLC is in USD, not EUR. Comparing 11 USD closes to 10 EUR
+        # would manufacture a roughly -9% movement.
+        daily=[[0,0,0,0,"11",0] for _ in range(40)]
+        tr=desk.trend_spot_quotato(daily,snapshot["SYN"])
+        self.assertEqual(tr["var_7g_pct"],0)
+        self.assertEqual(tr["var_30g_pct"],0)
+        self.assertEqual(tr["valuta_quotazione"],"USD")
+        self.assertNotIn("media_20g_eur",tr)
+        without_usdc=dict(tickers)
+        without_usdc.pop("USDCEUR")
+        only_usd,fx=multi.assemble(pairs,without_usdc,min_vol=0)
+        self.assertNotIn("USDC",fx)
+        self.assertNotIn("SUC",only_usd)
+        self.assertEqual(set(desk.wallet_spot_markets({},only_usd,wallet)),{"SYN"})
+        partial=desk.build_report(dict(source,markets=desk.wallet_spot_markets(
+            {},only_usd,simulated)),simulated,{}, {}, [])
+        self.assertNotIn("valore_eur",partial["posizioni"][1])
+        self.assertEqual(partial["posizioni"][0]["valore_eur"],20)
+        self.assertEqual(partial["stato_totale"],"PARZIALE")
+        without_usd=dict(tickers)
+        without_usd.pop("EURUSD")
+        only_usdc,fx2=multi.assemble(pairs,without_usd,min_vol=0)
+        self.assertNotIn("USD",fx2)
+        self.assertNotIn("SYN",only_usdc)
+        self.assertEqual(set(desk.wallet_spot_markets({},only_usdc,wallet)),{"SUC"})
+
+    def test_gpt_capital_economic_magnitude_against_spot_not_trade_signal(self):
+        from scripts import kdd_bridge_g2 as bridge
+        observations={"asset_reti":{"flussi_capitale":{"posizioni":[{
+            "token":"FUTURE","osservazioni":[{
+                "rete":"solana","asset_tecnico":"A"*32,"stato":"OSSERVATO_CON_LIMITI",
+                "eventi":[{"tx":"B"*64,"tipo":"TRASFERIMENTO",
+                            "stato_alla_lettura":"CAMPIONE_RECENTE","quantita":"20"}],
+                "detentori":[{"account":"C"*32,
+                              "variazione_unita_minima":"30000",
+                              "confronto_precedente_utc":T.isoformat()}],
+                "flussi_exchange_campione":{"stato":"NON_ATTRIBUIBILE_O_STORICO"},
+                "copertura":"Una transazione finalizzata; campione parziale"}]}]}}}
+        wallet=[{"token":"FUTURE","prezzo_eur":"5"}]
+        spot=[{"mercato_spot_kraken_alla_lettura":{
+                 "stato":"DISPONIBILE","coppia":"FUTURE/USD",
+                 "volume_24h_eur_stimato":"500"}}]
+        result=bridge.capital_market_context(observations,wallet,spot)
+        self.assertEqual(len(result),1)
+        point=result[0]["osservazioni"][0]
+        self.assertEqual(point["movimento_massimo_campionato"]["rapporto_volume_kraken_spot_24h_pct"],"20.00")
+        self.assertEqual(point["variazioni_top_detentori"][0]["variazione_unita_minima"],"30000")
+        self.assertEqual(point["flussi_exchange_campione"]["stato"],"NON_ATTRIBUIBILE_O_STORICO")
+        self.assertIn("NON equivale",point["movimento_massimo_campionato"]["limite_confronto"])
+        older=copy.deepcopy(observations)
+        older["asset_reti"]["flussi_capitale"]["posizioni"][0]["osservazioni"][0]["eventi"][0]["stato_alla_lettura"]="STORICO"
+        stale=bridge.capital_market_context(older,wallet,spot)
+        self.assertEqual(stale[0]["osservazioni"][0]["eventi_recenti"],0)
+        self.assertIsNone(stale[0]["osservazioni"][0]["movimento_massimo_campionato"])
+        market_stale=copy.deepcopy(spot)
+        market_stale[0]["mercato_spot_kraken_alla_lettura"]["stato"]="SCADUTO"
+        stale_market=bridge.capital_market_context(observations,wallet,market_stale)
+        self.assertIsNone(stale_market[0]["osservazioni"][0]["movimento_massimo_campionato"]["rapporto_volume_kraken_spot_24h_pct"])
+
+    def test_dynamic_candidate_rotation_and_missing_attribution(self):
+        import kdd_capital_flow as cap
+        assets = {"posizioni": [],"candidati":[
+          {"token":"NEW","progetto_id":"new_project","coppia_analisi":"NEW/EUR",
+           "contratti_indicizzati":[{"rete":"ethereum","contratto":self.EVM_ADDR}]},
+          {"token":"OTH","progetto_id":"other_project","coppia_analisi":"OTH/EUR",
+           "contratti_indicizzati":[{"rete":"solana","contratto":self.MINT}]}],
+          "fonti_native":{"ethereum":{"valori":{"altezza_blocco":1000}}}}
+        def down(url,payload=None):
+            raise OSError("offline")
+        raw=cap.collect(T,assets,{"posizioni":[],"candidati":[{},{}]},None,down)
+        self.assertEqual(len(raw["sonde"]),2)
+        read=cap.at_read(raw,assets,{"posizioni":[],"candidati":[{},{}]},T)
+        self.assertEqual([x["token"] for x in read["candidati"]],["NEW","OTH"])
+        self.assertTrue(all(x["osservazioni"][0]["stato"]=="NON_DISPONIBILE"
+                            for x in read["candidati"]))
 
 
 if __name__=="__main__":

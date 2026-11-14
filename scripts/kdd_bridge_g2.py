@@ -583,6 +583,65 @@ def stato_book_150_alla_lettura(packet, now, *, mercato_stato=None, saldo_stato=
             "limite": "Fee, negoziabilita e bid restano da confermare prima dell'ordine manuale."}
 
 
+def capital_market_context(network, wallet_rows, spot_readings):
+    """Explain capital circulation relative to same-asset Kraken spot volume.
+
+    A chain transfer is *not* a Kraken trade. This comparison is only an
+    order-of-magnitude yardstick, never net buy/sell or thresholded signal.
+    """
+    assets=network.get("asset_reti") if isinstance(network,dict) else None
+    capital=assets.get("flussi_capitale") if isinstance(assets,dict) else None
+    holdings=capital.get("posizioni") if isinstance(capital,dict) else None
+    if not isinstance(holdings,list) or len(holdings)!=len(wallet_rows):
+        return []  # old packets: no invented on-chain observations
+    out=[]
+    for original,capital_row,spot in zip(wallet_rows,holdings,spot_readings):
+        token=original.get("token")
+        if not isinstance(capital_row,dict) or capital_row.get("token")!=token:
+            raise BridgeError("On-chain circulation identity mismatches Kraken wallet")
+        kraken=spot.get("mercato_spot_kraken_alla_lettura") or {}
+        denominator=None
+        if kraken.get("stato")=="DISPONIBILE":
+            volume=numeric(kraken.get("volume_24h_eur_stimato"))
+            price=numeric(original.get("prezzo_eur"))
+            if volume is not None and price is not None and volume>0 and price>0:
+                denominator=volume/price
+        by_chain=[]
+        for observed in capital_row.get("osservazioni",[]):
+            if not isinstance(observed,dict):
+                continue
+            active=[e for e in observed.get("eventi",[])
+                    if e.get("stato_alla_lettura")=="CAMPIONE_RECENTE"]
+            strongest=max(active,key=lambda x:Decimal(x["quantita"])) if active else None
+            ratio=(str((Decimal(strongest["quantita"])/denominator*100)
+                       .quantize(Decimal(".01")))
+                   if strongest is not None and denominator is not None else None)
+            deltas=[{"account":h["account"],
+                     "variazione_unita_minima":h["variazione_unita_minima"],
+                     "confronto_precedente_utc":h.get("confronto_precedente_utc")}
+                    for h in observed.get("detentori",[]) if isinstance(h,dict)
+                    and h.get("variazione_unita_minima") is not None]
+            by_chain.append({"rete":observed.get("rete"),
+                "asset_tecnico":observed.get("asset_tecnico"),
+                "stato":observed.get("stato"),
+                "eventi_recenti":len(active),
+                "movimento_massimo_campionato":({
+                    "tx":strongest["tx"],"tipo":strongest.get("tipo"),
+                    "quantita":strongest["quantita"],
+                    "rapporto_volume_kraken_spot_24h_pct":ratio,
+                    "limite_confronto":"Volume giornaliero della sola coppia Kraken disponibile; trasferimento on-chain NON equivale a negoziazione Kraken"
+                } if strongest is not None else None),
+                "variazioni_top_detentori":deltas[:10],
+                "aggregato_detentori":observed.get("aggregato_detentori"),
+                "flussi_exchange_campione":observed.get("flussi_exchange_campione"),
+                "copertura":observed.get("copertura"),
+                "riesame":"Esaminare piu finestre, liquidita e ipotesi alternative; nessun segnale BUY/SELL"})
+        out.append({"token":token,"coppia_kraken":kraken.get("coppia"),
+                    "stato_mercato_kraken":kraken.get("stato"),
+                    "osservazioni":by_chain})
+    return out
+
+
 def read_context(bundle, *, now=None, expected_sha256=None):
     """GPT read-time contract: recalculate age/status and coverage, never authorise action."""
     moment = checked_now(now)
@@ -649,7 +708,9 @@ def read_context(bundle, *, now=None, expected_sha256=None):
             if provenance.get("valuta") != "EUR" or not isinstance(provenance.get("pair"), str):
                 raise BridgeError("Valuta quotazione non EUR")
             parts = provenance["pair"].split("/")
-            if len(parts) != 2 or parts[1] != "EUR" or wallet.canonical_wallet_alias(parts[0]) != wallet.canonical_wallet_alias(token):
+            if (len(parts) != 2 or parts[1] not in ("EUR","USD","USDC")
+                    or wallet.canonical_wallet_alias(parts[0]) != wallet.canonical_wallet_alias(token)
+                    or (parts[1] != "EUR" and provenance.get("valuta_mercato") != parts[1])):
                 raise BridgeError("Base quotazione incompatibile")
             if not isinstance(provenance.get("pair_key"), str) or not wallet.KRAKEN_PAIR_KEY.fullmatch(provenance["pair_key"]):
                 raise BridgeError("Identificativo mercato non verificabile")
@@ -725,7 +786,59 @@ def read_context(bundle, *, now=None, expected_sha256=None):
         comparison_at_read = kdd_candles.compare_context(read_frames)
         all_tf = all(value == "AGGIORNATO" for value in states.values())
         complete += bool(all_tf)
+        # A spot market is public Kraken trading evidence, not a chain flow.
+        # Rebind source/timestamp/pair to the same already-validated EUR
+        # quotation before giving GPT volume or indicative spread.
+        kraken=row.get("mercato_spot_kraken")
+        spot_read={"stato":"NON_ACQUISITO","volume_24h_eur_stimato":None,
+                   "spread_pct":None,"book":"NON_ACQUISITO_PER_QUESTA_COPPIA",
+                   "trades":"NON_ACQUISITI_PER_QUESTA_COPPIA"}
+        if isinstance(kraken,dict) and kraken.get("stato")=="DISPONIBILE_ALLO_SNAPSHOT":
+            ref=row.get("fonte_prezzo_eur")
+            if (not isinstance(ref,dict) or kraken.get("coppia")!=ref.get("pair")
+                    or kraken.get("pair_key")!=ref.get("pair_key")
+                    or kraken.get("rilevazione_utc")!=pkt["rilevazione_kdd_utc"]):
+                raise BridgeError("Mercato Kraken spot e fonte prezzo non allineati")
+            quote=kraken["coppia"].split("/")[-1]
+            if quote in ("USD","USDC"):
+                if (ref.get("valuta_mercato") != quote or
+                        kraken.get("valuta_quotazione") != quote or
+                        kraken.get("prezzo_quote") != ref.get("prezzo_quote") or
+                        kraken.get("eur_per_quote") != ref.get("eur_per_quote") or
+                        kraken.get("conversione_fonte") != ref.get("conversione_fonte") or
+                        ref.get("conversione_fonte") not in (
+                            ("EUR/USD","USD/EUR") if quote=="USD"
+                            else ("EUR/USDC","USDC/EUR"))):
+                    raise BridgeError("Prezzo Kraken in USD/USDC privo di fonte FX coerente")
+                raw_quote=numeric(ref.get("prezzo_quote"))
+                raw_fx=numeric(ref.get("eur_per_quote"))
+                if (raw_quote is None or raw_quote<=0 or raw_fx is None
+                        or raw_fx<=0 or price is None or
+                        float(price)!=float(raw_quote)*float(raw_fx)):
+                    raise BridgeError("Conversione FX Kraken non coerente col prezzo EUR")
+            elif quote!="EUR" or (isinstance(ref,dict) and ref.get("valuta_mercato") in ("USD","USDC")):
+                raise BridgeError("Valuta Kraken spot contraddittoria")
+            volume=numeric(kraken.get("volume_24h_eur_stimato"))
+            spread=numeric(kraken.get("spread_pct"))
+            if (volume is not None and volume<0 or
+                    spread is not None and not (0<=spread<=100)):
+                raise BridgeError("Metriche mercato Spot non valide")
+            recent=wallet.source_status(snap,moment)["stato"]=="RECENTE"
+            spot_read={"stato":"DISPONIBILE" if recent else "SCADUTO",
+                       "coppia":kraken["coppia"],
+                       "valuta_quotazione":quote,
+                       "prezzo_quote":str(raw_quote) if quote!="EUR" and recent else None,
+                       "eur_per_quote":str(raw_fx) if quote!="EUR" and recent else None,
+                       "conversione_fonte":ref.get("conversione_fonte") if quote!="EUR" and recent else None,
+                       "fonte":"Kraken Spot public Ticker",
+                       "rilevazione_utc":pkt["rilevazione_kdd_utc"],
+                       "volume_24h_eur_stimato":str(volume) if recent and volume is not None else None,
+                       "spread_pct":str(spread) if recent and spread is not None else None,
+                       "book":"NON_ACQUISITO_PER_QUESTA_COPPIA",
+                       "trades":"NON_ACQUISITI_PER_QUESTA_COPPIA",
+                       "limite":"Volume EUR stimato e spread indicativo: NON trasferimenti blockchain"}
         observations.append({"indice": i, "token": row.get("token"),
+                             "mercato_spot_kraken_alla_lettura":spot_read,
                              "stato_identita": row.get("stato_identita"),
                              "timeframe_ricalcolati": states,
                              "figure_candlestick_alla_lettura": figure_read_states,
@@ -785,6 +898,8 @@ def read_context(bundle, *, now=None, expected_sha256=None):
             "evidenze_economiche_alla_lettura": economic_read,
             "flusso_futures_alla_lettura": futures_at_read,
             "rete_defi_alla_lettura": network_at_read,
+            "circolazione_capitale_vs_spot": capital_market_context(
+                network_at_read, rows, observations),
             "totale_parziale": bool(section.get("totale_parziale")) or partial,
             "book_150_alla_lettura": stato_book_150_alla_lettura(
                 pkt, moment, mercato_stato=market_status["stato"],

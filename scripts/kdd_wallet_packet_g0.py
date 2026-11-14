@@ -133,7 +133,7 @@ KRAKEN_PAIR_KEY = re.compile(r"[A-Za-z0-9_.-]{2,48}$")
 
 
 def verify_eur_market_identity(snapshot, token, market, four_row=None):
-    """Reject contradicted EUR provenance; do not infer assets from opaque keys."""
+    """Reject contradicted EUR valuation and exact Kraken quote/FX provenance."""
     identity = canonical_wallet_alias(token)
     if not isinstance(market, dict):
         raise PacketError("Identita mercato EUR assente per posizione valorizzata")
@@ -141,7 +141,7 @@ def verify_eur_market_identity(snapshot, token, market, four_row=None):
     if not isinstance(pair, str) or pair.count("/") != 1:
         raise PacketError("Coppia mercato EUR assente o non valida")
     base, quote = pair.split("/")
-    if (not SYMBOL.fullmatch(base) or quote != "EUR"
+    if (not SYMBOL.fullmatch(base) or quote not in ("EUR","USD","USDC")
             or canonical_wallet_alias(base) != identity):
         raise PacketError("Coppia mercato EUR incoerente con posizione")
     declared = market.get("token")
@@ -159,8 +159,31 @@ def verify_eur_market_identity(snapshot, token, market, four_row=None):
                     or canonical_wallet_alias(other) != identity):
                 raise PacketError("Identita base mercato EUR discordante")
     for field in ("quote", "valuta_quotazione"):
-        if field in market and market[field] != "EUR":
-            raise PacketError("Coppia mercato EUR con valuta incoerente")
+        if field in market and market[field] != quote:
+            raise PacketError("Coppia mercato Kraken con valuta incoerente")
+    if quote != "EUR":
+        # The EUR value is possible only with a directly observed Kraken
+        # EUR/USD, USD/EUR, USDC/EUR or EUR/USDC quote from the SAME snapshot.
+        fx = snapshot.get("fx_rilevati")
+        record = fx.get(quote) if isinstance(fx, dict) else None
+        valid_sources = (("EUR/USD","USD/EUR") if quote=="USD"
+                         else ("USDC/EUR","EUR/USDC"))
+        if (not isinstance(record,dict) or
+                record.get("source") not in valid_sources or
+                market.get("conversione_fonte") != record["source"]):
+            raise PacketError("Coppia mercato EUR priva di fonte FX Kraken coerente")
+        rate = amount(record.get("eur"), "FX EUR per valuta")
+        quote_price = amount(market.get("prezzo_quote"), "Prezzo in valuta Kraken")
+        market_rate = amount(market.get("eur_per_quote"), "Tasso FX nel mercato")
+        eur_price = amount(market.get("prezzo_eur"), "Prezzo EUR derivato")
+        if any(v is None for v in (rate,quote_price,market_rate,eur_price)):
+            raise PacketError("Prezzo o FX del mercato Spot non disponibile")
+        # mercati_spot.assemble uses binary floats on the observed ticker/mid;
+        # compare its very same arithmetic, without invented cents tolerance.
+        q,fxnum = d1_float(quote_price,"Prezzo quote"),d1_float(rate,"FX")
+        if (q<=0 or fxnum<=0 or d1_float(market_rate,"FX mercato")!=fxnum
+                or d1_float(eur_price,"EUR derivato")!=q*fxnum):
+            raise PacketError("Prezzo EUR incoerente con Kraken Spot e FX")
     markets = snapshot.get("markets")
     # The exact same opaque Kraken identifier cannot name two different assets
     # in the SAME observation; this is an observable conflict, not key parsing.
@@ -491,8 +514,42 @@ def brief_positions(portfolio: dict, report: dict, snapshot: dict, dossier: dict
                          "pair_key":market_eur["pair_key"], "valuta":"EUR",
                          "rilevazione_utc":snapshot["rilevazione_utc"]}
                         if isinstance(market_eur, dict) else None)
+        if isinstance(price_source,dict) and market_eur["pair"].split("/")[-1]!="EUR":
+            price_source.update(
+                valuta_mercato=market_eur["pair"].split("/")[-1],
+                prezzo_quote=amount(market_eur.get("prezzo_quote"),"prezzo_quote"),
+                eur_per_quote=amount(market_eur.get("eur_per_quote"),"eur_per_quote"),
+                conversione_fonte=market_eur.get("conversione_fonte"))
+        # A Kraken Spot ticker is a different fact from a blockchain transfer.
+        # Reuse the already acquired same-snapshot market row, with explicit
+        # gaps for book/trades that were not requested for this holding.
+        spot_market = {"stato":"NON_DISPONIBILE","fonte":"Kraken Spot Ticker",
+                       "coppia":None,"pair_key":None,
+                       "volume_24h_eur_stimato":None,"spread_pct":None,
+                       "book":"NON_ACQUISITO_PER_QUESTA_COPPIA",
+                       "trades":"NON_ACQUISITI_PER_QUESTA_COPPIA"}
+        if isinstance(market_eur,dict) and price_source is not None:
+            v=market_eur.get("volume_24h_eur_stimato")
+            s=market_eur.get("spread_pct")
+            try:
+                volume=amount(v,"volume_24h_eur_stimato") if v is not None else None
+                spread=amount(s,"spread_pct") if s is not None else None
+            except PacketError:
+                volume,spread=None,None
+            spot_market.update(stato="DISPONIBILE_ALLO_SNAPSHOT",
+                coppia=market_eur["pair"],pair_key=market_eur["pair_key"],
+                volume_24h_eur_stimato=volume,spread_pct=spread,
+                rilevazione_utc=snapshot.get("rilevazione_utc"),
+                limite="Volume token * ultimo prezzo; spread top-of-book indicativo, non liquidita eseguibile")
+            if price_source.get("valuta_mercato") in ("USD","USDC"):
+                spot_market.update(valuta_quotazione=price_source["valuta_mercato"],
+                                   prezzo_quote=price_source["prezzo_quote"],
+                                   eur_per_quote=price_source["eur_per_quote"],
+                                   conversione_fonte=price_source["conversione_fonte"],
+                                   limite="Prezzo in quote Kraken convertito con FX diretto osservato nello snapshot; non prezzo eseguibile")
         selected.append({"indice":index, "token": token, "stato_identita":"VALIDA", "stato_quantita":qty_state, "quantita_spot": qty,
                          "analisi_4tf": technical4, "fonte_prezzo_eur": price_source,
+                         "mercato_spot_kraken": spot_market,
                          "disponibile_spot": amount(row.get("disponibile_spot"), "disponibile_spot"),
                          "prezzo_eur": price, "valore_eur": val,
                          "pl_indicativo_eur": pnl, "variazione": technical,
@@ -514,7 +571,20 @@ def public_shortlist(snapshot: dict) -> list[dict]:
         token = x.get("token")
         if not isinstance(token, str) or not SYMBOL.fullmatch(token):
             continue
+        market = {"stato":"NON_ACQUISITO","fonte":"Kraken Spot public",
+                  "coppia":x.get("coppia_analisi"),
+                  "volume_coppia_eur_stimato":None,
+                  "spread_book_pct":None}
+        book=x.get("book")
+        if isinstance(book,dict):
+            market["spread_book_pct"]=_analytic_value(book.get("spread_book_pct"))
+            market["book_stato"]="CAMPIONE" if market["spread_book_pct"] is not None else "NON_DISPONIBILE"
+        vol=_analytic_value(x.get("volume_coppia_eur_stimato"))
+        if vol is not None:
+            market.update(stato="VOLUME_SPOT_CAMPIONE",volume_coppia_eur_stimato=vol)
+        market["limite"]="Book della singola coppia se presente, non flusso on-chain o liquidita globale"
         out.append({"token": token,
+                    "mercato_spot_kraken":market,
                     "categoria": str(x.get("categoria") or "")[:100],
                     "esito_kdd": str(x.get("esito") or "")[:100],
                     "coppia_analisi": str(x.get("coppia_analisi") or "")[:70],

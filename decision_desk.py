@@ -180,6 +180,28 @@ def market_pairs_and_ticker(pairs, tickers):
             out[base] = row
     return out
 
+def wallet_spot_markets(legacy_eur, assembled, portfolio):
+    """Reuse the public Kraken multi-quote catalog for held USD/USDC-only assets.
+
+    Existing EUR market rows remain unchanged; no direct FX rate -> no row
+    from mercati_spot.assemble -> no fabricated EUR valuation.
+    """
+    result = dict(legacy_eur)
+    rows = portfolio.get('posizioni') if isinstance(portfolio,dict) else []
+    for row in rows if isinstance(rows,list) else []:
+        if not isinstance(row,dict):
+            continue
+        symbol, valid = wallet_symbol(row.get('token'))
+        if not valid:
+            continue
+        token = canonical(symbol)
+        multi = assembled.get(token) if isinstance(assembled,dict) else None
+        if token not in result and isinstance(multi,dict):
+            result[token] = dict(multi,
+                                 fonte_quotazione='Kraken Spot Ticker + cambio diretto Kraken')
+    return result
+
+
 def calc_trend(candles, spot):
     # L'ultima candela OHLC Kraken è in formazione. Non trattarla come chiusura ufficiale.
     closed = [num(r[4]) for r in candles[:-1] if len(r) > 4 and num(r[4]) > 0]
@@ -189,6 +211,23 @@ def calc_trend(candles, spot):
     highs = max(closed[-30:]); dd30 = pct(spot, highs)
     return {'var_7g_pct': d7, 'var_30g_pct': d30, 'media_20g_eur': ma20,
             'sopra_media20': spot >= ma20, 'distanza_massimo_chiusure30_pct': dd30}
+
+def trend_spot_quotato(candles, market):
+    """Compare OHLC and spot in the *same* Kraken quote currency."""
+    quote = market.get("quote", "EUR")
+    if quote not in ("EUR", "USD", "USDC"):
+        return {"errore": "Valuta mercato non riconosciuta"}
+    base = (market.get("prezzo_quote") if quote!="EUR"
+            else market.get("prezzo_eur"))
+    price = num(base)
+    if price <= 0:
+        return {"errore": "Prezzo spot nella valuta della candela non disponibile"}
+    result = calc_trend(candles, price)
+    if quote!="EUR" and "media_20g_eur" in result:
+        result["media_20g_quote"] = result.pop("media_20g_eur")
+        result["valuta_quotazione"] = quote
+    return result
+
 
 def fetch_feed(name, url, kind):
     items = []
@@ -1159,6 +1198,11 @@ def refresh():
     markets_multi, rates = multi.assemble(
         pairs, tickers, min_vol=num(conf.get('scanner',{}).get('volume_24h_min_eur',500000)),
         max_spread=num(conf.get('scanner',{}).get('spread_massimo_pct',0.8)))
+    # Reuse the existing verified multi-quote Kraken Spot/FX catalog for
+    # positions with no EUR market. Keep original EUR quotes unchanged.
+    # A missing direct FX observation cannot create an invented EUR price:
+    # mercati_spot.assemble omits such a market.
+    markets = wallet_spot_markets(markets, markets_multi, portfolio)
     tokens = sorted({'BTC','ETH','SOL'} |
                     {wallet_symbol(h.get('token'))[0]
                      for h in (portfolio.get('posizioni') or [])
@@ -1173,7 +1217,7 @@ def refresh():
             time.sleep(1.1)
             c = kraken('OHLC', pair=row['pair_key'], interval=1440)
             bars = [v for k,v in c.items() if k != 'last'][0]
-            trends[tok] = calc_trend(bars, row['prezzo_eur'])
+            trends[tok] = trend_spot_quotato(bars, row)
         except Exception as exc:
             trends[tok] = {'errore': f'OHLC non disponibile ({type(exc).__name__})'}
     # Campione stratificato per movimento E liquidità: 24 OHLC 1h MAX;

@@ -32,6 +32,9 @@ MAX_RESPONSE = 2_000_000
 ETH_PUBLIC_RPC = "https://public-ethereum-mainnet.rpcnode.dev"
 _ETH_RPC_LOCK = threading.Lock()
 _ETH_RPC_NEXT_AT = 0.0
+# Routescan public keyless tier: 2 rps; process-wide 0.55s between calls.
+_ROUTESCAN_LOCK = threading.Lock()
+_ROUTESCAN_NEXT_AT = 0.0
 
 
 def _now(value):
@@ -87,6 +90,13 @@ def _http(url, payload=None):
             if pause > 0:
                 time.sleep(pause)
             _ETH_RPC_NEXT_AT = time.monotonic() + 1.05
+    if url.startswith("https://api.routescan.io/v2/network/mainnet/evm/"):
+        global _ROUTESCAN_NEXT_AT
+        with _ROUTESCAN_LOCK:
+            pause = _ROUTESCAN_NEXT_AT-time.monotonic()
+            if pause>0:
+                time.sleep(pause)
+            _ROUTESCAN_NEXT_AT=time.monotonic()+0.55
     with urllib.request.urlopen(request, timeout=9) as response:
         if response.geturl() != url:
             raise ValueError("public source redirect rejected")
@@ -344,10 +354,13 @@ NATIVE_IDS = {
     "bitcoin": ("BTC", "bitcoin"), "ethereum": ("ETH", "ethereum"),
     "binancecoin": ("BNB", "bsc"), "near": ("NEAR", "near"),
     "ripple": ("XRP", "xrpl"), "solana": ("SOL", "solana"),
-    "sui": ("SUI", "sui"),
+    "sui": ("SUI", "sui"), "avalanche-2": ("AVAX", "avalanche"),
 }
 PLATFORM_CHAINS = {"ethereum": "ethereum", "binance-smart-chain": "bsc",
-                   "solana": "solana"}
+                   "solana": "solana", "avalanche": "avalanche",
+                   "optimistic-ethereum": "optimism"}
+# Avalanche token index is acquired by a verified free Routescan page;
+# no Avalanche RPC contract supply probe is implied or required.
 # Public endpoint/reference specifications (responses never authenticated by TLS alone):
 # BTC: https://github.com/Blockstream/esplora/blob/master/API.md
 # BSC: https://docs.bnbchain.org/bnb-smart-chain/developers/json_rpc/json-rpc-endpoint/
@@ -359,11 +372,13 @@ NATIVE_ENDPOINTS = {
     "bitcoin": "https://blockstream.info/api/blocks",
     "ethereum": ETH_PUBLIC_RPC,
     "bsc": "https://bsc-dataseed.bnbchain.org",
+    "avalanche": "https://api.avax.network/ext/bc/C/rpc",
     "near": "https://rpc.mainnet.near.org",
     "xrpl": "https://s1.ripple.com:51234",
 }
 CONTRACT_ENDPOINTS = {"ethereum": NATIVE_ENDPOINTS["ethereum"],
-                      "bsc": NATIVE_ENDPOINTS["bsc"], "solana": SOL_URL}
+                      "bsc": NATIVE_ENDPOINTS["bsc"], "solana": SOL_URL,
+                      "optimism": "https://mainnet.optimism.io"}
 EVM_ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}\Z")
 SOL_MINT = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,44}\Z")
 CG_DETAILS = "https://api.coingecko.com/api/v3/coins/"
@@ -395,7 +410,7 @@ def _supply_integer(value):
 
 def _contract_address(chain, address):
     return (isinstance(address, str) and
-            bool((EVM_ADDRESS if chain in ("ethereum", "bsc")
+            bool((EVM_ADDRESS if chain in ("ethereum", "bsc", "avalanche", "optimism")
                   else SOL_MINT if chain == "solana"
                   else re.compile(r"(?!)")).fullmatch(address)))
 
@@ -426,12 +441,20 @@ def coin_network_metadata(identity, payload, now):
                               "contratto": address})
     if len(contracts) > 12:
         return None
+    # Preserve other named CoinGecko platforms rather than presenting an
+    # unsupported on-chain asset as one with no known possible network.
+    unserved=sorted({platform for platform,address in platforms.items()
+                     if platform not in PLATFORM_CHAINS
+                     and isinstance(platform,str)
+                     and re.fullmatch(r"[a-z0-9-]{2,80}",platform)
+                     and isinstance(address,str) and bool(address)})[:40]
     return {"stato": "INDICE_COIN_GECKO", "token": token,
             "coingecko_id": identity["coingecko_id"],
             "coppia": identity["coppia"], "pair_key": identity["pair_key"],
             "fonte": CG_DETAILS + identity["coingecko_id"],
             "acquisito_utc": _now(now).isoformat(timespec="seconds"),
             "contratti": contracts, "piattaforme_dichiarate": len(platforms),
+            "piattaforme_senza_fonte": unserved,
             "limite": "Indici CoinGecko, non attestazione primaria di contratto, bridge o rete di deposito Kraken"}
 
 
@@ -454,6 +477,11 @@ def _metadata_valid(metadata, identity, acquired):
     return (isinstance(contracts, list) and len(contracts) <= 12
             and type(metadata.get("piattaforme_dichiarate")) is int
             and 0 <= metadata["piattaforme_dichiarate"] <= 40
+            and isinstance(metadata.get("piattaforme_senza_fonte",[]),list)
+            and len(metadata.get("piattaforme_senza_fonte",[]))<=40
+            and all(isinstance(p,str) and re.fullmatch(r"[a-z0-9-]{2,80}",p)
+                    and p not in PLATFORM_CHAINS
+                    for p in metadata.get("piattaforme_senza_fonte",[]))
             and all(isinstance(c, dict) and
                     c.get("rete") == PLATFORM_CHAINS.get(c.get("platform_id"))
                     and _contract_address(c.get("rete"), c.get("contratto"))
@@ -484,6 +512,7 @@ def _asset_roster(economics, positions, candidates, moment):
             if native and native[0] != basis["token"]:
                 native = None
             contracts = list(profile["contratti"]) if qualified and profile else []
+            other_networks=list(profile.get("piattaforme_senza_fonte",[])) if qualified and profile else []
             networks = sorted({x["rete"] for x in contracts} | ({native[1]} if native else set()))
             values.append({"token": basis["token"],
                            "coppia_analisi": basis.get("coppia_analisi") if name == "candidati" else None,
@@ -493,8 +522,11 @@ def _asset_roster(economics, positions, candidates, moment):
                            "tipo": ("NON_VERIFICATO" if not qualified else
                                     "MULTICHAIN" if len(networks) > 1 else
                                     "NATIVO" if native and not contracts else
-                                    "TOKEN_CON_CONTRATTO" if contracts else "RETE_NON_DOCUMENTATA"),
+                                    "TOKEN_CON_CONTRATTO" if contracts else
+                           "PIATTAFORMA_INDICIZZATA_SENZA_FONTE" if other_networks
+                           else "RETE_NON_DOCUMENTATA"),
                            "reti_possibili": networks,
+                           **({"piattaforme_senza_fonte":other_networks} if other_networks else {}),
                            "contratti_indicizzati": contracts,
                            # CoinGecko is a candidate locator. An RPC response
                            # cannot certify project ownership of the address.
@@ -526,7 +558,7 @@ def _native_observe(chain, fetch, now):
             values = {"altezza_blocco": height, "transazioni_blocco": count,
                       "blocco_hash": block["id"]}
             unit = "altezza, numero transazioni nel solo blocco"
-        elif chain in ("ethereum", "bsc"):
+        elif chain in ("ethereum", "bsc", "avalanche"):
             response = fetch(url, {"jsonrpc": "2.0", "id": 1, "method": "eth_getBlockByNumber",
                                    "params": ["latest", False]})
             block = response.get("result") if isinstance(response, dict) and response.get("id") == 1 and not response.get("error") else None
@@ -634,8 +666,14 @@ def _collect_assets(now, positions, candidates, economic, previous, fetch):
                      for r in family if r["progetto_id"] in NATIVE_IDS
                      and NATIVE_IDS[r["progetto_id"]][0] == r["token"]
                      and NATIVE_IDS[r["progetto_id"]][1] in NATIVE_ENDPOINTS})
-    sources = {chain: _native_observe(chain, fetch, now)
-               for chain in native[:MAX_NATIVE_SOURCES]}
+    # Native sources rotate as well: otherwise six networks permanently starve
+    # the sixth because the old implementation always chose the first five.
+    cursor = previous.get("prossima_rete_nativa") if isinstance(previous, dict) else None
+    offset = next((i for i,name in enumerate(native)
+                   if isinstance(cursor,str) and name>=cursor),0)
+    scheduled = [native[(offset+i)%len(native)]
+                 for i in range(min(MAX_NATIVE_SOURCES,len(native)))]
+    sources = {chain: _native_observe(chain, fetch, now) for chain in scheduled}
     contracts = sorted({(c["rete"], c["contratto"])
                         for family in rows.values() for r in family
                         for c in r["contratti_indicizzati"]
@@ -648,7 +686,9 @@ def _collect_assets(now, positions, candidates, economic, previous, fetch):
     probes = [_probe_contract(chain, address, fetch, now) for chain, address in selected]
     return {"schema": ASSET_SCHEMA, "acquisito_utc": now.isoformat(timespec="seconds"),
             "posizioni": rows["posizioni"], "candidati": rows["candidati"],
-            "fonti_native": sources, "sonde_contratto": probes,
+            "fonti_native": sources,
+            "prossima_rete_nativa": (native[(offset+len(scheduled))%len(native)]
+                                    if native else None), "sonde_contratto": probes,
             "contratti_indicizzati_totali": len(contracts),
             "contratti_esaminati": len(probes),
             "prossimo_contratto": ("|".join(contracts[(start+len(selected)) % len(contracts)])
@@ -669,9 +709,14 @@ def _read_assets(raw, owned, candidates, economic, now):
     relevant = sorted({NATIVE_IDS[r["progetto_id"]][1] for family in expected.values()
                        for r in family if r["progetto_id"] in NATIVE_IDS
                        and NATIVE_IDS[r["progetto_id"]][0] == r["token"]
-                       and NATIVE_IDS[r["progetto_id"]][1] in NATIVE_ENDPOINTS})[:MAX_NATIVE_SOURCES]
+                       and NATIVE_IDS[r["progetto_id"]][1] in NATIVE_ENDPOINTS})
     sources = raw.get("fonti_native")
-    if not isinstance(sources, dict) or set(sources) != set(relevant):
+    legacy="prossima_rete_nativa" not in raw
+    if (not isinstance(sources,dict) or not set(sources).issubset(set(relevant))
+            or len(sources)!=min(len(relevant),MAX_NATIVE_SOURCES)
+            or (legacy and set(sources)!=set(relevant[:MAX_NATIVE_SOURCES]))
+            or (not legacy and raw.get("prossima_rete_nativa") not in
+                (set(relevant) if relevant else {None}))):
         raise ValueError("native source coverage invalid")
     result_sources = {}
     for chain, value in sources.items():
@@ -688,7 +733,7 @@ def _read_assets(raw, owned, candidates, economic, now):
                 _integer(v.get("altezza_blocco")); _integer(v.get("transazioni_blocco"))
                 if not re.fullmatch(r"[0-9a-f]{64}", str(v.get("blocco_hash"))):
                     raise ValueError("BTC hash mismatch")
-            elif chain in ("ethereum", "bsc", "near"):
+            elif chain in ("ethereum", "bsc", "avalanche", "near"):
                 _integer(v.get("altezza_blocco"))
                 if not isinstance(v.get("blocco_hash"), str) or len(v["blocco_hash"]) < 25:
                     raise ValueError("block hash invalid")
@@ -752,6 +797,9 @@ def _read_assets(raw, owned, candidates, economic, now):
                 readings.append(dict(c, osservazione=reading or {
                     "stato": "NON_ESAMINATO_PER_BUDGET", "valori": None}))
             observation = result_sources.get(chain) if chain else None
+            if chain in relevant and chain not in result_sources:
+                observation = {"stato":"RINVIATO_BUDGET","valori":None,
+                               "copertura":"Rete nativa programmata dalla rotazione"}
             if chain in ("sui", "solana"):
                 observation = {"stato": "COPERTO_DA_FONTI_PREESISTENTI",
                                "valori": None, "copertura": "Vedere fonti Sui/Solana PR #53"}
@@ -790,4 +838,29 @@ def at_read(source, positions, candidates, now, *, economics=None):
         result["asset_reti"] = _read_assets(
             enriched, _roster(positions), _roster(candidates, candidate=True),
             economics, _now(now))
+    return result
+
+# KDD-17 G2/2: integrate a single reusable public capital-flow producer into
+# the existing asset-network family (dossier -> packet -> GPT bridge).
+# Legacy source/contract semantics above remain unchanged.
+_NETWORK_COLLECT_ASSETS = _collect_assets
+_NETWORK_READ_ASSETS = _read_assets
+
+
+def _collect_assets(now, positions, candidates, economic, previous, fetch):
+    import kdd_capital_flow
+    result = _NETWORK_COLLECT_ASSETS(now, positions, candidates, economic, previous, fetch)
+    earlier = previous.get("flussi_capitale") if isinstance(previous, dict) else None
+    result["flussi_capitale"] = kdd_capital_flow.collect(
+        now, result, economic, earlier, fetch)
+    return result
+
+
+def _read_assets(raw, owned, candidates, economic, now):
+    import kdd_capital_flow
+    result = _NETWORK_READ_ASSETS(raw, owned, candidates, economic, now)
+    # Old dossiers predate this family; absence is not a zero reading.
+    if "flussi_capitale" in raw:
+        result["flussi_capitale"] = kdd_capital_flow.at_read(
+            raw["flussi_capitale"], result, economic, now)
     return result
