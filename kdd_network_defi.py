@@ -439,12 +439,20 @@ def coin_network_metadata(identity, payload, now):
                               "contratto": address})
     if len(contracts) > 12:
         return None
+    # Preserve other named CoinGecko platforms rather than presenting an
+    # unsupported on-chain asset as one with no known possible network.
+    unserved=sorted({platform for platform,address in platforms.items()
+                     if platform not in PLATFORM_CHAINS
+                     and isinstance(platform,str)
+                     and re.fullmatch(r"[a-z0-9-]{2,80}",platform)
+                     and isinstance(address,str) and bool(address)})[:40]
     return {"stato": "INDICE_COIN_GECKO", "token": token,
             "coingecko_id": identity["coingecko_id"],
             "coppia": identity["coppia"], "pair_key": identity["pair_key"],
             "fonte": CG_DETAILS + identity["coingecko_id"],
             "acquisito_utc": _now(now).isoformat(timespec="seconds"),
             "contratti": contracts, "piattaforme_dichiarate": len(platforms),
+            "piattaforme_senza_fonte": unserved,
             "limite": "Indici CoinGecko, non attestazione primaria di contratto, bridge o rete di deposito Kraken"}
 
 
@@ -467,6 +475,11 @@ def _metadata_valid(metadata, identity, acquired):
     return (isinstance(contracts, list) and len(contracts) <= 12
             and type(metadata.get("piattaforme_dichiarate")) is int
             and 0 <= metadata["piattaforme_dichiarate"] <= 40
+            and isinstance(metadata.get("piattaforme_senza_fonte",[]),list)
+            and len(metadata.get("piattaforme_senza_fonte",[]))<=40
+            and all(isinstance(p,str) and re.fullmatch(r"[a-z0-9-]{2,80}",p)
+                    and p not in PLATFORM_CHAINS
+                    for p in metadata.get("piattaforme_senza_fonte",[]))
             and all(isinstance(c, dict) and
                     c.get("rete") == PLATFORM_CHAINS.get(c.get("platform_id"))
                     and _contract_address(c.get("rete"), c.get("contratto"))
@@ -497,6 +510,7 @@ def _asset_roster(economics, positions, candidates, moment):
             if native and native[0] != basis["token"]:
                 native = None
             contracts = list(profile["contratti"]) if qualified and profile else []
+            other_networks=list(profile.get("piattaforme_senza_fonte",[])) if qualified and profile else []
             networks = sorted({x["rete"] for x in contracts} | ({native[1]} if native else set()))
             values.append({"token": basis["token"],
                            "coppia_analisi": basis.get("coppia_analisi") if name == "candidati" else None,
@@ -506,8 +520,11 @@ def _asset_roster(economics, positions, candidates, moment):
                            "tipo": ("NON_VERIFICATO" if not qualified else
                                     "MULTICHAIN" if len(networks) > 1 else
                                     "NATIVO" if native and not contracts else
-                                    "TOKEN_CON_CONTRATTO" if contracts else "RETE_NON_DOCUMENTATA"),
+                                    "TOKEN_CON_CONTRATTO" if contracts else
+                           "PIATTAFORMA_INDICIZZATA_SENZA_FONTE" if other_networks
+                           else "RETE_NON_DOCUMENTATA"),
                            "reti_possibili": networks,
+                           "piattaforme_senza_fonte": other_networks,
                            "contratti_indicizzati": contracts,
                            # CoinGecko is a candidate locator. An RPC response
                            # cannot certify project ownership of the address.
