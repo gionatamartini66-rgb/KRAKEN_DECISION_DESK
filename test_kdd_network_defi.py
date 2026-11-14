@@ -1477,6 +1477,8 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
                 "packet_sha256":bridge.digest(prepared),"preparato_utc":iso}
         result=bridge.read_context(json.loads(json.dumps(bundle)),now=instant)
         flow=result["rete_defi_alla_lettura"]["asset_reti"]["flussi_capitale"]
+        self.assertEqual(len(result["circolazione_capitale_vs_spot"]),10)
+        self.assertEqual([r["token"] for r in result["circolazione_capitale_vs_spot"]],tokens)
         self.assertEqual([r["token"] for r in flow["posizioni"]],tokens)
         self.assertEqual(flow["candidati"][0]["token"],"CAKE")
         self.assertTrue(all(r["mercato_spot_kraken_alla_lettura"]["stato"] ==
@@ -1568,6 +1570,39 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         self.assertNotIn("USD",fx2)
         self.assertNotIn("SYN",only_usdc)
         self.assertEqual(set(desk.wallet_spot_markets({},only_usdc,wallet)),{"SUC"})
+
+    def test_gpt_capital_economic_magnitude_against_spot_not_trade_signal(self):
+        from scripts import kdd_bridge_g2 as bridge
+        observations={"asset_reti":{"flussi_capitale":{"posizioni":[{
+            "token":"FUTURE","osservazioni":[{
+                "rete":"solana","asset_tecnico":"A"*32,"stato":"OSSERVATO_CON_LIMITI",
+                "eventi":[{"tx":"B"*64,"tipo":"TRASFERIMENTO",
+                            "stato_alla_lettura":"CAMPIONE_RECENTE","quantita":"20"}],
+                "detentori":[{"account":"C"*32,
+                              "variazione_unita_minima":"30000",
+                              "confronto_precedente_utc":T.isoformat()}],
+                "flussi_exchange_campione":{"stato":"NON_ATTRIBUIBILE_O_STORICO"},
+                "copertura":"Una transazione finalizzata; campione parziale"}]}]}}}
+        wallet=[{"token":"FUTURE","prezzo_eur":"5"}]
+        spot=[{"mercato_spot_kraken_alla_lettura":{
+                 "stato":"DISPONIBILE","coppia":"FUTURE/USD",
+                 "volume_24h_eur_stimato":"500"}}]
+        result=bridge.capital_market_context(observations,wallet,spot)
+        self.assertEqual(len(result),1)
+        point=result[0]["osservazioni"][0]
+        self.assertEqual(point["movimento_massimo_campionato"]["rapporto_volume_kraken_spot_24h_pct"],"20.00")
+        self.assertEqual(point["variazioni_top_detentori"][0]["variazione_unita_minima"],"30000")
+        self.assertEqual(point["flussi_exchange_campione"]["stato"],"NON_ATTRIBUIBILE_O_STORICO")
+        self.assertIn("NON equivale",point["movimento_massimo_campionato"]["limite_confronto"])
+        older=copy.deepcopy(observations)
+        older["asset_reti"]["flussi_capitale"]["posizioni"][0]["osservazioni"][0]["eventi"][0]["stato_alla_lettura"]="STORICO"
+        stale=bridge.capital_market_context(older,wallet,spot)
+        self.assertEqual(stale[0]["osservazioni"][0]["eventi_recenti"],0)
+        self.assertIsNone(stale[0]["osservazioni"][0]["movimento_massimo_campionato"])
+        market_stale=copy.deepcopy(spot)
+        market_stale[0]["mercato_spot_kraken_alla_lettura"]["stato"]="SCADUTO"
+        stale_market=bridge.capital_market_context(observations,wallet,market_stale)
+        self.assertIsNone(stale_market[0]["osservazioni"][0]["movimento_massimo_campionato"]["rapporto_volume_kraken_spot_24h_pct"])
 
     def test_dynamic_candidate_rotation_and_missing_attribution(self):
         import kdd_capital_flow as cap
