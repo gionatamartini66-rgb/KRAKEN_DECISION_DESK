@@ -77,11 +77,13 @@ def _tag(address):
             if not isinstance(tag, dict):
                 continue
             value = str(tag.get("label") or tag.get("name") or "")[:90]
+            category_hint = " ".join(str(tag.get(field) or "")[:70] for field in
+                                     ("label", "category", "type", "tag_type"))
             category = next((name for word,name in
                              (("exchange","EXCHANGE"), ("custod","CUSTODE"),
                               ("fund","FONDO"), ("treasury","TESORERIA"),
                               ("protocol","PROTOCOLLO"), ("market maker","MARKET_MAKER"))
-                             if word in value.lower()), None)
+                             if word in category_hint.lower()), None)
             if category:
                 return {"stato": "ETICHETTA_PUBBLICA", "classe": category,
                         "etichetta": value, "fonte": ETH_EXPLORER + "/api/v2/"}
@@ -153,7 +155,7 @@ def _evm_native(chain, url, fetch, native):
             "copertura": "Un blocco esaminato, non flussi globali; profondita 6 blocchi senza attestare finalita"}
 
 
-def _evm_token(chain, contract, url, fetch, native):
+def _evm_token(chain, contract, url, fetch, native, previous):
     head = native.get("valori") if isinstance(native, dict) else None
     if not isinstance(head, dict):
         raise ValueError("EVM head unavailable")
@@ -206,6 +208,7 @@ def _evm_token(chain, contract, url, fetch, native):
             if not isinstance(rows, list) or len(rows) > 100:
                 raise ValueError("explorer transfer response")
             source = base + "/transfers"
+            used_fallback = set()
             for idx, item in enumerate(rows):
                 if not isinstance(item, dict):
                     continue
@@ -221,6 +224,10 @@ def _evm_token(chain, contract, url, fetch, native):
                     continue
                 when = item.get("timestamp")
                 _ts(when)
+                dedup_key = (tx.lower(), origin["hash"].lower(), dest["hash"].lower(), str(amount))
+                if item.get("log_index") is None and dedup_key in used_fallback:
+                    continue  # Explorer page lacks logIndex: avoid counting same item twice.
+                used_fallback.add(dedup_key)
                 events.append(_event(chain, contract, tx, item.get("log_index", idx),
                                      amount, decimals, source, item.get("block_number"),
                                      when, origin["hash"], dest["hash"], labels={
@@ -229,6 +236,11 @@ def _evm_token(chain, contract, url, fetch, native):
             raise ValueError("RPC logs unavailable: " + fallback_reason)
     holders = []
     holders_source = None
+    earlier = {h["account"].lower(): int(h["unita_minima"]) for h in
+               previous.get("detentori", []) if isinstance(h, dict)
+               and isinstance(h.get("account"), str) and
+               isinstance(h.get("unita_minima"), str) and
+               h["unita_minima"].isdigit()}
     if chain == "ethereum":
         h_url = ETH_EXPLORER + "/api/v2/tokens/" + contract + "/holders"
         try:
@@ -241,8 +253,12 @@ def _evm_token(chain, contract, url, fetch, native):
                     continue
                 addr = h.get("address")
                 if isinstance(addr, dict) and EVM.fullmatch(str(addr.get("hash"))):
-                    holders.append({"account": addr["hash"], "unita_minima": str(_nat(h.get("value"))),
-                                    "decimali": decimals, "entita": _tag(addr)})
+                    qty = _nat(h.get("value"))
+                    before = earlier.get(addr["hash"].lower())
+                    holders.append({"account": addr["hash"], "unita_minima": str(qty),
+                                    "decimali": decimals,
+                                    "variazione_unita_minima": (str(qty-before) if before is not None else None),
+                                    "entita": _tag(addr)})
             holders_source = h_url
         except (OSError, ValueError, KeyError, TypeError, AssertionError):
             pass
@@ -555,7 +571,7 @@ def _probe(key, assets, fetch, previous):
     native = assets.get("fonti_native",{}).get(chain)
     if chain in ("ethereum","bsc"):
         return (_evm_native(chain,url,fetch,native) if contract=="NATIVE" else
-                _evm_token(chain,contract,url,fetch,native))
+                _evm_token(chain,contract,url,fetch,native,previous))
     if chain=="solana":
         return (_solana_native(url,fetch,previous) if contract=="NATIVE" else
                 _solana_token(contract,url,fetch,previous))
@@ -584,8 +600,12 @@ def collect(now, assets, economics, previous, fetch):
                   for r in old.get("sonde",[]) if isinstance(r,dict)}
     source = []
     for key in chosen:
+        calls = [0]
+        def counted_fetch(url, payload=None):
+            calls[0] += 1
+            return fetch(url, payload)
         try:
-            result = _probe(key,assets,fetch,old_probes.get(key,{}))
+            result = _probe(key,assets,counted_fetch,old_probes.get(key,{}))
             state="OSSERVATO"
             reason=None
         except (OSError,ValueError,TypeError,KeyError,OverflowError,UnicodeError,
@@ -597,9 +617,10 @@ def collect(now, assets, economics, previous, fetch):
             reason=type(exc).__name__
         source.append({"rete":key[0],"asset_tecnico":key[1],
                        "stato":state,"acquisito_utc":moment.isoformat(timespec="seconds"),
-                       "motivo":reason,**result})
+                       "motivo":reason,"richieste_effettuate":calls[0],**result})
     return {"schema":SCHEMA,"acquisito_utc":moment.isoformat(timespec="seconds"),
             "sonde":source,"target_totali":len(targets),"target_interrogati":len(source),
+            "richieste_effettuate":sum(s["richieste_effettuate"] for s in source),
             "prossimo_target":("|".join(targets[(index+len(chosen))%len(targets)])
                                if targets else None),
             "limite":"Campione rotante di reti/contratti, non osservatorio completo, "
@@ -629,6 +650,7 @@ def at_read(raw, asset_rows, economics, now):
         bound[key]=source
         if source.get("stato") not in ("OSSERVATO","NON_DISPONIBILE"):
             raise ValueError("capital source state invalid")
+        _nat(source.get("richieste_effettuate"), 100)
         events=source.get("eventi")
         holders=source.get("detentori")
         if (not isinstance(events,list) or len(events)>MAX_EVENTS or
@@ -647,6 +669,29 @@ def at_read(raw, asset_rows, economics, now):
             if (_quantity(ev.get("unita_minima"),ev.get("decimali"))!=ev.get("quantita")
                     or not isinstance(ev.get("fonte"),str)):
                 raise ValueError("capital event amount/source invalid")
+            import kdd_network_defi as net
+            expected = (net.CONTRACT_ENDPOINTS[key[0]] if key[1]!="NATIVE"
+                        else net.NATIVE_ENDPOINTS.get(key[0],
+                            net.SOL_URL if key[0]=="solana" else net.SUI_URL))
+            indexed_url = ETH_EXPLORER + "/api/v2/tokens/" + key[1] + "/transfers"
+            block_prefix = "https://blockstream.info/api/block/"
+            if ev["fonte"] != expected and not (key[0]=="bitcoin" and
+                ev["fonte"].startswith(block_prefix) and ev["fonte"].endswith("/txs")) and not (
+                key[0]=="ethereum" and key[1]!="NATIVE" and ev["fonte"]==indexed_url):
+                raise ValueError("event source incompatible with chain/contract")
+            labels=ev.get("attribuzione")
+            if not isinstance(labels,dict) or set(labels)!={"da","a"}:
+                raise ValueError("source labels missing")
+            for label in labels.values():
+                if not isinstance(label,dict) or label.get("stato") not in (
+                        "ENTITA_NON_IDENTIFICATA","ETICHETTA_PUBBLICA"):
+                    raise ValueError("invalid attributed entity")
+                if label["stato"]=="ETICHETTA_PUBBLICA" and (
+                        key[0]!="ethereum" or
+                        label.get("fonte")!=ETH_EXPLORER+"/api/v2/" or
+                        label.get("classe") not in ("EXCHANGE","CUSTODE","FONDO",
+                                                   "TESORERIA","PROTOCOLLO","MARKET_MAKER")):
+                    raise ValueError("exchange/institution provenance invalid")
             if ev.get("orario_utc") is not None and _ts(ev["orario_utc"])>when+dt.timedelta(minutes=2):
                 raise ValueError("future event")
         for h in holders:
@@ -655,6 +700,8 @@ def at_read(raw, asset_rows, economics, now):
             _quantity(h.get("unita_minima"),h.get("decimali"))
         if source["stato"]=="NON_DISPONIBILE" and (events or holders):
             raise ValueError("unavailable source cannot carry metrics")
+    if raw.get("richieste_effettuate") != sum(s["richieste_effettuate"] for s in sources):
+        raise ValueError("capital request counts inconsistent")
     age=now-when
     fresh=dt.timedelta(minutes=-2)<=age<=dt.timedelta(minutes=30)
     def interpret(group):
@@ -684,16 +731,46 @@ def at_read(raw, asset_rows, economics, now):
                                          "detentori":[],"copertura":"Target atteso, non interrogato in questo ciclo"})
                     continue
                 events=[]
+                quantities = sorted(Decimal(e["quantita"]) for e in record["eventi"])
+                middle = quantities[len(quantities)//2] if len(quantities)>=3 else None
                 for item in record["eventi"]:
-                    if (not fresh or record["stato"]!="OSSERVATO"):
-                        events.append(dict(item,stato_alla_lettura="STORICO",valore_usd_indicativo=None))
+                    event_age = now-_ts(item["orario_utc"]) if item.get("orario_utc") else None
+                    relative = (str((Decimal(item["quantita"])/middle).quantize(Decimal(".01")))
+                                if middle is not None and middle>0 else None)
+                    if (not fresh or record["stato"]!="OSSERVATO" or
+                            (event_age is not None and event_age>dt.timedelta(minutes=30))):
+                        events.append(dict(item,stato_alla_lettura="STORICO",
+                                           rapporto_mediana_campione=relative,
+                                           valore_usd_indicativo=None))
                         continue
                     quantity=Decimal(item["quantita"])
                     value=(str((quantity*price).quantize(Decimal(".01"))) if price is not None else None)
                     events.append(dict(item,stato_alla_lettura="CAMPIONE_RECENTE",
+                                       rapporto_mediana_campione=relative,
                                        valore_usd_indicativo=value,
                                        fonte_valutazione=(fundamentals.get("fonte") if value else None),
                                        limite_valutazione="Marketcap/supply CoinGecko = prezzo implicito indicativo, non esecuzione" if value else None))
+                exchange={"ingresso_unita_minima":0,"uscita_unita_minima":0,
+                          "movimenti_interni_unita_minima":0,"eventi_ingresso":0,
+                          "eventi_uscita":0,"eventi_interni":0}
+                for event in events:
+                    if event.get("tipo")!="TRASFERIMENTO":
+                        continue
+                    labels=event.get("attribuzione") or {}
+                    left=labels.get("da") or {}
+                    right=labels.get("a") or {}
+                    incoming=right.get("classe")=="EXCHANGE" and right.get("stato")=="ETICHETTA_PUBBLICA"
+                    outgoing=left.get("classe")=="EXCHANGE" and left.get("stato")=="ETICHETTA_PUBBLICA"
+                    if incoming and outgoing and left.get("etichetta")==right.get("etichetta"):
+                        exchange["movimenti_interni_unita_minima"]+=int(event["unita_minima"])
+                        exchange["eventi_interni"]+=1
+                    else:
+                        if incoming:
+                            exchange["ingresso_unita_minima"]+=int(event["unita_minima"])
+                            exchange["eventi_ingresso"]+=1
+                        if outgoing:
+                            exchange["uscita_unita_minima"]+=int(event["unita_minima"])
+                            exchange["eventi_uscita"]+=1
                 recognized=sum(1 for ev in events
                                if any(v.get("stato")=="ETICHETTA_PUBBLICA"
                                       for v in (ev.get("attribuzione") or {}).values()
@@ -703,6 +780,12 @@ def at_read(raw, asset_rows, economics, now):
                                               else "STORICO" if record["stato"]=="OSSERVATO" else "NON_DISPONIBILE"),
                                      "eventi":events,"detentori":record["detentori"],
                                      "operatori_etichettati_nel_campione":recognized,
+                                     "flussi_exchange_campione":dict(exchange,
+                                         flusso_netto_unita_minima=(exchange["ingresso_unita_minima"]-
+                                                                   exchange["uscita_unita_minima"]),
+                                         fonte="ETICHETTE_PUBBLICHE_SE_PRESENTI",
+                                         limite="Non rappresenta flussi exchange globali, deposito non significa vendita"),
+                                     "detentori_top_somma_unita_minima":str(sum(int(h["unita_minima"]) for h in record["detentori"])),
                                      "periodo":record.get("periodo"),
                                      "acquisito_utc":record["acquisito_utc"],
                                      "copertura":record.get("copertura"),
