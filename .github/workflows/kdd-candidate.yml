@@ -32,49 +32,6 @@ jobs:
         run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_funding_book_g2
       - name: Existing safe updater tests
         run: python -B scripts/test_kdd_aggiorna.py
-      - name: KDD-17 TEMPORARY live ERC20 producer+GPT reader, no private data
-        if: github.event_name == 'pull_request' && github.event.pull_request.number == 64
-        continue-on-error: true
-        timeout-minutes: 3
-        run: |
-          PYTHONPATH=.:scripts python - <<'PY'
-          import json,time,datetime as dt
-          import kdd_network_defi as net,kdd_capital_flow as cap
-          now=dt.datetime.now(dt.timezone.utc)
-          contract="0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
-          calls=[];start=time.monotonic()
-          def fetch(url,payload=None):
-              t=time.monotonic()
-              try:
-                  data=net._http(url,payload)
-                  calls.append({"host":url.split("/")[2],"method":payload.get("method") if isinstance(payload,dict) else "GET",
-                                "status":"OK","ms":round((time.monotonic()-t)*1000)})
-                  return data
-              except Exception as ex:
-                  calls.append({"host":url.split("/")[2],"method":payload.get("method") if isinstance(payload,dict) else "GET",
-                                "status":type(ex).__name__,"code":getattr(ex,"code",None),
-                                "ms":round((time.monotonic()-t)*1000)})
-                  raise
-          head=net._native_observe("ethereum",fetch,now)
-          output={"head":head.get("stato"),"head_block":(head.get("valori") or {}).get("altezza_blocco")}
-          if head.get("stato")=="OSSERVATO":
-              asset={"posizioni":[{"token":"USDC","progetto_id":"usd-coin","contratti_indicizzati":[
-                        {"rete":"ethereum","contratto":contract}]}],
-                     "candidati":[],"fonti_native":{"ethereum":head}}
-              econ={"posizioni":[{"fondamentali":{"stato":"NON_VERIFICATO"}}],"candidati":[]}
-              raw=cap.collect(now,asset,econ,None,fetch)
-              p=raw["sonde"][0]
-              output.update({"status":p["stato"],"motivo":p.get("motivo"),"periodo":p.get("periodo"),
-                             "richieste":raw["richieste_effettuate"],"max_requests":raw["limite_richieste_refresh"],
-                             "event_count":len(p["eventi"]),"holder_count":len(p["detentori"]),
-                             "first_event":{k:p["eventi"][0].get(k) for k in ("tx","quantita","tipo","orario_utc","fonte")}
-                              if p["eventi"] else None,
-                             "first_holder":{k:p["detentori"][0].get(k) for k in ("unita_minima","decimali")}
-                              if p["detentori"] else None,
-                             "read":cap.at_read(raw,asset,econ,now)["posizioni"][0]["osservazioni"][0]["stato"]})
-          print("KDD17_REAL_CHAIN4",json.dumps({"result":output,"network_calls":calls,
-                "count":len(calls),"total_elapsed_ms":round((time.monotonic()-start)*1000)}),flush=True)
-          PY
 
   r5-historical-reference:
     runs-on: ubuntu-latest
