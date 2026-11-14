@@ -892,6 +892,38 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         self.assertEqual(next(s for s in raw["sonde"] if s["rete"]=="sui")
                          ["eventi"][0]["tipo"],"VARIAZIONE_NETTA_SALDO_NON_TRASFERIMENTO")
 
+    def test_near_final_shard_skips_empty_tx_root_and_rotates(self):
+        import kdd_capital_flow as cap
+        calls=[]
+        first="1"*32
+        def rpc(url,payload=None):
+            method=payload["method"]
+            if method=="block":
+                return {"id":1,"result":{"header":{"height":10},
+                     "chunks":[{"chunk_hash":"A"*44,"tx_root":first},
+                               {"chunk_hash":"B"*44,"tx_root":"C"*44},
+                               {"chunk_hash":"D"*44,"tx_root":"E"*44}]}}
+            if method=="chunk":
+                calls.append(payload["params"]["chunk_id"])
+                return {"id":1,"result":{"transactions":[{"hash":"X"*42,
+                  "signer_id":"sender.near","receiver_id":"receiver.near",
+                  "actions":[{"Transfer":{"deposit":"2500000000000000000000000"}}]}]}}
+            raise AssertionError(method)
+        url="https://rpc.mainnet.near.org"
+        rec=cap._near(url,rpc)
+        self.assertEqual(calls,["B"*44])  # 10 mod 2 selects first non-empty
+        self.assertEqual(rec["eventi"][0]["quantita"],"2.5")
+        self.assertEqual(rec["periodo"]["chunk_con_transazioni"],2)
+        self.assertEqual(rec["periodo"]["chunk_totali"],3)
+        def all_empty(url,payload=None):
+            if payload["method"]!="block":
+                raise AssertionError("empty shard must not trigger extra RPC")
+            return {"id":1,"result":{"header":{"height":11},
+                    "chunks":[{"chunk_hash":"A"*44,"tx_root":first}]}}
+        empty=cap._near(url,all_empty)
+        self.assertEqual(empty["eventi"],[])
+        self.assertEqual(empty["periodo"]["tipo"],"BLOCCO_TUTTI_CHUNK_SENZA_TX")
+
     def test_holders_comparison_survives_bounded_target_rotation(self):
         import kdd_capital_flow as cap
         contracts=["0x"+format(i+1, "040x") for i in range(6)]
