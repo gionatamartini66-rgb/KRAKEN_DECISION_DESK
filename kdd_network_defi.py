@@ -526,7 +526,7 @@ def _asset_roster(economics, positions, candidates, moment):
                            "PIATTAFORMA_INDICIZZATA_SENZA_FONTE" if other_networks
                            else "RETE_NON_DOCUMENTATA"),
                            "reti_possibili": networks,
-                           "piattaforme_senza_fonte": other_networks,
+                           **({"piattaforme_senza_fonte":other_networks} if other_networks else {}),
                            "contratti_indicizzati": contracts,
                            # CoinGecko is a candidate locator. An RPC response
                            # cannot certify project ownership of the address.
