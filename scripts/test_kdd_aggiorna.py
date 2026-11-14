@@ -204,6 +204,92 @@ class UpdateTests(unittest.TestCase):
                 self.assertEqual((backups[0]/name).read_bytes() if existed else None,old)
 
 
+    def test_kdd17_capital_flow_missing_or_stale_stage_and_install(self):
+        """The real new producer is importable from the updater's private stage."""
+        name = 'kdd_capital_flow.py'
+        self.assertIn(name, kdd.PY_FILES)
+        self.assertIn(name, kdd.FILES)
+        # Genuine module, not the placeholder created by synthetic setUp.
+        source = (Path(__file__).resolve().parents[1] / name).read_bytes()
+        (self.root / name).write_bytes(source)
+        for existed in (False, True):
+            with self.subTest(previous_file_existed=existed):
+                old = b'# prior on-chain version\\n' if existed else None
+                if old is None:
+                    (self.live / name).unlink(missing_ok=True)
+                else:
+                    (self.live / name).write_bytes(old)
+                seen = []
+                def inspect_stage(stage):
+                    self.assertEqual((stage / name).read_bytes(), source)
+                    spec = importlib.util.spec_from_file_location(
+                        'kdd_capital_flow_deploy_probe', stage / name)
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    self.assertTrue(callable(module.collect))
+                    self.assertTrue(callable(module.at_read))
+                    seen.append(stage)
+                with patch.object(kdd, 'isolated_test', side_effect=inspect_stage), \
+                     contextlib.redirect_stdout(io.StringIO()) as output:
+                    kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=True)
+                self.assertIn(name, output.getvalue())
+                self.assertIn('PRECHECK OK', output.getvalue())
+                self.assertEqual((self.live / name).read_bytes() if existed else None, old)
+                self.assertEqual(len(seen), 1)
+                home = Path(self.tmp.name) / ('capital-old-home' if existed else 'capital-new-home')
+                home.mkdir()
+                with patch.object(kdd.Path, 'home', return_value=home), \
+                     patch.object(kdd, 'isolated_test', side_effect=inspect_stage), \
+                     patch('builtins.input', return_value='APPLICA'), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=False)
+                self.assertEqual((self.live / name).read_bytes(), source)
+                self.assertEqual(len(seen), 3)  # check, preflight, postflight
+                backup = list((home / '.local/share/kdd-deploy-backups').glob('*'))
+                self.assertEqual(len(backup), 1)
+                self.assertEqual((backup[0] / name).read_bytes() if existed else None, old)
+                self.assertEqual((self.live / 'config.json').read_text(), '{}\\n')
+                self.assertIn('MANUALE LOCALE: DATO PRIVATO',
+                              (self.live / 'README.md').read_text())
+
+    def test_kdd17_capital_flow_rollback_old_or_absent(self):
+        """Failure after replacement restores old bytes or removes new module."""
+        name = 'kdd_capital_flow.py'
+        source = (Path(__file__).resolve().parents[1] / name).read_bytes()
+        (self.root / name).write_bytes(source)
+        for existed in (False, True):
+            with self.subTest(previous_file_existed=existed):
+                old = b'# prior module bytes\\n' if existed else None
+                if old is None:
+                    (self.live / name).unlink(missing_ok=True)
+                else:
+                    (self.live / name).write_bytes(old)
+                home = Path(self.tmp.name) / ('capital-rollback-old' if existed
+                                             else 'capital-rollback-new')
+                home.mkdir()
+                attempts = [0]
+                def fail_postflight(stage):
+                    attempts[0] += 1
+                    if attempts[0] == 2:
+                        self.assertEqual((stage / name).read_bytes(), source)
+                        raise kdd.SafetyError('synthetic postflight failed')
+                    self.assertEqual((stage / name).read_bytes(), source)
+                with patch.object(kdd.Path, 'home', return_value=home), \
+                     patch.object(kdd, 'isolated_test', side_effect=fail_postflight), \
+                     patch('builtins.input', return_value='APPLICA'), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaisesRegex(kdd.SafetyError, 'rollback'):
+                        kdd.apply(self.root, self.live,
+                                  commit_sha=self.sha, dry_run=False)
+                self.assertEqual(attempts[0], 2)
+                self.assertEqual((self.live / name).read_bytes() if existed else None, old)
+                self.assertEqual((self.live / 'README.md').read_text(), self.old_readme)
+                self.assertEqual((self.live / 'config.json').read_text(), '{}\\n')
+                backup = list((home / '.local/share/kdd-deploy-backups').glob('*'))
+                self.assertEqual(len(backup), 1)
+                self.assertEqual((backup[0] / name).read_bytes() if existed else None, old)
+
+
     def test_new_catalog_is_present_in_preflight_and_installed(self):
         """New JSON data must be tested, not just copied after preflight."""
         name = "kdd_project_catalog.json"
