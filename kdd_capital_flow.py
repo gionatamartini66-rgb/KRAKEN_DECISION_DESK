@@ -855,6 +855,32 @@ def at_read(raw, asset_rows, economics, now):
                         if outgoing:
                             exchange["uscita_unita_minima"]+=int(event["unita_minima"])
                             exchange["eventi_uscita"]+=1
+                # ERC-20 concentration can be expressed as a share only when
+                # the already-acquired totalSupply belongs to this exact
+                # chain+contract and is still usable at read-time.
+                contract_supply = None
+                if key[1]!="NATIVE":
+                    for candidate in row.get("osservazioni_contratti", []):
+                        if (candidate.get("rete"),candidate.get("contratto")) != key:
+                            continue
+                        observed = candidate.get("osservazione") or {}
+                        vals = observed.get("valori") or {}
+                        if observed.get("stato")=="OSSERVATO_CON_LIMITI":
+                            try:
+                                denom=_nat(vals.get("supply_unita_minima"))
+                                contract_supply=denom if denom>0 else None
+                            except (ValueError,TypeError):
+                                pass
+                holders_read = []
+                for holder in record["detentori"]:
+                    h=dict(holder)
+                    if key[0] in ("ethereum","bsc"):
+                        amount=int(h["unita_minima"])
+                        h["quota_supply_pct"]=(str((Decimal(amount)/Decimal(contract_supply)*100)
+                                                    .quantize(Decimal(".0001")))
+                                                if contract_supply and amount<=contract_supply else None)
+                        h["denominatore_quota"]="SUPPLY_CONTRATTO_ONCHAIN" if h["quota_supply_pct"] else None
+                    holders_read.append(h)
                 recognized=sum(1 for ev in events if ev.get("stato_alla_lettura")=="CAMPIONE_RECENTE"
                                if any(v.get("stato")=="ETICHETTA_PUBBLICA"
                                       for v in (ev.get("attribuzione") or {}).values()
@@ -862,7 +888,7 @@ def at_read(raw, asset_rows, economics, now):
                 observations.append({"rete":key[0],"asset_tecnico":key[1],
                                      "stato":("OSSERVATO_CON_LIMITI" if fresh and record["stato"]=="OSSERVATO"
                                               else "STORICO" if record["stato"]=="OSSERVATO" else "NON_DISPONIBILE"),
-                                     "eventi":events,"detentori":record["detentori"],
+                                     "eventi":events,"detentori":holders_read,
                                      "operatori_etichettati_nel_campione":recognized,
                                      "flussi_exchange_campione":(dict(exchange,
                                          flusso_netto_unita_minima=(exchange["ingresso_unita_minima"]-
