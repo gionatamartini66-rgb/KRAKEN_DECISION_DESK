@@ -85,7 +85,7 @@ def _tag(address):
                               ("protocol","PROTOCOLLO"), ("market maker","MARKET_MAKER"))
                              if word in category_hint.lower()), None)
             if category is None and re.search(
-                    r"\\b(?:binance|coinbase|kraken|bitfinex|okx|bybit|kucoin|bitstamp|bitget|gate\\.io)\\b",
+                    r"\b(?:binance|coinbase|kraken|bitfinex|okx|bybit|kucoin|bitstamp|bitget|gate\.io)\b",
                     category_hint, re.I):
                 category = "EXCHANGE"
             if category:
