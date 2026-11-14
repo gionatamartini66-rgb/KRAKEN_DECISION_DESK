@@ -1381,7 +1381,7 @@ def at_read(raw, asset_rows, economics, now):
                 holders_read = []
                 for holder in record["detentori"]:
                     h=dict(holder)
-                    if key[0] in ("ethereum","bsc"):
+                    if key[0] in ("ethereum","bsc","optimism"):
                         amount=int(h["unita_minima"])
                         h["quota_supply_pct"]=(str((Decimal(amount)/Decimal(contract_supply)*100)
                                                     .quantize(Decimal(".0001")))
