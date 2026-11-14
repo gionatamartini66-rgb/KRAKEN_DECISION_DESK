@@ -132,9 +132,10 @@ def _top(events):
 
 def _evm_native(chain, url, fetch, native):
     head = native.get("valori") if isinstance(native, dict) else None
-    if not isinstance(head, dict):
-        raise ValueError("native head absent")
-    height = _nat(head["altezza_blocco"])
+    # Native observation and capital sampling have independent request
+    # rotations. Do not lose AVAX/ETH/BNB when only the header was deferred.
+    height = (_nat(head["altezza_blocco"]) if isinstance(head,dict)
+              else _hex(_rpc(fetch,url,"eth_blockNumber",[])))
     block_number = max(0, height - 6)
     block = _rpc(fetch, url, "eth_getBlockByNumber", [hex(block_number), True])
     if (not isinstance(block, dict) or _hex(block.get("number")) != block_number
@@ -954,7 +955,7 @@ def _probe(key, assets, fetch, previous):
     url = (net.CONTRACT_ENDPOINTS[chain] if contract!="NATIVE" else
            net.NATIVE_ENDPOINTS.get(chain,net.SOL_URL if chain=="solana" else net.SUI_URL))
     native = assets.get("fonti_native",{}).get(chain)
-    if chain in ("ethereum","bsc"):
+    if chain in ("ethereum","bsc","avalanche"):
         return (_evm_native(chain,url,fetch,native) if contract=="NATIVE" else
                 _evm_token(chain,contract,url,fetch,native,previous))
     if chain=="solana":
