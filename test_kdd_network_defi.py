@@ -404,6 +404,11 @@ class Kdd17AssetIdentityG2Tests(unittest.TestCase):
         with_id = copy.deepcopy(response)
         with_id["id"] = 1
         self.assertEqual(observe(with_id)["stato"], "OSSERVATO")
+        # Preserve the older id+result.status dialect as well.
+        old_style = copy.deepcopy(with_id)
+        old_style.pop("status")
+        old_style["result"]["status"] = "success"
+        self.assertEqual(observe(old_style)["stato"], "OSSERVATO")
         cases = []
         for mutation in ("missing_validated", "not_validated", "numeric_validated",
                          "wrong_id", "bad_status", "index_mismatch", "hash_mismatch",
