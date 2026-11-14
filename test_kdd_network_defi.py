@@ -228,8 +228,23 @@ class NetworkDefiTests(unittest.TestCase):
             pepe["identita"], {"id":"pepe","symbol":"pepe","name":"Pepe",
                                "platforms":{"ethereum":Kdd17AssetIdentityG2Tests.ETH}},moment)
         fixture.dossier["evidenze_economiche"] = economics
+        standard_fetch=Kdd17AssetIdentityG2Tests().fetch
+        def sample_capital_fetch(url, payload=None):
+            # Keep the original Sui/Solana supply source, but also exercise
+            # real-shaped capital events through dossier -> packet -> bridge.
+            if url==evidence.SUI_URL and payload and "transactions(" in payload.get("query",""):
+                return {"data":{"transactions":{"nodes":[{
+                    "digest":"A"*40,"effects":{"status":"SUCCESS","timestamp":iso,
+                    "checkpoint":{"sequenceNumber":"450"},
+                    "balanceChanges":{"nodes":[{
+                        "owner":{"address":"0x123"},"amount":"-1000000000",
+                        "coinType":{"repr":"0x2::sui::SUI"}}]}}}]}}}
+            if url==evidence.SOL_URL and payload and payload.get("method")=="getLargestAccounts":
+                return {"id":1,"result":{"context":{"slot":500},
+                    "value":[{"address":"B"*32,"lamports":2000000000}]}}
+            return standard_fetch(url,payload)
         fixture.dossier["evidenze_rete_defi"]=evidence.collect(
-            moment,rows,shortlist,fetch=Kdd17AssetIdentityG2Tests().fetch,
+            moment,rows,shortlist,fetch=sample_capital_fetch,
             economics=economics)
         fixture.dump()
         p=packet.build(fixture.root,now=moment)
@@ -259,6 +274,14 @@ class NetworkDefiTests(unittest.TestCase):
                          ["supply_unita_minima"],"420690000000000000000000000000000000000")
         self.assertEqual(len(reading["rete_defi_alla_lettura"]["asset_reti"]["flussi_capitale"]["posizioni"]),3)
         self.assertEqual(len(reading["rete_defi_alla_lettura"]["asset_reti"]["flussi_capitale"]["candidati"]),2)
+        capital=reading["rete_defi_alla_lettura"]["asset_reti"]["flussi_capitale"]
+        sui=capital["posizioni"][0]["osservazioni"][0]
+        sol=capital["posizioni"][1]["osservazioni"][0]
+        self.assertEqual(sui["eventi"][0]["quantita"],"1")
+        self.assertEqual(sui["eventi"][0]["tipo"],"VARIAZIONE_NETTA_SALDO_NON_TRASFERIMENTO")
+        self.assertEqual(sui["eventi"][0]["stato_alla_lettura"],"CAMPIONE_RECENTE")
+        self.assertEqual(sol["detentori"][0]["unita_minima"],"2000000000")
+        self.assertEqual(sol["periodo"]["tipo"],"TOP20_ACCOUNT_SOL_FINALIZZATI")
         late=bridge.read_context(bundle,now=moment+dt.timedelta(minutes=40))
         self.assertIsNone(late["rete_defi_alla_lettura"]["posizioni"][0]
                           ["defi"]["valori"])
