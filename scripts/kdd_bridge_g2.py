@@ -649,7 +649,9 @@ def read_context(bundle, *, now=None, expected_sha256=None):
             if provenance.get("valuta") != "EUR" or not isinstance(provenance.get("pair"), str):
                 raise BridgeError("Valuta quotazione non EUR")
             parts = provenance["pair"].split("/")
-            if len(parts) != 2 or parts[1] != "EUR" or wallet.canonical_wallet_alias(parts[0]) != wallet.canonical_wallet_alias(token):
+            if (len(parts) != 2 or parts[1] not in ("EUR","USD","USDC")
+                    or wallet.canonical_wallet_alias(parts[0]) != wallet.canonical_wallet_alias(token)
+                    or (parts[1] != "EUR" and provenance.get("valuta_mercato") != parts[1])):
                 raise BridgeError("Base quotazione incompatibile")
             if not isinstance(provenance.get("pair_key"), str) or not wallet.KRAKEN_PAIR_KEY.fullmatch(provenance["pair_key"]):
                 raise BridgeError("Identificativo mercato non verificabile")
