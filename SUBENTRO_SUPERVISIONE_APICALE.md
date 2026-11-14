@@ -1,9 +1,11 @@
 # KDD — MANDATO INTEGRALE DI SUBENTRO DELLA SUPERVISIONE APICALE
 
 
-**RETTIFICA ESPRESSA DELL'AUTORE 13/11/2026, VINCOLANTE PER OGNI SUBENTRO:** il mandato è realizzare e collaudare tutti i 29 requisiti canonici, senza sostituire la costruzione con simulazioni patrimoniali anticipate. È revocato qualsiasi importo obiettivo di liquidità operativa; KDD-05 conserva la funzione generale di analisi dei capitali disponibili, costi e alternative. PR #56 annullata e chiusa senza merge: nessun operatore deve riprenderla. La presente rettifica prevale sulle fotografie storiche di questo documento; gli ordini finanziari richiedono sempre una decisione distinta dell'autore.
+**STATO VINCOLANTE AL 14/11/2026 — da riverificare sulla `main` e sulla PR al subentro, non da accumulare come nuova appendice:** il mandato dell'autore è completare e collaudare **tutti i 29 requisiti** (5 formalmente chiusi: KDD-01/06/08/10/13). **Unico cantiere G2 attivo: KDD-17, issue #63, [PR #64](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/pull/64) DRAFT, NON MERGED, NON INSTALLATA**. Ultima HEAD verificata prima di questi aggiornamenti documentali: `30274de3cfbb1e68144b14a6216e0fa07f781bf0`, [CI #43614143730](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/actions/runs/43614143730) **4/4 PASS**. Le PR #59/#61 sono già integrate, installate e collaudate sul Samsung: **non confondere** rete/supply oggi in produzione con il produttore flussi della #64. **Obiettivo vincolante della #64:** un KDD capace di seguire **un patrimonio Kraken Spot interamente diverso**, senza modifiche Python per ticker, con fonti on-chain multirete effettivamente disponibili, mercato Kraken Spot come complemento distinto e dati fino al consumer GPT. Binplorer BNB e riepilogo Jupiter Solana sono stati integrati e testati con fixture nella #64; Routescan Ethereum è stato interrogato pubblicamente ma **non ancora integrato**. Nessun test sul Samsung delle nuove funzioni, nessun GO di merge/deploy. Per il prossimo operatore: leggere il mandato #63, la [Roadmap corrente](ROADMAP_KDD.md), confrontare SHA della #64, **proseguire la stessa PR con prove reali e verifica su wallet sintetico completamente sostituito**, senza aprire una seconda PR/issue o un nuovo studio. Dopo ogni modifica alla Roadmap su `main`, riallineare la #64 e aggiornare `SUPERVISIONE-REGISTRO` al **blob SHA effettivo della nuova Roadmap**, quindi CI 4/4. Questa è una dipendenza del gate, non un problema finanziario né un'autorizzazione al merge.
 
-# KDD — HANDOFF VINCOLANTE DELLA SUPERVISIONE APICALE — 13 NOVEMBRE 2026
+**Rettifica permanente dell'autore 13/11/2026:** è revocato qualsiasi importo obiettivo di liquidità operativa; KDD-05 conserva disponibilità, costi e alternative senza soglia prefissata. La PR #56 resta annullata e chiusa senza merge. Nessuna operazione finanziaria prima del gate completo 29/29 e del successivo avallo separato dell'autore; API Kraken di sola lettura, nessun trading automatizzato.
+
+## Mandato di subentro del 13 novembre 2026 — disposizioni generali (stato operativo aggiornato sopra)
 
 **Incarico:** KDD-SUP-SUBENTRO-INTEGRALE-20261113  
 **Autorità:** autore e titolare del Kraken Decision Desk  
@@ -11,7 +13,7 @@
 **Regime di ingresso:** G0 — acquisizione, lettura, riconciliazione, valutazione e direzione tecnica. Nessun GO automatico a sviluppo, merge, deploy, operazioni, spese o accesso ai segreti.  
 **Oggetto inderogabile:** completare, installare, verificare sul dispositivo ove pertinente e far accettare **tutti e 29** i requisiti del KDD, senza modificarne il significato.
 
-**PRECEDENZA.** La presente attualizzazione, derivante da mandato espresso dell'autore del 13/11/2026, prevale sulle indicazioni precedenti incompatibili. Il testo storico sottostante è conservato per genealogia e contenuto non superato. La fonte vigente dei requisiti e delle dipendenze resta la ROADMAP canonica; i confini sono nel GOVERNO e nel README, inclusa la rettifica più recente dell'autore.
+**PRECEDENZA.** Le disposizioni generali espresse dall'autore il 13/11/2026 prevalgono su quelle storiche incompatibili; **stato, PR corrente e prossimo intervento sono quelli della Roadmap e della nota operativa del 14/11 in testa a questo file**, sempre da verificare su GitHub. Le successive sezioni datate sono conservate come storia, non mandati concorrenti. La fonte vigente dei requisiti resta la ROADMAP; responsabilità e limiti nel GOVERNO e nel README.
 
 ## I. Divieto di reinterpretazione
 
@@ -46,7 +48,7 @@ Per ciascuna fonte necessaria registrare nel checkpoint di ricognizione: URL/per
 
 Repository canonico: https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK
 
-**Baseline documentale alla consegna, da riverificare:** \`main@51937f9114cc30c510928d9ceefb49e7cd812699\`. L'esistenza di questo SHA non significa che il Samsung stia eseguendo quel codice.
+**Baseline documentale storica del mandato 13/11, NON corrente:** \`main@51937f9114cc30c510928d9ceefb49e7cd812699\`. Non utilizzarla per sviluppare né inferirne la versione Samsung: recuperare `main` e PR #64 all'istante del subentro.
 
 - Inventariare ricorsivamente **tutto l'albero di main fino a EOF**, comprese sottocartelle, test, vendor, configurazioni e script di distribuzione; indicare eventuali limiti del servizio.
 - Leggere integralmente fino a EOF i sorgenti e i test necessari a capire gli assi patrimoniale, Spot, on-chain/DeFi, derivati/Futures, macro/notizie, scheduler/alert, dashboard e ciclo GPT.
@@ -91,7 +93,7 @@ La ricezione automatica dell'handoff Android→Drive è un fatto documentato, no
 
 Non usare Desktop Commander come infrastruttura ordinaria o consumer necessario di KDD; nessun lavoro oneroso API o cambio credenziali implicito.
 
-Non aprire nuovi documenti di governo, checklist alternative, micro-PR scollegate o studi ripetitivi. Una lettura completata è condizione **per avviare costruzione**, non un pretesto per rinviarla. Ogni incarico deve dichiarare il **requisito**, il comportamento funzionale mancante, l'ambito codice, il criterio di prova e la dipendenza sulla Roadmap. Il successo è una funzione reale aggiunta e dimostrata, non un numero di commit.
+Non aprire nuovi documenti di governo, checklist alternative, micro-PR scollegate o studi ripetitivi. **Se esiste una PR G2 autorizzata e aperta, riprendere quel ramo e far progredire il codice**, senza sostituire l'esecuzione con commenti, nuovi mandati o piani. Una lettura completata è condizione per costruire, non un pretesto per rinviare. Ogni lavoro deve rispettare il requisito, il comportamento mancante, le prove concrete e le dipendenze della Roadmap. Il successo è una funzione reale aggiunta e dimostrata, non un numero di commit.
 
 ## VII. Prima consegna indispensabile per il subentro
 
