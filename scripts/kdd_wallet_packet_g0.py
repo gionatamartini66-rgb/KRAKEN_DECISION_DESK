@@ -491,8 +491,30 @@ def brief_positions(portfolio: dict, report: dict, snapshot: dict, dossier: dict
                          "pair_key":market_eur["pair_key"], "valuta":"EUR",
                          "rilevazione_utc":snapshot["rilevazione_utc"]}
                         if isinstance(market_eur, dict) else None)
+        # A Kraken Spot ticker is a different fact from a blockchain transfer.
+        # Reuse the already acquired same-snapshot market row, with explicit
+        # gaps for book/trades that were not requested for this holding.
+        spot_market = {"stato":"NON_DISPONIBILE","fonte":"Kraken Spot Ticker",
+                       "coppia":None,"pair_key":None,
+                       "volume_24h_eur_stimato":None,"spread_pct":None,
+                       "book":"NON_ACQUISITO_PER_QUESTA_COPPIA",
+                       "trades":"NON_ACQUISITI_PER_QUESTA_COPPIA"}
+        if isinstance(market_eur,dict) and price_source is not None:
+            v=market_eur.get("volume_24h_eur_stimato")
+            s=market_eur.get("spread_pct")
+            try:
+                volume=amount(v,"volume_24h_eur_stimato") if v is not None else None
+                spread=amount(s,"spread_pct") if s is not None else None
+            except PacketError:
+                volume,spread=None,None
+            spot_market.update(stato="DISPONIBILE_ALLO_SNAPSHOT",
+                coppia=market_eur["pair"],pair_key=market_eur["pair_key"],
+                volume_24h_eur_stimato=volume,spread_pct=spread,
+                rilevazione_utc=snapshot.get("rilevazione_utc"),
+                limite="Volume token * ultimo prezzo; spread top-of-book indicativo, non liquidita eseguibile")
         selected.append({"indice":index, "token": token, "stato_identita":"VALIDA", "stato_quantita":qty_state, "quantita_spot": qty,
                          "analisi_4tf": technical4, "fonte_prezzo_eur": price_source,
+                         "mercato_spot_kraken": spot_market,
                          "disponibile_spot": amount(row.get("disponibile_spot"), "disponibile_spot"),
                          "prezzo_eur": price, "valore_eur": val,
                          "pl_indicativo_eur": pnl, "variazione": technical,
@@ -514,7 +536,20 @@ def public_shortlist(snapshot: dict) -> list[dict]:
         token = x.get("token")
         if not isinstance(token, str) or not SYMBOL.fullmatch(token):
             continue
+        market = {"stato":"NON_ACQUISITO","fonte":"Kraken Spot public",
+                  "coppia":x.get("coppia_analisi"),
+                  "volume_coppia_eur_stimato":None,
+                  "spread_book_pct":None}
+        book=x.get("book")
+        if isinstance(book,dict):
+            market["spread_book_pct"]=_analytic_value(book.get("spread_book_pct"))
+            market["book_stato"]="CAMPIONE" if market["spread_book_pct"] is not None else "NON_DISPONIBILE"
+        vol=_analytic_value(x.get("volume_coppia_eur_stimato"))
+        if vol is not None:
+            market.update(stato="VOLUME_SPOT_CAMPIONE",volume_coppia_eur_stimato=vol)
+        market["limite"]="Book della singola coppia se presente, non flusso on-chain o liquidita globale"
         out.append({"token": token,
+                    "mercato_spot_kraken":market,
                     "categoria": str(x.get("categoria") or "")[:100],
                     "esito_kdd": str(x.get("esito") or "")[:100],
                     "coppia_analisi": str(x.get("coppia_analisi") or "")[:70],
