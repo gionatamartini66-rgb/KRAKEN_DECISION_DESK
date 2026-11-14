@@ -880,7 +880,7 @@ def _solana_native(url, fetch, previous):
     sample=None
     try:
         sample=_solana_system_sample(fetch)
-    except (OSError,ValueError,TypeError,KeyError,OverflowError):
+    except (OSError,ValueError,TypeError,KeyError,OverflowError,AssertionError):
         pass
     return {"eventi": sample["eventi"] if sample else [],
             "detentori": holders, "fonte_detentori": url,
