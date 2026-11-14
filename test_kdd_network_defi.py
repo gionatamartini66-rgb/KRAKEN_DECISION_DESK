@@ -678,7 +678,7 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         self.assertEqual(read["flussi_exchange_campione"]["stato"],"CAMPIONE_ETICHETTATO_PARZIALE")
         self.assertEqual(read["flussi_exchange_campione"]["ingresso_unita_minima"],10**18)
         self.assertEqual(read["flussi_exchange_campione"]["uscita_unita_minima"],0)
-        self.assertIn("deposito exchange non significa vendita",read["flussi_exchange_campione"]["limite"])
+        self.assertIn("deposito non significa vendita",read["flussi_exchange_campione"]["limite"])
         late=cap.at_read(raw,assets,self._econ(),T+dt.timedelta(minutes=45))["posizioni"][0]["osservazioni"][0]
         self.assertEqual(late["eventi"][0]["stato_alla_lettura"],"STORICO")
         self.assertIsNone(late["flussi_exchange_campione"]["flusso_netto_unita_minima"])
