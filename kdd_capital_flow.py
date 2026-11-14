@@ -896,7 +896,9 @@ def at_read(raw, asset_rows, economics, now):
                                          stato="CAMPIONE_ETICHETTATO_PARZIALE",
                                          fonte="ETICHETTE_PUBBLICHE_BLOCKSCOUT",
                                          limite="Non rappresenta flussi exchange globali, deposito non significa vendita")
-                                         if fresh and recognized and record["stato"]=="OSSERVATO" else
+                                         if fresh and record["stato"]=="OSSERVATO" and (
+                                             exchange["eventi_ingresso"] + exchange["eventi_uscita"]
+                                             + exchange["eventi_interni"]) > 0 else
                                          {"stato":"NON_ATTRIBUIBILE_O_STORICO",
                                           "ingresso_unita_minima":None,"uscita_unita_minima":None,
                                           "flusso_netto_unita_minima":None,
