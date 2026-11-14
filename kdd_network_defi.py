@@ -354,7 +354,7 @@ NATIVE_IDS = {
     "bitcoin": ("BTC", "bitcoin"), "ethereum": ("ETH", "ethereum"),
     "binancecoin": ("BNB", "bsc"), "near": ("NEAR", "near"),
     "ripple": ("XRP", "xrpl"), "solana": ("SOL", "solana"),
-    "sui": ("SUI", "sui"),
+    "sui": ("SUI", "sui"), "avalanche-2": ("AVAX", "avalanche"),
 }
 PLATFORM_CHAINS = {"ethereum": "ethereum", "binance-smart-chain": "bsc",
                    "solana": "solana", "avalanche": "avalanche"}
@@ -371,6 +371,7 @@ NATIVE_ENDPOINTS = {
     "bitcoin": "https://blockstream.info/api/blocks",
     "ethereum": ETH_PUBLIC_RPC,
     "bsc": "https://bsc-dataseed.bnbchain.org",
+    "avalanche": "https://api.avax.network/ext/bc/C/rpc",
     "near": "https://rpc.mainnet.near.org",
     "xrpl": "https://s1.ripple.com:51234",
 }
@@ -538,7 +539,7 @@ def _native_observe(chain, fetch, now):
             values = {"altezza_blocco": height, "transazioni_blocco": count,
                       "blocco_hash": block["id"]}
             unit = "altezza, numero transazioni nel solo blocco"
-        elif chain in ("ethereum", "bsc"):
+        elif chain in ("ethereum", "bsc", "avalanche"):
             response = fetch(url, {"jsonrpc": "2.0", "id": 1, "method": "eth_getBlockByNumber",
                                    "params": ["latest", False]})
             block = response.get("result") if isinstance(response, dict) and response.get("id") == 1 and not response.get("error") else None
@@ -646,8 +647,14 @@ def _collect_assets(now, positions, candidates, economic, previous, fetch):
                      for r in family if r["progetto_id"] in NATIVE_IDS
                      and NATIVE_IDS[r["progetto_id"]][0] == r["token"]
                      and NATIVE_IDS[r["progetto_id"]][1] in NATIVE_ENDPOINTS})
-    sources = {chain: _native_observe(chain, fetch, now)
-               for chain in native[:MAX_NATIVE_SOURCES]}
+    # Native sources rotate as well: otherwise six networks permanently starve
+    # the sixth because the old implementation always chose the first five.
+    cursor = previous.get("prossima_rete_nativa") if isinstance(previous, dict) else None
+    offset = next((i for i,name in enumerate(native)
+                   if isinstance(cursor,str) and name>=cursor),0)
+    scheduled = [native[(offset+i)%len(native)]
+                 for i in range(min(MAX_NATIVE_SOURCES,len(native)))]
+    sources = {chain: _native_observe(chain, fetch, now) for chain in scheduled}
     contracts = sorted({(c["rete"], c["contratto"])
                         for family in rows.values() for r in family
                         for c in r["contratti_indicizzati"]
@@ -660,7 +667,9 @@ def _collect_assets(now, positions, candidates, economic, previous, fetch):
     probes = [_probe_contract(chain, address, fetch, now) for chain, address in selected]
     return {"schema": ASSET_SCHEMA, "acquisito_utc": now.isoformat(timespec="seconds"),
             "posizioni": rows["posizioni"], "candidati": rows["candidati"],
-            "fonti_native": sources, "sonde_contratto": probes,
+            "fonti_native": sources,
+            "prossima_rete_nativa": (native[(offset+len(scheduled))%len(native)]
+                                    if native else None), "sonde_contratto": probes,
             "contratti_indicizzati_totali": len(contracts),
             "contratti_esaminati": len(probes),
             "prossimo_contratto": ("|".join(contracts[(start+len(selected)) % len(contracts)])
@@ -681,9 +690,12 @@ def _read_assets(raw, owned, candidates, economic, now):
     relevant = sorted({NATIVE_IDS[r["progetto_id"]][1] for family in expected.values()
                        for r in family if r["progetto_id"] in NATIVE_IDS
                        and NATIVE_IDS[r["progetto_id"]][0] == r["token"]
-                       and NATIVE_IDS[r["progetto_id"]][1] in NATIVE_ENDPOINTS})[:MAX_NATIVE_SOURCES]
+                       and NATIVE_IDS[r["progetto_id"]][1] in NATIVE_ENDPOINTS})
     sources = raw.get("fonti_native")
-    if not isinstance(sources, dict) or set(sources) != set(relevant):
+    if (not isinstance(sources,dict) or not set(sources).issubset(set(relevant))
+            or len(sources)!=min(len(relevant),MAX_NATIVE_SOURCES)
+            or raw.get("prossima_rete_nativa") not in
+               (set(relevant) if relevant else {None})):
         raise ValueError("native source coverage invalid")
     result_sources = {}
     for chain, value in sources.items():
@@ -700,7 +712,7 @@ def _read_assets(raw, owned, candidates, economic, now):
                 _integer(v.get("altezza_blocco")); _integer(v.get("transazioni_blocco"))
                 if not re.fullmatch(r"[0-9a-f]{64}", str(v.get("blocco_hash"))):
                     raise ValueError("BTC hash mismatch")
-            elif chain in ("ethereum", "bsc", "near"):
+            elif chain in ("ethereum", "bsc", "avalanche", "near"):
                 _integer(v.get("altezza_blocco"))
                 if not isinstance(v.get("blocco_hash"), str) or len(v["blocco_hash"]) < 25:
                     raise ValueError("block hash invalid")
@@ -764,6 +776,9 @@ def _read_assets(raw, owned, candidates, economic, now):
                 readings.append(dict(c, osservazione=reading or {
                     "stato": "NON_ESAMINATO_PER_BUDGET", "valori": None}))
             observation = result_sources.get(chain) if chain else None
+            if chain in relevant and chain not in result_sources:
+                observation = {"stato":"RINVIATO_BUDGET","valori":None,
+                               "copertura":"Rete nativa programmata dalla rotazione"}
             if chain in ("sui", "solana"):
                 observation = {"stato": "COPERTO_DA_FONTI_PREESISTENTI",
                                "valori": None, "copertura": "Vedere fonti Sui/Solana PR #53"}
