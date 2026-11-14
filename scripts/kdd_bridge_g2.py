@@ -725,7 +725,36 @@ def read_context(bundle, *, now=None, expected_sha256=None):
         comparison_at_read = kdd_candles.compare_context(read_frames)
         all_tf = all(value == "AGGIORNATO" for value in states.values())
         complete += bool(all_tf)
+        # A spot market is public Kraken trading evidence, not a chain flow.
+        # Rebind source/timestamp/pair to the same already-validated EUR
+        # quotation before giving GPT volume or indicative spread.
+        kraken=row.get("mercato_spot_kraken")
+        spot_read={"stato":"NON_ACQUISITO","volume_24h_eur_stimato":None,
+                   "spread_pct":None,"book":"NON_ACQUISITO_PER_QUESTA_COPPIA",
+                   "trades":"NON_ACQUISITI_PER_QUESTA_COPPIA"}
+        if isinstance(kraken,dict) and kraken.get("stato")=="DISPONIBILE_ALLO_SNAPSHOT":
+            ref=row.get("fonte_prezzo_eur")
+            if (not isinstance(ref,dict) or kraken.get("coppia")!=ref.get("pair")
+                    or kraken.get("pair_key")!=ref.get("pair_key")
+                    or kraken.get("rilevazione_utc")!=pkt["rilevazione_kdd_utc"]):
+                raise BridgeError("Mercato Kraken spot e fonte prezzo non allineati")
+            volume=numeric(kraken.get("volume_24h_eur_stimato"))
+            spread=numeric(kraken.get("spread_pct"))
+            if (volume is not None and volume<0 or
+                    spread is not None and not (0<=spread<=100)):
+                raise BridgeError("Metriche mercato Spot non valide")
+            recent=wallet.source_status(snap,moment)["stato"]=="RECENTE"
+            spot_read={"stato":"DISPONIBILE" if recent else "SCADUTO",
+                       "coppia":kraken["coppia"],
+                       "fonte":"Kraken Spot public Ticker",
+                       "rilevazione_utc":pkt["rilevazione_kdd_utc"],
+                       "volume_24h_eur_stimato":str(volume) if recent and volume is not None else None,
+                       "spread_pct":str(spread) if recent and spread is not None else None,
+                       "book":"NON_ACQUISITO_PER_QUESTA_COPPIA",
+                       "trades":"NON_ACQUISITI_PER_QUESTA_COPPIA",
+                       "limite":"Volume EUR stimato e spread indicativo: NON trasferimenti blockchain"}
         observations.append({"indice": i, "token": row.get("token"),
+                             "mercato_spot_kraken_alla_lettura":spot_read,
                              "stato_identita": row.get("stato_identita"),
                              "timeframe_ricalcolati": states,
                              "figure_candlestick_alla_lettura": figure_read_states,
