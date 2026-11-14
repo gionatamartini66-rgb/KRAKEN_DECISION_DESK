@@ -883,9 +883,23 @@ def _near(url, fetch):
     chunks = block["chunks"]
     if not chunks:
         raise ValueError("NEAR empty block")
-    hashed = chunks[0].get("chunk_hash")
+    # The first shard is often empty. Choose among chunks with a
+    # non-empty transaction root, rotating by finalized block height without
+    # adding requests. Unknown roots remain eligible (legacy RPC schemas).
+    empty_root="1"*32
+    nonempty=[row for row in chunks if isinstance(row,dict)
+              and row.get("tx_root")!=empty_root]
+    if not nonempty:
+        return {"eventi":[],"detentori":[],"eventi_distinti":0,
+                "elementi_esaminati":0,
+                "periodo":{"tipo":"BLOCCO_TUTTI_CHUNK_SENZA_TX",
+                           "altezza_blocco":block.get("header",{}).get("height")},
+                "copertura":"Tutti i chunk dichiarano una radice transazioni vuota; nessun trasferimento campionato."}
+    height=_nat((block.get("header") or {}).get("height",0))
+    selected=nonempty[height%len(nonempty)]
+    hashed = selected.get("chunk_hash")
     if not isinstance(hashed,str) or len(hashed)<25:
-        raise ValueError("NEAR chunk hash missing")
+        raise ValueError("NEAR selected chunk hash missing")
     chunk = _rpc(fetch,url,"chunk",{"chunk_id":hashed})
     txs=chunk.get("transactions") if isinstance(chunk,dict) else None
     if not isinstance(txs,list) or len(txs)>500:
@@ -909,8 +923,9 @@ def _near(url, fetch):
     chosen,total=_top(events)
     return {"eventi":chosen,"detentori":[],"eventi_distinti":total,
             "elementi_esaminati":len(txs),
-            "periodo":{"tipo":"UN_CHUNK_BLOCCO_FINALIZZATO","chunk_hash":hashed},
-            "copertura":"Un chunk NEAR per ciclo, non tutte le shard e non tutte le ricevute."}
+            "periodo":{"tipo":"UN_CHUNK_BLOCCO_FINALIZZATO","chunk_hash":hashed,
+                       "chunk_con_transazioni":len(nonempty),"chunk_totali":len(chunks)},
+            "copertura":"Un chunk NEAR non vuoto selezionato per altezza di blocco: non tutte le shard e ricevute."}
 
 
 def _targets(assets):
