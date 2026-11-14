@@ -204,6 +204,15 @@ class UpdateTests(unittest.TestCase):
                 self.assertEqual((backups[0]/name).read_bytes() if existed else None,old)
 
 
+    def test_kdd17_capital_flow_absent_from_clone_blocks_preflight(self):
+        name = 'kdd_capital_flow.py'
+        self.assertIn(name, kdd.FILES)
+        (self.root / name).unlink()
+        with self.assertRaisesRegex(kdd.SafetyError, 'sorgente assente'):
+            kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=True)
+        self.assertEqual((self.live / 'README.md').read_text(), self.old_readme)
+        self.assertEqual((self.live / 'config.json').read_text(), '{}\n')
+
     def test_kdd17_capital_flow_missing_or_stale_stage_and_install(self):
         """The real new producer is importable from the updater's private stage."""
         name = 'kdd_capital_flow.py'
