@@ -583,6 +583,65 @@ def stato_book_150_alla_lettura(packet, now, *, mercato_stato=None, saldo_stato=
             "limite": "Fee, negoziabilita e bid restano da confermare prima dell'ordine manuale."}
 
 
+def capital_market_context(network, wallet_rows, spot_readings):
+    """Explain capital circulation relative to same-asset Kraken spot volume.
+
+    A chain transfer is *not* a Kraken trade. This comparison is only an
+    order-of-magnitude yardstick, never net buy/sell or thresholded signal.
+    """
+    assets=network.get("asset_reti") if isinstance(network,dict) else None
+    capital=assets.get("flussi_capitale") if isinstance(assets,dict) else None
+    holdings=capital.get("posizioni") if isinstance(capital,dict) else None
+    if not isinstance(holdings,list) or len(holdings)!=len(wallet_rows):
+        return []  # old packets: no invented on-chain observations
+    out=[]
+    for original,capital_row,spot in zip(wallet_rows,holdings,spot_readings):
+        token=original.get("token")
+        if not isinstance(capital_row,dict) or capital_row.get("token")!=token:
+            raise BridgeError("On-chain circulation identity mismatches Kraken wallet")
+        kraken=spot.get("mercato_spot_kraken_alla_lettura") or {}
+        denominator=None
+        if kraken.get("stato")=="DISPONIBILE":
+            volume=numeric(kraken.get("volume_24h_eur_stimato"))
+            price=numeric(original.get("prezzo_eur"))
+            if volume is not None and price is not None and volume>0 and price>0:
+                denominator=volume/price
+        by_chain=[]
+        for observed in capital_row.get("osservazioni",[]):
+            if not isinstance(observed,dict):
+                continue
+            active=[e for e in observed.get("eventi",[])
+                    if e.get("stato_alla_lettura")=="CAMPIONE_RECENTE"]
+            strongest=max(active,key=lambda x:Decimal(x["quantita"])) if active else None
+            ratio=(str((Decimal(strongest["quantita"])/denominator*100)
+                       .quantize(Decimal(".01")))
+                   if strongest is not None and denominator is not None else None)
+            deltas=[{"account":h["account"],
+                     "variazione_unita_minima":h["variazione_unita_minima"],
+                     "confronto_precedente_utc":h.get("confronto_precedente_utc")}
+                    for h in observed.get("detentori",[]) if isinstance(h,dict)
+                    and h.get("variazione_unita_minima") is not None]
+            by_chain.append({"rete":observed.get("rete"),
+                "asset_tecnico":observed.get("asset_tecnico"),
+                "stato":observed.get("stato"),
+                "eventi_recenti":len(active),
+                "movimento_massimo_campionato":({
+                    "tx":strongest["tx"],"tipo":strongest.get("tipo"),
+                    "quantita":strongest["quantita"],
+                    "rapporto_volume_kraken_spot_24h_pct":ratio,
+                    "limite_confronto":"Volume giornaliero della sola coppia Kraken disponibile; trasferimento on-chain NON equivale a negoziazione Kraken"
+                } if strongest is not None else None),
+                "variazioni_top_detentori":deltas[:10],
+                "aggregato_detentori":observed.get("aggregato_detentori"),
+                "flussi_exchange_campione":observed.get("flussi_exchange_campione"),
+                "copertura":observed.get("copertura"),
+                "riesame":"Esaminare piu finestre, liquidita e ipotesi alternative; nessun segnale BUY/SELL"})
+        out.append({"token":token,"coppia_kraken":kraken.get("coppia"),
+                    "stato_mercato_kraken":kraken.get("stato"),
+                    "osservazioni":by_chain})
+    return out
+
+
 def read_context(bundle, *, now=None, expected_sha256=None):
     """GPT read-time contract: recalculate age/status and coverage, never authorise action."""
     moment = checked_now(now)
@@ -839,6 +898,8 @@ def read_context(bundle, *, now=None, expected_sha256=None):
             "evidenze_economiche_alla_lettura": economic_read,
             "flusso_futures_alla_lettura": futures_at_read,
             "rete_defi_alla_lettura": network_at_read,
+            "circolazione_capitale_vs_spot": capital_market_context(
+                network_at_read, rows, observations),
             "totale_parziale": bool(section.get("totale_parziale")) or partial,
             "book_150_alla_lettura": stato_book_150_alla_lettura(
                 pkt, moment, mercato_stato=market_status["stato"],
