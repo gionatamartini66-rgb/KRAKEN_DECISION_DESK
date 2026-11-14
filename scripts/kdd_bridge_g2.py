@@ -738,6 +738,25 @@ def read_context(bundle, *, now=None, expected_sha256=None):
                     or kraken.get("pair_key")!=ref.get("pair_key")
                     or kraken.get("rilevazione_utc")!=pkt["rilevazione_kdd_utc"]):
                 raise BridgeError("Mercato Kraken spot e fonte prezzo non allineati")
+            quote=kraken["coppia"].split("/")[-1]
+            if quote in ("USD","USDC"):
+                if (ref.get("valuta_mercato") != quote or
+                        kraken.get("valuta_quotazione") != quote or
+                        kraken.get("prezzo_quote") != ref.get("prezzo_quote") or
+                        kraken.get("eur_per_quote") != ref.get("eur_per_quote") or
+                        kraken.get("conversione_fonte") != ref.get("conversione_fonte") or
+                        ref.get("conversione_fonte") not in (
+                            ("EUR/USD","USD/EUR") if quote=="USD"
+                            else ("EUR/USDC","USDC/EUR"))):
+                    raise BridgeError("Prezzo Kraken in USD/USDC privo di fonte FX coerente")
+                raw_quote=numeric(ref.get("prezzo_quote"))
+                raw_fx=numeric(ref.get("eur_per_quote"))
+                if (raw_quote is None or raw_quote<=0 or raw_fx is None
+                        or raw_fx<=0 or price is None or
+                        float(price)!=float(raw_quote)*float(raw_fx)):
+                    raise BridgeError("Conversione FX Kraken non coerente col prezzo EUR")
+            elif quote!="EUR" or (isinstance(ref,dict) and ref.get("valuta_mercato") in ("USD","USDC")):
+                raise BridgeError("Valuta Kraken spot contraddittoria")
             volume=numeric(kraken.get("volume_24h_eur_stimato"))
             spread=numeric(kraken.get("spread_pct"))
             if (volume is not None and volume<0 or
@@ -746,6 +765,10 @@ def read_context(bundle, *, now=None, expected_sha256=None):
             recent=wallet.source_status(snap,moment)["stato"]=="RECENTE"
             spot_read={"stato":"DISPONIBILE" if recent else "SCADUTO",
                        "coppia":kraken["coppia"],
+                       "valuta_quotazione":quote,
+                       "prezzo_quote":str(raw_quote) if quote!="EUR" and recent else None,
+                       "eur_per_quote":str(raw_fx) if quote!="EUR" and recent else None,
+                       "conversione_fonte":ref.get("conversione_fonte") if quote!="EUR" and recent else None,
                        "fonte":"Kraken Spot public Ticker",
                        "rilevazione_utc":pkt["rilevazione_kdd_utc"],
                        "volume_24h_eur_stimato":str(volume) if recent and volume is not None else None,
