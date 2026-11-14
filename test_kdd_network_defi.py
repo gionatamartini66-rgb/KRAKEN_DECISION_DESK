@@ -924,6 +924,81 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         self.assertEqual(empty["eventi"],[])
         self.assertEqual(empty["periodo"]["tipo"],"BLOCCO_TUTTI_CHUNK_SENZA_TX")
 
+    def test_avalanche_native_and_six_chain_upstream_rotation(self):
+        import kdd_network_defi as net
+        portfolio=[("AVAX","avalanche-2"),("BTC","bitcoin"),
+                   ("BNB","binancecoin"),("ETH","ethereum"),
+                   ("NEAR","near"),("XRP","ripple")]
+        positions=[{"token":token} for token,_ in portfolio]
+        econ={"posizioni":[{"indice":i,"token":token,
+            "identita":{"stato":"IDENTITA_VERIFICATA_DA_CATALOGO",
+                        "token":token,"coingecko_id":coin,
+                        "coppia":token+"/EUR","pair_key":token+"EUR",
+                        "fonte_identita":"Kraken Spot + CoinGecko"},
+            "network_metadata":None} for i,(token,coin) in enumerate(portfolio)],
+            "candidati":[]}
+        def fetch(url,payload=None):
+            if url==net.NATIVE_ENDPOINTS["avalanche"]:
+                self.assertEqual(payload["method"],"eth_getBlockByNumber")
+                return {"id":1,"result":{"number":hex(1000),
+                        "timestamp":hex(int(T.timestamp())),
+                        "hash":"0x"+"f"*64}}
+            return Kdd17AssetIdentityG2Tests().fetch(url,payload)
+        a=net._NETWORK_COLLECT_ASSETS(T,positions,[],econ,None,fetch)
+        self.assertEqual(set(a["fonti_native"]),
+                         {"avalanche","bitcoin","bsc","ethereum","near"})
+        self.assertEqual(a["prossima_rete_nativa"],"xrpl")
+        b=net._NETWORK_COLLECT_ASSETS(T+dt.timedelta(seconds=15),
+                                     positions,[],econ,a,fetch)
+        self.assertIn("xrpl",b["fonti_native"])
+        self.assertNotIn("near",b["fonti_native"])
+        self.assertEqual(b["prossima_rete_nativa"],"near")
+        read=net._NETWORK_READ_ASSETS(b,positions,[],econ,
+                                    T+dt.timedelta(seconds=15))
+        statuses={r["token"]:r["osservazione_nativa"]["stato"]
+                  for r in read["posizioni"]}
+        self.assertEqual(statuses["NEAR"],"RINVIATO_BUDGET")
+        self.assertEqual(statuses["XRP"],"OSSERVATO_CON_LIMITI")
+        self.assertEqual(statuses["AVAX"],"OSSERVATO_CON_LIMITI")
+        short=net._NETWORK_COLLECT_ASSETS(T,positions[:1],[],
+                                          {"posizioni":econ["posizioni"][:1],
+                                           "candidati":[]},None,fetch)
+        self.assertEqual(set(short["fonti_native"]),{"avalanche"})
+
+    def test_bsc_binplorer_429_rpc_fallback_without_bnb_position(self):
+        import kdd_capital_flow as cap
+        address=self.EVM_ADDR
+        assets={"posizioni":[{"token":"NEW","progetto_id":"new-token",
+                "contratti_indicizzati":[{"rete":"bsc","contratto":address}]}],
+                "candidati":[],"fonti_native":{}}
+        topic=lambda x:"0x"+"0"*24+x[2:]
+        called=[]
+        def fetch(url,payload=None):
+            if url.startswith(cap.BINPLORER):
+                raise OSError("HTTP429 Binplorer")
+            called.append(payload["method"])
+            method=payload["method"]
+            if method=="eth_blockNumber":
+                return {"id":1,"result":hex(1000)}
+            if method=="eth_call":
+                return {"id":1,"result":"0x12"}
+            if method=="eth_getLogs":
+                self.assertEqual(payload["params"][0]["address"],address)
+                return {"id":1,"result":[{
+                    "address":address,"transactionHash":"0x"+"f"*64,
+                    "blockNumber":hex(990),"logIndex":"0x0","removed":False,
+                    "topics":[cap.TOPIC_TRANSFER,topic(self.EVM_FROM),topic(self.EVM_TO)],
+                    "data":"0x"+format(1000000000000000000,"064x")}]}
+            raise AssertionError(method)
+        out=cap.collect(T,assets,{"posizioni":[{}],"candidati":[]},None,fetch)
+        self.assertEqual(out["sonde"][0]["stato"],"OSSERVATO")
+        self.assertEqual(out["sonde"][0]["eventi"][0]["quantita"],"1")
+        self.assertEqual(out["sonde"][0]["richieste_effettuate"],4)
+        self.assertEqual(called,["eth_blockNumber","eth_call","eth_getLogs"])
+        self.assertEqual(cap.at_read(out,assets,{"posizioni":[{}],"candidati":[]},T)
+                          ["posizioni"][0]["osservazioni"][0]["stato"],
+                         "OSSERVATO_CON_LIMITI")
+
     def test_holders_comparison_survives_bounded_target_rotation(self):
         import kdd_capital_flow as cap
         contracts=["0x"+format(i+1, "040x") for i in range(6)]
