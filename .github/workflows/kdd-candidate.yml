@@ -32,7 +32,7 @@ jobs:
         run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_funding_book_g2
       - name: Existing safe updater tests
         run: python -B scripts/test_kdd_aggiorna.py
-      - name: KDD-17 TEMPORARY bounded public onchain smoke, no secrets
+      - name: KDD-17 TEMPORARY second public RPC capability probe
         if: github.event_name == 'pull_request' && github.event.pull_request.number == 64
         continue-on-error: true
         timeout-minutes: 3
@@ -40,47 +40,53 @@ jobs:
           PYTHONPATH=.:scripts python - <<'PY'
           import json, time, datetime as dt
           import kdd_network_defi as net, kdd_capital_flow as cap
-          calls = []
-          def fetch(url, payload=None):
-              started = time.monotonic()
+          reqs=[];MAX=18
+          def fetch(url,payload=None):
+              if len(reqs)>=MAX:raise RuntimeError("public request budget exhausted")
+              t=time.monotonic()
               try:
-                  r = net._http(url, payload)
-                  calls.append({"host":url.split("/")[2],"method":payload.get("method") if isinstance(payload,dict) else "GET",
-                                "ms":round((time.monotonic()-started)*1000),"status":"OK"})
-                  return r
-              except Exception as ex:
-                  calls.append({"host":url.split("/")[2],"method":payload.get("method") if isinstance(payload,dict) else "GET",
-                                "ms":round((time.monotonic()-started)*1000),"status":type(ex).__name__,
-                                "detail":str(getattr(ex,"code",str(ex)))[:80]})
-                  raise
-          usdc="0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
-          spl="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-          base="https://eth.blockscout.com/api/v2/tokens/"+usdc
-          results={}
-          for name,fn in [
-              ("blockscout_transfers", lambda: fetch(base+"/transfers")),
-              ("blockscout_holders", lambda: fetch(base+"/holders")),
-              ("blockscout_token", lambda: fetch(base)),
-              ("ethereum_head",lambda: net._native_observe("ethereum",fetch,dt.datetime.now(dt.timezone.utc))),
-              ("solana_largest",lambda: cap._rpc(fetch,net.SOL_URL,"getTokenLargestAccounts",[spl,{"commitment":"finalized"}])),
-              ("solana_supply",lambda: cap._rpc(fetch,net.SOL_URL,"getTokenSupply",[spl,{"commitment":"finalized"}])),
-              ("xrpl_capital",lambda:cap._xrpl(net.NATIVE_ENDPOINTS["xrpl"],fetch)),
-              ("sui_capital",lambda:cap._sui(net.SUI_URL,fetch)),
-              ("near_capital",lambda:cap._near(net.NATIVE_ENDPOINTS["near"],fetch)),
-          ]:
-              try:
-                  started=time.monotonic()
-                  out=fn()
-                  first=(out.get("items") or [None])[0] if isinstance(out,dict) else None
-                  results[name]={"status":"OK","ms":round((time.monotonic()-started)*1000),
-                      "top_keys":list(out)[:18] if isinstance(out,dict) else type(out).__name__,
-                      "item_keys":list(first)[:20] if isinstance(first,dict) else None,
-                      "count":len(out.get("items",[])) if isinstance(out,dict) and isinstance(out.get("items"),list) else None,
-                      "events":len(out.get("eventi",[])) if isinstance(out,dict) else None,
-                      "holders":len(out.get("detentori",[])) if isinstance(out,dict) else None}
+                  out=net._http(url,payload)
+                  reqs.append({"host":url.split("/")[2],"method":payload.get("method") if isinstance(payload,dict) else "GET","ms":round((time.monotonic()-t)*1000),"status":"OK"})
+                  return out
               except Exception as e:
-                  results[name]={"status":"UNAVAILABLE","error":type(e).__name__+":"+str(e)[:140]}
-          print("KDD17_LIVE_SCHEMA",json.dumps({"results":results,"requests":calls,"count":len(calls)},ensure_ascii=False),flush=True)
+                  reqs.append({"host":url.split("/")[2],"method":payload.get("method") if isinstance(payload,dict) else "GET","ms":round((time.monotonic()-t)*1000),"status":type(e).__name__,"code":getattr(e,"code",None)})
+                  raise
+          mint="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+          contract="0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+          now=dt.datetime.now(dt.timezone.utc)
+          results={}
+          def attempt(name, fn):
+              t=time.monotonic()
+              try:
+                  x=fn()
+                  results[name]={"status":"OK","elapsed_ms":round((time.monotonic()-t)*1000),
+                    "events":len(x.get("eventi",[])) if isinstance(x,dict) else None,
+                    "holders":len(x.get("detentori",[])) if isinstance(x,dict) else None,
+                    "first_event": {k:x["eventi"][0].get(k) for k in ("tx","quantita","tipo","rete","orario_utc","fonte")}
+                                   if isinstance(x,dict) and x.get("eventi") else None,
+                    "fields":list(x)[:15] if isinstance(x,dict) else None}
+                  return x
+              except Exception as e:
+                  results[name]={"status":"UNAVAILABLE","error":type(e).__name__+":"+str(e)[:110],"elapsed_ms":round((time.monotonic()-t)*1000)}
+                  return None
+          head=attempt("ethereum_native_head",lambda:net._native_observe("ethereum",fetch,now))
+          if head and head.get("stato")=="OSSERVATO":
+              attempt("ethereum_ERC20_full_probe",lambda:cap._evm_token(
+                  "ethereum",contract,net.NATIVE_ENDPOINTS["ethereum"],fetch,
+                  {"valori":head["valori"]},{}))
+          for name,url in [("rpcnode_solana","https://public-solana-mainnet.rpcnode.dev"),
+                           ("publicnode_solana","https://solana-rpc.publicnode.com")]:
+              attempt(name,lambda url=url: cap._rpc(fetch,url,"getTokenLargestAccounts",
+                      [mint,{"commitment":"finalized"}]))
+          b=attempt("near_final_block",lambda:cap._rpc(fetch,net.NATIVE_ENDPOINTS["near"],
+                                "block",{"finality":"final"}))
+          if isinstance(b,dict):
+              chunks=b.get("chunks",[])
+              results["near_chunks"]={"count":len(chunks),"first_tx_root":chunks[0].get("tx_root") if chunks else None,
+                                     "non_empty":sum(1 for c in chunks if c.get("tx_root") not in (None,"11111111111111111111111111111111"))}
+          attempt("xrpl_event_sample",lambda:cap._xrpl(net.NATIVE_ENDPOINTS["xrpl"],fetch))
+          attempt("sui_event_sample",lambda:cap._sui(net.SUI_URL,fetch))
+          print("KDD17_REAL_PROBE2",json.dumps({"results":results,"requests":reqs,"count":len(reqs)},ensure_ascii=False),flush=True)
           PY
 
   r5-historical-reference:
