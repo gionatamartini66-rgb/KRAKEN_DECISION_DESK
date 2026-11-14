@@ -97,7 +97,7 @@ jobs:
               chained={"status":"ERROR","error":type(e).__name__+":"+str(e)[:160]}
           print("KDD17_REPLACEMENT_LIVE",json.dumps({
               "spot":market,"onchain":chained,"calls":calls,
-              "total_calls":len(calls),"elapsed_ms":round((time.monotonic()-start)*1000)},flush=True)
+              "total_calls":len(calls),"elapsed_ms":round((time.monotonic()-start)*1000)}),flush=True)
           PY
 
   r5-historical-reference:
