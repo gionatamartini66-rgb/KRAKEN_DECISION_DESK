@@ -244,6 +244,9 @@ class NetworkDefiTests(unittest.TestCase):
         self.assertEqual(network["asset_reti"]["candidati"][1]["ufficialita_contratto"],
                          "NON_ATTESTATA")
         self.assertEqual(network["asset_reti"]["posizioni"][2]["tipo"],"NON_VERIFICATO")
+        self.assertIn("flussi_capitale", network["asset_reti"])
+        self.assertEqual(len(network["asset_reti"]["flussi_capitale"]["posizioni"]),3)
+        self.assertEqual(len(network["asset_reti"]["flussi_capitale"]["candidati"]),2)
         bundle={"schema":bridge.SCHEMA_BUNDLE,"packet":p,
                 "packet_sha256":bridge.digest(p),"preparato_utc":iso}
         reading=bridge.read_context(json.loads(json.dumps(bundle)),now=moment)
@@ -254,6 +257,8 @@ class NetworkDefiTests(unittest.TestCase):
         self.assertEqual(reading["rete_defi_alla_lettura"]["asset_reti"]["candidati"][1]
                          ["osservazioni_contratti"][0]["osservazione"]["valori"]
                          ["supply_unita_minima"],"420690000000000000000000000000000000000")
+        self.assertEqual(len(reading["rete_defi_alla_lettura"]["asset_reti"]["flussi_capitale"]["posizioni"]),3)
+        self.assertEqual(len(reading["rete_defi_alla_lettura"]["asset_reti"]["flussi_capitale"]["candidati"]),2)
         late=bridge.read_context(bundle,now=moment+dt.timedelta(minutes=40))
         self.assertIsNone(late["rete_defi_alla_lettura"]["posizioni"][0]
                           ["defi"]["valori"])
@@ -606,6 +611,8 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         self.assertEqual(probe["eventi"][0]["quantita"], "0.0000000002")
         self.assertEqual(probe["eventi"][0]["da"], self.EVM_FROM)
         self.assertEqual(probe["detentori"][0]["entita"]["classe"], "EXCHANGE")
+        second=cap.collect(T, assets, self._econ(), raw, fetch)
+        self.assertEqual(second["sonde"][0]["detentori"][0]["variazione_unita_minima"],"0")
         read = cap.at_read(raw, assets, self._econ(), T)
         record = read["posizioni"][0]["osservazioni"][0]
         self.assertEqual(record["stato"], "OSSERVATO_CON_LIMITI")
@@ -644,6 +651,42 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         self.assertEqual(block["eventi"][0]["tipo"], "OUTPUT_UTXO")
         self.assertIn("resto", block["copertura"])
         self.assertEqual(block["periodo"]["transazioni_totali_blocco"], 300)
+
+    def test_explorer_transfer_tags_inbound_not_sale_and_historical_nonzero_unknown(self):
+        import kdd_capital_flow as cap
+        assets=self._assets(contract=self.EVM_ADDR)
+        tx="0x"+"d"*64
+        transfer={"tx_hash":tx,"timestamp":T.isoformat(),
+                  "from":{"hash":self.EVM_FROM,"public_tags":[]},
+                  "to":{"hash":self.EVM_TO,"public_tags":[{"label":"Example Exchange"}]},
+                  "total":{"value":"1000000000000000000"}}
+        def fetch(url,payload=None):
+            if payload:
+                if payload["method"]=="eth_call":
+                    return {"jsonrpc":"2.0","id":1,"result":"0x12"}
+                if payload["method"]=="eth_getLogs":
+                    raise OSError("RPC method denied")
+            if url.endswith("/transfers"):
+                return {"items":[transfer,dict(transfer)]}
+            if url.endswith("/holders"):
+                return {"items":[]}
+            raise AssertionError(url)
+        raw=cap.collect(T,assets,self._econ(),None,fetch)
+        self.assertEqual(raw["sonde"][0]["stato"],"OSSERVATO")
+        self.assertEqual(len(raw["sonde"][0]["eventi"]),1)
+        read=cap.at_read(raw,assets,self._econ(),T)["posizioni"][0]["osservazioni"][0]
+        self.assertEqual(read["flussi_exchange_campione"]["stato"],"CAMPIONE_ETICHETTATO_PARZIALE")
+        self.assertEqual(read["flussi_exchange_campione"]["ingresso_unita_minima"],10**18)
+        self.assertEqual(read["flussi_exchange_campione"]["uscita_unita_minima"],0)
+        self.assertIn("deposito exchange non significa vendita",read["flussi_exchange_campione"]["limite"])
+        late=cap.at_read(raw,assets,self._econ(),T+dt.timedelta(minutes=45))["posizioni"][0]["osservazioni"][0]
+        self.assertEqual(late["eventi"][0]["stato_alla_lettura"],"STORICO")
+        self.assertIsNone(late["flussi_exchange_campione"]["flusso_netto_unita_minima"])
+        transfer["timestamp"]=(T-dt.timedelta(days=1)).isoformat()
+        old=cap.collect(T,assets,self._econ(),None,fetch)
+        historical=cap.at_read(old,assets,self._econ(),T)["posizioni"][0]["osservazioni"][0]
+        self.assertEqual(historical["eventi"][0]["stato_alla_lettura"],"STORICO")
+        self.assertIsNone(historical["flussi_exchange_campione"]["ingresso_unita_minima"])
 
     def test_solana_spl_holders_and_transfer_checked(self):
         import kdd_capital_flow as cap
