@@ -963,6 +963,71 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
                          "NON_DISPONIBILE")
         self.assertIsNone(read["candidati"][3]["osservazioni"][0].get("valori"))
 
+    def test_routescan_ethereum_and_avalanche_without_native_wallet_assets(self):
+        """Live-verified Routescan schemas; both tokens have dynamic contracts."""
+        import kdd_capital_flow as cap
+        chains={"ethereum":("0x"+"1"*40,"1"),
+                "avalanche":("0x"+"2"*40,"43114")}
+        assets={"posizioni":[
+            {"token":"AAVE","progetto_id":"aave","coppia_analisi":None,
+             "contratti_indicizzati":[{"rete":"ethereum","contratto":chains["ethereum"][0]}]},
+            {"token":"AVAXUSDC","progetto_id":"usd-coin","coppia_analisi":None,
+             "contratti_indicizzati":[{"rete":"avalanche","contratto":chains["avalanche"][0]}]}],
+            "candidati":[],"fonti_native":{}} # No ETH or AVAX wallet position
+        def fetch(url,payload=None):
+            chain=next((ch for ch,(contract,number) in chains.items()
+                        if url.startswith(cap.ROUTESCAN+number+"/")),None)
+            if not chain:
+                raise AssertionError("unexpected source: "+url)
+            contract,chain_id=chains[chain]
+            if "erc20-transfers?" in url:
+                self.assertIn("tokenAddress="+contract,url)
+                return {"items":[{"chainId":chain_id,"blockNumber":25800000,
+                    "txHash":"0x"+("a" if chain=="ethereum" else "b")*64,
+                    "logIndex":0,"from":self.EVM_FROM,"to":self.EVM_TO,
+                    "timestamp":T.isoformat(),"amount":"123000000",
+                    "tokenAddress":contract,"tokenDecimals":6,
+                    "tokenSymbol":"USDC"}],"link":{"next":"opaque"}}
+            if url.endswith("/holders?limit=10"):
+                return {"items":[{"chainId":chain_id,"address":self.EVM_FROM,
+                                  "balance":"500000000"}],"link":{}}
+            raise AssertionError(url)
+        econ={"posizioni":[{},{}],"candidati":[]}
+        raw=cap.collect(T,assets,econ,None,fetch)
+        self.assertEqual(raw["target_totali"],2)
+        self.assertEqual(raw["richieste_effettuate"],4)
+        self.assertEqual([r["stato"] for r in raw["sonde"]],["OSSERVATO"]*2)
+        read=cap.at_read(raw,assets,econ,T)
+        for row,chain in zip(read["posizioni"],("ethereum","avalanche")):
+            record=row["osservazioni"][0]
+            self.assertEqual(record["rete"],chain)
+            self.assertEqual(record["eventi"][0]["quantita"],"123")
+            self.assertEqual(record["detentori"][0]["unita_minima"],"500000000")
+            self.assertEqual(record["eventi"][0]["fonte"],
+                cap._routescan_urls(chain,chains[chain][0])[0])
+            self.assertIsNone(record["flussi_exchange_campione"]["flusso_netto_unita_minima"])
+        self.assertEqual(read["posizioni"][1]["osservazioni"][0]["periodo"]["tipo"],
+                         "PAGINA_ROUTESCAN")
+
+    def test_routescan_wrong_contract_chain_and_unit_fail_closed(self):
+        import kdd_capital_flow as cap
+        contract="0x"+"5"*40
+        for bad_field in ("tokenAddress","chainId","tokenDecimals","amount"):
+            with self.subTest(bad_field=bad_field):
+                row={"chainId":"1","blockNumber":123,
+                     "txHash":"0x"+"a"*64,"logIndex":1,
+                     "from":self.EVM_FROM,"to":self.EVM_TO,
+                     "timestamp":T.isoformat(),"amount":"1000000",
+                     "tokenAddress":contract,"tokenDecimals":6}
+                row[bad_field]={"tokenAddress":"0x"+"9"*40,
+                                "chainId":"43114","tokenDecimals":18,
+                                "amount":"1.250"}[bad_field]
+                def fetch(url,payload=None):
+                    return {"items":[row],"link":{}}
+                events,precision,source=cap._routescan_transfers(
+                    "ethereum",contract,6,fetch)
+                self.assertEqual(events,[])
+
     def test_bsc_new_candidate_binplorer_without_native_bnb_position(self):
         import kdd_capital_flow as cap
         contract=self.EVM_ADDR
