@@ -214,7 +214,7 @@ class UpdateTests(unittest.TestCase):
         (self.root / name).write_bytes(source)
         for existed in (False, True):
             with self.subTest(previous_file_existed=existed):
-                old = b'# prior on-chain version\\n' if existed else None
+                old = b'# prior on-chain version\n' if existed else None
                 if old is None:
                     (self.live / name).unlink(missing_ok=True)
                 else:
@@ -248,7 +248,7 @@ class UpdateTests(unittest.TestCase):
                 backup = list((home / '.local/share/kdd-deploy-backups').glob('*'))
                 self.assertEqual(len(backup), 1)
                 self.assertEqual((backup[0] / name).read_bytes() if existed else None, old)
-                self.assertEqual((self.live / 'config.json').read_text(), '{}\\n')
+                self.assertEqual((self.live / 'config.json').read_text(), '{}\n')
                 self.assertIn('MANUALE LOCALE: DATO PRIVATO',
                               (self.live / 'README.md').read_text())
 
@@ -259,7 +259,7 @@ class UpdateTests(unittest.TestCase):
         (self.root / name).write_bytes(source)
         for existed in (False, True):
             with self.subTest(previous_file_existed=existed):
-                old = b'# prior module bytes\\n' if existed else None
+                old = b'# prior module bytes\n' if existed else None
                 if old is None:
                     (self.live / name).unlink(missing_ok=True)
                 else:
@@ -284,7 +284,7 @@ class UpdateTests(unittest.TestCase):
                 self.assertEqual(attempts[0], 2)
                 self.assertEqual((self.live / name).read_bytes() if existed else None, old)
                 self.assertEqual((self.live / 'README.md').read_text(), self.old_readme)
-                self.assertEqual((self.live / 'config.json').read_text(), '{}\\n')
+                self.assertEqual((self.live / 'config.json').read_text(), '{}\n')
                 backup = list((home / '.local/share/kdd-deploy-backups').glob('*'))
                 self.assertEqual(len(backup), 1)
                 self.assertEqual((backup[0] / name).read_bytes() if existed else None, old)
