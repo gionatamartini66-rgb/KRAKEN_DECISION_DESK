@@ -1107,10 +1107,12 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         """
         import kdd_economics as econ
         import kdd_capital_flow as cap
+        import mercati_spot as spot
+        import decision_desk as desk
         from scripts import kdd_wallet_packet_g0 as packet
         from scripts import kdd_bridge_g2 as bridge
         from scripts import test_kdd_wallet_packet_g0 as packet_fixture
-        tokens=["ADA","AAVE","AVAX","BONK","LINK","UNI","USDC","PEPE","ONDO","PUMP"]
+        tokens=["LIGHTER","AAVE","AVAX","BONK","LINK","UNI","USDC","PEPE","ONDO","PUMP"]
         original={"BTC","ETH","SOL","SUI","NEAR","JUP","RENDER","FET","BNB","XRP"}
         self.assertFalse(original.intersection(tokens))
         evm=lambda n:"0x"+format(n,"040x")
@@ -1127,19 +1129,21 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
             "CAKE":{"binance-smart-chain":evm(19)}}
         catalog={}
         for token in tokens+["CAKE"]:
-            catalog[token+"EUR"]={"pair_key":token+"EUR","pair":token+"/EUR",
-                                   "base":token,"quote":"EUR"}
+            q="USD" if token=="LIGHTER" else "EUR"
+            catalog[token+q]={"pair_key":token+q,"pair":token+"/"+q,
+                                   "base":token,"quote":q}
         def identity(token):
             coin_id=token.lower()+"-synthetic-project"
+            quote="USD" if token=="LIGHTER" else "EUR"
             discovered={"metodo":"KRAKEN_COINGECKO_MARKET",
                         "coingecko_id":coin_id,"progetto":token+" Synthetic",
                         "prova_mercato":{"exchange":"kraken","symbol":token,
-                           "base":token,"target":"EUR","is_stale":False,
+                           "base":token,"target":quote,"is_stale":False,
                            "is_anomaly":False,
                            "ricerca_url":econ.CG_SEARCH+token,
                            "ticker_url":econ.CG+coin_id+"/tickers?exchange_ids=kraken",
                            "verificato_utc":T.isoformat()}}
-            return econ.identify(token,token+"/EUR",token+"EUR",
+            return econ.identify(token,token+"/"+quote,token+quote,
                                  catalog=catalog,discovered=discovered)
         def row(token,i,candidate=False):
             ident=identity(token)
@@ -1256,14 +1260,32 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
             {"token":token,"quantita":"1","disponibile_spot":"1",
              "costo_medio_eur":None} for token in tokens]
         fixture.snapshot["rilevazione_utc"]=(T+dt.timedelta(minutes=3)).isoformat()
-        fixture.snapshot["markets"]={token:{"token":token,"pair":token+"/EUR",
+        # LIGHTER/USD was confirmed in real public Kraken AssetPairs+Ticker
+        # on 14 Nov 2026 (Actions #43622245482); no LIGHTER/EUR was listed.
+        # Test the actual reusable assemble + FX path, not a made-up EUR pair.
+        fx_pairs={"ZEURZUSD":{"wsname":"EUR/USD","status":"online"}}
+        fx_ticks={"ZEURZUSD":{"a":["1.1"],"b":["1.1"],"c":["1.1"],
+                             "o":"1.1","v":["100","100"]}}
+        fx_pairs["LIGHTERUSD"]={"wsname":"LIGHTER/USD","status":"online"}
+        fx_ticks["LIGHTERUSD"]={"a":["11.0"],"b":["11.0"],"c":["11.0"],
+                               "o":"11.0","v":["100000","100000"]}
+        multi,rates=spot.assemble(fx_pairs,fx_ticks)
+        self.assertEqual(multi["LIGHTER"]["quote"],"USD")
+        self.assertEqual(multi["LIGHTER"]["conversione_fonte"],"EUR/USD")
+        self.assertEqual(multi["LIGHTER"]["prezzo_eur"],10.0)
+        fixture.snapshot["fx_rilevati"]=rates
+        old_eur={token:{"token":token,"pair":token+"/EUR",
              "pair_key":token+"EUR","prezzo_eur":10.0,"volume_24h_eur_stimato":1000000.0,
-             "spread_pct":0.4} for token in tokens}
+             "spread_pct":0.4} for token in tokens if token!="LIGHTER"}
+        fixture.snapshot["markets"]=desk.wallet_spot_markets(old_eur,multi,fixture.portfolio)
+        self.assertEqual(fixture.snapshot["markets"]["LIGHTER"]["pair"],"LIGHTER/USD")
         fixture.snapshot["schede_v02"]=[{"token":"CAKE","coppia_analisi":"CAKE/EUR",
                                         "esito":"RIESAME","categoria":"confronto"}]
         fixture.report["rilevazione_utc"]=fixture.snapshot["rilevazione_utc"]
-        fixture.report["posizioni"]=[{"token":token,"quantita":"1","prezzo_eur":10,
-            "valore_eur":10,"pl_non_realizzato_eur":None,"decisione":"ESAME"}
+        fixture.report["posizioni"]=[{"token":token,"quantita":"1",
+            "prezzo_eur":fixture.snapshot["markets"][token]["prezzo_eur"],
+            "valore_eur":fixture.snapshot["markets"][token]["prezzo_eur"],
+            "pl_non_realizzato_eur":None,"decisione":"ESAME"}
             for token in tokens]
         fixture.report["totale_stimato_eur"]=100
         fixture.report["totale_parziale"]=False
@@ -1281,8 +1303,14 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         self.assertEqual([r["token"] for r in prepared["patrimonio"]["posizioni"]],tokens)
         for position in prepared["patrimonio"]["posizioni"]:
             spot=position["mercato_spot_kraken"]
-            self.assertEqual(spot["coppia"],position["token"]+"/EUR")
-            self.assertEqual(spot["volume_24h_eur_stimato"],"1000000.0")
+            expected="LIGHTER/USD" if position["token"]=="LIGHTER" else position["token"]+"/EUR"
+            self.assertEqual(spot["coppia"],expected)
+            if position["token"]=="LIGHTER":
+                self.assertEqual(spot["valuta_quotazione"],"USD")
+                self.assertEqual(spot["conversione_fonte"],"EUR/USD")
+                self.assertEqual(position["fonte_prezzo_eur"]["prezzo_quote"],"11.0")
+            else:
+                self.assertEqual(spot["volume_24h_eur_stimato"],"1000000.0")
             self.assertEqual(spot["spread_pct"],"0.4")
             self.assertEqual(spot["book"],"NON_ACQUISITO_PER_QUESTA_COPPIA")
         self.assertEqual(len(prepared["evidenze_multifonte"]["rete_defi"]
@@ -1296,13 +1324,33 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         self.assertTrue(all(r["mercato_spot_kraken_alla_lettura"]["stato"] ==
                             "DISPONIBILE"
                             for r in result["copertura"]))
+        lighter=next(x for x in result["copertura"] if x["token"]=="LIGHTER")
+        self.assertEqual(lighter["mercato_spot_kraken_alla_lettura"]["coppia"],"LIGHTER/USD")
+        self.assertEqual(lighter["mercato_spot_kraken_alla_lettura"]["valuta_quotazione"],"USD")
+        self.assertEqual(lighter["mercato_spot_kraken_alla_lettura"]["conversione_fonte"],"EUR/USD")
         self.assertTrue(all(r["mercato_spot_kraken_alla_lettura"]["volume_24h_eur_stimato"]
-                            == "1000000.0" for r in result["copertura"]))
+                            == "1000000.0" for r in result["copertura"]
+                            if r["token"]!="LIGHTER"))
         tampered=copy.deepcopy(bundle)
         tampered["packet"]["patrimonio"]["posizioni"][0]["mercato_spot_kraken"]["pair_key"]="FAKEPAIR"
         tampered["packet_sha256"]=bridge.digest(tampered["packet"])
         with self.assertRaises(bridge.BridgeError):
             bridge.read_context(tampered,now=instant)
+        badfx=copy.deepcopy(bundle)
+        lighter_row=badfx["packet"]["patrimonio"]["posizioni"][0]
+        lighter_row["mercato_spot_kraken"]["eur_per_quote"]="1"
+        badfx["packet_sha256"]=bridge.digest(badfx["packet"])
+        with self.assertRaises(bridge.BridgeError):
+            bridge.read_context(badfx,now=instant)
+        missing_fx=copy.deepcopy(fixture.snapshot)
+        missing_fx["fx_rilevati"].pop("USD")
+        # A price already derived from an absent FX rate cannot be endorsed.
+        with self.assertRaises(packet.PacketError):
+            packet.brief_positions(fixture.portfolio,fixture.report,missing_fx,
+                                   fixture.dossier,True,
+                                   four_rows=packet.four_tf_evidence(
+                                      fixture.portfolio,fixture.report,fixture.dossier,
+                                      fixture.snapshot["rilevazione_utc"]),now=instant)
         self.assertTrue(any(s["stato"]=="OSSERVATO_CON_LIMITI"
                             for r in flow["posizioni"] for s in r["osservazioni"]))
         self.assertTrue(all(r["token"] in fixture.snapshot["markets"]
