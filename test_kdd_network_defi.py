@@ -1356,6 +1356,48 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         self.assertTrue(all(r["token"] in fixture.snapshot["markets"]
                             for r in flow["posizioni"]))
 
+    def test_assembled_usd_usdc_only_markets_and_missing_direct_fx(self):
+        """No invented USD/USDC parity and no mixed-currency daily trend."""
+        import mercati_spot as multi
+        import decision_desk as desk
+        def ticker(price,vol="100000"):
+            return {"a":[str(price)],"b":[str(price)],"c":[str(price)],
+                    "o":str(price),"v":[vol,vol]}
+        pairs={"EURUSD":{"wsname":"EUR/USD","status":"online"},
+               "USDCEUR":{"wsname":"USDC/EUR","status":"online"},
+               "SYNUSD":{"wsname":"SYN/USD","status":"online"},
+               "SUCUSDC":{"wsname":"SUC/USDC","status":"online"}}
+        tickers={"EURUSD":ticker(1.1),"USDCEUR":ticker(.9),
+                 "SYNUSD":ticker(11),"SUCUSDC":ticker(10)}
+        assembled,rates=multi.assemble(pairs,tickers,min_vol=0)
+        self.assertEqual(assembled["SYN"]["conversione_fonte"],"EUR/USD")
+        self.assertEqual(assembled["SUC"]["conversione_fonte"],"USDC/EUR")
+        self.assertEqual(assembled["SYN"]["prezzo_eur"],10)
+        self.assertEqual(assembled["SUC"]["prezzo_eur"],9)
+        wallet={"posizioni":[{"token":"SYN"},{"token":"SUC"},{"token":"GONE"}]}
+        snapshot=desk.wallet_spot_markets({},assembled,wallet)
+        self.assertEqual(set(snapshot),{"SYN","SUC"})
+        # OHLC is in USD, not EUR. Comparing 11 USD closes to 10 EUR
+        # would manufacture a roughly -9% movement.
+        daily=[[0,0,0,0,"11",0] for _ in range(40)]
+        tr=desk.trend_spot_quotato(daily,snapshot["SYN"])
+        self.assertEqual(tr["var_7g_pct"],0)
+        self.assertEqual(tr["var_30g_pct"],0)
+        self.assertEqual(tr["valuta_quotazione"],"USD")
+        self.assertNotIn("media_20g_eur",tr)
+        without_usdc=dict(tickers)
+        without_usdc.pop("USDCEUR")
+        only_usd,fx=multi.assemble(pairs,without_usdc,min_vol=0)
+        self.assertNotIn("USDC",fx)
+        self.assertNotIn("SUC",only_usd)
+        self.assertEqual(set(desk.wallet_spot_markets({},only_usd,wallet)),{"SYN"})
+        without_usd=dict(tickers)
+        without_usd.pop("EURUSD")
+        only_usdc,fx2=multi.assemble(pairs,without_usd,min_vol=0)
+        self.assertNotIn("USD",fx2)
+        self.assertNotIn("SYN",only_usdc)
+        self.assertEqual(set(desk.wallet_spot_markets({},only_usdc,wallet)),{"SUC"})
+
     def test_dynamic_candidate_rotation_and_missing_attribution(self):
         import kdd_capital_flow as cap
         assets = {"posizioni": [],"candidati":[
