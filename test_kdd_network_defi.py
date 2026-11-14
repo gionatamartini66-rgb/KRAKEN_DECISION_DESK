@@ -1311,7 +1311,7 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
                 self.assertEqual(position["fonte_prezzo_eur"]["prezzo_quote"],"11.0")
             else:
                 self.assertEqual(spot["volume_24h_eur_stimato"],"1000000.0")
-            self.assertEqual(spot["spread_pct"],"0.4")
+            self.assertEqual(spot["spread_pct"],"0.0" if position["token"]=="LIGHTER" else "0.4")
             self.assertEqual(spot["book"],"NON_ACQUISITO_PER_QUESTA_COPPIA")
         self.assertEqual(len(prepared["evidenze_multifonte"]["rete_defi"]
                              ["asset_reti"]["flussi_capitale"]["posizioni"]),10)
