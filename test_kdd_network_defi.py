@@ -963,6 +963,79 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
                          "NON_DISPONIBILE")
         self.assertIsNone(read["candidati"][3]["osservazioni"][0].get("valori"))
 
+    def test_bsc_new_candidate_binplorer_without_native_bnb_position(self):
+        import kdd_capital_flow as cap
+        contract=self.EVM_ADDR
+        asset={"posizioni":[],"candidati":[{"token":"NEWBSC",
+            "progetto_id":"unlisted-new-project","coppia_analisi":"NEWBSC/EUR",
+            "contratti_indicizzati":[{"rete":"bsc","contratto":contract}]}],
+            "fonti_native":{}}  # No BNB held; token still gets public evidence.
+        seen=[]
+        def fetch(url,payload=None):
+            seen.append(url)
+            if "/getTokenInfo/" in url:
+                return {"address":contract,"decimals":"18","symbol":"NEWBSC"}
+            if "/getTokenHistory/" in url:
+                return {"operations":[{"timestamp":int(T.timestamp()),
+                    "transactionHash":"0x"+"d"*64,
+                    "tokenInfo":{"address":contract,"decimals":"18"},
+                    "type":"transfer","value":"4000000000000000000",
+                    "from":self.EVM_FROM,"to":self.EVM_TO}]}
+            if "/getTopTokenHolders/" in url:
+                return {"holders":[{"address":self.EVM_FROM,
+                    "rawBalance":"8000000000000000000"}]}
+            raise OSError("unexpected source")
+        economics={"posizioni":[],"candidati":[{}]}
+        raw=cap.collect(T,asset,economics,None,fetch)
+        self.assertEqual(raw["target_totali"],1)
+        self.assertEqual(raw["sonde"][0]["stato"],"OSSERVATO")
+        self.assertEqual(raw["sonde"][0]["periodo"]["tipo"],"PAGINA_BINPLORER")
+        self.assertEqual(raw["sonde"][0]["eventi"][0]["quantita"],"4")
+        self.assertEqual(raw["sonde"][0]["detentori"][0]["unita_minima"],
+                         "8000000000000000000")
+        self.assertEqual(len(seen),3)
+        read=cap.at_read(raw,asset,economics,T)
+        obs=read["candidati"][0]["osservazioni"][0]
+        self.assertEqual(obs["stato"],"OSSERVATO_CON_LIMITI")
+        self.assertIsNone(obs["flussi_exchange_campione"]["ingresso_unita_minima"])
+        self.assertEqual(obs["eventi"][0]["quantita"],"4")
+
+    def test_sol_jupiter_index_when_largest_accounts_rpc_throttled(self):
+        import kdd_capital_flow as cap
+        mint=self.MINT
+        asset={"posizioni":[],"candidati":[{"token":"FUTURE",
+            "progetto_id":"future-sol-token","coppia_analisi":"FUTURE/EUR",
+            "contratti_indicizzati":[{"rete":"solana","contratto":mint}]}],
+            "fonti_native":{}}
+        def fetch(url,payload=None):
+            if url==evidence.CONTRACT_ENDPOINTS["solana"] and payload:
+                self.assertEqual(payload["method"],"getTokenLargestAccounts")
+                raise OSError("public RPC HTTP 429")
+            if url==cap.JUPITER_TOKENS+mint:
+                return [{"id":mint,"decimals":6,"holderCount":5000,
+                         "audit":{"topHoldersPercentage":12.4}}]
+            raise OSError("unexpected source")
+        econ={"posizioni":[],"candidati":[{}]}
+        raw=cap.collect(T,asset,econ,None,fetch)
+        self.assertEqual(raw["sonde"][0]["stato"],"OSSERVATO")
+        self.assertEqual(raw["sonde"][0]["eventi"],[])
+        self.assertEqual(raw["sonde"][0]["detentori"],[])
+        recent=cap.at_read(raw,asset,econ,T)["candidati"][0]["osservazioni"][0]
+        agg=recent["aggregato_detentori"]
+        self.assertEqual(agg["numero_account"],5000)
+        self.assertEqual(agg["quota_top_pct_indice"],"12.4")
+        self.assertEqual(agg["stato_alla_lettura"],"RECENTE")
+        self.assertEqual(recent["periodo"]["tipo"],"RIEPILOGO_JUPITER_TOKEN")
+        late=cap.at_read(raw,asset,econ,T+dt.timedelta(minutes=40))
+        self.assertEqual(late["candidati"][0]["osservazioni"][0]
+                         ["aggregato_detentori"]["stato_alla_lettura"],"STORICO")
+        def wrong_mint(url,payload=None):
+            if url==evidence.CONTRACT_ENDPOINTS["solana"]:
+                raise OSError("HTTP 429")
+            return [{"id":"WRONG","decimals":6,"holderCount":5000}]
+        bad=cap.collect(T,asset,econ,None,wrong_mint)
+        self.assertEqual(bad["sonde"][0]["stato"],"NON_DISPONIBILE")
+
     def test_dynamic_candidate_rotation_and_missing_attribution(self):
         import kdd_capital_flow as cap
         assets = {"posizioni": [],"candidati":[
