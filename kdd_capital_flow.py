@@ -162,10 +162,23 @@ def _evm_token(chain, contract, url, fetch, native, previous):
     height = _nat(head["altezza_blocco"])
     end = max(0, height - 6)
     start = max(0, end - 47)
-    decimals_value = _rpc(fetch, url, "eth_call",
-                          [{"to": contract, "data": "0x313ce567"}, "latest"])
-    decimals = _hex(decimals_value, 30)
     source = url
+    try:
+        decimals_value = _rpc(fetch, url, "eth_call",
+                              [{"to": contract, "data": "0x313ce567"}, "latest"])
+        decimals = _hex(decimals_value, 30)
+    except (OSError,ValueError,TypeError,KeyError):
+        if chain != "ethereum":
+            raise
+        # Public explorer token metadata is a secondary index, explicitly
+        # identified as such; never infer official project contract status.
+        meta_url = ETH_EXPLORER + "/api/v2/tokens/" + contract
+        meta = fetch(meta_url)
+        if not isinstance(meta, dict) or str(meta.get("type")).upper() != "ERC-20":
+            raise ValueError("explorer ERC-20 token metadata absent")
+        raw_decimals = meta.get("decimals")
+        decimals = _nat(raw_decimals, 30)
+
     events = []
     fallback_reason = None
     try:
@@ -780,12 +793,19 @@ def at_read(raw, asset_rows, economics, now):
                                               else "STORICO" if record["stato"]=="OSSERVATO" else "NON_DISPONIBILE"),
                                      "eventi":events,"detentori":record["detentori"],
                                      "operatori_etichettati_nel_campione":recognized,
-                                     "flussi_exchange_campione":dict(exchange,
+                                     "flussi_exchange_campione":(dict(exchange,
                                          flusso_netto_unita_minima=(exchange["ingresso_unita_minima"]-
                                                                    exchange["uscita_unita_minima"]),
-                                         fonte="ETICHETTE_PUBBLICHE_SE_PRESENTI",
-                                         limite="Non rappresenta flussi exchange globali, deposito non significa vendita"),
-                                     "detentori_top_somma_unita_minima":str(sum(int(h["unita_minima"]) for h in record["detentori"])),
+                                         stato="CAMPIONE_ETICHETTATO_PARZIALE",
+                                         fonte="ETICHETTE_PUBBLICHE_BLOCKSCOUT",
+                                         limite="Non rappresenta flussi exchange globali, deposito non significa vendita")
+                                         if fresh and recognized and record["stato"]=="OSSERVATO" else
+                                         {"stato":"NON_ATTRIBUIBILE_O_STORICO",
+                                          "ingresso_unita_minima":None,"uscita_unita_minima":None,
+                                          "flusso_netto_unita_minima":None,
+                                          "limite":"Assenza di indirizzi exchange etichettati o campione scaduto: NON zero"}),
+                                     "detentori_top_somma_unita_minima":(str(sum(int(h["unita_minima"]) for h in record["detentori"]))
+                                          if record["detentori"] else None),
                                      "periodo":record.get("periodo"),
                                      "acquisito_utc":record["acquisito_utc"],
                                      "copertura":record.get("copertura"),
