@@ -1635,6 +1635,14 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         flow=result["rete_defi_alla_lettura"]["asset_reti"]["flussi_capitale"]
         self.assertEqual(len(result["circolazione_capitale_vs_spot"]),10)
         self.assertEqual([r["token"] for r in result["circolazione_capitale_vs_spot"]],tokens)
+        print("KDD17_REPLACED_WALLET_COVERAGE",json.dumps({
+            "portfolio_assets":len(tokens),"scanner_candidates":len(candidates),
+            "distinct_onchain_targets_observed_4_refreshes":len(observed),
+            "chains_observed":sorted({chain for chain,_ in observed}),
+            "spot_market_rows":len(fixture.snapshot["markets"]),
+            "packet_positions":len(prepared["patrimonio"]["posizioni"]),
+            "bridge_capital_vs_spot_rows":len(result["circolazione_capitale_vs_spot"]),
+            "calls_per_refresh_limit":cap.MAX_PUBLIC_CALLS},sort_keys=True))
         self.assertEqual([r["token"] for r in flow["posizioni"]],tokens)
         self.assertEqual(flow["candidati"][0]["token"],"CAKE")
         self.assertTrue(all(r["mercato_spot_kraken_alla_lettura"]["stato"] ==
