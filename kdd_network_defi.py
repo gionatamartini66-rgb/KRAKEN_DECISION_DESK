@@ -791,3 +791,28 @@ def at_read(source, positions, candidates, now, *, economics=None):
             enriched, _roster(positions), _roster(candidates, candidate=True),
             economics, _now(now))
     return result
+
+# KDD-17 G2/2: integrate a single reusable public capital-flow producer into
+# the existing asset-network family (dossier -> packet -> GPT bridge).
+# Legacy source/contract semantics above remain unchanged.
+_NETWORK_COLLECT_ASSETS = _collect_assets
+_NETWORK_READ_ASSETS = _read_assets
+
+
+def _collect_assets(now, positions, candidates, economic, previous, fetch):
+    import kdd_capital_flow
+    result = _NETWORK_COLLECT_ASSETS(now, positions, candidates, economic, previous, fetch)
+    earlier = previous.get("flussi_capitale") if isinstance(previous, dict) else None
+    result["flussi_capitale"] = kdd_capital_flow.collect(
+        now, result, economic, earlier, fetch)
+    return result
+
+
+def _read_assets(raw, owned, candidates, economic, now):
+    import kdd_capital_flow
+    result = _NETWORK_READ_ASSETS(raw, owned, candidates, economic, now)
+    # Old dossiers predate this family; absence is not a zero reading.
+    if "flussi_capitale" in raw:
+        result["flussi_capitale"] = kdd_capital_flow.at_read(
+            raw["flussi_capitale"], result, economic, now)
+    return result
