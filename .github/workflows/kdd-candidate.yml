@@ -32,7 +32,7 @@ jobs:
         run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_funding_book_g2
       - name: Existing safe updater tests
         run: python -B scripts/test_kdd_aggiorna.py
-      - name: TEMP KDD17 new public producer end-to-end live measurement
+      - name: TEMP KDD17 corrected bound producer and GoPlus live evidence
         if: github.event_name == 'pull_request' && github.event.pull_request.number == 64
         continue-on-error: true
         timeout-minutes: 4
@@ -41,55 +41,71 @@ jobs:
           import json,datetime as dt,time
           import kdd_network_defi as net,kdd_capital_flow as cap
           now=dt.datetime.now(dt.timezone.utc)
-          urls=[
-            ("OPTUSDC","optimized-asset","optimism","0x0b2c639c533813f4aa9d7837caf62653d097ff85"),
-            ("SOL","solana","solana","NATIVE"),
-            ("SPLUSDC","usd-coin","solana","EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
-            ("AVAX","avalanche-2","avalanche","NATIVE"),
-            ("BSCUSDT","tether","bsc","0x55d398326f99059ff775485246999027b3197955"),
-            ("NEAR","near","near","NATIVE")]
-          reports=[]
-          for group in (urls[:3],urls[3:]):
-              rows=[{"token":token,"progetto_id":proj,
-                     "contratti_indicizzati":([] if address=="NATIVE" else
-                         [{"rete":chain,"contratto":address}])}
-                    for token,proj,chain,address in group]
+          known=[
+             ("OPTUSDC","optimism","0x0b2c639c533813f4aa9d7837caf62653d097ff85"),
+             ("SOL","solana","NATIVE"),
+             ("SOL_USDC","solana","EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
+             ("AVAX","avalanche","NATIVE"),
+             ("BSC_USDT","bsc","0x55d398326f99059ff775485246999027b3197955"),
+             ("NEAR","near","NATIVE")]
+          groups=[known[:3],known[3:]]
+          out=[]
+          for group in groups:
+              positions=[{"token":sym,"progetto_id":sym.lower(),
+                          "contratti_indicizzati":([] if identifier=="NATIVE"
+                                  else [{"rete":chain,"contratto":identifier}])}
+                         for sym,chain,identifier in group]
               native={}
-              if any(chain=="avalanche" and address=="NATIVE" for _,_,chain,address in group):
+              if any(chain=="avalanche" and identifier=="NATIVE" for _,chain,identifier in group):
                   native["avalanche"]=net._native_observe("avalanche",net._http,now)
-              assets={"posizioni":rows,"candidati":[],"fonti_native":native}
-              start=time.monotonic()
-              raw=cap.collect(now,assets,{"posizioni":[{} for _ in rows],
-                                          "candidati":[]},None,net._http)
+              data={"posizioni":positions,"candidati":[],"fonti_native":native}
+              mapping={(chain,identifier):sym for sym,chain,identifier in group}
+              # SOL must bind to its true canonical project id for native routing.
+              for row in positions:
+                  if row["token"]=="SOL":row["progetto_id"]="solana"
+                  if row["token"]=="AVAX":row["progetto_id"]="avalanche-2"
+                  if row["token"]=="NEAR":row["progetto_id"]="near"
+              t=time.monotonic()
+              raw=cap.collect(now,data,{"posizioni":[{}]*len(positions),
+                                        "candidati":[]},None,net._http)
               try:
-                  read=cap.at_read(raw,assets,{"posizioni":[{} for _ in rows],
-                                               "candidati":[]},now)
-                  reader="OK"
-              except Exception as e:
-                  read=None;reader=type(e).__name__+":"+str(e)[:90]
-              items=[]
-              for i,s in enumerate(raw["sonde"]):
-                  events=s.get("eventi") or []
-                  first=events[0] if events else None
-                  items.append({"token":rows[i]["token"],"chain":s["rete"],
-                                "state":s["stato"],"reason":s.get("motivo"),
-                                "requests":s["richieste_effettuate"],
-                                "events":len(events),"holders":len(s.get("detentori") or []),
-                                "aggregate":bool(s.get("aggregato_detentori")),
-                                "first":{k:first.get(k) for k in ("tx","quantita","tipo","orario_utc","fonte")}
-                                        if first else None,
-                                "period":s.get("periodo")})
-              reports.append({"items":items,"calls":raw["richieste_effettuate"],
-                              "reader":reader,
-                              "seconds":round(time.monotonic()-start,3)})
+                  view=cap.at_read(raw,data,{"posizioni":[{}]*len(positions),
+                                            "candidati":[]},now)
+                  viewed={p["token"]:p["osservazioni"] for p in view["posizioni"]}
+                  reader="PASS"
+              except Exception as exc:
+                  reader=type(exc).__name__+":"+str(exc)[:100]
+                  viewed={}
+              samples=[]
+              for s in raw["sonde"]:
+                  key=(s["rete"],s["asset_tecnico"])
+                  ev=(s.get("eventi") or [])
+                  first=ev[0] if ev else None
+                  sym=mapping.get(key,"UNKNOWN")
+                  samples.append({"asset":sym,"network":s["rete"],"state":s["stato"],
+                       "reason":s.get("motivo"),"requests":s["richieste_effettuate"],
+                       "events":len(ev),"holders":len(s.get("detentori") or []),
+                       "holder_aggregate":bool(s.get("aggregato_detentori")),
+                       "reader_state":viewed.get(sym,[{}])[0].get("stato") if viewed.get(sym) else None,
+                       "first":{k:first.get(k) for k in ("tx","quantita","tipo","orario_utc","fonte")}
+                               if first else None,"period":s.get("periodo")})
+              out.append({"samples":samples,"requests":raw["richieste_effettuate"],
+                          "seconds":round(time.monotonic()-t,3),"reader":reader})
+          bsc="0x55d398326f99059ff775485246999027b3197955"
+          t=time.monotonic()
           try:
-              security=net._http("https://api.gopluslabs.io/api/v1/token_security/56?contract_addresses=0x55d398326f99059ff775485246999027b3197955")
-              entry=security.get("result",{}).get("0x55d398326f99059ff775485246999027b3197955",{})
-              reports.append({"goplus":"OK","result_fields":list(entry)[:60] if isinstance(entry,dict) else None,
-                              "holders_preview":entry.get("holders",[])[:2] if isinstance(entry,dict) and isinstance(entry.get("holders"),list) else None})
+              fallback=cap._bsc_goplus_holders(bsc,net._http,{})
+              out.append({"goplus_fallback":"PASS",
+                  "holders":len(fallback["detentori"]),
+                  "holder_count":fallback["aggregato_detentori"]["numero_account"],
+                  "first_raw":fallback["detentori"][0]["unita_minima"] if fallback["detentori"] else None,
+                  "labelled":sum(1 for h in fallback["detentori"]
+                               if h["entita"]["stato"]=="ETICHETTA_PUBBLICA"),
+                  "seconds":round(time.monotonic()-t,3)})
           except Exception as ex:
-              reports.append({"goplus":"UNAVAILABLE","reason":type(ex).__name__})
-          print("KDD17_REAL_CODE_MEASUREMENT",json.dumps(reports,ensure_ascii=False),flush=True)
+              out.append({"goplus_fallback":"UNAVAILABLE","reason":type(ex).__name__+":"+str(ex)[:100],
+                          "seconds":round(time.monotonic()-t,3)})
+          print("KDD17_FINAL_LIVE_PRODUCERS",json.dumps(out,ensure_ascii=False),flush=True)
           PY
 
   r5-historical-reference:
