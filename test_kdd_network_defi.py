@@ -762,6 +762,43 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         self.assertEqual(next(s for s in raw["sonde"] if s["rete"]=="sui")
                          ["eventi"][0]["tipo"],"VARIAZIONE_NETTA_SALDO_NON_TRASFERIMENTO")
 
+    def test_holders_comparison_survives_bounded_target_rotation(self):
+        import kdd_capital_flow as cap
+        contracts=["0x"+format(i+1, "040x") for i in range(6)]
+        assets={"posizioni":[],"candidati":[
+            {"token":"T"+str(i),"progetto_id":"project-"+str(i),
+             "coppia_analisi":"T"+str(i)+"/EUR",
+             "contratti_indicizzati":[{"rete":"ethereum","contratto":address}]}
+            for i,address in enumerate(contracts)],
+            "fonti_native":{"ethereum":{"valori":{"altezza_blocco":1000}}}}
+        economic={"posizioni":[],"candidati":[{} for _ in contracts]}
+        calls=[]
+        def fake_probe(key, assets, fetch, previous):
+            previous_rows=previous.get("detentori") or []
+            old=previous_rows[0]["unita_minima"] if previous_rows else None
+            calls.append((key[1],old))
+            qty=int(old)+1 if old is not None else 100
+            return {"eventi":[],"detentori":[{
+                "account":"0x"+"a"*40,"unita_minima":str(qty),"decimali":18,
+                "variazione_unita_minima":str(qty-int(old)) if old else None,
+                "entita":{"stato":"ENTITA_NON_IDENTIFICATA"}}],
+                "elementi_esaminati":1,"eventi_distinti":0,
+                "periodo":{"tipo":"TEST"},"copertura":"Synthetic holder snapshot"}
+        with mock.patch.object(cap,"_probe",side_effect=fake_probe):
+            first=cap.collect(T,assets,economic,None,lambda *args: None)
+            second=cap.collect(T+dt.timedelta(minutes=1),assets,economic,first,lambda *args: None)
+            third=cap.collect(T+dt.timedelta(minutes=2),assets,economic,second,lambda *args: None)
+        self.assertEqual([x["asset_tecnico"] for x in first["sonde"]],contracts[:5])
+        self.assertEqual(len(first["storico_detentori"]),5)
+        self.assertEqual(len(second["storico_detentori"]),6)
+        self.assertEqual(len(third["storico_detentori"]),6)
+        self.assertEqual(calls[6],(contracts[0],"100"))
+        self.assertTrue(any(key==contracts[4] and prior=="100" for key,prior in calls[10:]))
+        interpreted=cap.at_read(third,assets,economic,T+dt.timedelta(minutes=2))
+        self.assertEqual(len(interpreted["candidati"]),6)
+        self.assertTrue(any(x["osservazioni"][0]["stato"]=="RINVIATO_BUDGET"
+                            for x in interpreted["candidati"]))
+
     def test_dynamic_candidate_rotation_and_missing_attribution(self):
         import kdd_capital_flow as cap
         assets = {"posizioni": [],"candidati":[
