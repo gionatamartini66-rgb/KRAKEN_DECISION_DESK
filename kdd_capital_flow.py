@@ -809,9 +809,59 @@ def _solana_token(mint, url, fetch, previous):
                         "Campione trasferimenti massimo una transazione di un account selezionato."}
 
 
+def _solana_system_sample(fetch):
+    """Two public reads, one finalized System Program transaction sample."""
+    program="11111111111111111111111111111111"
+    signatures=_rpc(fetch,SOLANA_ALT_RPC,"getSignaturesForAddress",
+                    [program,{"limit":1,"commitment":"finalized"}])
+    if not isinstance(signatures,list) or len(signatures)>1:
+        raise ValueError("SOL system signatures unavailable")
+    events=[]
+    slot=None
+    if signatures:
+        latest=signatures[0]
+        if (isinstance(latest,dict) and latest.get("err") is None and
+                B58.fullmatch(str(latest.get("signature")))):
+            txid=latest["signature"]
+            tx=_rpc(fetch,SOLANA_ALT_RPC,"getTransaction",
+                    [txid,{"encoding":"jsonParsed","commitment":"finalized",
+                           "maxSupportedTransactionVersion":1}])
+            if (not isinstance(tx,dict) or not isinstance(tx.get("meta"),dict)
+                    or tx["meta"].get("err") is not None):
+                raise ValueError("SOL system transaction unavailable")
+            slot=_nat(tx.get("slot"))
+            when=(dt.datetime.fromtimestamp(_nat(tx["blockTime"],10**11),UTC).isoformat()
+                  if tx.get("blockTime") is not None else None)
+            ins=list(((tx.get("transaction") or {}).get("message") or {}).get("instructions") or [])
+            for inner in tx["meta"].get("innerInstructions") or []:
+                if isinstance(inner,dict):
+                    ins.extend(inner.get("instructions") or [])
+            for n,instruction in enumerate(ins[:120]):
+                parsed=instruction.get("parsed") if isinstance(instruction,dict) else None
+                info=parsed.get("info") if isinstance(parsed,dict) else None
+                if (not isinstance(info,dict) or parsed.get("type")!="transfer"
+                        or instruction.get("program")!="system"
+                        or not B58.fullmatch(str(info.get("source")))
+                        or not B58.fullmatch(str(info.get("destination")))):
+                    continue
+                events.append(_event("solana","NATIVE",txid,n,info.get("lamports"),
+                                     9,SOLANA_ALT_RPC,slot,when,
+                                     info["source"],info["destination"]))
+    chosen,total=_top(events)
+    return {"eventi":chosen,"detentori":[],"eventi_distinti":total,
+            "elementi_esaminati":1 if slot is not None else 0,
+            "periodo":{"tipo":"UNA_TRANSAZIONE_SYSTEM_PROGRAM_FINALIZZATA","slot":slot},
+            "copertura":"Una transazione finalizzata campionata fra gli utilizzi del System Program; non rappresenta tutti i movimenti SOL."}
+
+
 def _solana_native(url, fetch, previous):
-    result = _rpc(fetch, url, "getLargestAccounts",
-                  [{"commitment": "finalized", "filter": "circulating"}])
+    try:
+        result = _rpc(fetch, url, "getLargestAccounts",
+                      [{"commitment": "finalized", "filter": "circulating"}])
+    except (OSError,ValueError,TypeError,KeyError):
+        # A throttled top-account method need not erase public confirmed SOL
+        # system transfers: this alternate route actually returned a transfer.
+        return dict(_solana_system_sample(fetch),fonte_detentori=None)
     rows = result.get("value") if isinstance(result, dict) else None
     if not isinstance(rows, list) or len(rows) > 20:
         raise ValueError("largest SOL accounts invalid")
@@ -827,11 +877,20 @@ def _solana_native(url, fetch, previous):
                         "decimali": 9, "variazione_unita_minima": str(n-int(old)) if old is not None else None,
                         "confronto_precedente_utc": previous.get("acquisito_utc") if old is not None else None,
                         "entita": {"stato":"ENTITA_NON_IDENTIFICATA"}})
-    return {"eventi": [], "detentori": holders, "fonte_detentori": url,
-            "elementi_esaminati": len(rows), "eventi_distinti": 0,
+    sample=None
+    try:
+        sample=_solana_system_sample(fetch)
+    except (OSError,ValueError,TypeError,KeyError,OverflowError):
+        pass
+    return {"eventi": sample["eventi"] if sample else [],
+            "detentori": holders, "fonte_detentori": url,
+            "elementi_esaminati": len(rows),
+            "eventi_distinti": sample["eventi_distinti"] if sample else 0,
             "periodo": {"tipo":"TOP20_ACCOUNT_SOL_FINALIZZATI",
-                        "slot": _nat(result.get("context", {}).get("slot"))},
-            "copertura": "Top 20 account SOL circolanti, non tutti i detentori e non prova di movimenti."}
+                        "slot": _nat(result.get("context", {}).get("slot")),
+                        "sistema":sample["periodo"] if sample else None},
+            "copertura": "Top 20 account SOL circolanti; non tutti i detentori. "
+                        + (sample["copertura"] if sample else "Nessun trasferimento acquisito.")}
 
 
 def _bitcoin(fetch, native):
@@ -1206,7 +1265,7 @@ def at_read(raw, asset_rows, economics, now):
                 key[0]=="ethereum" and key[1]!="NATIVE" and
                 ev["fonte"] in (indexed_url, ethplorer_url)) and not (
                 key[0]=="bsc" and key[1]!="NATIVE" and ev["fonte"]==binplorer_url) and not (
-                key[0]=="solana" and key[1]!="NATIVE" and ev["fonte"]==SOLANA_ALT_RPC) and not (
+                key[0]=="solana" and ev["fonte"]==SOLANA_ALT_RPC) and not (
                 key[0] in ROUTESCAN_CHAINS and key[1]!="NATIVE" and ev["fonte"]==routescan_url):
                 raise ValueError("event source incompatible with chain/contract")
             labels=ev.get("attribuzione")
