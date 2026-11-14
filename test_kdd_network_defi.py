@@ -1377,6 +1377,14 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         wallet={"posizioni":[{"token":"SYN"},{"token":"SUC"},{"token":"GONE"}]}
         snapshot=desk.wallet_spot_markets({},assembled,wallet)
         self.assertEqual(set(snapshot),{"SYN","SUC"})
+        source={"rilevazione_utc":T.isoformat(),"markets":snapshot,
+                "trends":{},"feed":[],"problemi_feed":[]}
+        simulated={"posizioni":[{"token":"SYN","quantita":"2"},
+                                {"token":"SUC","quantita":"3"}]}
+        actual=desk.build_report(source,simulated,{}, {}, [])
+        self.assertEqual([r["prezzo_eur"] for r in actual["posizioni"]],[10,9])
+        self.assertEqual([r["valore_eur"] for r in actual["posizioni"]],[20,27])
+        self.assertEqual(actual["totale_stimato_eur"],47)
         # OHLC is in USD, not EUR. Comparing 11 USD closes to 10 EUR
         # would manufacture a roughly -9% movement.
         daily=[[0,0,0,0,"11",0] for _ in range(40)]
@@ -1391,6 +1399,11 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         self.assertNotIn("USDC",fx)
         self.assertNotIn("SUC",only_usd)
         self.assertEqual(set(desk.wallet_spot_markets({},only_usd,wallet)),{"SYN"})
+        partial=desk.build_report(dict(source,markets=desk.wallet_spot_markets(
+            {},only_usd,simulated)),simulated,{}, {}, [])
+        self.assertNotIn("valore_eur",partial["posizioni"][1])
+        self.assertEqual(partial["posizioni"][0]["valore_eur"],20)
+        self.assertEqual(partial["stato_totale"],"PARZIALE")
         without_usd=dict(tickers)
         without_usd.pop("EURUSD")
         only_usdc,fx2=multi.assemble(pairs,without_usd,min_vol=0)
