@@ -12,6 +12,8 @@ import re
 UTC = dt.timezone.utc
 SCHEMA = "kdd-capital-observatory-v001"
 MAX_TARGETS = 5
+MAX_PUBLIC_CALLS = 15  # extra HTTP requests at most, per normal refresh
+MAX_CALLS_PER_TARGET = 6
 MAX_HISTORY = 32  # bounded last public holder samples across target rotation
 MAX_EVENTS = 8
 MAX_HOLDERS = 10
@@ -725,6 +727,10 @@ def _probe(key, assets, fetch, previous):
     raise ValueError("unsupported chain")
 
 
+class _PublicBudgetReached(RuntimeError):
+    """Bound public network cost without conflating a missing probe with zero."""
+
+
 def collect(now, assets, economics, previous, fetch):
     """Probe a rotated bounded subset, preserve an entry for every wallet/candidate."""
     moment = now.astimezone(UTC)
@@ -757,22 +763,29 @@ def collect(now, assets, economics, previous, fetch):
                 and isinstance(row.get("detentori"),list)):
             history[key]=row
     source = []
+    total_calls = [0]
     for key in chosen:
+        if total_calls[0] >= MAX_PUBLIC_CALLS:
+            break
         calls = [0]
         def counted_fetch(url, payload=None):
+            if calls[0] >= MAX_CALLS_PER_TARGET or total_calls[0] >= MAX_PUBLIC_CALLS:
+                raise _PublicBudgetReached("BUDGET_RICHIESTE")
             calls[0] += 1
+            total_calls[0] += 1
             return fetch(url, payload)
         try:
             result = _probe(key,assets,counted_fetch,history.get(key,{}))
             state="OSSERVATO"
             reason=None
         except (OSError,ValueError,TypeError,KeyError,OverflowError,UnicodeError,
-                AssertionError,AttributeError) as exc:
+                AssertionError,AttributeError,_PublicBudgetReached) as exc:
             result={"eventi":[],"detentori":[],"elementi_esaminati":0,
                     "eventi_distinti":0,"periodo":None,
                     "copertura":"Sorgente non disponibile; nessuno zero economico dedotto"}
             state="NON_DISPONIBILE"
-            reason=type(exc).__name__
+            reason=("BUDGET_RICHIESTE" if isinstance(exc,_PublicBudgetReached)
+                    else type(exc).__name__)
         source.append({"rete":key[0],"asset_tecnico":key[1],
                        "stato":state,"acquisito_utc":moment.isoformat(timespec="seconds"),
                        "motivo":reason,"richieste_effettuate":calls[0],**result})
@@ -784,9 +797,11 @@ def collect(now, assets, economics, previous, fetch):
                 if key in targets]
     return {"schema":SCHEMA,"acquisito_utc":moment.isoformat(timespec="seconds"),
             "sonde":source,"target_totali":len(targets),"target_interrogati":len(source),
-            "richieste_effettuate":sum(s["richieste_effettuate"] for s in source),
+            "richieste_effettuate":total_calls[0],
+            "limite_richieste_refresh":MAX_PUBLIC_CALLS,
+            "limite_richieste_target":MAX_CALLS_PER_TARGET,
             "storico_detentori":historic,
-            "prossimo_target":("|".join(targets[(index+len(chosen))%len(targets)])
+            "prossimo_target":("|".join(targets[(index+len(source))%len(targets)])
                                if targets else None),
             "limite":"Campione rotante di reti/contratti, non osservatorio completo, "
                      "nessun proprietario dedotto da un account; nessun segnale automatico."}
@@ -805,6 +820,9 @@ def at_read(raw, asset_rows, economics, now):
             raw.get("target_totali")!=len(allowed) or
             raw.get("target_interrogati")!=len(sources)):
         raise ValueError("capital coverage mismatch")
+    if (raw.get("limite_richieste_refresh") != MAX_PUBLIC_CALLS
+            or raw.get("limite_richieste_target") != MAX_CALLS_PER_TARGET):
+        raise ValueError("capital public request budget altered")
     bound={}
     for source in sources:
         if not isinstance(source,dict):
@@ -815,7 +833,7 @@ def at_read(raw, asset_rows, economics, now):
         bound[key]=source
         if source.get("stato") not in ("OSSERVATO","NON_DISPONIBILE"):
             raise ValueError("capital source state invalid")
-        _nat(source.get("richieste_effettuate"), 100)
+        _nat(source.get("richieste_effettuate"), MAX_CALLS_PER_TARGET)
         events=source.get("eventi")
         holders=source.get("detentori")
         if (not isinstance(events,list) or len(events)>MAX_EVENTS or
@@ -868,7 +886,8 @@ def at_read(raw, asset_rows, economics, now):
             _quantity(h.get("unita_minima"),h.get("decimali"))
         if source["stato"]=="NON_DISPONIBILE" and (events or holders):
             raise ValueError("unavailable source cannot carry metrics")
-    if raw.get("richieste_effettuate") != sum(s["richieste_effettuate"] for s in sources):
+    if (raw.get("richieste_effettuate") != sum(s["richieste_effettuate"] for s in sources)
+            or _nat(raw.get("richieste_effettuate")) > MAX_PUBLIC_CALLS):
         raise ValueError("capital request counts inconsistent")
     age=now-when
     fresh=dt.timedelta(minutes=-2)<=age<=dt.timedelta(minutes=30)
