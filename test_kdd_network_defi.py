@@ -724,6 +724,44 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         self.assertEqual(historical["eventi"][0]["stato_alla_lettura"],"STORICO")
         self.assertIsNone(historical["flussi_exchange_campione"]["ingresso_unita_minima"])
 
+    def test_custodian_fund_protocol_labels_are_not_exchange_flows(self):
+        """An identified institution is not automatically a known exchange."""
+        import kdd_capital_flow as cap
+        assets = self._assets(contract=self.EVM_ADDR)
+        for name, expected in (("Example Custodian", "CUSTODE"),
+                               ("Example Fund", "FONDO"),
+                               ("Example Protocol", "PROTOCOLLO")):
+            with self.subTest(name=name):
+                def fetch(url, payload=None):
+                    if payload:
+                        method = payload["method"]
+                        if method == "eth_call":
+                            return {"jsonrpc": "2.0", "id": 1, "result": "0x12"}
+                        if method == "eth_getLogs":
+                            raise OSError("RPC logs unavailable")
+                    if url.endswith("/transfers"):
+                        return {"items": [{"tx_hash": "0x" + "e" * 64,
+                            "timestamp": T.isoformat(),
+                            "from": {"hash": self.EVM_FROM, "public_tags": []},
+                            "to": {"hash": self.EVM_TO,
+                                   "public_tags": [{"label": name}]},
+                            "total": {"value": "1000000000000000000"}}]}
+                    if url.endswith("/holders"):
+                        return {"items": []}
+                    raise AssertionError(url)
+                raw = cap.collect(T, assets, self._econ(), None, fetch)
+                reading = cap.at_read(raw, assets, self._econ(), T)
+                observation = reading["posizioni"][0]["osservazioni"][0]
+                self.assertEqual(observation["eventi"][0]["attribuzione"]["a"]["classe"],
+                                 expected)
+                self.assertEqual(observation["operatori_etichettati_nel_campione"], 1)
+                flow = observation["flussi_exchange_campione"]
+                self.assertEqual(flow["stato"], "NON_ATTRIBUIBILE_O_STORICO")
+                for field in ("ingresso_unita_minima", "uscita_unita_minima",
+                              "flusso_netto_unita_minima"):
+                    self.assertIsNone(flow[field])
+                self.assertIn("NON zero", flow["limite"])
+
     def test_solana_spl_holders_and_transfer_checked(self):
         import kdd_capital_flow as cap
         assets = {"posizioni": [{"token": "JUP", "progetto_id": "jupiter",
