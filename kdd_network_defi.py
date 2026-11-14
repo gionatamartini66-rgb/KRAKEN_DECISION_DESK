@@ -711,10 +711,12 @@ def _read_assets(raw, owned, candidates, economic, now):
                        and NATIVE_IDS[r["progetto_id"]][0] == r["token"]
                        and NATIVE_IDS[r["progetto_id"]][1] in NATIVE_ENDPOINTS})
     sources = raw.get("fonti_native")
+    legacy="prossima_rete_nativa" not in raw
     if (not isinstance(sources,dict) or not set(sources).issubset(set(relevant))
             or len(sources)!=min(len(relevant),MAX_NATIVE_SOURCES)
-            or raw.get("prossima_rete_nativa") not in
-               (set(relevant) if relevant else {None})):
+            or (legacy and set(sources)!=set(relevant[:MAX_NATIVE_SOURCES]))
+            or (not legacy and raw.get("prossima_rete_nativa") not in
+                (set(relevant) if relevant else {None}))):
         raise ValueError("native source coverage invalid")
     result_sources = {}
     for chain, value in sources.items():
