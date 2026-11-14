@@ -32,6 +32,56 @@ jobs:
         run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_funding_book_g2
       - name: Existing safe updater tests
         run: python -B scripts/test_kdd_aggiorna.py
+      - name: KDD-17 TEMPORARY bounded public onchain smoke, no secrets
+        if: github.event_name == 'pull_request' && github.event.pull_request.number == 64
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          PYTHONPATH=.:scripts python - <<'PY'
+          import json, time, datetime as dt
+          import kdd_network_defi as net, kdd_capital_flow as cap
+          calls = []
+          def fetch(url, payload=None):
+              started = time.monotonic()
+              try:
+                  r = net._http(url, payload)
+                  calls.append({"host":url.split("/")[2],"method":payload.get("method") if isinstance(payload,dict) else "GET",
+                                "ms":round((time.monotonic()-started)*1000),"status":"OK"})
+                  return r
+              except Exception as ex:
+                  calls.append({"host":url.split("/")[2],"method":payload.get("method") if isinstance(payload,dict) else "GET",
+                                "ms":round((time.monotonic()-started)*1000),"status":type(ex).__name__,
+                                "detail":str(getattr(ex,"code",str(ex)))[:80]})
+                  raise
+          usdc="0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+          spl="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+          base="https://eth.blockscout.com/api/v2/tokens/"+usdc
+          results={}
+          for name,fn in [
+              ("blockscout_transfers", lambda: fetch(base+"/transfers")),
+              ("blockscout_holders", lambda: fetch(base+"/holders")),
+              ("blockscout_token", lambda: fetch(base)),
+              ("ethereum_head",lambda: net._native_observe("ethereum",fetch,dt.datetime.now(dt.timezone.utc))),
+              ("solana_largest",lambda: cap._rpc(fetch,net.SOL_URL,"getTokenLargestAccounts",[spl,{"commitment":"finalized"}])),
+              ("solana_supply",lambda: cap._rpc(fetch,net.SOL_URL,"getTokenSupply",[spl,{"commitment":"finalized"}])),
+              ("xrpl_capital",lambda:cap._xrpl(net.NATIVE_ENDPOINTS["xrpl"],fetch)),
+              ("sui_capital",lambda:cap._sui(net.SUI_URL,fetch)),
+              ("near_capital",lambda:cap._near(net.NATIVE_ENDPOINTS["near"],fetch)),
+          ]:
+              try:
+                  started=time.monotonic()
+                  out=fn()
+                  first=(out.get("items") or [None])[0] if isinstance(out,dict) else None
+                  results[name]={"status":"OK","ms":round((time.monotonic()-started)*1000),
+                      "top_keys":list(out)[:18] if isinstance(out,dict) else type(out).__name__,
+                      "item_keys":list(first)[:20] if isinstance(first,dict) else None,
+                      "count":len(out.get("items",[])) if isinstance(out,dict) and isinstance(out.get("items"),list) else None,
+                      "events":len(out.get("eventi",[])) if isinstance(out,dict) else None,
+                      "holders":len(out.get("detentori",[])) if isinstance(out,dict) else None}
+              except Exception as e:
+                  results[name]={"status":"UNAVAILABLE","error":type(e).__name__+":"+str(e)[:140]}
+          print("KDD17_LIVE_SCHEMA",json.dumps({"results":results,"requests":calls,"count":len(calls)},ensure_ascii=False),flush=True)
+          PY
 
   r5-historical-reference:
     runs-on: ubuntu-latest
