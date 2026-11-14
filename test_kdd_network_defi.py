@@ -849,6 +849,57 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         second=cap.collect(T,assets,self._econ(),raw,fetch)
         self.assertEqual(second["sonde"][0]["detentori"][0]["variazione_unita_minima"],"0")
 
+    def test_sol_rpc_429_jupiter_holders_plus_real_shaped_mint_transfer(self):
+        import kdd_capital_flow as cap
+        import kdd_network_defi as net
+        assets={"posizioni":[{"token":"BONK","progetto_id":"bonk",
+                 "contratti_indicizzati":[{"rete":"solana","contratto":self.MINT}]}],
+                "candidati":[],"fonti_native":{}}
+        called=[]
+        def fetch(url,payload=None):
+            if url==net.SOL_URL:
+                raise OSError("HTTP429 getTokenLargestAccounts")
+            if url.startswith(cap.JUPITER_TOKENS):
+                return [{"id":self.MINT,"decimals":6,"holderCount":25000,
+                         "audit":{"topHoldersPercentage":28.5}}]
+            if url!=cap.SOLANA_ALT_RPC:
+                raise AssertionError(url)
+            called.append(payload["method"])
+            if payload["method"]=="getSignaturesForAddress":
+                return {"id":1,"result":[{"signature":"F"*64,"err":None}]}
+            if payload["method"]=="getTransaction":
+                self.assertEqual(payload["params"][1]["maxSupportedTransactionVersion"],1)
+                return {"id":1,"result":{"slot":500,
+                    "blockTime":int(T.timestamp()),"meta":{"err":None,
+                        "innerInstructions":[]},
+                    "transaction":{"message":{"instructions":[
+                        {"parsed":{"type":"transferChecked","info":{
+                            "mint":self.MINT,"source":self.HOLDER,
+                            "destination":"D"*32,
+                            "tokenAmount":{"amount":"2500000","decimals":6}}}},
+                        {"parsed":{"type":"transferChecked","info":{
+                            "mint":"Z"*32,"source":self.HOLDER,
+                            "destination":"D"*32,
+                            "tokenAmount":{"amount":"9000000","decimals":6}}}}]}}}}
+            raise AssertionError(payload["method"])
+        raw=cap.collect(T,assets,{"posizioni":[{}],"candidati":[]},None,fetch)
+        record=raw["sonde"][0]
+        self.assertEqual(record["stato"],"OSSERVATO")
+        self.assertEqual(raw["richieste_effettuate"],4)
+        self.assertEqual(called,["getSignaturesForAddress","getTransaction"])
+        self.assertEqual(record["aggregato_detentori"]["numero_account"],25000)
+        self.assertEqual(record["periodo"]["tipo"],"JUPITER_HOLDER_PLUS_MINT_TRANSFER")
+        self.assertEqual(len(record["eventi"]),1)
+        self.assertEqual(record["eventi"][0]["quantita"],"2.5")
+        read=cap.at_read(raw,assets,{"posizioni":[{}],"candidati":[]},T)
+        obs=read["posizioni"][0]["osservazioni"][0]
+        self.assertEqual(obs["eventi"][0]["fonte"],cap.SOLANA_ALT_RPC)
+        self.assertEqual(obs["aggregato_detentori"]["numero_account"],25000)
+        wrong=copy.deepcopy(raw)
+        wrong["sonde"][0]["eventi"][0]["asset_tecnico"]="Z"*32
+        with self.assertRaises(ValueError):
+            cap.at_read(wrong,assets,{"posizioni":[{}],"candidati":[]},T)
+
     def test_xrp_sui_near_samples_and_source_outage_independent(self):
         import kdd_capital_flow as cap
         btc = self._assets()
