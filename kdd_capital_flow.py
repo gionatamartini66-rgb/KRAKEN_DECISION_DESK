@@ -169,6 +169,7 @@ def _evm_native(chain, url, fetch, native):
 ETHPLORER = "https://api.ethplorer.io"
 BINPLORER = "https://api.binplorer.com"
 JUPITER_TOKENS = "https://api.jup.ag/tokens/v2/search?query="
+SOLANA_ALT_RPC = "https://public.rpc.solanavibestation.com"
 ETHPLORER_HISTORY_LIMIT = 20
 # Routescan keyless Data API: 2 req/s and 10,000/day. Only networks with
 # successful end-to-end public probes are activated here.
@@ -641,12 +642,98 @@ def _evm_token(chain, contract, url, fetch, native, previous):
             "fallback": fallback_reason}
 
 
+def _solana_recent_mint_transfer(mint, fetch):
+    """Mint-address signatures: one recent finalized tx, not a complete token flow.
+
+    Public Solana RPC getSignaturesForAddress + getTransaction v1 was observed
+    returning a real transferChecked mint match without top accounts.
+    """
+    signatures=_rpc(fetch,SOLANA_ALT_RPC,"getSignaturesForAddress",
+                    [mint,{"limit":2,"commitment":"finalized"}])
+    if not isinstance(signatures,list) or len(signatures)>2:
+        raise ValueError("mint signature sample invalid")
+    events=[]
+    scanned=0
+    slots=[]
+    for signature in signatures[:1]:
+        if not isinstance(signature,dict) or signature.get("err") is not None:
+            continue
+        txid=signature.get("signature")
+        if not B58.fullmatch(str(txid)):
+            continue
+        tx=_rpc(fetch,SOLANA_ALT_RPC,"getTransaction",
+                [txid,{"encoding":"jsonParsed","commitment":"finalized",
+                       "maxSupportedTransactionVersion":1}])
+        if (not isinstance(tx,dict) or not isinstance(tx.get("meta"),dict)
+                or tx["meta"].get("err") is not None):
+            continue
+        scanned+=1
+        slot=_nat(tx.get("slot"))
+        slots.append(slot)
+        stamp=(dt.datetime.fromtimestamp(_nat(tx["blockTime"],10**11),UTC).isoformat()
+               if tx.get("blockTime") is not None else None)
+        base=(tx.get("transaction") or {}).get("message") or {}
+        instructions=list(base.get("instructions") or [])
+        for inner in tx["meta"].get("innerInstructions") or []:
+            if isinstance(inner,dict):
+                instructions.extend(inner.get("instructions") or [])
+        for i,instruction in enumerate(instructions[:120]):
+            parsed=instruction.get("parsed") if isinstance(instruction,dict) else None
+            info=parsed.get("info") if isinstance(parsed,dict) else None
+            if (not isinstance(info,dict) or parsed.get("type")!="transferChecked"
+                    or info.get("mint")!=mint):
+                continue
+            quantity=info.get("tokenAmount")
+            if not isinstance(quantity,dict):
+                continue
+            dec=quantity.get("decimals")
+            if (type(dec) is not int or not 0<=dec<=30
+                    or not B58.fullmatch(str(info.get("source")))
+                    or not B58.fullmatch(str(info.get("destination")))):
+                continue
+            events.append(_event("solana",mint,txid,i,quantity.get("amount"),
+                                 dec,SOLANA_ALT_RPC,slot,stamp,
+                                 info["source"],info["destination"]))
+    result,count=_top(events)
+    return {"eventi":result,"eventi_distinti":count,
+            "elementi_esaminati":scanned,
+            "periodo":{"tipo":"CAMPIONE_TRANSAZIONE_MINT_FINALIZZATA",
+                       "slot":slots[0] if slots else None},
+            "copertura":"Una transazione finalizzata che include il mint, trasferimenti transferChecked soltanto: NON storico completo del token."}
+
+
 def _solana_token(mint, url, fetch, previous):
     try:
         top = _rpc(fetch, url, "getTokenLargestAccounts",
                    [mint, {"commitment": "finalized"}])
     except (OSError, ValueError, TypeError, KeyError):
-        return _solana_jupiter_index(mint, fetch)
+        # Holder aggregation and recent mint-linked transfers are different
+        # evidence: either may survive when top-20 Solana RPC is throttled.
+        index=None
+        try:
+            index=_solana_jupiter_index(mint,fetch)
+        except (OSError,ValueError,TypeError,KeyError,OverflowError):
+            pass
+        sample=None
+        try:
+            sample=_solana_recent_mint_transfer(mint,fetch)
+        except (OSError,ValueError,TypeError,KeyError,OverflowError):
+            pass
+        if index is None and (sample is None or not sample["eventi"]):
+            raise ValueError("Solana public index and mint transfer unavailable")
+        if index is None:
+            return dict(sample,detentori=[],
+                        copertura=sample["copertura"]+"; Jupiter holders unavailable",
+                        fonte_detentori=None)
+        if sample and sample["eventi"]:
+            index.update(eventi=sample["eventi"],
+                         eventi_distinti=sample["eventi_distinti"],
+                         elementi_esaminati=sample["elementi_esaminati"],
+                         periodo={"tipo":"JUPITER_HOLDER_PLUS_MINT_TRANSFER",
+                                  "trasferimento":sample["periodo"],
+                                  "aggregato":"JUPITER_SECONDARIO"},
+                         copertura=index["copertura"]+"; "+sample["copertura"])
+        return index
     if not isinstance(top, dict) or not isinstance(top.get("value"), list):
         raise ValueError("largest token accounts missing")
     slot = _nat(top.get("context", {}).get("slot"))
@@ -1119,6 +1206,7 @@ def at_read(raw, asset_rows, economics, now):
                 key[0]=="ethereum" and key[1]!="NATIVE" and
                 ev["fonte"] in (indexed_url, ethplorer_url)) and not (
                 key[0]=="bsc" and key[1]!="NATIVE" and ev["fonte"]==binplorer_url) and not (
+                key[0]=="solana" and key[1]!="NATIVE" and ev["fonte"]==SOLANA_ALT_RPC) and not (
                 key[0] in ROUTESCAN_CHAINS and key[1]!="NATIVE" and ev["fonte"]==routescan_url):
                 raise ValueError("event source incompatible with chain/contract")
             labels=ev.get("attribuzione")
