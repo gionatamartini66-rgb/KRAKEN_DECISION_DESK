@@ -32,6 +32,62 @@ jobs:
         run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_funding_book_g2
       - name: Existing safe updater tests
         run: python -B scripts/test_kdd_aggiorna.py
+      - name: TEMP KDD17 bounded public provider discovery on PR64
+        if: github.event_name == 'pull_request' && github.event.pull_request.number == 64
+        continue-on-error: true
+        timeout-minutes: 4
+        run: |
+          PYTHONPATH=.:scripts python - <<'PY'
+          import json,time,datetime as dt,urllib.parse
+          import kdd_network_defi as net
+          contract={
+              "polygon":("137","0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"),
+              "base":("8453","0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
+              "arbitrum":("42161","0xaf88d065e77c8cc2239327c5edb3a432268e5831"),
+              "optimism":("10","0x0b2c639c533813f4aa9d7837caf62653d097ff85")}
+          results=[];max_calls=24
+          def check(name,url,payload=None):
+              if len(results)>=max_calls:return
+              t=time.monotonic()
+              try:
+                  out=net._http(url,payload)
+                  result=out.get("result") if payload and isinstance(out,dict) else out
+                  if payload and (not isinstance(out,dict) or out.get("error") or "result" not in out):
+                      raise ValueError("RPC error "+str(out.get("error") if isinstance(out,dict) else out)[:100])
+                  rows=(result.get("items") or result.get("operations") or result.get("holders") or result.get("value")
+                        if isinstance(result,dict) else result)
+                  if not isinstance(rows,list):rows=None
+                  first=rows[0] if rows else None
+                  results.append({"name":name,"status":"OK","ms":round((time.monotonic()-t)*1000),
+                      "keys":list(result)[:12] if isinstance(result,dict) else None,
+                      "n":len(rows) if rows is not None else None,
+                      "firstkeys":list(first)[:20] if isinstance(first,dict) else None,
+                      "sample":{k:first.get(k) for k in ("txHash","tokenAddress","chainId","amount","tokenDecimals","timestamp","balance")}
+                                if isinstance(first,dict) else None})
+              except Exception as ex:
+                  results.append({"name":name,"status":"FAIL","ms":round((time.monotonic()-t)*1000),
+                                  "err":type(ex).__name__+":"+str(getattr(ex,"code",str(ex)))[:90]})
+          for label,(chainid,address) in contract.items():
+              base="https://api.routescan.io/v2/network/mainnet/evm/"+chainid
+              check(label+"_erc20",base+"/erc20-transfers?tokenAddress="+address+"&sort=desc&limit=5")
+              check(label+"_holders",base+"/erc20/"+address+"/holders?limit=5")
+          for label,url,method,params in [
+            ("sol_vibe_largest","https://public.rpc.solanavibestation.com","getTokenLargestAccounts",["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",{"commitment":"finalized"}]),
+            ("sol_vibe_sig","https://public.rpc.solanavibestation.com","getSignaturesForAddress",["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",{"limit":1}]),
+            ("sol_chainstack","https://solana-mainnet.rpc.chainstack.com","getTokenLargestAccounts",["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",{"commitment":"finalized"}]),
+            ("sol_vibe_sollargest","https://public.rpc.solanavibestation.com","getLargestAccounts",[{"commitment":"finalized","filter":"circulating"}]),
+            ("bsc_bscscan_rpc","https://bsc-dataseed.bnbchain.org","eth_getLogs",[{"address":"0x55d398326f99059ff775485246999027b3197955","fromBlock":"latest","toBlock":"latest","topics":["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"]}]),
+            ("bsc_alt_rpc","https://bsc.publicnode.com","eth_blockNumber",[]),
+          ]:
+              check(label,url,{"jsonrpc":"2.0","id":1,"method":method,"params":params})
+          for label,url in [
+             ("xrpscan_labels","https://api.xrpscan.com/api/v1/names/well-known"),
+             ("xrpscan_rich","https://api.xrpscan.com/api/v1/balances"),
+             ("binplorer_holder","https://api.binplorer.com/getTopTokenHolders/0x55d398326f99059ff775485246999027b3197955?apiKey=freekey&limit=5"),
+             ("solanafm_info","https://api.solana.fm/v0/tokens/EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
+          ]:check(label,url)
+          print("KDD17_PROVIDER_DISCOVERY",json.dumps({"count":len(results),"items":results},ensure_ascii=False),flush=True)
+          PY
 
   r5-historical-reference:
     runs-on: ubuntu-latest
