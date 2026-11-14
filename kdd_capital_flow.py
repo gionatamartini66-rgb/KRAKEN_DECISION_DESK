@@ -55,6 +55,17 @@ def _hex(value, limit=10**24):
     return n
 
 
+def _evm_log_time(value):
+    """Use a chain log's actual Unix-seconds blockTimestamp, never fetch time."""
+    if value is None:
+        return None
+    seconds=_hex(value, 10**11)
+    try:
+        return dt.datetime.fromtimestamp(seconds, UTC).isoformat()
+    except (OverflowError, OSError, ValueError) as exc:
+        raise ValueError("EVM log timestamp outside calendar") from exc
+
+
 def _rpc(fetch, url, method, params):
     data = fetch(url, {"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
     if (not isinstance(data, dict) or data.get("error") or
@@ -425,8 +436,15 @@ def _bsc_goplus_holders(contract, fetch, previous):
         count=_nat(str(count),10**12)
     except ValueError:
         count=None
+    # A reported total of zero cannot coexist with a nonempty top-holder
+    # list. Preserve observed balances, never turn contradictory metadata
+    # into an economically meaningful zero.
+    contradictory=count is not None and count < len(source)
+    status=("CONTEGGIO_INCOERENTE_CON_ELENCO" if contradictory else
+            "NON_DISPONIBILE" if count is None else "DICHIARATO_DALL_INDICE")
     return {"eventi":[],"detentori":holders,"fonte_detentori":url,
-            "aggregato_detentori":{"numero_account":count,
+            "aggregato_detentori":{"numero_account":None if contradictory else count,
+                "stato_numero_account":status,
                 "fonte":url,"tipo":"AGGREGATO_BSC_GOPLUS_SECONDA_FONTE"},
             "elementi_esaminati":len(source),"eventi_distinti":0,
             "periodo":{"tipo":"TOP_HOLDERS_GOPLUS_BSC"},
@@ -550,8 +568,9 @@ def _evm_token(chain, contract, url, fetch, native, previous):
             dest = "0x" + topics[2][-40:]
             kind = ("MINT" if int(topics[1], 16) == 0 else
                     "BURN" if int(topics[2], 16) == 0 else "TRASFERIMENTO")
+            event_time=_evm_log_time(log.get("blockTimestamp"))
             events.append(_event(chain, contract, log["transactionHash"], index,
-                                 int(data, 16), decimals, source, number, None,
+                                 int(data, 16), decimals, source, number, event_time,
                                  origin, dest, kind))
     except (OSError, ValueError, KeyError, TypeError, OverflowError) as exc:
         fallback_reason = type(exc).__name__
@@ -1398,8 +1417,15 @@ def at_read(raw, asset_rows, economics, now):
                     event_age = now-_ts(item["orario_utc"]) if item.get("orario_utc") else None
                     relative = (str((Decimal(item["quantita"])/middle).quantize(Decimal(".01")))
                                 if middle is not None and middle>0 else None)
+                    if event_age is None:
+                        events.append(dict(item,stato_alla_lettura="ORARIO_EVENTO_NON_VERIFICABILE",
+                                           rapporto_mediana_campione=relative,
+                                           valore_usd_indicativo=None,
+                                           limite_temporale="Ora acquisizione nota; ora del trasferimento non fornita"))
+                        continue
                     if (not fresh or record["stato"]!="OSSERVATO" or
-                            (event_age is not None and event_age>dt.timedelta(minutes=30))):
+                            event_age>dt.timedelta(minutes=30)
+                            or event_age<dt.timedelta(minutes=-2)):
                         events.append(dict(item,stato_alla_lettura="STORICO",
                                            rapporto_mediana_campione=relative,
                                            valore_usd_indicativo=None))
