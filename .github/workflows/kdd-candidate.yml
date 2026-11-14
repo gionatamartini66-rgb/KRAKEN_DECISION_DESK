@@ -32,61 +32,50 @@ jobs:
         run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_funding_book_g2
       - name: Existing safe updater tests
         run: python -B scripts/test_kdd_aggiorna.py
-      - name: KDD-17 TEMPORARY second public RPC capability probe
+      - name: KDD-17 TEMPORARY public alternative providers verification
         if: github.event_name == 'pull_request' && github.event.pull_request.number == 64
         continue-on-error: true
         timeout-minutes: 3
         run: |
           PYTHONPATH=.:scripts python - <<'PY'
-          import json, time, datetime as dt
+          import json,time
           import kdd_network_defi as net, kdd_capital_flow as cap
-          reqs=[];MAX=18
-          def fetch(url,payload=None):
-              if len(reqs)>=MAX:raise RuntimeError("public request budget exhausted")
-              t=time.monotonic()
-              try:
-                  out=net._http(url,payload)
-                  reqs.append({"host":url.split("/")[2],"method":payload.get("method") if isinstance(payload,dict) else "GET","ms":round((time.monotonic()-t)*1000),"status":"OK"})
-                  return out
-              except Exception as e:
-                  reqs.append({"host":url.split("/")[2],"method":payload.get("method") if isinstance(payload,dict) else "GET","ms":round((time.monotonic()-t)*1000),"status":type(e).__name__,"code":getattr(e,"code",None)})
-                  raise
+          usdc="0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
           mint="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-          contract="0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
-          now=dt.datetime.now(dt.timezone.utc)
-          results={}
-          def attempt(name, fn):
-              t=time.monotonic()
+          outcomes={};calls=0
+          def check(name,url,payload=None):
+              global calls
+              t=time.monotonic();calls+=1
               try:
-                  x=fn()
-                  results[name]={"status":"OK","elapsed_ms":round((time.monotonic()-t)*1000),
-                    "events":len(x.get("eventi",[])) if isinstance(x,dict) else None,
-                    "holders":len(x.get("detentori",[])) if isinstance(x,dict) else None,
-                    "first_event": {k:x["eventi"][0].get(k) for k in ("tx","quantita","tipo","rete","orario_utc","fonte")}
-                                   if isinstance(x,dict) and x.get("eventi") else None,
-                    "fields":list(x)[:15] if isinstance(x,dict) else None}
-                  return x
+                  resp=net._http(url,payload)
+                  obj=resp.get("result") if payload and isinstance(resp,dict) else resp
+                  if payload and resp.get("error"):raise ValueError(str(resp["error"])[:150])
+                  if payload and "result" not in resp:raise ValueError("missing JSONRPC result")
+                  items=(obj.get("holders") or obj.get("operations") or obj.get("value")
+                         if isinstance(obj,dict) else obj)
+                  if isinstance(items,dict):items=items.get("value")
+                  outcomes[name]={"status":"OK","elapsed_ms":round((time.monotonic()-t)*1000),
+                      "keys":list(obj)[:18] if isinstance(obj,dict) else type(obj).__name__,
+                      "count":len(items) if isinstance(items,list) else None,
+                      "first_keys":list(items[0])[:16] if isinstance(items,list) and items and isinstance(items[0],dict) else None}
               except Exception as e:
-                  results[name]={"status":"UNAVAILABLE","error":type(e).__name__+":"+str(e)[:110],"elapsed_ms":round((time.monotonic()-t)*1000)}
-                  return None
-          head=attempt("ethereum_native_head",lambda:net._native_observe("ethereum",fetch,now))
-          if head and head.get("stato")=="OSSERVATO":
-              attempt("ethereum_ERC20_full_probe",lambda:cap._evm_token(
-                  "ethereum",contract,net.NATIVE_ENDPOINTS["ethereum"],fetch,
-                  {"valori":head["valori"]},{}))
-          for name,url in [("rpcnode_solana","https://public-solana-mainnet.rpcnode.dev"),
-                           ("publicnode_solana","https://solana-rpc.publicnode.com")]:
-              attempt(name,lambda url=url: cap._rpc(fetch,url,"getTokenLargestAccounts",
-                      [mint,{"commitment":"finalized"}]))
-          b=attempt("near_final_block",lambda:cap._rpc(fetch,net.NATIVE_ENDPOINTS["near"],
-                                "block",{"finality":"final"}))
-          if isinstance(b,dict):
-              chunks=b.get("chunks",[])
-              results["near_chunks"]={"count":len(chunks),"first_tx_root":chunks[0].get("tx_root") if chunks else None,
-                                     "non_empty":sum(1 for c in chunks if c.get("tx_root") not in (None,"11111111111111111111111111111111"))}
-          attempt("xrpl_event_sample",lambda:cap._xrpl(net.NATIVE_ENDPOINTS["xrpl"],fetch))
-          attempt("sui_event_sample",lambda:cap._sui(net.SUI_URL,fetch))
-          print("KDD17_REAL_PROBE2",json.dumps({"results":results,"requests":reqs,"count":len(reqs)},ensure_ascii=False),flush=True)
+                  outcomes[name]={"status":"UNAVAILABLE","elapsed_ms":round((time.monotonic()-t)*1000),
+                                  "error":type(e).__name__+":"+str(getattr(e,"code",str(e)))[:140]}
+          topic=cap.TOPIC_TRANSFER
+          for name,url in [("drpc_ethereum","https://eth.drpc.org"),
+                           ("llamarpc_ethereum","https://eth.llamarpc.com"),
+                           ("rpcfree_ethereum","https://rpcfree.com/ethereum-rpc"),
+                           ("blockpi_ethereum","https://ethereum.blockpi.network/v1/rpc/public")]:
+              check(name,url,{"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":[
+                  {"address":usdc,"fromBlock":"latest","toBlock":"latest","topics":[topic]}]})
+          for name,url in [("ethplorer_history",f"https://api.ethplorer.io/getTokenHistory/{usdc}?apiKey=freekey&limit=5"),
+                           ("ethplorer_holders",f"https://api.ethplorer.io/getTopTokenHolders/{usdc}?apiKey=freekey&limit=5")]:
+              check(name,url)
+          for name,url in [("solana_official","https://api.mainnet.solana.com"),
+                           ("solana_nodeflare","https://rpc.nodeflare.app/solana/public")]:
+              check(name,url,{"jsonrpc":"2.0","id":1,"method":"getTokenLargestAccounts",
+                   "params":[mint,{"commitment":"finalized"}]})
+          print("KDD17_PUBLIC_ALT3",json.dumps({"responses":outcomes,"requests":calls}),flush=True)
           PY
 
   r5-historical-reference:
