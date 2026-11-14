@@ -166,12 +166,15 @@ def _evm_native(chain, url, fetch, native):
 # credential (not a private account key). Fair-use limits: 2 rps, 20/min.
 # Source: https://github.com/EverexIO/Ethplorer/wiki/ethplorer-api
 ETHPLORER = "https://api.ethplorer.io"
+BINPLORER = "https://api.binplorer.com"
+JUPITER_TOKENS = "https://api.jup.ag/tokens/v2/search?query="
 ETHPLORER_HISTORY_LIMIT = 20
 
 
-def _ethplorer_history(contract, decimals, fetch):
+def _ethplorer_history(contract, decimals, fetch, chain="ethereum"):
     """Indexed ERC-20 contract operations when direct logs/explorer are unavailable."""
-    url = (ETHPLORER + "/getTokenHistory/" + contract
+    base = ETHPLORER if chain == "ethereum" else BINPLORER
+    url = (base + "/getTokenHistory/" + contract
            + "?apiKey=freekey&limit=" + str(ETHPLORER_HISTORY_LIMIT))
     data = fetch(url)
     records = data.get("operations") if isinstance(data, dict) else None
@@ -202,14 +205,15 @@ def _ethplorer_history(contract, decimals, fetch):
         if key in seen:
             continue
         seen.add(key)
-        events.append(_event("ethereum", contract, tx, n, qty, decimals,
+        events.append(_event(chain, contract, tx, n, qty, decimals,
                              url, None, stamp, origin, dest, kind))
     return events, url
 
 
-def _ethplorer_holders(contract, decimals, previous, fetch):
+def _ethplorer_holders(contract, decimals, previous, fetch, chain="ethereum"):
     """Exact rawBalance only; no percentage inferred from an index's UI balance."""
-    url = ETHPLORER + "/getTopTokenHolders/" + contract + "?apiKey=freekey&limit=10"
+    base = ETHPLORER if chain == "ethereum" else BINPLORER
+    url = base + "/getTopTokenHolders/" + contract + "?apiKey=freekey&limit=10"
     data = fetch(url)
     records = data.get("holders") if isinstance(data, dict) else None
     if not isinstance(records, list) or len(records) > MAX_HOLDERS:
@@ -235,7 +239,60 @@ def _ethplorer_holders(contract, decimals, previous, fetch):
     return rows, url
 
 
+
+def _bsc_public_index(contract, fetch, previous):
+    """Binplorer on BNB Chain: public operations and accounts, not owners."""
+    meta = fetch(BINPLORER + "/getTokenInfo/" + contract + "?apiKey=freekey")
+    if not isinstance(meta, dict) or str(meta.get("address","")).lower() != contract.lower():
+        raise ValueError("Binplorer contract mismatch")
+    decimals = _nat(meta.get("decimals"), 30)
+    events, source = _ethplorer_history(contract, decimals, fetch, chain="bsc")
+    holders, holder_source = [], None
+    try:
+        holders, holder_source = _ethplorer_holders(contract, decimals, previous, fetch, chain="bsc")
+    except (OSError, ValueError, TypeError, KeyError, OverflowError):
+        pass
+    selected, total = _top(events)
+    return {"eventi": selected, "detentori": holders, "fonte_detentori": holder_source,
+            "elementi_esaminati":len(events), "eventi_distinti":total,
+            "periodo":{"tipo":"PAGINA_BINPLORER"},
+            "copertura":"BNB Chain: recent indexed transfers and up to ten holders; sample, not full exchange flows",
+            "fallback":"BINPLORER_INDEX"}
+
+
+def _solana_jupiter_index(mint, fetch):
+    """Public index of holder concentration, NOT owner or transfer events."""
+    url = JUPITER_TOKENS + mint
+    data = fetch(url)
+    matches = [x for x in data if isinstance(x,dict) and x.get("id")==mint] if isinstance(data,list) else []
+    if len(matches)!=1:
+        raise ValueError("Jupiter exact mint not available")
+    row=matches[0]
+    decimals=_nat(row.get("decimals"),30)
+    count=_nat(row.get("holderCount"),10**12)
+    audit=row.get("audit")
+    concentration=audit.get("topHoldersPercentage") if isinstance(audit,dict) else None
+    try:
+        percentage=Decimal(str(concentration))
+        if not percentage.is_finite() or not 0<=percentage<=100:
+            raise ValueError("index concentration invalid")
+        share=str(percentage)
+    except (ValueError,TypeError,InvalidOperation):
+        share=None
+    return {"eventi":[],"detentori":[],"elementi_esaminati":0,"eventi_distinti":0,
+            "aggregato_detentori":{"mint":mint,"numero_account":count,
+               "decimali":decimals,"quota_top_pct_indice":share,"fonte":url,
+               "tipo":"AGGREGATO_INDICIZZATO_SECONDARIO"},
+            "periodo":{"tipo":"RIEPILOGO_JUPITER_TOKEN"},
+            "copertura":"Token SPL: holder count and top share indexed by Jupiter; no individual holders, transfers or owners."}
+
+
 def _evm_token(chain, contract, url, fetch, native, previous):
+    if chain=="bsc":
+        try:
+            return _bsc_public_index(contract, fetch, previous)
+        except (OSError, ValueError, TypeError, KeyError, OverflowError):
+            pass  # native RPC fallback remains
     head = native.get("valori") if isinstance(native, dict) else None
     if not isinstance(head, dict):
         raise ValueError("EVM head unavailable")
@@ -413,8 +470,11 @@ def _evm_token(chain, contract, url, fetch, native, previous):
 
 
 def _solana_token(mint, url, fetch, previous):
-    top = _rpc(fetch, url, "getTokenLargestAccounts",
-               [mint, {"commitment": "finalized"}])
+    try:
+        top = _rpc(fetch, url, "getTokenLargestAccounts",
+                   [mint, {"commitment": "finalized"}])
+    except (OSError, ValueError, TypeError, KeyError):
+        return _solana_jupiter_index(mint, fetch)
     if not isinstance(top, dict) or not isinstance(top.get("value"), list):
         raise ValueError("largest token accounts missing")
     slot = _nat(top.get("context", {}).get("slot"))
@@ -860,10 +920,13 @@ def at_read(raw, asset_rows, economics, now):
             block_prefix = "https://blockstream.info/api/block/"
             ethplorer_url = (ETHPLORER + "/getTokenHistory/" + key[1]
                              + "?apiKey=freekey&limit=" + str(ETHPLORER_HISTORY_LIMIT))
+            binplorer_url = (BINPLORER + "/getTokenHistory/" + key[1]
+                             + "?apiKey=freekey&limit=" + str(ETHPLORER_HISTORY_LIMIT))
             if ev["fonte"] != expected and not (key[0]=="bitcoin" and
                 ev["fonte"].startswith(block_prefix) and ev["fonte"].endswith("/txs")) and not (
                 key[0]=="ethereum" and key[1]!="NATIVE" and
-                ev["fonte"] in (indexed_url, ethplorer_url)):
+                ev["fonte"] in (indexed_url, ethplorer_url)) and not (
+                key[0]=="bsc" and key[1]!="NATIVE" and ev["fonte"]==binplorer_url):
                 raise ValueError("event source incompatible with chain/contract")
             labels=ev.get("attribuzione")
             if not isinstance(labels,dict) or set(labels)!={"da","a"}:
@@ -1007,7 +1070,10 @@ def at_read(raw, asset_rows, economics, now):
                                           "ingresso_unita_minima":None,"uscita_unita_minima":None,
                                           "flusso_netto_unita_minima":None,
                                           "limite":"Assenza di indirizzi exchange etichettati o campione scaduto: NON zero"}),
-                                     "detentori_top_somma_unita_minima":(str(sum(int(h["unita_minima"]) for h in record["detentori"]))
+                                     "aggregato_detentori": (dict(record["aggregato_detentori"],
+                                          stato_alla_lettura="RECENTE" if fresh else "STORICO")
+                                          if isinstance(record.get("aggregato_detentori"),dict) else None),
+                                      "detentori_top_somma_unita_minima":(str(sum(int(h["unita_minima"]) for h in record["detentori"]))
                                           if record["detentori"] else None),
                                      "periodo":record.get("periodo"),
                                      "acquisito_utc":record["acquisito_utc"],
