@@ -370,11 +370,17 @@ def economic_evidence(source, wallet, four, candidates, now, *,
                     and isinstance(token, str)):
                 key = (token, identity["coppia"])
                 unresolved.setdefault(key, identity["pair_key"])
-    pending_pairs = sorted(unresolved)
+    # A completely replaced wallet must not queue newly owned assets
+    # behind scanner-only ideas. Keep deterministic rotation *within* each
+    # group and retain the existing nine-call CoinGecko budget.
+    held_pending = {(row["token"], row["identita"].get("coppia"))
+                    for row in items["posizioni"]
+                    if row["identita"].get("motivo") == "PROGETTO_NON_NEL_CATALOGO_CURATO"}
+    pending_pairs = sorted(unresolved, key=lambda item: (item not in held_pending, item))
     next_token = prior.get("prossimo_token_identita")
     next_idx = next((i for i, item in enumerate(pending_pairs)
                      if isinstance(next_token, str)
-                     and "|".join(item) >= next_token), 0)
+                     and "|".join(item) == next_token), 0)
     chosen = pending_pairs[next_idx] if pending_pairs else None
     next_token = ("|".join(pending_pairs[(next_idx+1) % len(pending_pairs)])
                   if pending_pairs else None)
