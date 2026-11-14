@@ -143,7 +143,7 @@ def verify_eur_market_identity(snapshot, token, market, four_row=None):
     base, quote = pair.split("/")
     if (not SYMBOL.fullmatch(base) or quote not in ("EUR","USD","USDC")
             or canonical_wallet_alias(base) != identity):
-        raise PacketError("Coppia mercato Spot incoerente con posizione")
+        raise PacketError("Coppia mercato EUR incoerente con posizione")
     declared = market.get("token")
     if (not isinstance(declared, str) or not SYMBOL.fullmatch(declared)
             or canonical_wallet_alias(declared) != identity):
@@ -171,7 +171,7 @@ def verify_eur_market_identity(snapshot, token, market, four_row=None):
         if (not isinstance(record,dict) or
                 record.get("source") not in valid_sources or
                 market.get("conversione_fonte") != record["source"]):
-            raise PacketError("Fonte FX Kraken Spot mancante o non allineata")
+            raise PacketError("Coppia mercato EUR priva di fonte FX Kraken coerente")
         rate = amount(record.get("eur"), "FX EUR per valuta")
         quote_price = amount(market.get("prezzo_quote"), "Prezzo in valuta Kraken")
         market_rate = amount(market.get("eur_per_quote"), "Tasso FX nel mercato")
