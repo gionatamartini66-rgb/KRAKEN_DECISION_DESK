@@ -625,11 +625,73 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
                     "offerta_circolante": 1000000, "fonte": "https://api.coingecko.com/api/v3/coins/pepe"}}],
                 "candidati": []}
 
+    def test_evm_real_block_timestamp_missing_and_historical_time_at_gpt_read(self):
+        import kdd_capital_flow as cap
+        import kdd_network_defi as net
+        from scripts import kdd_bridge_g2 as bridge
+        assets=self._assets(chain="optimism",contract=self.EVM_ADDR)
+        label=self.EVM_ADDR
+        block_time=[hex(int(T.timestamp()))]
+        def fetch(url,payload=None):
+            self.assertEqual(url,net.CONTRACT_ENDPOINTS["optimism"])
+            method=payload["method"]
+            if method=="eth_blockNumber":
+                return {"id":1,"result":hex(200)}
+            if method=="eth_call":
+                return {"id":1,"result":"0x12"}
+            if method=="eth_getLogs":
+                entry={"address":label,"transactionHash":"0x"+"f"*64,
+                       "blockNumber":hex(190),"logIndex":"0x0","removed":False,
+                       "topics":[cap.TOPIC_TRANSFER,
+                                 "0x"+"0"*24+self.EVM_FROM[2:],
+                                 "0x"+"0"*24+self.EVM_TO[2:]],
+                       "data":"0x"+format(2*10**18,"064x")}
+                if block_time[0] is not None:
+                    entry["blockTimestamp"]=block_time[0]
+                return {"id":1,"result":[entry]}
+            raise AssertionError(method)
+        def sample():
+            raw=cap.collect(T,assets,self._econ(),None,fetch)
+            self.assertEqual(raw["sonde"][0]["stato"],"OSSERVATO")
+            self.assertEqual(len(raw["sonde"][0]["eventi"]),1)
+            read=cap.at_read(raw,assets,self._econ(),T)
+            evt=read["posizioni"][0]["osservazioni"][0]["eventi"][0]
+            economic=bridge.capital_market_context(
+                {"asset_reti":{"flussi_capitale":read}},
+                [{"token":"PEPE","prezzo_eur":"1"}],
+                [{"mercato_spot_kraken_alla_lettura":{
+                    "stato":"DISPONIBILE","coppia":"PEPE/EUR",
+                    "volume_24h_eur_stimato":"1000"}}])
+            return evt,economic[0]["osservazioni"][0]["movimento_massimo_campionato"]
+        current,market=sample()
+        self.assertEqual(current["orario_utc"],T.isoformat())
+        self.assertEqual(current["stato_alla_lettura"],"CAMPIONE_RECENTE")
+        self.assertEqual(market["rapporto_volume_kraken_spot_24h_pct"],"0.20")
+        # No timestamp is not a historical event and not a recent event:
+        # acquisition freshness must not be silently assigned to the fact.
+        block_time[0]=None
+        unknown,market=sample()
+        self.assertIsNone(unknown["orario_utc"])
+        self.assertEqual(unknown["stato_alla_lettura"],"ORARIO_EVENTO_NON_VERIFICABILE")
+        self.assertEqual(unknown["quantita"],"2")
+        self.assertIsNone(unknown["valore_usd_indicativo"])
+        self.assertIsNone(market)
+        block_time[0]=hex(int((T-dt.timedelta(hours=3)).timestamp()))
+        historical,market=sample()
+        self.assertEqual(historical["stato_alla_lettura"],"STORICO")
+        self.assertEqual(historical["orario_utc"],(T-dt.timedelta(hours=3)).isoformat())
+        self.assertIsNone(market)
+        for invalid in ("now", T.isoformat(), "-0x1", True):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    cap._evm_log_time(invalid)
+
     def test_erc20_real_transfer_logs_dedup_largest_and_supply_context(self):
         import kdd_capital_flow as cap
         topic = lambda addr: "0x" + "0" * 24 + addr[2:]
         log = {"address": self.EVM_ADDR, "transactionHash": "0x" + "f" * 64,
                "blockNumber": hex(983), "logIndex": "0x0",
+               "blockTimestamp":hex(int(T.timestamp())),
                "removed": False, "topics": [cap.TOPIC_TRANSFER,
                 topic(self.EVM_FROM), topic(self.EVM_TO)],
                "data": "0x" + format(200000000, "064x")}
@@ -973,13 +1035,17 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
                              "contratti_indicizzati":[{"rete":"bsc","contratto":self.EVM_ADDR}]}],
                "candidati":[],"fonti_native":{}}
         holder=self.EVM_FROM
+        announced_count=["500000"]
         def fetch(url,payload=None):
             if url.startswith(cap.BINPLORER):
                 raise OSError("HTTP429")
             if url.startswith(cap.GOPLUS_BSC):
                 return {"code":1,"message":"OK","result":{self.EVM_ADDR.lower():{
-                    "holder_count":"500000","holders":[{"address":holder,
-                    "balance":"1.250000000000000000","tag":"Exchange Public Label"}]}}}
+                    "holder_count":announced_count[0],"holders":[
+                       {"address":holder if i==0 else "0x"+format(i+100,"040x"),
+                        "balance":"1.250000000000000000" if i==0 else "1.000000000000000000",
+                        "tag":"Exchange Public Label" if i==0 else ""}
+                       for i in range(10)]}}}
             if url==net.CONTRACT_ENDPOINTS["bsc"]:
                 method=payload["method"]
                 if method=="eth_blockNumber":return {"id":1,"result":hex(1000)}
@@ -993,6 +1059,7 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         self.assertEqual(record["eventi"],[])
         self.assertEqual(record["detentori"][0]["unita_minima"],"1250000000000000000")
         self.assertEqual(record["aggregato_detentori"]["numero_account"],500000)
+        self.assertEqual(len(record["detentori"]),10)
         self.assertEqual(record["detentori"][0]["entita"]["fonte"],
                          cap.GOPLUS_BSC+"?contract_addresses="+self.EVM_ADDR)
         read=cap.at_read(raw,asset,{"posizioni":[{}],"candidati":[]},T)
@@ -1001,6 +1068,30 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         self.assertEqual(observed["flussi_exchange_campione"]["stato"],
                          "NON_ATTRIBUIBILE_O_STORICO")
         self.assertIsNone(observed["flussi_exchange_campione"]["ingresso_unita_minima"])
+        # The *real* free GoPlus response reported total 0 despite listing
+        # ten holders. The ten balances survive; zero must not reach GPT.
+        announced_count[0]="0"
+        contradictory=cap.collect(T,asset,{"posizioni":[{}],"candidati":[]},None,fetch)
+        discrepant=contradictory["sonde"][0]
+        self.assertEqual(discrepant["stato"],"OSSERVATO")
+        self.assertEqual(len(discrepant["detentori"]),10)
+        self.assertEqual(discrepant["detentori"][0]["unita_minima"],"1250000000000000000")
+        aggregate=discrepant["aggregato_detentori"]
+        self.assertIsNone(aggregate["numero_account"])
+        self.assertEqual(aggregate["stato_numero_account"],"CONTEGGIO_INCOERENTE_CON_ELENCO")
+        reread=cap.at_read(contradictory,asset,{"posizioni":[{}],"candidati":[]},T)
+        propagated=reread["posizioni"][0]["osservazioni"][0]
+        self.assertEqual(len(propagated["detentori"]),10)
+        self.assertIsNone(propagated["aggregato_detentori"]["numero_account"])
+        from scripts import kdd_bridge_g2 as bridge
+        gpt=bridge.capital_market_context(
+            {"asset_reti":{"flussi_capitale":reread}},
+            [{"token":"BSCNEW","prezzo_eur":"1"}],
+            [{"mercato_spot_kraken_alla_lettura":{
+                "stato":"DISPONIBILE","coppia":"BSCNEW/EUR",
+                "volume_24h_eur_stimato":"1000"}}])
+        self.assertIsNone(gpt[0]["osservazioni"][0]["aggregato_detentori"]["numero_account"])
+        self.assertEqual(len(gpt[0]["osservazioni"][0]["variazioni_top_detentori"]),0)
 
     def test_second_solana_mint_signature_only_when_first_unrelated(self):
         import kdd_capital_flow as cap
