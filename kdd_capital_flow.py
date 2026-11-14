@@ -398,6 +398,35 @@ def _solana_jupiter_index(mint, fetch):
 
 
 def _evm_token(chain, contract, url, fetch, native, previous):
+    # A newly held ERC-20 must work even if ETH is not in the wallet.
+    # A chain head is a convenience for bounded RPC logs, not an ownership
+    # prerequisite for publicly indexed contract transfers.
+    head = native.get("valori") if isinstance(native, dict) else None
+    if chain=="ethereum" and not isinstance(head, dict):
+        try:
+            return _routescan_index(chain, contract, fetch, previous)
+        except (OSError, ValueError, KeyError, TypeError, OverflowError, AssertionError):
+            try:
+                dec = _hex(_rpc(fetch,url,"eth_call",
+                    [{"to":contract,"data":"0x313ce567"},"latest"]),30)
+            except (OSError, ValueError, KeyError, TypeError, OverflowError):
+                info = fetch(ETHPLORER + "/getTokenInfo/" + contract + "?apiKey=freekey")
+                if not isinstance(info,dict) or str(info.get("address","")).lower()!=contract.lower():
+                    raise ValueError("unknown Ethereum contract precision")
+                dec = _nat(info.get("decimals"),30)
+            events,source=_ethplorer_history(contract,dec,fetch)
+            holders=[]
+            holder_source=None
+            try:
+                holders,holder_source=_ethplorer_holders(contract,dec,previous,fetch)
+            except (OSError,ValueError,TypeError,KeyError,OverflowError):
+                pass
+            chosen,total=_top(events)
+            return {"eventi":chosen,"detentori":holders,"fonte_detentori":holder_source,
+                    "eventi_distinti":total,"elementi_esaminati":len(events),
+                    "periodo":{"tipo":"PAGINA_ETHPLORER"},
+                    "copertura":"Contract indexed independently of native ETH wallet asset; no owner claim",
+                    "fallback":"ETHPLORER_SENZA_TESTA_NATIVE"}
     if chain=="bsc":
         try:
             return _bsc_public_index(contract, fetch, previous)
