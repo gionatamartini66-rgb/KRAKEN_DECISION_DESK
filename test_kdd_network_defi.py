@@ -1293,9 +1293,11 @@ class Kdd17CapitalMovementTests(unittest.TestCase):
         flow=result["rete_defi_alla_lettura"]["asset_reti"]["flussi_capitale"]
         self.assertEqual([r["token"] for r in flow["posizioni"]],tokens)
         self.assertEqual(flow["candidati"][0]["token"],"CAKE")
-        self.assertTrue(all(r.get("mercato_spot_kraken",{}).get("stato") ==
-                            "DISPONIBILE_ALLO_SNAPSHOT"
-                            for r in result["patrimonio"]["posizioni"]))
+        self.assertTrue(all(r["mercato_spot_kraken_alla_lettura"]["stato"] ==
+                            "DISPONIBILE"
+                            for r in result["copertura"]))
+        self.assertTrue(all(r["mercato_spot_kraken_alla_lettura"]["volume_24h_eur_stimato"]
+                            == "1000000.0" for r in result["copertura"]))
         self.assertTrue(any(s["stato"]=="OSSERVATO_CON_LIMITI"
                             for r in flow["posizioni"] for s in r["osservazioni"]))
         self.assertTrue(all(r["token"] in fixture.snapshot["markets"]
