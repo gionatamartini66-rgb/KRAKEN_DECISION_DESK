@@ -32,50 +32,48 @@ jobs:
         run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_funding_book_g2
       - name: Existing safe updater tests
         run: python -B scripts/test_kdd_aggiorna.py
-      - name: KDD-17 TEMPORARY public alternative providers verification
+      - name: KDD-17 TEMPORARY live ERC20 producer+GPT reader, no private data
         if: github.event_name == 'pull_request' && github.event.pull_request.number == 64
         continue-on-error: true
         timeout-minutes: 3
         run: |
           PYTHONPATH=.:scripts python - <<'PY'
-          import json,time
-          import kdd_network_defi as net, kdd_capital_flow as cap
-          usdc="0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
-          mint="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-          outcomes={};calls=0
-          def check(name,url,payload=None):
-              global calls
-              t=time.monotonic();calls+=1
+          import json,time,datetime as dt
+          import kdd_network_defi as net,kdd_capital_flow as cap
+          now=dt.datetime.now(dt.timezone.utc)
+          contract="0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+          calls=[];start=time.monotonic()
+          def fetch(url,payload=None):
+              t=time.monotonic()
               try:
-                  resp=net._http(url,payload)
-                  obj=resp.get("result") if payload and isinstance(resp,dict) else resp
-                  if payload and resp.get("error"):raise ValueError(str(resp["error"])[:150])
-                  if payload and "result" not in resp:raise ValueError("missing JSONRPC result")
-                  items=(obj.get("holders") or obj.get("operations") or obj.get("value")
-                         if isinstance(obj,dict) else obj)
-                  if isinstance(items,dict):items=items.get("value")
-                  outcomes[name]={"status":"OK","elapsed_ms":round((time.monotonic()-t)*1000),
-                      "keys":list(obj)[:18] if isinstance(obj,dict) else type(obj).__name__,
-                      "count":len(items) if isinstance(items,list) else None,
-                      "first_keys":list(items[0])[:16] if isinstance(items,list) and items and isinstance(items[0],dict) else None}
-              except Exception as e:
-                  outcomes[name]={"status":"UNAVAILABLE","elapsed_ms":round((time.monotonic()-t)*1000),
-                                  "error":type(e).__name__+":"+str(getattr(e,"code",str(e)))[:140]}
-          topic=cap.TOPIC_TRANSFER
-          for name,url in [("drpc_ethereum","https://eth.drpc.org"),
-                           ("llamarpc_ethereum","https://eth.llamarpc.com"),
-                           ("rpcfree_ethereum","https://rpcfree.com/ethereum-rpc"),
-                           ("blockpi_ethereum","https://ethereum.blockpi.network/v1/rpc/public")]:
-              check(name,url,{"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":[
-                  {"address":usdc,"fromBlock":"latest","toBlock":"latest","topics":[topic]}]})
-          for name,url in [("ethplorer_history",f"https://api.ethplorer.io/getTokenHistory/{usdc}?apiKey=freekey&limit=5"),
-                           ("ethplorer_holders",f"https://api.ethplorer.io/getTopTokenHolders/{usdc}?apiKey=freekey&limit=5")]:
-              check(name,url)
-          for name,url in [("solana_official","https://api.mainnet.solana.com"),
-                           ("solana_nodeflare","https://rpc.nodeflare.app/solana/public")]:
-              check(name,url,{"jsonrpc":"2.0","id":1,"method":"getTokenLargestAccounts",
-                   "params":[mint,{"commitment":"finalized"}]})
-          print("KDD17_PUBLIC_ALT3",json.dumps({"responses":outcomes,"requests":calls}),flush=True)
+                  data=net._http(url,payload)
+                  calls.append({"host":url.split("/")[2],"method":payload.get("method") if isinstance(payload,dict) else "GET",
+                                "status":"OK","ms":round((time.monotonic()-t)*1000)})
+                  return data
+              except Exception as ex:
+                  calls.append({"host":url.split("/")[2],"method":payload.get("method") if isinstance(payload,dict) else "GET",
+                                "status":type(ex).__name__,"code":getattr(ex,"code",None),
+                                "ms":round((time.monotonic()-t)*1000)})
+                  raise
+          head=net._native_observe("ethereum",fetch,now)
+          output={"head":head.get("stato"),"head_block":(head.get("valori") or {}).get("altezza_blocco")}
+          if head.get("stato")=="OSSERVATO":
+              asset={"posizioni":[{"token":"USDC","progetto_id":"usd-coin","contratti_indicizzati":[
+                        {"rete":"ethereum","contratto":contract}]}],
+                     "candidati":[],"fonti_native":{"ethereum":head}}
+              econ={"posizioni":[{"fondamentali":{"stato":"NON_VERIFICATO"}}],"candidati":[]}
+              raw=cap.collect(now,asset,econ,None,fetch)
+              p=raw["sonde"][0]
+              output.update({"status":p["stato"],"motivo":p.get("motivo"),"periodo":p.get("periodo"),
+                             "richieste":raw["richieste_effettuate"],"max_requests":raw["limite_richieste_refresh"],
+                             "event_count":len(p["eventi"]),"holder_count":len(p["detentori"]),
+                             "first_event":{k:p["eventi"][0].get(k) for k in ("tx","quantita","tipo","orario_utc","fonte")}
+                              if p["eventi"] else None,
+                             "first_holder":{k:p["detentori"][0].get(k) for k in ("unita_minima","decimali")}
+                              if p["detentori"] else None,
+                             "read":cap.at_read(raw,asset,econ,now)["posizioni"][0]["osservazioni"][0]["stato"]})
+          print("KDD17_REAL_CHAIN4",json.dumps({"result":output,"network_calls":calls,
+                "count":len(calls),"total_elapsed_ms":round((time.monotonic()-start)*1000)}),flush=True)
           PY
 
   r5-historical-reference:
