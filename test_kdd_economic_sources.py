@@ -480,6 +480,83 @@ class PrimaryFollowupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             economic.at_read(future,[{"token":"BTC"}],[],T+dt.timedelta(hours=5))
 
+    def test_ten_holdings_candidate_primary_review_double_read_and_source_swap(self):
+        # Publicly named project identities; invented data, NOT the live wallet.
+        tokens=("BNB","FET","JUP","NEAR","RENDER","SOL","SUI","ETH","BTC","XRP")
+        candidate=self.row("KAS")
+        candidate["coppia_analisi"]="KAS/EUR"
+        items=self.items(tokens=tokens,extra=candidate)
+        pairs={token+"EUR":{"wsname":token+"/EUR","status":"online"}
+               for token in tokens+("KAS",)}
+        pairs["SOLEUR"]["status"]="cancel_only"
+        series=[(2026,9,4100000000),(2026,10,4130000000),
+                (2026,11,4139000000),(2026,12,4150000000),
+                (2027,1,4170000000),(2027,2,4190000000)]
+        def public(url):
+            if url==sources.SUI_CIRCULATION:
+                return json.dumps([{"year":y,"month":m,"circulatingSupplyValue":q,
+                    "circulatingSupplyPercentage":q/10000000000}
+                    for y,m,q in series]).encode()
+            return self.fetch(url)
+        def solana(url,request):
+            self.assertEqual(request.get("method"),"getInflationGovernor")
+            return {"result":{"initial":.08,"taper":.15,"terminal":.015,
+                              "foundation":0.0,"foundationTerm":0}}
+        primary=sources.collect(T,items,{},public,asset_pairs=pairs,
+                                rpc_fetch=solana,collect_project_issues=True)
+        self.assertEqual(primary["richieste_pubbliche"],7)
+        initial={"schema":economic.VERSION,"acquisito_utc":T.isoformat(),
+            "posizioni":items["posizioni"],"candidati":items["candidati"],
+            "macro":economic.macro([],T),"fonti_economiche":economic.sources_matrix(),
+            "regime":{"stato":"INDETERMINATO","qualita":"INSUFFICIENTE"},
+            "monitor_fonti":primary}
+        position_targets=[{"token":token} for token in tokens]
+        candidates=[{"token":"KAS","coppia_analisi":"KAS/EUR"}]
+        first=economic.at_read(initial,position_targets,candidates,T)
+        self.assertEqual(len(first["posizioni"]),10)
+        self.assertEqual(len(first["candidati"]),1)
+        by_token={r["token"]:r["valutazione_fonti_primarie"]
+                  for r in first["posizioni"]}
+        self.assertEqual(by_token["SOL"]["progetto_id"],"solana")
+        self.assertTrue(any(f["tipo"]=="PARAMETRI_EMISSIONE"
+                            for f in by_token["SOL"]["fatti"]))
+        self.assertTrue(any(f["tipo"]=="STATO_COPPIA_KRAKEN"
+                            and f["dettaglio"]["status"]=="cancel_only"
+                            for f in by_token["SOL"]["fatti"]))
+        self.assertIn("restrizione",by_token["SOL"]["ipotesi_non_attestata"])
+        self.assertTrue(any(f["tipo"]=="PROIEZIONE_CIRCOLAZIONE"
+                            for f in by_token["SUI"]["fatti"]))
+        self.assertFalse(any("UNLOCK_SOLO_PROGRAMMATO"==f["tipo"]
+                             for f in by_token["SUI"]["fatti"]))
+        self.assertEqual(first["candidati"][0]["valutazione_fonti_primarie"]["progetto_id"],
+                         "kaspa")
+        self.assertEqual(first["candidati"][0]["valutazione_fonti_primarie"]["stato"],
+                         "COPERTURA_PRIMARIA_PARZIALE")
+        self.assertEqual(first["candidati"][0]["valutazione_fonti_primarie"]["fatti"][0]
+                         ["tipo"],"STATO_COPPIA_KRAKEN")
+        twice=economic.at_read(first,position_targets,candidates,T)
+        self.assertEqual(twice["posizioni"][5]["valutazione_fonti_primarie"],
+                         first["posizioni"][5]["valutazione_fonti_primarie"])
+        false=copy.deepcopy(first)
+        false["posizioni"][5]["valutazione_fonti_primarie"]["fatti"][0]["fatto"] = (
+            "Kraken certifica una vendita avvenuta")
+        with self.assertRaisesRegex(ValueError,"alterata"):
+            economic.at_read(false,position_targets,candidates,T)
+        late=economic.at_read(first,position_targets,candidates,
+                               T+dt.timedelta(days=36))
+        self.assertEqual(late["posizioni"][6]["valutazione_fonti_primarie"]["stato"],
+                         "NESSUNA_EVIDENZA_PRIMARIA_ATTUALE")
+        self.assertEqual(late["posizioni"][5]["valutazione_fonti_primarie"]["stato"],
+                         "NESSUNA_EVIDENZA_PRIMARIA_ATTUALE")
+        self.assertEqual(len(late["candidati"]),1)
+        self.assertEqual(late["candidati"][0]["valutazione_fonti_primarie"]["stato"],
+                         "NESSUNA_EVIDENZA_PRIMARIA_ATTUALE")
+        switched=copy.deepcopy(initial)
+        next(row for row in switched["monitor_fonti"]["calendari"]
+             if row["progetto_id"]=="sui")["fonte"]="https://attacker.example/sui"
+        with self.assertRaises(ValueError):
+            economic.at_read(switched,position_targets,candidates,T)
+
     def test_existing_economic_reader_consumes_followup(self):
         items=self.items(tokens=("BTC",))
         a=sources.collect(T,items,{},self.fetch)
