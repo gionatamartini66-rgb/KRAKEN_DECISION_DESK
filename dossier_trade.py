@@ -708,7 +708,9 @@ def collect(source=None, *, asset_pairs=None):
     import kdd_economics as econ
     btc = next((r for r in (analisi_patrimonio.get("posizioni") or [])
                 if r.get("token") == "BTC"), {})
-    economic["regime"] = econ.regime(btc, external.get("coingecko_global"), now)
+    economic["regime"] = econ.regime_participation(
+        econ.regime(btc, external.get("coingecko_global"), now),
+        derivatives, economic.get("monitor_fonti"), now)
     # One additional public-only evidence family. No private balances, amounts,
     # addresses or the on-chain prototypes #9-14 ever enter these requests.
     # Manual/legacy dossier creation without a real refresh has no new-source

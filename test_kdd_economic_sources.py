@@ -200,5 +200,29 @@ class PrimaryFollowupTests(unittest.TestCase):
             economic.at_read(dict(source,monitor_fonti=dict(a,progetti=[])),[{"token":"BTC"}],[],T)
 
 
+    def test_regime_cross_checks_futures_without_claiming_institutional_buying(self):
+        base={"stato":"RIALZISTA","qualita":"PARZIALE",
+              "mancanti":["Derivati con copertura e confronto partecipazione/volumi tra rilevazioni"],
+              "famiglie_osservate":[],"contrari":[],"favorevoli":[]}
+        derivatives={"open-interest":{
+            "ultimo_close":110,"close_4h_fa":100,
+            "ultimo_punto_utc":T.isoformat(),"ultimo_punto_provvisorio":False},
+            "cvd":{"ultimo_cvd":-40,"cvd_4h_fa":-10,
+                   "ultimo_punto_utc":T.isoformat(),"ultimo_punto_provvisorio":False}}
+        primary={"indicatori_macro":[{"id":"USD_EUR","stato":"OSSERVATO",
+                                     "fonte":"https://data-api.ecb.europa.eu/service/data/EXR/D.USD.EUR.SP00.A",
+                                     "periodo":"2026-11-14","unita":"USD per EUR","valore":1.09}]}
+        r=economic.regime_participation(base,derivatives,primary,T)
+        self.assertEqual(r["stato"],"RIALZISTA")
+        self.assertEqual(r["qualita"],"PARZIALE_CON_CONTRADDIZIONI")
+        self.assertEqual(len(r["contrari"]),1)
+        self.assertEqual(len(r["famiglie_osservate"]),2)
+        self.assertIn("non identifica",r["famiglie_osservate"][0]["limite"])
+        later=economic.regime_participation(base,derivatives,primary,T+dt.timedelta(hours=6))
+        self.assertIn("OI e CVD", " ".join(later["mancanti"]))
+        self.assertNotEqual(later["qualita"],"PARZIALE_CON_CONTRADDIZIONI")
+
+
+
 if __name__=="__main__":
     unittest.main()

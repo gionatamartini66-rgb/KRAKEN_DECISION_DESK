@@ -510,6 +510,67 @@ def regime(btc_four, global_row, now):
     return out
 
 
+
+def regime_participation(base, derivatives, primary, now):
+    """KDD-22: independently dated futures participation and ECB facts.
+
+    OI is leverage exposure, not institutional capital. CVD of one Kraken
+    contract may contradict the broader context, not predict an asset trade.
+    No source here constitutes two independent confirmation signals.
+    """
+    out = dict(base)
+    out["famiglie_osservate"] = list(base.get("famiglie_osservate") or [])
+    out["mancanti"] = list(base.get("mancanti") or [])
+    out["contrari"] = list(base.get("contrari") or [])
+    out["favorevoli"] = list(base.get("favorevoli") or [])
+    out["ipotesi"] = "Partecipazione futures e condizioni macro potrebbero modificare la robustezza del regime"
+    out["controipotesi"] = "CVD e OI di un singolo future non rappresentano il mercato crypto né i flussi Spot"
+    out["condizione_di_riesame"] = "Rilevare nuovamente chiusure 4H/1D, attività aggregata e flussi futures con orari coerenti"
+    frame = derivatives if isinstance(derivatives, dict) else {}
+    oi = frame.get("open-interest") if isinstance(frame.get("open-interest"), dict) else {}
+    cvd = frame.get("cvd") if isinstance(frame.get("cvd"), dict) else {}
+    oi_time = stamp(oi.get("ultimo_punto_utc"))
+    cvd_time = stamp(cvd.get("ultimo_punto_utc"))
+    def finite(value):
+        return (type(value) in (int,float) and math.isfinite(value))
+    valid = (oi_time is not None and cvd_time is not None
+             and dt.timedelta(0) <= now - oi_time <= dt.timedelta(hours=4)
+             and dt.timedelta(0) <= now - cvd_time <= dt.timedelta(hours=4)
+             and abs((oi_time-cvd_time).total_seconds()) <= 3600
+             and oi.get("ultimo_punto_provvisorio") is False
+             and cvd.get("ultimo_punto_provvisorio") is False
+             and all(finite(v) for v in (oi.get("ultimo_close"),oi.get("close_4h_fa"),
+                   cvd.get("ultimo_cvd"),cvd.get("cvd_4h_fa")))
+             and oi["ultimo_close"] > 0 and oi["close_4h_fa"] > 0)
+    if valid:
+        oi_change = round(100*(oi["ultimo_close"]/oi["close_4h_fa"]-1),4)
+        cvd_delta = cvd["ultimo_cvd"]-cvd["cvd_4h_fa"]
+        out["famiglie_osservate"].append({
+            "famiglia":"DERIVATI_BTC_KRAKEN", "fonte":"https://futures.kraken.com/api/charts/v1/analytics/PF_XBTUSD/",
+            "strumento":"PF_XBTUSD","osservato_utc":max(oi_time,cvd_time).isoformat(timespec="seconds"),
+            "var_oi_4h_pct":oi_change,"cvd_delta_4h":cvd_delta,
+            "limite":"Singolo contratto; OI non identifica la direzione, CVD non equivale a flussi spot istituzionali"})
+        out["mancanti"] = [s for s in out["mancanti"] if "Derivati con copertura" not in s]
+        if (out.get("stato") in ("RIALZISTA","RIBASSISTA") and cvd_delta != 0
+                and ((cvd_delta>0) != (out["stato"]=="RIALZISTA"))):
+            out["contrari"].append("CVD 4H di PF_XBTUSD divergente dalla classificazione del mercato aggregato")
+            out["qualita"]="PARZIALE_CON_CONTRADDIZIONI"
+    else:
+        out["mancanti"].append("OI e CVD Kraken PF_XBTUSD chiusi, recenti e concordanti temporalmente")
+    rows = primary.get("indicatori_macro") if isinstance(primary, dict) else None
+    if isinstance(rows, list):
+        for item in rows:
+            if not isinstance(item, dict) or item.get("stato") != "OSSERVATO":
+                continue
+            if item.get("id") not in ("USD_EUR","EA_HICP") or not finite(item.get("valore")):
+                continue
+            out["famiglie_osservate"].append({
+                "famiglia":"MACRO_ECB_" + item["id"],"fonte":item.get("fonte"),
+                "periodo":item.get("periodo"),"valore":item["valore"],"unita":item.get("unita"),
+                "limite":"Dato macro osservato; segno dell'impatto sul prezzo non dedotto"})
+    return out
+
+
 def decision_context(identity, fundamental, event):
     """A falsifiable review question, never a buy/sell classification."""
     if identity.get("stato") != "IDENTITA_VERIFICATA_DA_CATALOGO":
