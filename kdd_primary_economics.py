@@ -256,9 +256,22 @@ def collect(now, identities, previous, *, fetch_json, fetch_csv, catalog, enable
             names.setdefault(coin, identity)
     keys = sorted(names)
     if not enabled:
+        previous_source = (previous if isinstance(previous, dict) and
+                           previous.get("schema") == VERSION else {})
+        retained = {row.get("coingecko_id"): row
+                    for row in previous_source.get("storico", [])
+                    if isinstance(row, dict) and row.get("coingecko_id") in names}
+        for row in previous_source.get("progetti", []):
+            if (isinstance(row, dict) and row.get("coingecko_id") in names
+                    and row.get("stato") not in
+                    ("RINVIATO_BUDGET", "NON_ACQUISITO_FUORI_REFRESH")):
+                retained[row["coingecko_id"]] = row
         return {"schema": VERSION, "acquisito_utc": moment.isoformat(timespec="seconds"),
                 "progetti": [_empty(k, "NON_ACQUISITO_FUORI_REFRESH", moment) for k in keys],
-                "storico": [], "prossimo_progetto": keys[0] if keys else None,
+                "storico": [retained[k] for k in sorted(retained)][:HISTORY_LIMIT],
+                "prossimo_progetto": previous_source.get("prossimo_progetto")
+                                     if previous_source.get("prossimo_progetto") in keys
+                                     else (keys[0] if keys else None),
                 "indicatori_macro": [{"id": k, "stato": "NON_ACQUISITO_FUORI_REFRESH"}
                                       for k in ECB_SERIES],
                 "richieste_effettuate": 0, "limite_richieste": MAX_REQUESTS,
