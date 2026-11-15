@@ -525,7 +525,7 @@ def regime_integrated(base, derivatives, primary, previous, now):
     hist = []
     if isinstance(previous, dict):
         previous_regime = previous.get("regime")
-        old = previous.get("storico_regimi")
+        old = previous_regime.get("storico_regimi") if isinstance(previous_regime, dict) else None
         for h in (old if isinstance(old, list) else [])[-7:]:
             if isinstance(h, dict) and stamp(h.get("acquisito_utc")):
                 hist.append({k: h.get(k) for k in ("acquisito_utc", "stato", "qualita")})
