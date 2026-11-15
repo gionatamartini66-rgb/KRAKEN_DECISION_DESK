@@ -20,15 +20,20 @@ MAX_GOVERNANCE_CALLS = 2
 MAX_MACRO_CALLS = 1
 MAX_SCHEDULE_CALLS = 1
 MAX_SECURITY_CALLS = 1
+MAX_EMISSION_CALLS = 1
 MAX_SAMPLES = 96
 ECON_SCHEDULE_SCHEMA = "kdd-official-token-schedule-v001"
 SUI_CIRCULATION = "https://sui-circulation.suiexplorer.com/api/sui_circulation"
 SUI_SCHEDULE_HOME = "https://www.sui.io/token-schedule"
+SOLANA_RPC = "https://api.mainnet.solana.com"
+SOLANA_GOVERNOR_DOC = "https://solana.com/docs/rpc/http/getinflationgovernor"
 MONTHLY_FORMAT = "official-monthly-circulation-v001"
 MACRO_SERIES = (
     ("USD_EUR", "EXR", "D.USD.EUR.SP00.A", "USD per EUR", 8),
     ("EA_HICP", "HICP", "M.U2.N.000000.4D0.ANR", "variazione percentuale a/a", 65),
     ("ECB_DEPOSIT_RATE", "FM", "D.U2.EUR.4F.KR.DFR.LEV", "percentuale annua", 8),
+    ("ECB_MAIN_REFI_RATE", "FM", "D.U2.EUR.4F.KR.MRR_FR.LEV", "percentuale annua", 8),
+    ("EA_M3_GROWTH", "BSI", "M.U2.Y.V.M30.X.I.U2.2300.Z01.A", "variazione percentuale a/a", 65),
 )
 GITHUB = "https://api.github.com/repos/"
 ECB = "https://data-api.ecb.europa.eu/service/data/"
@@ -134,6 +139,30 @@ def _security_events(payload, repo, now):
                      "impatto_sul_token":"NON_ATTESTATO",
                      "limite":"Advisory del repository: non prova effetto sul token, fondi o prezzo"})
     return rows
+
+
+def _solana_governor(payload, now):
+    """Official current inflation parameters. Not a vesting/unlock calendar."""
+    obj=payload.get("result") if isinstance(payload,dict) else None
+    if not isinstance(obj,dict) or payload.get("error") is not None:
+        return None
+    keys=("initial","taper","terminal","foundation","foundationTerm")
+    if any(type(obj.get(k)) not in (int,float) or not math.isfinite(obj[k]) or obj[k]<0
+           for k in keys):
+        return None
+    if any(obj[k]>1 for k in keys[:4]) or obj["foundationTerm"]>1000:
+        return None
+    return {"stato":"OSSERVATO","tipo":"PARAMETRI_EMISSIONE_SOLANA",
+            "fonte":SOLANA_RPC,"documentazione":SOLANA_GOVERNOR_DOC,
+            "pubblicato_utc":None,"acquisito_utc":_iso(now),
+            "unita":"FRAZIONE_ANNUA","valori":{k:obj[k] for k in keys},
+            "stato_unlock":"NON_ATTESTATO","vendita":"NON_ATTESTATA",
+            "limite":"RPC inflazione Solana attuale: parametri di emissione, non calendario unlock, quantità emessa o vendite"}
+
+
+def _emission_descriptor(descriptor):
+    if not isinstance(descriptor,dict): return None
+    return SOLANA_RPC if descriptor.get("emission_primary")=="SOLANA_RPC_GOVERNOR" else None
 
 
 def _schedule_descriptor(descriptor):
@@ -499,7 +528,7 @@ def _supply_samples(roster, old, now):
     return retained,changes[:30]
 
 
-def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=None):
+def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=None, rpc_fetch=None):
     """One shared, reusable, bounded producer for all current asset identities."""
     now = _utc(now)
     roster = _roster(items)
@@ -571,6 +600,55 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
             entry.update(stato="RINVIATO_RATE_LIMIT_HTTP_429",
                          limite="HTTP 429 upstream: nessuna richiesta supplementare")
         projects.append(entry)
+    # KDD-18: one official on-chain inflation governor read per cycle,
+    # only for projects explicitly bound to a catalogued primary RPC.
+    emission_eligible=[p for p in roster if _emission_descriptor(roster[p]["source"])]
+    old_emission={x["progetto_id"]:x for x in old.get("politiche_emissioni",[])
+                  if isinstance(x,dict) and x.get("progetto_id") in roster}
+    emission_cursor=old.get("prossima_emissione")
+    emission_start=next((i for i,p in enumerate(emission_eligible)
+                         if isinstance(emission_cursor,str) and p>=emission_cursor),0)
+    emission_selected=(emission_eligible[emission_start:emission_start+MAX_EMISSION_CALLS]
+                       if network_allowed and callable(rpc_fetch) else [])
+    emission_next=(emission_eligible[(emission_start+len(emission_selected))%len(emission_eligible)]
+                   if emission_eligible else None)
+    emissions=[]
+    for project in roster:
+        bound=_emission_descriptor(roster[project]["source"])
+        row={"progetto_id":project,
+             "stato":"SENZA_FONTE_PRIMARIA_ASSOCIATA" if not bound else "RINVIATO_BUDGET",
+             "fonte":bound,"valori":None,"acquisito_utc":None,
+             "stato_unlock":"NON_ATTESTATO","vendita":"NON_ATTESTATA",
+             "limite":"Parametri di emissione non attestano unlock o vendita"}
+        if bound and project in emission_selected:
+            used+=1
+            try:
+                response=rpc_fetch(SOLANA_RPC,{"jsonrpc":"2.0","id":1,
+                    "method":"getInflationGovernor","params":[{"commitment":"finalized"}]})
+                observed=_solana_governor(response,now)
+            except Exception:
+                observed=None
+            if observed is None:
+                row.update(stato="FONTE_NON_DISPONIBILE")
+            else:
+                row.update(observed)
+                former=old_emission.get(project)
+                if (former and former.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO")
+                        and former.get("valori") is not None
+                        and former.get("valori")!=observed["valori"]):
+                    row["confronto"]={"precedente_utc":former.get("acquisito_utc"),
+                                     "cambiati":[k for k in observed["valori"]
+                                                if (former.get("valori") or {}).get(k)!=observed["valori"][k]],
+                                     "limite":"Variazione parametri policy: non prova emissione osservata o vendita"}
+        elif bound:
+            former=old_emission.get(project)
+            if former and former.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO"):
+                t=_time(former.get("acquisito_utc"))
+                if t and dt.timedelta(0)<=now-t<=dt.timedelta(days=14):
+                    row.update(former,stato="STORICO_NON_AGGIORNATO")
+            if not network_allowed and row["stato"]=="RINVIATO_BUDGET":
+                row["stato"]="RINVIATO_RATE_LIMIT_HTTP_429"
+        emissions.append(row)
     # KDD-20: independent capped rotation of repository security advisories.
     # PR #66 acquires issue labels, not published GHSA alerts; no duplication.
     security_eligible=[p for p in roster if _security_repo(roster[p]["source"])]
@@ -706,6 +784,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
     return {"schema":SCHEMA,"acquisito_utc":_iso(now),"progetti":projects,
             "stati_coppie_kraken":kraken_status,
             "avvisi_repository":advisories,"prossimo_security":sec_cursor,
+            "politiche_emissioni":emissions,"prossima_emissione":emission_next,
             "indicatori_macro":macro,"calendari":schedules,
             "revisioni_piani":changes_calendar,
             "storico_supply":history,"variazioni_supply":changes,
@@ -713,7 +792,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
             "prossimo_progetto":next_project,
             "prossimo_indicatore":series[(pick+(1 if network_allowed else 0))%len(series)][0],
             "prossimo_schedule":sch_next,
-            "richieste_pubbliche":used,"limite_richieste":MAX_GOVERNANCE_CALLS+MAX_MACRO_CALLS+MAX_SCHEDULE_CALLS+MAX_SECURITY_CALLS,
+            "richieste_pubbliche":used,"limite_richieste":MAX_GOVERNANCE_CALLS+MAX_MACRO_CALLS+MAX_SCHEDULE_CALLS+MAX_SECURITY_CALLS+MAX_EMISSION_CALLS,
             "limite":"Campioni pubblici: proposal != approvazione; unlock != circolazione != vendita; nessuna direzione di mercato inferita"}
 
 
@@ -734,7 +813,7 @@ def at_read(raw, items, now):
         raise ValueError("Primary economics identity mismatch")
     if [r.get("progetto_id") for r in schedules if isinstance(r,dict)] != list(roster):
         raise ValueError("Primary schedule identity mismatch")
-    if type(raw.get("richieste_pubbliche")) is not int or not 0<=raw["richieste_pubbliche"]<=5:
+    if type(raw.get("richieste_pubbliche")) is not int or not 0<=raw["richieste_pubbliche"]<=6:
         raise ValueError("Primary economics budget")
     retained=raw.get("storico_eventi",[])
     if not isinstance(retained,list) or len(retained)>MAX_SAMPLES:
@@ -750,6 +829,33 @@ def at_read(raw, items, now):
                 or not _time(old_event.get("acquisito_utc"))
                 or old_event.get("stato_decisione_rete")!="NON_ATTESTATO"):
             raise ValueError("Public event history attribution")
+    verified_emissions=[]
+    source_emissions=raw.get("politiche_emissioni")
+    if source_emissions is not None:
+        if (not isinstance(source_emissions,list) or len(source_emissions)!=len(roster)
+                or [r.get("progetto_id") for r in source_emissions if isinstance(r,dict)]!=list(roster)):
+            raise ValueError("Primary issuance roster mismatch")
+        for row in source_emissions:
+            project=row["progetto_id"]
+            expected=_emission_descriptor(roster[project]["source"])
+            if row.get("fonte")!=expected:
+                raise ValueError("Primary inflation source forged")
+            copy=dict(row)
+            if row.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO"):
+                moment=_time(row.get("acquisito_utc"))
+                keys=("initial","taper","terminal","foundation","foundationTerm")
+                values=row.get("valori")
+                if (expected!=SOLANA_RPC or not moment or moment>now+dt.timedelta(minutes=2)
+                        or not isinstance(values,dict)
+                        or any(type(values.get(k)) not in (int,float) or not math.isfinite(values[k])
+                               or values[k]<0 for k in keys)
+                        or any(values[k]>1 for k in keys[:4]) or values["foundationTerm"]>1000
+                        or row.get("stato_unlock")!="NON_ATTESTATO"
+                        or row.get("vendita")!="NON_ATTESTATA"):
+                    raise ValueError("Primary inflation numeric or claim forged")
+                copy["stato_alla_lettura"]=(
+                    "SCADUTO" if now-moment>dt.timedelta(days=14) else row["stato"])
+            verified_emissions.append(copy)
     verified_advisories=[]
     raw_advisories=raw.get("avvisi_repository")
     if raw_advisories is not None:
@@ -858,10 +964,12 @@ def at_read(raw, items, now):
     return dict(raw,letto_utc=_iso(now),progetti=read_projects,
             stati_coppie_kraken=pairs_read,
             avvisi_repository=verified_advisories if raw_advisories is not None else None,
+            politiche_emissioni=verified_emissions if source_emissions is not None else None,
             indicatori_macro=indicators,calendari=read_schedules,
             variazioni_supply=raw.get("variazioni_supply",[])[:30],
             copertura={"progetti":len(projects),"governance_osservati":sum(p["stato"]=="OSSERVATO" for p in read_projects),
                         "indicatori_macro_osservati":sum(m["stato"]=="OSSERVATO" for m in indicators),
                         "calendari_primari_attuali":sum(s["stato"]=="DOCUMENTO_PRIMARIO_CON_SCHEDULE" for s in read_schedules),
-                        "security_repository_osservati":sum(a.get("stato_alla_lettura") in ("OSSERVATO","NESSUN_AVVISO_NEL_CAMPIONE") for a in verified_advisories)},
+                        "security_repository_osservati":sum(a.get("stato_alla_lettura") in ("OSSERVATO","NESSUN_AVVISO_NEL_CAMPIONE") for a in verified_advisories),
+                        "politiche_emissioni_osservate":sum(e.get("stato_alla_lettura")=="OSSERVATO" for e in verified_emissions)},
             limite=raw.get("limite"))

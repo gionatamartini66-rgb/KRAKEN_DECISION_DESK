@@ -38,7 +38,8 @@
       "id": "solana",
       "name": "Solana",
       "repository": "anza-xyz/agave",
-      "governance_repository": "solana-foundation/solana-improvement-documents"
+      "governance_repository": "solana-foundation/solana-improvement-documents",
+      "emission_primary": "SOLANA_RPC_GOVERNOR"
     },
     "ADA": {
       "id": "cardano",
