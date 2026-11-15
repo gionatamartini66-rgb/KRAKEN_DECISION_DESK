@@ -662,4 +662,9 @@ def at_read(source, positions, shortlist, now):
                            "titolo": item.get("titolo"),
                            "data": item.get("pubblicato_utc")})
     result["macro"] = macro(normalized, now)
+    if "monitor_fonti" in source:
+        import kdd_economic_sources as primary
+        # Validation occurs after the original per-asset Kraken/project binding;
+        # no extra fetch, write or source refresh is permitted at GPT read-time.
+        result["monitor_fonti"] = primary.at_read(source["monitor_fonti"], source, now)
     return result

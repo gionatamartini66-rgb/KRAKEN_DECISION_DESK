@@ -576,10 +576,17 @@ def economic_evidence(source, wallet, four, candidates, now, *,
                                      "network_metadata": row.get("network_metadata")}
     dynamic_cache = [{"token": token, "coppia": pair, "risoluzione": record}
                      for (token, pair), record in sorted(previous_dynamic.items())][:100]
+    # The primary-source follow-up belongs to the same economic dossier and
+    # uses the same verified identity roster, prior public cache and refresh.
+    import kdd_economic_sources as primary
+    monitoring = primary.collect(
+        now, items, prior.get("monitor_fonti"),
+        lambda url: desk.request(url, timeout=10))
     btc = next((r for r in four_rows if isinstance(r, dict) and r.get("token") == "BTC"), {})
     return {"schema": econ.VERSION, "acquisito_utc": now.isoformat(timespec="seconds"),
             "posizioni": items["posizioni"], "candidati": items["candidati"],
             "macro": econ.macro(source.get("feed"), now),
+            "monitor_fonti": monitoring,
             "regime": econ.regime(btc, (source.get("coingecko_global") or {}), now),
             "fonti_economiche": econ.sources_matrix(),
             "identita_dinamiche": dynamic_cache,

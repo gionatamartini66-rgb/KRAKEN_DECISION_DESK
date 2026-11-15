@@ -31,12 +31,14 @@
     "BTC": {
       "id": "bitcoin",
       "name": "Bitcoin",
-      "repository": "bitcoin/bitcoin"
+      "repository": "bitcoin/bitcoin",
+      "governance_repository": "bitcoin/bips"
     },
     "SOL": {
       "id": "solana",
       "name": "Solana",
-      "repository": "anza-xyz/agave"
+      "repository": "anza-xyz/agave",
+      "governance_repository": "solana-foundation/solana-improvement-documents"
     },
     "ADA": {
       "id": "cardano",
@@ -45,7 +47,8 @@
     },
     "ETH": {
       "id": "ethereum",
-      "name": "Ethereum"
+      "name": "Ethereum",
+      "governance_repository": "ethereum/EIPs"
     },
     "NEAR": {
       "id": "near",
