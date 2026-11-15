@@ -69,7 +69,17 @@ def _roster(items):
             if not isinstance(row, dict):
                 continue
             identity = row.get("identita")
-            if not isinstance(identity, dict) or identity.get("stato") != "IDENTITA_VERIFICATA_DA_CATALOGO":
+            if not isinstance(identity, dict):
+                continue
+            verified = identity.get("stato") == "IDENTITA_VERIFICATA_DA_CATALOGO"
+            # At the second GPT read pass a once-proven dynamically matched
+            # project may be expired. Keep the *historical* roster identity to
+            # validate its old empty-source entry; do not re-authorize its data.
+            expired = (identity.get("stato") == "NON_VERIFICATO"
+                       and identity.get("motivo") == "ATTESTAZIONE_IDENTITA_SCADUTA"
+                       and identity.get("metodo") == "KRAKEN_COINGECKO_MARKET"
+                       and isinstance(identity.get("prova_mercato"), dict))
+            if not (verified or expired):
                 continue
             pid = identity.get("coingecko_id")
             if not isinstance(pid, str) or not COIN.fullmatch(pid):

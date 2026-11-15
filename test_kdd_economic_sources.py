@@ -232,5 +232,35 @@ class PrimaryFollowupTests(unittest.TestCase):
 
 
 
+    def test_dynamic_identity_expiry_does_not_corrupt_historical_double_read(self):
+        coin={"id":"unseen-market-verified","name":"Unseen","symbol":"UNSEEN"}
+        discovered=economic.resolve_public(
+            "UNSEEN","UNSEEN/EUR",{"coins":[coin]},
+            {coin["id"]:{"name":"Unseen","tickers":[{
+                "market":{"identifier":"kraken"},"base":"UNSEEN","target":"EUR",
+                "is_stale":False,"is_anomaly":False}]}},T)
+        catalog={"UNSEENEUR":{"pair_key":"UNSEENEUR","pair":"UNSEEN/EUR",
+                              "base":"UNSEEN","quote":"EUR"}}
+        identity=economic.identify("UNSEEN","UNSEEN/EUR","UNSEENEUR",
+                                   catalog=catalog,discovered=discovered)
+        row={"indice":0,"token":"UNSEEN","identita":identity,
+             "fondamentali":economic.fundamentals(identity,None,T,T),
+             "evento":economic.release_event(identity,None,T,T)}
+        items={"posizioni":[row],"candidati":[]}
+        primary_data=sources.collect(T,items,None,self.fetch)
+        original={"schema":economic.VERSION,"acquisito_utc":T.isoformat(),
+                  "posizioni":[row],"candidati":[],
+                  "fonti_economiche":economic.sources_matrix(),
+                  "regime":{"stato":"INDETERMINATO","qualita":"INSUFFICIENTE"},
+                  "macro":economic.macro([],T),"monitor_fonti":primary_data}
+        later=T+dt.timedelta(days=8)
+        read1=economic.at_read(original,[{"token":"UNSEEN"}],[],later)
+        self.assertEqual(read1["posizioni"][0]["identita"]["stato"],"NON_VERIFICATO")
+        read2=economic.at_read(read1,[{"token":"UNSEEN"}],[],later)
+        self.assertEqual(read2["monitor_fonti"]["copertura"]["progetti"],1)
+        self.assertEqual(read2["monitor_fonti"]["progetti"][0]["stato"],
+                         "SENZA_FONTE_PRIMARIA_ASSOCIATA")
+
+
 if __name__=="__main__":
     unittest.main()
