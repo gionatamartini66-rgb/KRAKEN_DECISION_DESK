@@ -35,6 +35,12 @@ class PrimaryFollowupTests(unittest.TestCase):
         return {"posizioni":rows,"candidati":candidates}
 
     def fetch(self, url):
+        if "/security-advisories?" in url:
+            name=url.split("/repos/")[1].split("/security-advisories?")[0]
+            return json.dumps([{"ghsa_id":"GHSA-abcd-efgh-ijkl",
+                "html_url":"https://github.com/"+name+"/security/advisories/GHSA-abcd-efgh-ijkl",
+                "state":"published","summary":"Repository advisory",
+                "published_at":"2026-11-12T00:00:00+00:00","withdrawn_at":None}]).encode()
         if url.startswith(sources.ECB):
             if "/EXR/" in url:
                 return ("KEY,TIME_PERIOD,OBS_VALUE\n"
@@ -66,6 +72,29 @@ class PrimaryFollowupTests(unittest.TestCase):
                     "quantita_token":100,"allocazione":"example"}]}).encode()
         raise AssertionError("source URL not registered: "+url)
 
+    def test_repositories_rotate_security_advisories_without_claiming_token_compromise(self):
+        roster=self.items(tokens=("BTC","ETH","SOL"))
+        first=sources.collect(T,roster,{},self.fetch)
+        one=[x for x in first["avvisi_repository"] if x["stato"]=="OSSERVATO"]
+        self.assertEqual(len(one),1)
+        self.assertEqual(one[0]["progetto_id"],"bitcoin")
+        self.assertEqual(one[0]["avvisi"][0]["impatto_sul_token"],"NON_ATTESTATO")
+        second=sources.collect(T+dt.timedelta(hours=1),roster,first,self.fetch)
+        self.assertEqual(second["avvisi_repository"][0]["stato"],"STORICO")
+        self.assertEqual(second["avvisi_repository"][1]["stato"],"OSSERVATO")
+        sources.at_read(second,roster,T+dt.timedelta(hours=1))
+        forged=copy.deepcopy(first)
+        forged["avvisi_repository"][0]["avvisi"][0]["fonte"]="https://attacker.example/advisory"
+        with self.assertRaises(ValueError):
+            sources.at_read(forged,roster,T)
+        inflated=copy.deepcopy(first)
+        inflated["avvisi_repository"][0]["avvisi"][0]["impatto_sul_token"]="COMPROMESSO"
+        with self.assertRaises(ValueError):
+            sources.at_read(inflated,roster,T)
+        empty=sources.collect(T,roster,{},lambda url:
+            b"[]" if "/security-advisories?" in url else self.fetch(url))
+        self.assertEqual(empty["avvisi_repository"][0]["stato"],"NESSUN_AVVISO_NEL_CAMPIONE")
+
     def test_two_refreshes_rotate_and_preserve_historical_supply(self):
         records=[]
         def fetch(url):
@@ -75,8 +104,8 @@ class PrimaryFollowupTests(unittest.TestCase):
         b=sources.collect(T+dt.timedelta(hours=1),self.items(
             observed=T+dt.timedelta(hours=1),circ=112),a,fetch)
         self.assertEqual(a["schema"],sources.SCHEMA)
-        self.assertEqual(a["richieste_pubbliche"],3)
-        self.assertEqual(b["richieste_pubbliche"],3)
+        self.assertEqual(a["richieste_pubbliche"],4)
+        self.assertEqual(b["richieste_pubbliche"],4)
         self.assertEqual(len(a["progetti"]),4)
         self.assertEqual(len(b["progetti"]),4)
         self.assertEqual({x["progetto_id"] for x in a["progetti"] if x["stato"]=="OSSERVATO"},
@@ -99,7 +128,7 @@ class PrimaryFollowupTests(unittest.TestCase):
             self.assertEqual(x["variazioni"]["offerta_circolante"],12)
             self.assertIn("non provano unlock",x["limite"])
         self.assertFalse(any(x["stato"]=="DOCUMENTO_PRIMARIO_CON_SCHEDULE" for x in b["calendari"]))
-        self.assertEqual(len(records),6)
+        self.assertEqual(len(records),8)
 
     def test_stale_read_without_new_fetch_and_no_false_sale(self):
         a=sources.collect(T,self.items(),{},self.fetch)
@@ -142,7 +171,7 @@ class PrimaryFollowupTests(unittest.TestCase):
             if "/pulls?" in url:return b'{"not":"a list"}'
             raise OSError("provider down")
         a=sources.collect(T,self.items(),{},broken)
-        self.assertEqual(a["richieste_pubbliche"],3)
+        self.assertEqual(a["richieste_pubbliche"],4)
         self.assertTrue(all(p["stato"]!="OSSERVATO" for p in a["progetti"]))
         self.assertEqual(a["indicatori_macro"][0]["stato"],"FONTE_NON_DISPONIBILE")
         self.assertIsNone(a["indicatori_macro"][0]["valore"])
@@ -183,7 +212,7 @@ class PrimaryFollowupTests(unittest.TestCase):
         existing["official_schedule"]={"repository":"bitcoin/bips","path":"schedules/btc.json","ref":"main"}
         with mock.patch.dict(economic._CURATED,{"BTC":existing}):
             a=sources.collect(T,self.items(tokens=("BTC",)),{},self.fetch)
-            self.assertEqual(a["richieste_pubbliche"],3)
+            self.assertEqual(a["richieste_pubbliche"],4)
             record=a["calendari"][0]
             self.assertEqual(record["stato"],"DOCUMENTO_PRIMARIO_CON_SCHEDULE")
             self.assertEqual(record["eventi"][0]["stato"],"PROGRAMMATO_NON_CIRCOLANTE")
@@ -263,7 +292,7 @@ class PrimaryFollowupTests(unittest.TestCase):
         first=sources.collect(T,items,{},self.fetch,asset_pairs=pairs)
         states=first["stati_coppie_kraken"]["posizioni"]
         self.assertEqual([p["status_kraken"] for p in states],["online","cancel_only"])
-        self.assertEqual(first["richieste_pubbliche"],3)
+        self.assertEqual(first["richieste_pubbliche"],4)
         self.assertEqual(sources.at_read(first,items,T)
                          ["stati_coppie_kraken"]["posizioni"][1]["stato_alla_lettura"],"OSSERVATO")
         pairs2=copy.deepcopy(pairs)

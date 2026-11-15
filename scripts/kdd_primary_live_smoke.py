@@ -77,6 +77,7 @@ for cycle in range(1,4):
           "history_events",len(raw["storico_eventi"]),
           "next_project",raw["prossimo_progetto"],
           "next_macro",raw["prossimo_indicatore"])
+    print("repository_security",[(r["progetto_id"],r["stato"],len(r["avvisi"])) for r in checked.get("avvisi_repository") or []])
     print("unlock_schedule",[(r["progetto_id"],r["stato"]) for r in checked["calendari"]])
     sui=next(r for r in checked["calendari"] if r["progetto_id"]=="sui")
     print("sui_official_monthly",sui["stato"],"source",sui.get("fonte"),

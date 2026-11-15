@@ -19,6 +19,7 @@ UTC = dt.timezone.utc
 MAX_GOVERNANCE_CALLS = 2
 MAX_MACRO_CALLS = 1
 MAX_SCHEDULE_CALLS = 1
+MAX_SECURITY_CALLS = 1
 MAX_SAMPLES = 96
 ECON_SCHEDULE_SCHEMA = "kdd-official-token-schedule-v001"
 SUI_CIRCULATION = "https://sui-circulation.suiexplorer.com/api/sui_circulation"
@@ -98,6 +99,41 @@ def _roster(items):
 def _source_repo(descriptor):
     repo = descriptor.get("governance_repository") if isinstance(descriptor, dict) else None
     return repo if isinstance(repo, str) and REPO.fullmatch(repo) else None
+
+
+def _security_repo(descriptor):
+    if not isinstance(descriptor,dict): return None
+    repo=descriptor.get("security_repository") or descriptor.get("repository")
+    return repo if isinstance(repo,str) and REPO.fullmatch(repo) else None
+
+
+def _security_events(payload, repo, now):
+    """Authentic public repository advisories, not a claim of token compromise."""
+    if not isinstance(payload,list) or len(payload)>25: return None
+    rows=[]
+    for source in payload[:5]:
+        if not isinstance(source,dict): return None
+        uid=source.get("ghsa_id")
+        if not isinstance(uid,str) or not re.fullmatch(r"GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}",uid):
+            return None
+        url="https://github.com/"+repo+"/security/advisories/"+uid
+        published=_time(source.get("published_at"))
+        withdrawn=_time(source.get("withdrawn_at"))
+        if (source.get("html_url")!=url or published is None
+                or published>now+dt.timedelta(minutes=2)
+                or (withdrawn and withdrawn<published)):
+            return None
+        if source.get("state")!="published": continue
+        summary=source.get("summary")
+        if not isinstance(summary,str) or not summary.strip(): return None
+        rows.append({"id":uid,"fonte":url,"emittente":repo,
+                     "tipo":"AVVISO_REPOSITORY","titolo":summary.strip()[:200],
+                     "pubblicato_utc":_iso(published),
+                     "ritirato_utc":_iso(withdrawn) if withdrawn else None,
+                     "stato":"RITIRATO" if withdrawn else "PUBBLICATO",
+                     "impatto_sul_token":"NON_ATTESTATO",
+                     "limite":"Advisory del repository: non prova effetto sul token, fondi o prezzo"})
+    return rows
 
 
 def _schedule_descriptor(descriptor):
@@ -535,6 +571,43 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
             entry.update(stato="RINVIATO_RATE_LIMIT_HTTP_429",
                          limite="HTTP 429 upstream: nessuna richiesta supplementare")
         projects.append(entry)
+    # KDD-20: independent capped rotation of repository security advisories.
+    # PR #66 acquires issue labels, not published GHSA alerts; no duplication.
+    security_eligible=[p for p in roster if _security_repo(roster[p]["source"])]
+    prior_security={e["progetto_id"]:e for e in old.get("avvisi_repository",[])
+                    if isinstance(e,dict) and e.get("progetto_id") in roster}
+    next_s=old.get("prossimo_security")
+    start_s=next((i for i,p in enumerate(security_eligible)
+                  if isinstance(next_s,str) and p>=next_s),0)
+    chosen_s=(security_eligible[start_s:start_s+1] if network_allowed else [])
+    sec_cursor=(security_eligible[(start_s+len(chosen_s))%len(security_eligible)]
+                if security_eligible else None)
+    advisories=[]
+    for project in roster:
+        r=_security_repo(roster[project]["source"])
+        row={"progetto_id":project,"repository_sicurezza":r,"stato":
+             "SENZA_REPOSITORY" if r is None else "RINVIATO_BUDGET",
+             "acquisito_utc":None,"avvisi":[],"limite":"Campione vuoto non equivale a sicurezza provata"}
+        if r and project in chosen_s:
+            used+=1
+            result,err=_fetch(fetch,GITHUB+r+"/security-advisories?per_page=5")
+            parsed=_security_events(result,r,now) if not err else None
+            if parsed is None:
+                row.update(stato="FONTE_NON_DISPONIBILE",errore=err or "RISPOSTA_NON_CONFORME")
+            else:
+                row.update(stato="OSSERVATO" if parsed else "NESSUN_AVVISO_NEL_CAMPIONE",
+                           acquisito_utc=_iso(now),avvisi=parsed)
+        elif r:
+            previous=prior_security.get(project)
+            if previous and previous.get("stato") in (
+                    "OSSERVATO","STORICO","NESSUN_AVVISO_NEL_CAMPIONE"):
+                observed=_time(previous.get("acquisito_utc"))
+                if observed and dt.timedelta(0)<=now-observed<=dt.timedelta(days=14):
+                    row.update(stato="STORICO",acquisito_utc=previous["acquisito_utc"],
+                               avvisi=previous.get("avvisi",[])[:5])
+            if not network_allowed and row["stato"]=="RINVIATO_BUDGET":
+                row["stato"]="RINVIATO_RATE_LIMIT_HTTP_429"
+        advisories.append(row)
     # ECB source rotation is independent from project and wallet membership.
     series=MACRO_SERIES
     past_macro={x["id"]:x for x in old.get("indicatori_macro",[])
@@ -632,6 +705,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
     kraken_status=_spot_status(now,items,asset_pairs,old)
     return {"schema":SCHEMA,"acquisito_utc":_iso(now),"progetti":projects,
             "stati_coppie_kraken":kraken_status,
+            "avvisi_repository":advisories,"prossimo_security":sec_cursor,
             "indicatori_macro":macro,"calendari":schedules,
             "revisioni_piani":changes_calendar,
             "storico_supply":history,"variazioni_supply":changes,
@@ -639,7 +713,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
             "prossimo_progetto":next_project,
             "prossimo_indicatore":series[(pick+(1 if network_allowed else 0))%len(series)][0],
             "prossimo_schedule":sch_next,
-            "richieste_pubbliche":used,"limite_richieste":MAX_GOVERNANCE_CALLS+MAX_MACRO_CALLS+MAX_SCHEDULE_CALLS,
+            "richieste_pubbliche":used,"limite_richieste":MAX_GOVERNANCE_CALLS+MAX_MACRO_CALLS+MAX_SCHEDULE_CALLS+MAX_SECURITY_CALLS,
             "limite":"Campioni pubblici: proposal != approvazione; unlock != circolazione != vendita; nessuna direzione di mercato inferita"}
 
 
@@ -660,7 +734,7 @@ def at_read(raw, items, now):
         raise ValueError("Primary economics identity mismatch")
     if [r.get("progetto_id") for r in schedules if isinstance(r,dict)] != list(roster):
         raise ValueError("Primary schedule identity mismatch")
-    if type(raw.get("richieste_pubbliche")) is not int or not 0<=raw["richieste_pubbliche"]<=4:
+    if type(raw.get("richieste_pubbliche")) is not int or not 0<=raw["richieste_pubbliche"]<=5:
         raise ValueError("Primary economics budget")
     retained=raw.get("storico_eventi",[])
     if not isinstance(retained,list) or len(retained)>MAX_SAMPLES:
@@ -676,6 +750,35 @@ def at_read(raw, items, now):
                 or not _time(old_event.get("acquisito_utc"))
                 or old_event.get("stato_decisione_rete")!="NON_ATTESTATO"):
             raise ValueError("Public event history attribution")
+    verified_advisories=[]
+    raw_advisories=raw.get("avvisi_repository")
+    if raw_advisories is not None:
+        if (not isinstance(raw_advisories,list) or len(raw_advisories)!=len(roster)
+                or [r.get("progetto_id") for r in raw_advisories if isinstance(r,dict)] != list(roster)):
+            raise ValueError("Security roster mismatch")
+        for row in raw_advisories:
+            project=row["progetto_id"]
+            repo=_security_repo(roster[project]["source"])
+            if row.get("repository_sicurezza")!=repo: raise ValueError("Security repository forged")
+            item=dict(row)
+            if row.get("stato") in ("OSSERVATO","NESSUN_AVVISO_NEL_CAMPIONE","STORICO"):
+                t=_time(row.get("acquisito_utc"))
+                if not repo or t is None or t>now+dt.timedelta(minutes=2):
+                    raise ValueError("Security observation time")
+                alerts=row.get("avvisi")
+                if not isinstance(alerts,list) or len(alerts)>5: raise ValueError("Advisory cardinality")
+                for a in alerts:
+                    if (not isinstance(a,dict) or
+                            a.get("impatto_sul_token")!="NON_ATTESTATO" or
+                            a.get("tipo")!="AVVISO_REPOSITORY" or
+                            a.get("emittente")!=repo):
+                        raise ValueError("Security impact or issuer forged")
+                    expected="https://github.com/"+repo+"/security/advisories/"+str(a.get("id"))
+                    if (a.get("fonte")!=expected or _time(a.get("pubblicato_utc")) is None):
+                        raise ValueError("Security advisory attribution")
+                item["stato_alla_lettura"]=(
+                    "SCADUTO" if now-t>dt.timedelta(days=14) else row["stato"])
+            verified_advisories.append(item)
     read_projects=[]
     for row in projects:
         repo=_source_repo(roster[row["progetto_id"]]["source"])
@@ -754,9 +857,11 @@ def at_read(raw, items, now):
     # reader is called by both packet build and GPT bridge (idempotent).
     return dict(raw,letto_utc=_iso(now),progetti=read_projects,
             stati_coppie_kraken=pairs_read,
+            avvisi_repository=verified_advisories if raw_advisories is not None else None,
             indicatori_macro=indicators,calendari=read_schedules,
             variazioni_supply=raw.get("variazioni_supply",[])[:30],
             copertura={"progetti":len(projects),"governance_osservati":sum(p["stato"]=="OSSERVATO" for p in read_projects),
                         "indicatori_macro_osservati":sum(m["stato"]=="OSSERVATO" for m in indicators),
-                        "calendari_primari_attuali":sum(s["stato"]=="DOCUMENTO_PRIMARIO_CON_SCHEDULE" for s in read_schedules)},
+                        "calendari_primari_attuali":sum(s["stato"]=="DOCUMENTO_PRIMARIO_CON_SCHEDULE" for s in read_schedules),
+                        "security_repository_osservati":sum(a.get("stato_alla_lettura") in ("OSSERVATO","NESSUN_AVVISO_NEL_CAMPIONE") for a in verified_advisories)},
             limite=raw.get("limite"))
