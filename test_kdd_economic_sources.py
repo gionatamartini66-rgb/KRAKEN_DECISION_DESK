@@ -521,6 +521,39 @@ class PrimaryFollowupTests(unittest.TestCase):
         self.assertEqual(outage["politiche_emissioni"][0]["stato"],"FONTE_NON_DISPONIBILE")
         self.assertIsNone(outage["politiche_emissioni"][0]["valori"])
 
+    def test_official_cftc_futures_positions_are_not_spot_institutional_flows(self):
+        spec=next(s for s in sources.MACRO_SERIES if s[0]=="CFTC_BTC_TFF")
+        rows=[["CANADIAN DOLLAR - CHICAGO MERCANTILE EXCHANGE","261103",
+               "2026-11-03","090741","CME ","00","090"]+["1"]*85+["FutOnly"]]
+        btc=[sources.CFTC_BTC_CONTRACT,"261110","2026-11-10",
+             sources.CFTC_BTC_MARKET_CODE,"CME ","00","133"]
+        btc+=["17527","6027","5548","490","4379","1976","187",
+              "5114","7705","427","124","308","17","16765",
+              "16658","762","869"]
+        btc+=["0"]*70+["FutOnly"]
+        rows.append(btc)
+        text="\n".join(__import__("csv").writer(__import__("io").StringIO()) or [] ) if False else ""
+        import csv,io
+        output=io.StringIO()
+        writer=csv.writer(output)
+        writer.writerows(rows)
+        got=sources._cftc_btc_tff(output.getvalue(),spec,T)
+        self.assertEqual(got["valore"],17527)
+        self.assertEqual(got["classificazioni"]["asset_manager"]["saldo_long_meno_short"],2403)
+        self.assertEqual(got["classificazioni"]["leveraged_money"]["saldo_long_meno_short"],-2591)
+        self.assertEqual(got["stato_pubblicazione"],"DATA_RAPPORTO_NON_DATA_PUBBLICAZIONE")
+        self.assertTrue(sources._cftc_read_valid(got))
+        corrupt=copy.deepcopy(got)
+        corrupt["classificazioni"]["dealer"]["saldo_long_meno_short"]=10000000
+        self.assertFalse(sources._cftc_read_valid(corrupt))
+        # Wrong contract / Coinbase micro cannot be used as BTC CME 5-BTC.
+        btc[3]="133742"
+        output=io.StringIO();csv.writer(output).writerow(btc)
+        self.assertIsNone(sources._cftc_btc_tff(output.getvalue(),spec,T))
+        older=sources._cftc_btc_tff(rows[0][0] if False else output.getvalue(),
+                                    spec,T)
+        self.assertIsNone(older)
+
     def test_ecb_primary_rotation_includes_refinancing_and_m3_without_double_fetch(self):
         roster=self.items(tokens=("BTC",))
         prev={}

@@ -87,7 +87,7 @@ _SOURCE_MATRIX = (
      "CONSULTABILE_DA_GPT_NON_ACQUISITO", "https://farside.co.uk/bitcoin-etf-flow-all-data/",
      "Flussi netti giornalieri degli ETF spot BTC", "Non distingue investitori istituzionali e retail"),
     ("cftc_cme", "CFTC Commitments of Traders / CME", "FONTE_PRIMARIA",
-     "CONSULTABILE_DA_GPT_NON_ACQUISITO", "https://www.cftc.gov/MarketReports/CommitmentsofTraders/index.htm",
+     "INTEGRATO_CAMPIONE_BTC_FUTURES", "https://www.cftc.gov/MarketReports/CommitmentsofTraders/index.htm",
      "Posizionamento settimanale futures regolamentati", "Dati ritardati, non il complesso del mercato crypto"),
     ("sec_13f", "SEC Form 13F", "FONTE_PRIMARIA",
      "CONSULTABILE_DA_GPT_NON_ACQUISITO", "https://www.sec.gov/rules-regulations/staff-guidance/division-investment-management-frequently-asked-questions/frequently-asked-questions-about-form-13f",
@@ -583,10 +583,10 @@ def regime_participation(base, derivatives, primary, now, previous=None):
         for item in rows:
             if not isinstance(item, dict) or item.get("stato") != "OSSERVATO":
                 continue
-            if item.get("id") not in ("USD_EUR","EA_HICP") or not finite(item.get("valore")):
+            if item.get("id") not in ("USD_EUR","EA_HICP","CFTC_BTC_TFF") or not finite(item.get("valore")):
                 continue
             out["famiglie_osservate"].append({
-                "famiglia":"MACRO_ECB_" + item["id"],"fonte":item.get("fonte"),
+                "famiglia":("FUTURES_CFTC_" if item["id"]=="CFTC_BTC_TFF" else "MACRO_ECB_") + item["id"],"fonte":item.get("fonte"),
                 "periodo":item.get("periodo"),"valore":item["valore"],"unita":item.get("unita"),
                 "limite":"Dato macro osservato; segno dell'impatto sul prezzo non dedotto"})
     return out

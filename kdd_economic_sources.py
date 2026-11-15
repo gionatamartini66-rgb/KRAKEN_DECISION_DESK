@@ -47,11 +47,15 @@ MACRO_SERIES = (
     ("ECB_DEPOSIT_RATE", "FM", "D.U2.EUR.4F.KR.DFR.LEV", "percentuale annua", 8),
     ("ECB_MAIN_REFI_RATE", "FM", "D.U2.EUR.4F.KR.MRR_FR.LEV", "percentuale annua", 8),
     ("EA_M3_GROWTH", "BSI", "M.U2.Y.V.M30.X.I.U2.2300.Z01.A", "variazione percentuale a/a", 65),
+    ("CFTC_BTC_TFF", "CFTC", "BTC_CME_133741", "contratti futures CME Bitcoin (5 BTC/contratto)", 21),
 )
 ISSUE_LABELS = {"governance","security","tokenomics","protocol","upgrade",
                 "migration","breaking-change","deprecation"}
 GITHUB = "https://api.github.com/repos/"
 ECB = "https://data-api.ecb.europa.eu/service/data/"
+CFTC_BTC_TFF_URL = "https://www.cftc.gov/dea/newcot/FinFutWk.txt"
+CFTC_BTC_CONTRACT = "BITCOIN - CHICAGO MERCANTILE EXCHANGE"
+CFTC_BTC_MARKET_CODE = "133741"
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 PATH = re.compile(r"[A-Za-z0-9_.\-/]+\Z")
 SHA_OR_REF = re.compile(r"[A-Za-z0-9_.-]{1,80}\Z")
@@ -295,6 +299,8 @@ def _governance(payload, repo, acquired):
 
 def _series_url(series):
     _, flow, key, _, _ = series
+    if flow=="CFTC" and key=="BTC_CME_133741":
+        return CFTC_BTC_TFF_URL
     return ECB + flow + "/" + key + "?format=csvdata&lastNObservations=2"
 
 
@@ -333,6 +339,87 @@ def _ecb_csv(raw, series, now):
             "pubblicato_utc": None, "stato_pubblicazione": "NON_ATTESTATO_DAL_CSV",
             "stato": "OSSERVATO" if (now.date()-day).days <= days else "SCADUTO",
             "limite": "Data del periodo, non data di pubblicazione; revisioni possibili. Nessuna causalita sui token"}
+
+
+def _cftc_btc_tff(raw, spec, now):
+    """CFTC official Friday TFF Futures-only flat file: one EXACT CME BTC contract.
+
+    CFTC trader classes are reportable FUTURES contracts, never identifiable
+    firms, ETF creations, on-chain transfers or spot institutional cash flow.
+    """
+    if spec[0]!="CFTC_BTC_TFF" or not isinstance(raw,str) or len(raw)>950000:
+        return None
+    try:
+        rows=list(csv.reader(io.StringIO(raw)))
+    except (ValueError,csv.Error):
+        return None
+    if not 1<=len(rows)<=300:
+        return None
+    target=[r for r in rows if len(r)>90 and r[0].strip()==CFTC_BTC_CONTRACT
+            and r[3].strip()==CFTC_BTC_MARKET_CODE
+            and r[5].strip()=="00" and r[-1].strip()=="FutOnly"]
+    if len(target)!=1:
+        return None
+    r=target[0]
+    try:
+        date=dt.date.fromisoformat(r[2].strip())
+        if date>now.date()+dt.timedelta(days=1):
+            return None
+        # Source column layout is TFF Futures Only (not the combined report).
+        indices={"dealer":(8,9),"asset_manager":(11,12),
+                 "leveraged_money":(14,15),"other_reportable":(17,18),
+                 "nonreportable":(22,23)}
+        vals={}
+        for role,(left,right) in indices.items():
+            a,b=int(r[left].strip()),int(r[right].strip())
+            if not 0<=a<=1000000000 or not 0<=b<=1000000000:
+                return None
+            vals[role]={"long_contratti":a,"short_contratti":b,
+                        "saldo_long_meno_short":a-b}
+        interest=int(r[7].strip())
+        if not 0<interest<1000000000:
+            return None
+    except (ValueError,IndexError,TypeError):
+        return None
+    return {"id":spec[0],"serie":"CFTC.BTC_CME_133741",
+            "fonte":CFTC_BTC_TFF_URL,"mercato":CFTC_BTC_CONTRACT,
+            "codice_contratto":CFTC_BTC_MARKET_CODE,
+            "contratto_nominale":"5 BTC",
+            "periodo":date.isoformat(),"valore":interest,
+            "classificazioni":vals,"unita":spec[3],
+            "acquisito_utc":_iso(now),
+            "pubblicato_utc":None,
+            "stato_pubblicazione":"DATA_RAPPORTO_NON_DATA_PUBBLICAZIONE",
+            "stato":"OSSERVATO" if (now.date()-date).days<=spec[4] else "SCADUTO",
+            "limite":"CFTC TFF futures only: posizioni riportate per classe alla data martedì; non operatori nominati, flussi spot, acquisti istituzionali o segnali direzionali"}
+
+
+def _cftc_read_valid(row):
+    if row.get("id")!="CFTC_BTC_TFF" or row.get("fonte")!=CFTC_BTC_TFF_URL:
+        return False
+    if (row.get("mercato")!=CFTC_BTC_CONTRACT
+            or row.get("codice_contratto")!=CFTC_BTC_MARKET_CODE
+            or row.get("contratto_nominale")!="5 BTC"
+            or row.get("stato_pubblicazione")!="DATA_RAPPORTO_NON_DATA_PUBBLICAZIONE"
+            or row.get("pubblicato_utc") is not None):
+        return False
+    v=row.get("valore")
+    if type(v) is not int or not 0<v<1000000000:
+        return False
+    roles=("dealer","asset_manager","leveraged_money","other_reportable","nonreportable")
+    groups=row.get("classificazioni")
+    if not isinstance(groups,dict) or set(groups)!=set(roles):
+        return False
+    for role in roles:
+        rec=groups[role]
+        if not isinstance(rec,dict) or set(rec)!=set(("long_contratti","short_contratti","saldo_long_meno_short")):
+            return False
+        a,b,net=rec["long_contratti"],rec["short_contratti"],rec["saldo_long_meno_short"]
+        if any(type(x) is not int or abs(x)>1000000000 for x in (a,b,net)):
+            return False
+        if a<0 or b<0 or a-b!=net:
+            return False
+    return True
 
 
 def _official_schedule(raw, project_id, source, now):
@@ -888,7 +975,8 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
     if network_allowed:
         used+=1
         raw,error=_fetch(fetch,url,json_data=False)
-        current=_ecb_csv(raw,spec,now) if not error else None
+        current=(_cftc_btc_tff(raw,spec,now)
+                 if spec[0]=="CFTC_BTC_TFF" else _ecb_csv(raw,spec,now)) if not error else None
     else:
         error=paused
         current=None
@@ -1386,6 +1474,8 @@ def at_read(raw, items, now):
             raise ValueError("ECB series forged")
         new=dict(row)
         if row.get("valore") is not None:
+            if row["id"]=="CFTC_BTC_TFF" and not _cftc_read_valid(row):
+                raise ValueError("CFTC futures report source or classification forged")
             period=str(row.get("periodo"))
             if len(period)==7 and re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])",period):
                 year,month=map(int,period.split("-"))

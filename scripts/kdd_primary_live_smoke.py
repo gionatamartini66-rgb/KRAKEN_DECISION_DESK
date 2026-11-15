@@ -19,7 +19,8 @@ def fetch(url):
     if not (url.startswith("https://api.github.com/repos/")
             or url.startswith("https://data-api.ecb.europa.eu/service/data/")
             or url.startswith("https://raw.githubusercontent.com/")
-            or url == primary.SUI_CIRCULATION):
+            or url == primary.SUI_CIRCULATION
+            or url == primary.CFTC_BTC_TFF_URL):
         raise ValueError("URL outside verified public source allowlist")
     req = urllib.request.Request(url, headers={
         "User-Agent": "KDD-G2-public-source-smoke/1.0",
@@ -67,7 +68,7 @@ def counted(url):
     return fetch(url)
 
 raw=None
-for cycle in range(1,6):
+for cycle in range(1,7):
     moment=dt.datetime.now(dt.timezone.utc)
     before=len(seen)
     raw=primary.collect(moment,roster,raw,counted,rpc_fetch=rpc_fetch,collect_project_issues=True)
