@@ -1376,6 +1376,7 @@ class PrimaryEconomicProducerTests(unittest.TestCase):
             fetch_json=self._request, fetch_csv=lambda url: self.macro_csv,
             enabled=False)
         source["fonti_primarie"] = raw
+        source["fonti_economiche"] = e.sources_matrix()
         by_id = {x["coingecko_id"]:x for x in raw["progetti"]}
         for row in source["posizioni"]+source["candidati"]:
             row["osservazioni_primarie"] = by_id.get(
