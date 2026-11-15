@@ -23,6 +23,10 @@ ECB_SERIES = {
         "FM/D.U2.EUR.4F.KR.MRR_FR.LEV", "PERCENTUALE_ANNUA"),
     "CAMBIO_USD_PER_EUR": (
         "EXR/D.USD.EUR.SP00.A", "USD_PER_EUR"),
+    "INFLAZIONE_HICP_EUROZONA": (
+        "HICP/M.U2.N.000000.4D0.ANR", "INFLAZIONE_AA_PCT"),
+    "M3_CRESCITA_EUROZONA": (
+        "BSI/M.U2.Y.V.M30.X.I.U2.2300.Z01.A", "M3_CRESCITA_AA_PCT"),
 }
 LABELS = {"governance", "security", "tokenomics", "protocol",
           "upgrade", "migration", "breaking-change", "deprecation"}
@@ -201,18 +205,20 @@ def parse_ecb_csv(raw, series, unit, now):
     valid = []
     for row in rows:
         period, value = row.get("TIME_PERIOD"), row.get("OBS_VALUE")
-        if not isinstance(period, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", period):
+        if not isinstance(period, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}(?:-[0-9]{2})?", period):
             continue
         try:
             n = float(value)
-            t = dt.date.fromisoformat(period)
+            t = dt.date.fromisoformat(period + "-01" if len(period) == 7 else period)
         except (ValueError, TypeError, OverflowError):
             continue
         if not math.isfinite(n) or t > now.date():
             continue
         if unit == "USD_PER_EUR" and n <= 0:
             continue
-        if unit != "USD_PER_EUR" and not (0 <= n <= 50):
+        if unit == "PERCENTUALE_ANNUA" and not (0 <= n <= 50):
+            continue
+        if unit in ("INFLAZIONE_AA_PCT", "M3_CRESCITA_AA_PCT") and not (-50 <= n <= 100):
             continue
         valid.append((t, n))
     if not valid:
@@ -448,7 +454,8 @@ def at_read(raw, identities, now, *, catalog=None):
             series, unit = ECB_SERIES[row["id"]]
             if (row.get("fonte") != "https://data-api.ecb.europa.eu/service/data/"+series
                     or row.get("unita") != unit
-                    or numeric(row.get("valore")) is None):
+                    or type(row.get("valore")) not in (float, int)
+                    or not math.isfinite(row["valore"])):
                 raise ValueError("macro evidence invalid")
             record = dict(row)
             record["stato_alla_lettura"] = ("SCADUTO" if now-observed > dt.timedelta(days=2)
