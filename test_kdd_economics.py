@@ -1205,6 +1205,14 @@ class PrimaryEconomicProducerTests(unittest.TestCase):
         self.assertEqual(retained["solana"]["politica_emissioni"]["stato"], "OSSERVATO")
         self.assertLessEqual(max(x["richieste_effettuate"] for x in (a,b,c)), 8)
         self.assertEqual(len(c["progetti"]), 4)
+        import kdd_primary_economics as primary
+        seen = primary.at_read(c, self.ids, self.now+__import__('datetime').timedelta(minutes=40),
+                               catalog=self.catalog)
+        self.assertEqual(len(seen["storico_sintesi"]), 4)
+        seen_again = primary.at_read(
+            seen, self.ids, self.now+__import__('datetime').timedelta(minutes=41),
+            catalog=self.catalog)
+        self.assertEqual(seen_again["storico_sintesi"], seen["storico_sintesi"])
 
     def test_solana_issued_policy_is_not_unlock(self):
         out = self._collect(ids=[self.ids[2]])
