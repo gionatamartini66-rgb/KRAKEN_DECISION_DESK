@@ -23,7 +23,8 @@ MAX_SAMPLES = 96
 ECON_SCHEDULE_SCHEMA = "kdd-official-token-schedule-v001"
 MACRO_SERIES = (
     ("USD_EUR", "EXR", "D.USD.EUR.SP00.A", "USD per EUR", 8),
-    ("EA_HICP", "ICP", "M.U2.N.000000.4.ANR", "variazione percentuale a/a", 65),
+    ("EA_HICP", "HICP", "M.U2.N.000000.4D0.ANR", "variazione percentuale a/a", 65),
+    ("ECB_DEPOSIT_RATE", "FM", "D.U2.EUR.4F.KR.DFR.LEV", "percentuale annua", 8),
 )
 GITHUB = "https://api.github.com/repos/"
 ECB = "https://data-api.ecb.europa.eu/service/data/"

@@ -40,9 +40,12 @@ class PrimaryFollowupTests(unittest.TestCase):
                 return ("KEY,TIME_PERIOD,OBS_VALUE\n"
                         "EXR.D.USD.EUR.SP00.A,2026-11-13,1.08\n"
                         "EXR.D.USD.EUR.SP00.A,2026-11-14,1.09\n").encode()
-            if "/ICP/" in url:
+            if "/HICP/" in url:
                 return ("KEY,TIME_PERIOD,OBS_VALUE\n"
-                        "ICP.M.U2.N.000000.4.ANR,2026-10,2.3\n").encode()
+                        "HICP.M.U2.N.000000.4D0.ANR,2026-10,2.3\n").encode()
+            if "/FM/" in url:
+                return ("KEY,TIME_PERIOD,OBS_VALUE\n"
+                        "FM.D.U2.EUR.4F.KR.DFR.LEV,2026-11-14,2.5\n").encode()
             raise AssertionError("unexpected macro series")
         if "/pulls?" in url:
             repo=url.split("/repos/")[1].split("/pulls?")[0]
