@@ -35,6 +35,9 @@ def fetch(url):
 def rpc_fetch(url,payload):
     if url!=primary.SOLANA_RPC or payload.get("method")!="getInflationGovernor":
         raise ValueError("Unapproved public RPC")
+    # Count JSON-RPC POST beside the HTTP GET observations; a timeout is
+    # still one real attempted request, not a free synthetic source.
+    seen.append(url+"#getInflationGovernor")
     req=urllib.request.Request(url,data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type":"application/json","User-Agent":"KDD-G2-public-source-smoke/1.0"},
         method="POST")
