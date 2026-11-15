@@ -1164,8 +1164,8 @@ def decision_review(evidence, row, group):
                       "dettaglio":details,"limite":limit})
     schedule=by_project("calendari")
     if schedule.get("stato")=="DOCUMENTO_PRIMARIO_CON_SCHEDULE":
-        event=next((x for x in schedule.get("eventi",[]) if isinstance(x,dict)),None)
-        if event:
+        for event in schedule.get("eventi",[])[:4]:
+            if not isinstance(event,dict): continue
             add("UNLOCK_SOLO_PROGRAMMATO",
                 "Documento del progetto con unlock programmato; rilascio effettivo e vendita non attestati",
                 schedule.get("fonte"),event.get("evento_utc"),schedule.get("acquisito_utc"),
@@ -1203,10 +1203,12 @@ def decision_review(evidence, row, group):
                 {"status":entry.get("status_kraken"),"cambiamento":entry.get("cambiamento")})
     security=by_project("avvisi_repository")
     if security.get("stato_alla_lettura")=="OSSERVATO":
-        event=next((e for e in security.get("avvisi",[]) if isinstance(e,dict)),None)
-        if event:
+        for event in security.get("avvisi",[])[:5]:
+            if not isinstance(event,dict): continue
             add("AVVISO_SICUREZZA_REPOSITORY",
-                "Il repository associato pubblica un avviso di sicurezza: impatto sul token non attestato",
+                "Il repository pubblica un avviso di sicurezza"+(
+                    " ritirato" if event.get("stato")=="RITIRATO" else "")+
+                    ": impatto sul token non attestato",
                 event.get("fonte"),event.get("pubblicato_utc"),
                 security.get("acquisito_utc"),"DOCUMENTO_REPOSITORY",
                 event.get("limite"),{"titolo":event.get("titolo"),"stato":event.get("stato")})
@@ -1219,8 +1221,8 @@ def decision_review(evidence, row, group):
             {"valori":emission.get("valori")})
     governance=by_project("progetti")
     if governance.get("stato")=="OSSERVATO":
-        event=next((e for e in governance.get("eventi",[]) if isinstance(e,dict)),None)
-        if event:
+        for event in governance.get("eventi",[])[:3]:
+            if not isinstance(event,dict): continue
             add("PROPOSTA_GOVERNANCE_DOCUMENTALE",
                 "Esiste una proposta di documentazione; attivazione sulla rete non attestata",
                 event.get("fonte"),event.get("pubblicato_utc"),
@@ -1229,14 +1231,24 @@ def decision_review(evidence, row, group):
                                       "stato_documento":event.get("stato_documento")})
     issues=by_project("segnalazioni_repo")
     if issues.get("stato_alla_lettura")=="OSSERVATO":
-        event=next((e for e in issues.get("eventi",[]) if isinstance(e,dict)),None)
-        if event:
+        for event in issues.get("eventi",[])[:4]:
+            if not isinstance(event,dict): continue
             add("ISSUE_TECNICA_ETICHETTATA",
                 "È pubblicata una issue etichettata: l'esito tecnico non è accertato",
                 event.get("fonte"),event.get("pubblicato_utc"),
                 issues.get("acquisito_utc"),"SEGNALAZIONE_NON_CONFERMA",
                 event.get("limite"),{"titolo":event.get("titolo"),
                                       "categorie":event.get("categorie")})
+    if pid=="bitcoin":
+        for point in evidence.get("indicatori_macro",[]):
+            if (isinstance(point,dict) and point.get("id")=="CFTC_BTC_TFF"
+                    and point.get("stato")=="OSSERVATO"):
+                add("POSIZIONI_FUTURES_CFTC_BTC",
+                    "Posizioni futures BTC CME dichiarate alla CFTC: classificazioni, non acquisti spot",
+                    point.get("fonte"),point.get("periodo"),point.get("acquisito_utc"),
+                    "RILEVAZIONE_REGOLAMENTARE_RITARDATA",point.get("limite"),
+                    {"open_interest_contratti":point.get("valore"),
+                     "categorie":point.get("classificazioni")})
     if not facts:
         return base
     priority=(("STATO_COPPIA_KRAKEN", "Una restrizione della coppia potrebbe impedire l'operatività prevista",
@@ -1246,6 +1258,10 @@ def decision_review(evidence, row, group):
                "I periodi mensili documentati potrebbero influire sulla supply futura",
                "Mancano giorno esatto, quantità della tranche, circolazione e vendita",
                "Rileggere la regola pubblicata e verificare eventuali eventi effettivi prima di stimare l'impatto"),
+              ("POSIZIONI_FUTURES_CFTC_BTC",
+               "Cambiamenti nel posizionamento futures possono modificare il quadro della partecipazione",
+               "Le posizioni riportate non identificano acquisti spot, singoli soggetti o causalità",
+               "Confrontare prossime rilevazioni CFTC, volumi spot e dati indipendenti"),
               ("UNLOCK_SOLO_PROGRAMMATO",
                "Una distribuzione programmata potrebbe modificare la disponibilità futura di token",
                "Il documento non attesta immissione effettiva, domanda o vendite",
@@ -1276,9 +1292,36 @@ def decision_review(evidence, row, group):
     pair=next((f for f in facts if f["tipo"]=="STATO_COPPIA_KRAKEN"),None)
     if pair and pair["dettaglio"]["status"]=="online":
         selected=next(((a,b,c) for kind,a,b,c in priority[1:] if kind in present),selected)
+    # Do not let the first chronological row in a family conceal important
+    # coexisting advisories, issues or governance proposals. Record missing
+    # cardinality so a capped summary explicitly directs GPT to the source.
+    visible=facts[:20]
+    shown={}
+    for x in visible: shown[x["tipo"]]=shown.get(x["tipo"],0)+1
+    available={
+        "UNLOCK_SOLO_PROGRAMMATO":len(schedule.get("eventi",[]))
+            if schedule.get("stato")=="DOCUMENTO_PRIMARIO_CON_SCHEDULE" else 0,
+        "AVVISO_SICUREZZA_REPOSITORY":len(security.get("avvisi",[]))
+            if security.get("stato_alla_lettura")=="OSSERVATO" else 0,
+        "PROPOSTA_GOVERNANCE_DOCUMENTALE":len(governance.get("eventi",[]))
+            if governance.get("stato")=="OSSERVATO" else 0,
+        "ISSUE_TECNICA_ETICHETTATA":len(issues.get("eventi",[]))
+            if issues.get("stato_alla_lettura")=="OSSERVATO" else 0}
+    hidden={k:n-shown.get(k,0) for k,n in available.items()
+            if n>shown.get(k,0)}
+    other=[{"tipo":kind,"ipotesi_non_attestata":hyp,
+            "controipotesi":counter,"condizione_di_riesame":recheck}
+           for kind,hyp,counter,recheck in priority
+           if kind in present][:8]
+    condition=(selected[2]+("; RIVEDERE le altre evidenze nel monitor originale: "
+               +str(hidden) if hidden else ""))
     return dict(base,stato="COPERTURA_PRIMARIA_PARZIALE",
-                fatti=facts[:7],ipotesi_non_attestata=selected[0],
-                controipotesi=selected[1],condizione_di_riesame=selected[2])
+                fatti=visible,numero_fatti_visibili=len(visible),
+                eventi_concorrenti_nel_campione=len(facts),
+                non_mostrati_per_tipo=hidden,
+                ipotesi_concorrenti=other,
+                ipotesi_non_attestata=selected[0],
+                controipotesi=selected[1],condizione_di_riesame=condition)
 
 
 def at_read(raw, items, now):
