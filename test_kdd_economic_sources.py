@@ -188,6 +188,72 @@ class PrimaryFollowupTests(unittest.TestCase):
         self.assertEqual(no_extra["segnalazioni_repo"][0]["stato"],"NON_RICHIESTO")
         self.assertEqual(no_extra["richieste_pubbliche"],4)
 
+    def test_concurrent_official_events_not_hidden_and_later_revision_changes_view(self):
+        # Eight labelled issues + six proposals + five GHSA notices coexist for
+        # one project. Review must retain plurality and disclose capped rows.
+        roster=self.items(tokens=("BTC",))
+        iteration={"n":1}
+        def public(url):
+            if "/security-advisories?" in url:
+                repo=url.split("/repos/")[1].split("/security-advisories?")[0]
+                return json.dumps([{
+                    "ghsa_id":f"GHSA-abcd-efgh-{i:04d}",
+                    "html_url":f"https://github.com/{repo}/security/advisories/GHSA-abcd-efgh-{i:04d}",
+                    "state":"published",
+                    "summary":("Updated advisory" if iteration["n"]==2 and i==0
+                               else "Original security advisory"),
+                    "published_at":"2026-11-12T08:00:00+00:00",
+                    "withdrawn_at":("2026-11-14T09:00:00+00:00"
+                                    if iteration["n"]==2 and i==0 else None)}
+                    for i in range(5)]).encode()
+            if "/issues?" in url:
+                repo=url.split("/repos/")[1].split("/issues?")[0]
+                return json.dumps([{
+                    "number":8100+i,"title":f"Technical issue {i}",
+                    "html_url":f"https://github.com/{repo}/issues/{8100+i}",
+                    "created_at":"2026-11-12T08:00:00+00:00",
+                    "updated_at":"2026-11-14T08:00:00+00:00",
+                    "labels":[{"name":"upgrade"}]}
+                    for i in range(8)]).encode()
+            if "/pulls?" in url:
+                repo=url.split("/repos/")[1].split("/pulls?")[0]
+                return json.dumps([{
+                    "number":700+i,"title":f"Governance proposal {i}",
+                    "html_url":f"https://github.com/{repo}/pull/{700+i}",
+                    "base":{"repo":{"full_name":repo}},
+                    "created_at":"2026-11-12T08:00:00+00:00",
+                    "updated_at":"2026-11-14T08:00:00+00:00",
+                    "merged_at":None}
+                    for i in range(6)]).encode()
+            return self.fetch(url)
+        first=sources.collect(T,roster,{},public,collect_project_issues=True)
+        checked=sources.at_read(first,roster,T)
+        r=sources.decision_review(checked,roster["posizioni"][0],"posizioni")
+        types=[f["tipo"] for f in r["fatti"]]
+        self.assertEqual(types.count("AVVISO_SICUREZZA_REPOSITORY"),5)
+        self.assertEqual(types.count("ISSUE_TECNICA_ETICHETTATA"),4)
+        self.assertEqual(types.count("PROPOSTA_GOVERNANCE_DOCUMENTALE"),3)
+        self.assertEqual(r["non_mostrati_per_tipo"]["ISSUE_TECNICA_ETICHETTATA"],4)
+        self.assertEqual(r["non_mostrati_per_tipo"]["PROPOSTA_GOVERNANCE_DOCUMENTALE"],3)
+        self.assertGreaterEqual(len(r["ipotesi_concorrenti"]),3)
+        self.assertIn("RIVEDERE",r["condizione_di_riesame"])
+        iteration["n"]=2
+        after=T+dt.timedelta(hours=1)
+        second=sources.collect(after,roster,first,public,collect_project_issues=True)
+        revised=sources.decision_review(sources.at_read(second,roster,after),
+                                        roster["posizioni"][0],"posizioni")
+        self.assertNotEqual(r["fatti"],revised["fatti"])
+        self.assertTrue(any("ritirato" in f["fatto"] for f in revised["fatti"]))
+        self.assertTrue(any(f["dettaglio"].get("titolo")=="Updated advisory"
+                            for f in revised["fatti"]
+                            if f["tipo"]=="AVVISO_SICUREZZA_REPOSITORY"))
+        self.assertEqual(revised["non_mostrati_per_tipo"]["ISSUE_TECNICA_ETICHETTATA"],4)
+        late=sources.decision_review(
+            sources.at_read(second,roster,after+dt.timedelta(days=16)),
+            roster["posizioni"][0],"posizioni")
+        self.assertEqual(late["stato"],"NESSUNA_EVIDENZA_PRIMARIA_ATTUALE")
+        self.assertEqual(late["fatti"],[])
+
     def test_repositories_rotate_security_advisories_without_claiming_token_compromise(self):
         roster=self.items(tokens=("BTC","ETH","SOL"))
         first=sources.collect(T,roster,{},self.fetch)
