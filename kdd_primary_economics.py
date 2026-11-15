@@ -301,8 +301,11 @@ def collect(now, identities, previous, *, fetch_json, fetch_csv, catalog, enable
         projection = registry.get("circulation_schedule_primary")
         if (isinstance(projection, dict) and
                 projection.get("type") == "MONTHLY_CIRCULATION_PROJECTION" and
-                projection.get("url") ==
-                "https://sui-circulation.suiexplorer.com/api/sui_circulation" and
+                isinstance(projection.get("url"), str) and
+                projection["url"].startswith("https://") and
+                urlparse(projection["url"]).hostname not in (None,"localhost","127.0.0.1") and
+                not urlparse(projection["url"]).username and
+                not urlparse(projection["url"]).password and
                 requests+1 <= MAX_REQUESTS):
             requests += 1
             try:
@@ -368,7 +371,7 @@ def collect(now, identities, previous, *, fetch_json, fetch_csv, catalog, enable
             "limite_richieste": MAX_REQUESTS, "limite": "Prove pubbliche primarie, non segnali o esecuzioni"}
 
 
-def at_read(raw, identities, now):
+def at_read(raw, identities, now, *, catalog=None):
     """Fail closed on fabricated project attribution, future times and source drift."""
     if not isinstance(raw, dict) or raw.get("schema") != VERSION:
         raise ValueError("primary economic schema invalid")
@@ -416,8 +419,11 @@ def at_read(raw, identities, now):
                     raise ValueError("invented unlock evidence")
         projection = rec.get("proiezione_circolazione")
         if isinstance(projection, dict) and projection.get("stato") == "OSSERVATO":
-            if (coin != "sui" or projection.get("fonte") !=
-                    "https://sui-circulation.suiexplorer.com/api/sui_circulation"):
+            identity_for_source = next(x for x in identities if name(x) == coin)
+            entry = (catalog or {}).get(identity_for_source.get("token_progetto"), {})
+            approved = entry.get("circulation_schedule_primary", {})
+            if (entry.get("id") != coin or approved.get("type") != "MONTHLY_CIRCULATION_PROJECTION"
+                    or projection.get("fonte") != approved.get("url")):
                 raise ValueError("unbound monthly supply source")
             for event in projection.get("eventi", []):
                 if (event.get("vendita") != "NON_ATTESTATA"
