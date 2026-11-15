@@ -1366,6 +1366,37 @@ class PrimaryEconomicProducerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             primary.at_read(forged,[self.ids[2]],self.now)
 
+    def test_economic_packet_and_gpt_double_read_keep_primary_identity_and_history(self):
+        import copy
+        import kdd_primary_economics as primary
+        source, positions, shortlist = EconomicEvidenceTests("test_all_assets_remain_even_when_missing").sample()
+        ids = [row["identita"] for row in source["posizioni"]+source["candidati"]]
+        raw = primary.collect(
+            T, ids, None, catalog=e._CURATED,
+            fetch_json=self._request, fetch_csv=lambda url: self.macro_csv,
+            enabled=False)
+        source["fonti_primarie"] = raw
+        by_id = {x["coingecko_id"]:x for x in raw["progetti"]}
+        for row in source["posizioni"]+source["candidati"]:
+            row["osservazioni_primarie"] = by_id.get(
+                row["identita"]["coingecko_id"],
+                {"stato":"NON_VERIFICATO_IDENTITA",
+                 "limite":"Progetto non attribuibile con fonte indipendente"})
+        packet_read = e.at_read(source,positions,shortlist,T)
+        gpt_read = e.at_read(packet_read,positions,shortlist,T)
+        self.assertEqual(gpt_read["fonti_primarie"]["schema"],primary.VERSION)
+        self.assertEqual(len(gpt_read["posizioni"]),2)
+        self.assertEqual(len(gpt_read["candidati"]),1)
+        self.assertEqual(len(gpt_read["fonti_primarie"]["progetti"]),3)
+        altered=copy.deepcopy(source)
+        altered["posizioni"][0]["osservazioni_primarie"] = (
+            altered["posizioni"][1]["osservazioni_primarie"])
+        with self.assertRaises(ValueError):
+            e.at_read(altered,positions,shortlist,T)
+        aged=e.at_read(source,positions,shortlist,T+dt.timedelta(days=8))
+        self.assertEqual(aged["fonti_primarie"]["progetti"][0]
+                         ["stato_alla_lettura"],"SCADUTO")
+
     def test_regime_contradiction_does_not_become_trade_signal(self):
         import kdd_economics as econ
         base={"stato":"RIALZISTA","qualita":"PARZIALE","contrari":[]}
