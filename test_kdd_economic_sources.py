@@ -370,8 +370,7 @@ class PrimaryFollowupTests(unittest.TestCase):
                    "origine":"CLI_ESPLICITO_LOCALE"}]}
         def keep(name,record):
             self.assertEqual(name,"config.json")
-            conf.clear()
-            conf.update(record)
+            self.assertIs(record,conf)
         with mock.patch.object(desk,"load",return_value=conf), \
              mock.patch.object(desk,"save",side_effect=keep) as saved, \
              mock.patch.object(desk,"NOW",return_value=T), \
