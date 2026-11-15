@@ -625,7 +625,7 @@ def at_read(source, positions, shortlist, now):
     original_primary = source.get("fonti_primarie")
     identities = [row.get("identita") for rows in (original_positions, original_candidates)
                   for row in rows if isinstance(row, dict)]
-    primary_read = (primary.at_read(original_primary, identities, now)
+    primary_read = (primary.at_read(original_primary, identities, now, catalog=_CURATED)
                     if original_primary is not None else None)
     raw_primary = ({row["coingecko_id"]: row
                     for row in original_primary.get("progetti", [])}
