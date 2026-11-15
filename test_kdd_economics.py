@@ -1316,6 +1316,20 @@ class PrimaryEconomicProducerTests(unittest.TestCase):
                                    "FM/D.U2.EUR.4F.KR.MRR_FR.LEV",
                                    "PERCENTUALE_ANNUA",self.now)
 
+    def test_hicp_and_money_growth_monthly_negative_values_are_dated(self):
+        import kdd_primary_economics as primary
+        doc = b"TIME_PERIOD,OBS_VALUE\n2026-09,1.9\n2026-10,2.1\n"
+        result=primary.parse_ecb_csv(doc,"HICP/M.U2.N.000000.4D0.ANR",
+                                     "INFLAZIONE_AA_PCT",self.now)
+        self.assertEqual(result["periodo_dato"],"2026-10-01")
+        self.assertEqual(result["valore"],2.1)
+        m3 = b"TIME_PERIOD,OBS_VALUE\n2026-08,-0.5\n2026-09,-0.2\n"
+        money=primary.parse_ecb_csv(m3,"BSI/M.U2.Y.V.M30.X.I.U2.2300.Z01.A",
+                                    "M3_CRESCITA_AA_PCT",self.now)
+        self.assertEqual(money["valore"],-.2)
+        self.assertEqual(money["stato"],"OSSERVATO")
+        self.assertNotIn("previsione",money)
+
     def test_provider_failure_never_becomes_zero(self):
         import kdd_primary_economics as primary
         def blocked(url,payload=None):raise OSError("HTTP 429 rate limit")
