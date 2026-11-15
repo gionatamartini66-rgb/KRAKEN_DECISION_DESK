@@ -510,6 +510,67 @@ def regime(btc_four, global_row, now):
     return out
 
 
+def regime_integrated(base, derivatives, primary, previous, now):
+    """Contextual reconciliation, never a buy/sell action or automatic macro causation.
+
+    Independent families: BTC spot 4H/1D already one trend source; public
+    futures CVD is another and never proof of institutional positioning.
+    Previous classified states remain dated, not extrapolated forecasts.
+    """
+    result = dict(base)
+    result["acquisito_utc"] = now.isoformat(timespec="seconds")
+    result["derivati_confronto"] = {"stato": "NON_DISPONIBILE",
+        "strumento": "PF_XBTUSD",
+        "limite": "CVD futures Kraken non equivale a tutto il mercato crypto"}
+    hist = []
+    if isinstance(previous, dict):
+        previous_regime = previous.get("regime")
+        old = previous_regime.get("storico_regimi") if isinstance(previous_regime, dict) else None
+        for h in (old if isinstance(old, list) else [])[-7:]:
+            if isinstance(h, dict) and stamp(h.get("acquisito_utc")):
+                hist.append({k: h.get(k) for k in ("acquisito_utc", "stato", "qualita")})
+        if isinstance(previous_regime, dict) and stamp(previous_regime.get("acquisito_utc")):
+            hist.append({k: previous_regime.get(k)
+                         for k in ("acquisito_utc", "stato", "qualita")})
+    result["storico_regimi"] = hist[-8:]
+    derivatives = derivatives if isinstance(derivatives, dict) else {}
+    cvd = derivatives.get("cvd")
+    if isinstance(cvd, dict) and cvd.get("ultimo_punto_provvisorio") is False:
+        observed = stamp(cvd.get("ultimo_punto_utc"))
+        latest = cvd.get("ultimo_cvd")
+        previous_value = cvd.get("cvd_4h_fa")
+        if (observed and dt.timedelta(0) <= now-observed <= dt.timedelta(hours=3)
+                and type(latest) in (float, int) and type(previous_value) in (float, int)
+                and math.isfinite(latest) and math.isfinite(previous_value)):
+            delta = latest - previous_value
+            result["derivati_confronto"] = {
+                "stato": "OSSERVATO_CON_LIMITI", "strumento": "PF_XBTUSD",
+                "fonte": "https://futures.kraken.com/api/charts/v1/analytics/",
+                "osservato_utc": observed.isoformat(timespec="seconds"),
+                "delta_cvd_4h": delta,
+                "unita": "UNITA_FONTE_DA_VERIFICARE",
+                "limite": "Futures BTC Kraken: copertura parziale, non prova flussi istituzionali"}
+            if ((result["stato"] == "RIALZISTA" and delta < 0)
+                    or (result["stato"] == "RIBASSISTA" and delta > 0)):
+                result.setdefault("contrari", []).append(
+                    "CVD futures BTC 4H in direzione opposta al regime spot aggregato")
+                result["qualita"] = "CONFLITTO_DA_RIESAMINARE"
+                result["condizione_riesame"] = (
+                    "Verificare persistenza del conflitto CVD con nuovi dati Spot, Futures e macro")
+    macro = primary.get("indicatori_macro", []) if isinstance(primary, dict) else []
+    result["macro_contestuale"] = [
+        {"id": x.get("id"), "stato": x.get("stato"),
+         "periodo_dato": x.get("periodo_dato"), "valore": x.get("valore"),
+         "unita": x.get("unita"), "fonte": x.get("fonte")}
+        for x in macro if isinstance(x, dict)]
+    result["limite_macro"] = (
+        "Tassi/cambio e titoli ufficiali sono contesto; non trasformati in causalita o previsioni del regime")
+    result["dipendenza_kdd27"] = (
+        "Richiamabile dal normale refresh; la sorveglianza futura deve verificare tempi, "
+        "contraddizioni e cambi di regime, senza creare un secondo scheduler")
+    return result
+
+
 def decision_context(identity, fundamental, event):
     """A falsifiable review question, never a buy/sell classification."""
     if identity.get("stato") != "IDENTITA_VERIFICATA_DA_CATALOGO":
@@ -558,10 +619,25 @@ def at_read(source, positions, shortlist, now):
     matrix = source.get("fonti_economiche")
     if matrix is not None and matrix != sources_matrix():
         raise ValueError("Matrice fonti economiche alterata")
+    # Validate primary project sources once against the original roster.
+    # The packet reads this again: no second fetch, no reinstatement of stale data.
+    import kdd_primary_economics as primary
+    original_primary = source.get("fonti_primarie")
+    identities = [row.get("identita") for rows in (original_positions, original_candidates)
+                  for row in rows if isinstance(row, dict)]
+    primary_read = (primary.at_read(original_primary, identities, now, catalog=_CURATED)
+                    if original_primary is not None else None)
+    raw_primary = ({row["coingecko_id"]: row
+                    for row in original_primary.get("progetti", [])}
+                   if primary_read is not None else {})
+    verified_primary = ({row["coingecko_id"]: row
+                         for row in primary_read["progetti"]}
+                        if primary_read is not None else {})
     result = {"schema": VERSION, "acquisito_utc": source["acquisito_utc"],
               "letto_utc": now.isoformat(timespec="seconds"),
               "fonti_economiche": matrix if matrix is not None else [],
-              "posizioni": [], "candidati": []}
+              "posizioni": [], "candidati": [],
+              "fonti_primarie": primary_read}
     for name, source_rows, expected in (
             ("posizioni", original_positions, positions),
             ("candidati", original_candidates, shortlist)):
@@ -628,6 +704,30 @@ def at_read(source, positions, shortlist, now):
                     fundamentals({}, None, now, now), stato="NON_VERIFICATO_IDENTITA",
                     motivo="ATTESTAZIONE_IDENTITA_SCADUTA")
                 row_copy["evento"] = release_event({}, None, now, now)
+            # A forged/swap-bound project observation must not survive the
+            # wallet/shortlist rebinding or the second GPT-side validation.
+            if primary_read is not None:
+                coin = identity.get("coingecko_id")
+                expected = raw_primary.get(coin)
+                attached = row.get("osservazioni_primarie")
+                if expected is None:
+                    if attached not in (None, {"stato": "NON_VERIFICATO_IDENTITA"},
+                                        {"stato": "NON_VERIFICATO_IDENTITA",
+                                         "limite": "Progetto non attribuibile con fonte indipendente"}):
+                        raise ValueError("Fonte primaria senza identita")
+                    row_copy["osservazioni_primarie"] = {
+                        "stato": "NON_VERIFICATO_IDENTITA"}
+                else:
+                    # When invoked on an already read-time-normalized packet,
+                    # it carries the validated row instead of the raw producer.
+                    if (attached != expected and attached != verified_primary.get(coin)
+                            and not (row_copy["identita"].get("stato") != "IDENTITA_VERIFICATA_DA_CATALOGO"
+                                     and attached == {"stato": "NON_VERIFICATO_IDENTITA"})):
+                        raise ValueError("Fonte primaria scambiata tra progetti")
+                    row_copy["osservazioni_primarie"] = (
+                        verified_primary.get(coin) if row_copy["identita"].get("stato")
+                        == "IDENTITA_VERIFICATA_DA_CATALOGO" else
+                        {"stato": "NON_VERIFICATO_IDENTITA"})
             row_copy["politica_monetaria_primaria"] = monetary_reference(row_copy["identita"])
             row_copy["lettura_economica"] = decision_context(
                 row_copy["identita"], row_copy["fondamentali"], row_copy["evento"])
@@ -662,4 +762,6 @@ def at_read(source, positions, shortlist, now):
                            "titolo": item.get("titolo"),
                            "data": item.get("pubblicato_utc")})
     result["macro"] = macro(normalized, now)
+    if primary_read is not None:
+        result["macro"]["indicatori_primari"] = primary_read["indicatori_macro"]
     return result

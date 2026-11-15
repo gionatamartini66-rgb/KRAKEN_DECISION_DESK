@@ -1,5 +1,19 @@
 """Dossier verificabile per ragionamento GPT in chat, senza API private né ordini."""
 import datetime as dt
+import contextlib
+import contextvars
+_PRIMARY_REAL_REFRESH = contextvars.ContextVar("kdd_primary_real_refresh", default=False)
+
+
+@contextlib.contextmanager
+def primary_refresh_context():
+    """Permit ordinary primary-source requests only during the KDD refresh."""
+    marker = _PRIMARY_REAL_REFRESH.set(True)
+    try:
+        yield
+    finally:
+        _PRIMARY_REAL_REFRESH.reset(marker)
+
 import json
 import math
 import time
@@ -563,6 +577,30 @@ def economic_evidence(source, wallet, four, candidates, now, *,
             row["lettura_economica"] = econ.decision_context(
                 identity, row["fondamentali"], row["evento"])
 
+    # Primary sources use the same verified dynamic identity roster and the
+    # same persisted dossier. This is not a second scanner or transport.
+    import kdd_primary_economics as primary
+    previous_primary = prior.get("fonti_primarie")
+    verified_identifications = [
+        row["identita"] for group in ("posizioni", "candidati")
+        for row in items[group]]
+    primary_evidence = primary.collect(
+        now, verified_identifications, previous_primary,
+        fetch_json=onchain._http,
+        fetch_csv=lambda url: desk.request(url, timeout=12)[:400_000],
+        catalog=econ._CURATED,
+        enabled=_PRIMARY_REAL_REFRESH.get())
+    primary_by_id = {x["coingecko_id"]: x
+                     for x in primary_evidence["progetti"]}
+    for group in ("posizioni", "candidati"):
+        for row in items[group]:
+            row["osservazioni_primarie"] = primary_by_id.get(
+                row["identita"].get("coingecko_id"),
+                {"stato": "NON_VERIFICATO_IDENTITA",
+                 "limite": "Progetto non attribuibile con fonte indipendente"})
+    # The original KDD-22 regime remains the sole classifier; primary numeric
+    # macro series are independent context, never automatic price causes.
+
     # Bounded PUBLIC-only persistence: identity and source cache, no balances,
     # wallet quantities, T0 or private account data.
     public_cache = dict(previous_cache)
@@ -582,6 +620,7 @@ def economic_evidence(source, wallet, four, candidates, now, *,
             "macro": econ.macro(source.get("feed"), now),
             "regime": econ.regime(btc, (source.get("coingecko_global") or {}), now),
             "fonti_economiche": econ.sources_matrix(),
+            "fonti_primarie": primary_evidence,
             "identita_dinamiche": dynamic_cache,
             "prossimo_token_identita": next_token,
             "cache_fondamentali": list(public_cache.values())[:100],
@@ -700,7 +739,9 @@ def collect(source=None, *, asset_pairs=None):
     import kdd_economics as econ
     btc = next((r for r in (analisi_patrimonio.get("posizioni") or [])
                 if r.get("token") == "BTC"), {})
-    economic["regime"] = econ.regime(btc, external.get("coingecko_global"), now)
+    economic["regime"] = econ.regime_integrated(
+        econ.regime(btc, external.get("coingecko_global"), now),
+        derivatives, economic.get("fonti_primarie"), previous_economic, now)
     # One additional public-only evidence family. No private balances, amounts,
     # addresses or the on-chain prototypes #9-14 ever enter these requests.
     # Manual/legacy dossier creation without a real refresh has no new-source

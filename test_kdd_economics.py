@@ -1138,5 +1138,288 @@ class AdaptivePortfolioTests(unittest.TestCase):
             self.assertEqual(absent["storico_transizioni_posizioni"][1]
                              ["acquisito_utc"], "2026-11-09T08:20:00+00:00")
 
+
+class PrimaryEconomicProducerTests(unittest.TestCase):
+    """Live-provider-shaped public fixtures; no wallet/network or paid API."""
+
+    def setUp(self):
+        import datetime as dt
+        self.now = dt.datetime(2026, 11, 15, 12, 0, tzinfo=dt.timezone.utc)
+        self.ids = [
+            {"stato": "IDENTITA_VERIFICATA_DA_CATALOGO",
+             "token_progetto": "BTC", "token": "BTC",
+             "coingecko_id": "bitcoin", "progetto": "Bitcoin",
+             "repository_primario": "bitcoin/bitcoin"},
+            {"stato": "IDENTITA_VERIFICATA_DA_CATALOGO",
+             "token_progetto": "NEAR", "token": "NEAR",
+             "coingecko_id": "near", "progetto": "NEAR Protocol",
+             "repository_primario": "near/nearcore"},
+            {"stato": "IDENTITA_VERIFICATA_DA_CATALOGO",
+             "token_progetto": "SOL", "token": "SOL",
+             "coingecko_id": "solana", "progetto": "Solana",
+             "repository_primario": "anza-xyz/agave"},
+            {"stato": "IDENTITA_VERIFICATA_DA_CATALOGO",
+             "token_progetto": "SUI", "token": "SUI",
+             "coingecko_id": "sui", "progetto": "Sui",
+             "repository_primario": "MystenLabs/sui"}]
+        self.catalog = {
+            identity["token_progetto"]: {
+                "id": identity["coingecko_id"],
+                "name": identity["progetto"],
+                "emission_primary": "SOLANA_RPC_GOVERNOR"
+                if identity["token"] == "SOL" else None}
+            for identity in self.ids}
+        self.macro_csv = (
+            b"TIME_PERIOD,OBS_VALUE\n2026-11-01,2.15\n2026-11-14,2.25\n")
+
+    def _request(self, url, payload=None):
+        if url == "https://api.mainnet.solana.com":
+            self.assertEqual(payload["method"], "getInflationGovernor")
+            return {"jsonrpc": "2.0",
+                    "result": {"initial": .15, "terminal": .015,
+                               "taper": .15, "foundation": .05,
+                               "foundationTerm": 7}}
+        if url.startswith("https://api.github.com/repos/"):
+            return []
+        raise AssertionError("unexpected URL: " + url)
+
+    def _collect(self, ids=None, old=None, when=None, fetch=None, registry=None):
+        import kdd_primary_economics as primary
+        return primary.collect(
+            when or self.now, ids or self.ids, old,
+            fetch_json=fetch or self._request,
+            fetch_csv=lambda url: self.macro_csv,
+            catalog=registry or self.catalog)
+
+    def test_rotation_four_projects_and_retained_primary_history(self):
+        a = self._collect()
+        b = self._collect(old=a, when=self.now+__import__('datetime').timedelta(minutes=20))
+        c = self._collect(old=b, when=self.now+__import__('datetime').timedelta(minutes=40))
+        first = [x["coingecko_id"] for x in a["progetti"] if x["stato"]!="RINVIATO_BUDGET"]
+        second = [x["coingecko_id"] for x in b["progetti"] if x["stato"]!="RINVIATO_BUDGET"]
+        third = [x["coingecko_id"] for x in c["progetti"] if x["stato"]!="RINVIATO_BUDGET"]
+        self.assertEqual(first, ["bitcoin","near"])
+        self.assertEqual(second, ["solana","sui"])
+        self.assertEqual(third, first)
+        retained = {x["coingecko_id"]: x for x in c["storico"]}
+        self.assertEqual(retained["solana"]["politica_emissioni"]["stato"], "OSSERVATO")
+        self.assertLessEqual(max(x["richieste_effettuate"] for x in (a,b,c)), 8)
+        self.assertEqual(len(c["progetti"]), 4)
+        import kdd_primary_economics as primary
+        seen = primary.at_read(c, self.ids, self.now+__import__('datetime').timedelta(minutes=40),
+                               catalog=self.catalog)
+        self.assertEqual(len(seen["storico_sintesi"]), 4)
+        seen_again = primary.at_read(
+            seen, self.ids, self.now+__import__('datetime').timedelta(minutes=41),
+            catalog=self.catalog)
+        self.assertEqual(seen_again["storico_sintesi"], seen["storico_sintesi"])
+
+    def test_solana_issued_policy_is_not_unlock(self):
+        out = self._collect(ids=[self.ids[2]])
+        p = out["progetti"][0]
+        self.assertEqual(p["politica_emissioni"]["stato"], "OSSERVATO")
+        self.assertEqual(p["politica_emissioni"]["valori"]["terminal"], .015)
+        self.assertNotEqual(p["calendario"]["stato"], "OSSERVATO")
+        self.assertEqual(p["calendario"]["eventi"], [])
+
+    def test_primary_schedule_requires_exact_project_and_publisher(self):
+        import kdd_primary_economics as primary
+        identity = self.ids[2]
+        source = "https://raw.githubusercontent.com/anza-xyz/agave/main/tokenomics/vesting.json"
+        payload = {"schema": "kdd-primary-vesting-v001",
+                   "coingecko_id": "solana", "source_url": source,
+                   "published_at": "2026-11-01T12:00:00Z",
+                   "events": [{"kind": "UNLOCK_PROGRAMMATO",
+                               "scheduled_utc": "2027-01-02T12:00:00Z",
+                               "quantity_tokens": 100}]}
+        accepted = primary.parse_calendar(identity,payload,source,self.now)
+        self.assertEqual(accepted["stato"], "OSSERVATO")
+        self.assertEqual(accepted["eventi"][0]["vendita"], "NON_ATTESTATA")
+        rejected = primary.parse_calendar(identity,dict(payload,coingecko_id="another"),source,self.now)
+        self.assertEqual(rejected["stato"], "NON_VERIFICATO")
+        rejected2 = primary.parse_calendar(identity,dict(payload,source_url="https://other.example"),source,self.now)
+        self.assertEqual(rejected2["stato"], "NON_VERIFICATO")
+
+    def test_source_must_be_registered_not_passed_as_arbitrary_url(self):
+        def reject_bad(url, payload=None):
+            self.assertNotIn("evil.example",url)
+            return self._request(url,payload)
+        registry = dict(self.catalog)
+        registry["SOL"] = dict(registry["SOL"], schedule_primary={
+            "path": "../evil.json"})
+        o = self._collect(ids=[self.ids[2]],fetch=reject_bad,registry=registry)
+        self.assertEqual(o["progetti"][0]["calendario"]["stato"],"NON_VERIFICATO")
+
+    def test_primary_monthly_circulation_forecast_has_no_fake_unlock(self):
+        import datetime
+        import kdd_primary_economics as primary
+        url = "https://sui-circulation.suiexplorer.com/api/sui_circulation"
+        registry = dict(self.catalog)
+        registry["SUI"] = dict(registry["SUI"],
+            circulation_schedule_primary={
+                "type": "MONTHLY_CIRCULATION_PROJECTION",
+                "url": url, "max_supply_tokens": 10_000_000_000})
+        def public(url_requested,payload=None):
+            if url_requested == url:
+                return [{"year":2026,"month":11,
+                         "circulatingSupplyValue":4_139_043_544.13,
+                         "circulatingSupplyPercentage":.413904354413},
+                        {"year":2026,"month":12,
+                         "circulatingSupplyValue":4_159_640_598.62,
+                         "circulatingSupplyPercentage":.415964059862},
+                        {"year":2027,"month":1,
+                         "circulatingSupplyValue":4_180_107_445.11,
+                         "circulatingSupplyPercentage":.418010744511}]
+            return self._request(url_requested,payload)
+        raw = self._collect(ids=[self.ids[3]],fetch=public,registry=registry)
+        record=raw["progetti"][0]["proiezione_circolazione"]
+        self.assertEqual(record["stato"],"OSSERVATO")
+        self.assertEqual(len(record["eventi"]),3)
+        self.assertEqual(record["eventi"][1]["vendita"],"NON_ATTESTATA")
+        self.assertEqual(record["eventi"][1]["immissione_effettiva"],"NON_ATTESTATA")
+        self.assertNotIn("UNLOCK_PROGRAMMATO",str(record))
+        observed = primary.at_read(raw,[self.ids[3]],self.now,catalog=registry)
+        self.assertEqual(observed["progetti"][0]["proiezione_circolazione"]["stato"],"OSSERVATO")
+        with self.assertRaises(ValueError):
+            primary.at_read(raw,[self.ids[3]],self.now,catalog=self.catalog)
+
+    def test_monthly_supply_malformed_or_wrong_cap_fails_closed(self):
+        import kdd_primary_economics as primary
+        endpoint="https://sui-circulation.suiexplorer.com/api/sui_circulation"
+        doc=[{"year":2026,"month":11,"circulatingSupplyValue":4_000_000_000,
+              "circulatingSupplyPercentage":.4},
+             {"year":2026,"month":12,"circulatingSupplyValue":3_900_000_000,
+              "circulatingSupplyPercentage":.39}]
+        o=primary.parse_monthly_projection(self.ids[3],doc,endpoint,self.now,
+                                            maximum=10_000_000_000)
+        self.assertEqual(o["stato"],"NON_VERIFICATO")
+        bigger=[dict(x,circulatingSupplyValue=12_000_000_000) for x in doc]
+        b=primary.parse_monthly_projection(self.ids[3],bigger,endpoint,self.now,
+                                            maximum=10_000_000_000)
+        self.assertEqual(b["stato"],"NON_VERIFICATO")
+
+    def test_verified_proposal_is_not_effective_governance(self):
+        import kdd_primary_economics as primary
+        issue = {"html_url": "https://github.com/bitcoin/bitcoin/issues/123",
+                 "created_at": "2026-11-11T00:00:00Z", "title": "Protocol review",
+                 "labels": [{"name": "governance"}]}
+        found = primary.parse_issues(self.ids[0],[issue],self.now)
+        self.assertEqual(len(found),1)
+        self.assertIsNone(found[0]["evento_utc"])
+        self.assertEqual(found[0]["esito_proposta"],"NON_ATTESTATO")
+        bad = dict(issue,html_url="https://github.com/other/repo/issues/123")
+        self.assertEqual(primary.parse_issues(self.ids[0],[bad],self.now),[])
+        self.assertEqual(primary.parse_issues(self.ids[0],[dict(issue,labels=[])],self.now),[])
+
+    def test_macro_values_are_observed_not_consensus(self):
+        import kdd_primary_economics as primary
+        out = primary.parse_ecb_csv(self.macro_csv, "FM/D.U2.EUR.4F.KR.MRR_FR.LEV",
+                                    "PERCENTUALE_ANNUA",self.now)
+        self.assertEqual(out["valore"],2.25)
+        self.assertEqual(out["precedente"]["valore"],2.15)
+        self.assertIsNone(out["pubblicato_utc"])
+        self.assertNotIn("consenso",out)
+        with self.assertRaises(ValueError):
+            primary.parse_ecb_csv(b"TIME_PERIOD,OBS_VALUE\n2028-01-01,9\n",
+                                   "FM/D.U2.EUR.4F.KR.MRR_FR.LEV",
+                                   "PERCENTUALE_ANNUA",self.now)
+
+    def test_hicp_and_money_growth_monthly_negative_values_are_dated(self):
+        import kdd_primary_economics as primary
+        doc = b"TIME_PERIOD,OBS_VALUE\n2026-09,1.9\n2026-10,2.1\n"
+        result=primary.parse_ecb_csv(doc,"HICP/M.U2.N.000000.4D0.ANR",
+                                     "INFLAZIONE_AA_PCT",self.now)
+        self.assertEqual(result["periodo_dato"],"2026-10-01")
+        self.assertEqual(result["valore"],2.1)
+        m3 = b"TIME_PERIOD,OBS_VALUE\n2026-08,-0.5\n2026-09,-0.2\n"
+        money=primary.parse_ecb_csv(m3,"BSI/M.U2.Y.V.M30.X.I.U2.2300.Z01.A",
+                                    "M3_CRESCITA_AA_PCT",self.now)
+        self.assertEqual(money["valore"],-.2)
+        self.assertEqual(money["stato"],"OSSERVATO")
+        self.assertNotIn("previsione",money)
+
+    def test_provider_failure_never_becomes_zero(self):
+        import kdd_primary_economics as primary
+        def blocked(url,payload=None):raise OSError("HTTP 429 rate limit")
+        o = self._collect(ids=[self.ids[2]],fetch=blocked)
+        self.assertEqual(o["progetti"][0]["politica_emissioni"]["stato"],
+                         "NON_DISPONIBILE")
+        self.assertEqual(o["progetti"][0]["calendario"]["eventi"],[])
+        self.assertNotIn("valore",o["progetti"][0]["politica_emissioni"])
+        self.assertLessEqual(o["richieste_effettuate"],8)
+
+    def test_new_roster_is_dynamic_and_rejects_ticker_only(self):
+        unknown = {"token":"ABC", "coingecko_id":"fake",
+                   "stato":"NON_VERIFICATO"}
+        out = self._collect(ids=[self.ids[1],unknown])
+        self.assertEqual([x["coingecko_id"] for x in out["progetti"]],["near"])
+        extra = {"stato":"IDENTITA_VERIFICATA_DA_CATALOGO",
+                 "token":"XYZ", "token_progetto":"XYZ",
+                 "coingecko_id":"new-coin", "progetto":"New Project",
+                 "repository_primario":None}
+        out2 = self._collect(ids=[extra])
+        self.assertEqual(out2["progetti"][0]["coingecko_id"],"new-coin")
+        self.assertEqual(out2["progetti"][0]["calendario"]["stato"],"NON_VERIFICATO")
+
+    def test_gpt_reader_refuses_forged_project_and_expires_evidence(self):
+        import copy,datetime
+        import kdd_primary_economics as primary
+        out=self._collect(ids=[self.ids[2]])
+        ok=primary.at_read(out,[self.ids[2]],self.now)
+        self.assertEqual(len(ok["progetti"]),1)
+        stale=primary.at_read(out,[self.ids[2]],self.now+datetime.timedelta(days=8))
+        self.assertEqual(stale["progetti"][0]["stato_alla_lettura"],"SCADUTO")
+        forged=copy.deepcopy(out)
+        forged["progetti"][0]["coingecko_id"]="different-coin"
+        with self.assertRaises(ValueError):
+            primary.at_read(forged,[self.ids[2]],self.now)
+
+    def test_economic_packet_and_gpt_double_read_keep_primary_identity_and_history(self):
+        import copy
+        import kdd_primary_economics as primary
+        source, positions, shortlist = EconomicEvidenceTests("test_all_assets_remain_even_when_missing").sample()
+        ids = [row["identita"] for row in source["posizioni"]+source["candidati"]]
+        raw = primary.collect(
+            T, ids, None, catalog=e._CURATED,
+            fetch_json=self._request, fetch_csv=lambda url: self.macro_csv,
+            enabled=False)
+        source["fonti_primarie"] = raw
+        source["fonti_economiche"] = e.sources_matrix()
+        by_id = {x["coingecko_id"]:x for x in raw["progetti"]}
+        for row in source["posizioni"]+source["candidati"]:
+            row["osservazioni_primarie"] = by_id.get(
+                row["identita"]["coingecko_id"],
+                {"stato":"NON_VERIFICATO_IDENTITA",
+                 "limite":"Progetto non attribuibile con fonte indipendente"})
+        packet_read = e.at_read(source,positions,shortlist,T)
+        gpt_read = e.at_read(packet_read,positions,shortlist,T)
+        self.assertEqual(gpt_read["fonti_primarie"]["schema"],primary.VERSION)
+        self.assertEqual(len(gpt_read["posizioni"]),2)
+        self.assertEqual(len(gpt_read["candidati"]),1)
+        self.assertEqual(len(gpt_read["fonti_primarie"]["progetti"]),3)
+        altered=copy.deepcopy(source)
+        altered["posizioni"][0]["osservazioni_primarie"] = (
+            altered["posizioni"][1]["osservazioni_primarie"])
+        with self.assertRaises(ValueError):
+            e.at_read(altered,positions,shortlist,T)
+        aged=e.at_read(source,positions,shortlist,T+dt.timedelta(days=8))
+        self.assertEqual(aged["fonti_primarie"]["progetti"][0]
+                         ["stato_alla_lettura"],"SCADUTO")
+
+    def test_regime_contradiction_does_not_become_trade_signal(self):
+        import kdd_economics as econ
+        base={"stato":"RIALZISTA","qualita":"PARZIALE","contrari":[]}
+        derivatives={"cvd":{"ultimo_punto_provvisorio":False,
+                            "ultimo_punto_utc":self.now.isoformat(),
+                            "ultimo_cvd":10.0,"cvd_4h_fa":50.0}}
+        extended=econ.regime_integrated(base,derivatives,{},None,self.now)
+        self.assertEqual(extended["stato"],"RIALZISTA")
+        self.assertEqual(extended["qualita"],"CONFLITTO_DA_RIESAMINARE")
+        self.assertNotIn("ordine",extended)
+        older=econ.regime_integrated(base,{}, {},{"regime":extended},
+                                      self.now+__import__('datetime').timedelta(hours=2))
+        self.assertEqual(len(older["storico_regimi"]),1)
+
+
 if __name__=="__main__":
     unittest.main()
