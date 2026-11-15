@@ -360,6 +360,40 @@ class PrimaryFollowupTests(unittest.TestCase):
         b=sources.at_read(a,self.items(),T)
         self.assertEqual(b["copertura"]["governance_osservati"],0)
 
+    def test_explicit_local_cli_request_preserves_config_and_does_not_call_kraken(self):
+        import decision_desk as desk
+        conf={"scanner":{"volume_24h_min_eur":400000},
+              "analisi_asset_richiesti":[
+                  {"token":"ARB","richiesto_utc":T.isoformat(),
+                   "origine":"CLI_ESPLICITO_LOCALE"},
+                  {"token":"SOL","richiesto_utc":T.isoformat(),
+                   "origine":"CLI_ESPLICITO_LOCALE"}]}
+        def keep(name,record):
+            self.assertEqual(name,"config.json")
+            conf.clear()
+            conf.update(record)
+        with mock.patch.object(desk,"load",return_value=conf), \
+             mock.patch.object(desk,"save",side_effect=keep) as saved, \
+             mock.patch.object(desk,"NOW",return_value=T), \
+             mock.patch.object(desk,"kraken",side_effect=AssertionError("Private Kraken API invoked")), \
+             mock.patch.object(desk,"request",side_effect=AssertionError("Public network invoked")):
+            desk.request_public_asset(type("Args",(),{"token":"PEPE"})())
+            self.assertEqual([x["token"] for x in conf["analisi_asset_richiesti"]],
+                             ["ARB","SOL","PEPE"])
+            self.assertEqual(conf["scanner"]["volume_24h_min_eur"],400000)
+            self.assertEqual(conf["analisi_asset_richiesti"][-1]["origine"],
+                             "CLI_ESPLICITO_LOCALE")
+            desk.request_public_asset(type("Args",(),{"token":"PEPE"})())
+            self.assertEqual([x["token"] for x in conf["analisi_asset_richiesti"]],
+                             ["ARB","SOL","PEPE"])
+            desk.request_public_asset(type("Args",(),{"token":"ETH"})())
+            self.assertEqual([x["token"] for x in conf["analisi_asset_richiesti"]],
+                             ["SOL","PEPE","ETH"])
+            self.assertEqual(saved.call_count,3)
+            with self.assertRaises(ValueError):
+                desk.request_public_asset(type("Args",(),{"token":"NOT VALID!"})())
+            self.assertEqual(saved.call_count,3)
+
     def test_requested_pepe_outside_wallet_scanner_is_a_third_verified_group(self):
         import dossier_trade as producer
         from unittest import mock
