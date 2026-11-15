@@ -32,6 +32,17 @@ def fetch(url):
     return data
 
 
+def rpc_fetch(url,payload):
+    if url!=primary.SOLANA_RPC or payload.get("method")!="getInflationGovernor":
+        raise ValueError("Unapproved public RPC")
+    req=urllib.request.Request(url,data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type":"application/json","User-Agent":"KDD-G2-public-source-smoke/1.0"},
+        method="POST")
+    with urllib.request.urlopen(req,timeout=15) as res:
+        raw=res.read(100001)
+    return json.loads(raw.decode("utf-8"))
+
+
 def identity(token):
     # Synthetic Kraken market record for NON-PRIVATE producer testing only.
     pair=token+"/EUR"
@@ -53,10 +64,10 @@ def counted(url):
     return fetch(url)
 
 raw=None
-for cycle in range(1,4):
+for cycle in range(1,6):
     moment=dt.datetime.now(dt.timezone.utc)
     before=len(seen)
-    raw=primary.collect(moment,roster,raw,counted)
+    raw=primary.collect(moment,roster,raw,counted,rpc_fetch=rpc_fetch)
     checked=primary.at_read(raw,roster,moment)
     assert checked["schema"]==primary.SCHEMA
     assert checked["copertura"]["progetti"]==4
@@ -77,6 +88,8 @@ for cycle in range(1,4):
           "history_events",len(raw["storico_eventi"]),
           "next_project",raw["prossimo_progetto"],
           "next_macro",raw["prossimo_indicatore"])
+    print("solana_inflation",[(p["progetto_id"],p["stato"],p.get("valori"))
+                              for p in checked.get("politiche_emissioni") or [] if p["progetto_id"]=="solana"])
     print("repository_security",[(r["progetto_id"],r["stato"],len(r["avvisi"])) for r in checked.get("avvisi_repository") or []])
     print("unlock_schedule",[(r["progetto_id"],r["stato"]) for r in checked["calendari"]])
     sui=next(r for r in checked["calendari"] if r["progetto_id"]=="sui")

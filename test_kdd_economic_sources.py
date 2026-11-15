@@ -50,8 +50,13 @@ class PrimaryFollowupTests(unittest.TestCase):
                 return ("KEY,TIME_PERIOD,OBS_VALUE\n"
                         "HICP.M.U2.N.000000.4D0.ANR,2026-10,2.3\n").encode()
             if "/FM/" in url:
+                code=("FM.D.U2.EUR.4F.KR.MRR_FR.LEV" if "MRR_FR.LEV" in url
+                      else "FM.D.U2.EUR.4F.KR.DFR.LEV")
                 return ("KEY,TIME_PERIOD,OBS_VALUE\n"
-                        "FM.D.U2.EUR.4F.KR.DFR.LEV,2026-11-14,2.5\n").encode()
+                        +code+",2026-11-14,2.5\n").encode()
+            if "/BSI/" in url:
+                return ("KEY,TIME_PERIOD,OBS_VALUE\n"
+                        "BSI.M.U2.Y.V.M30.X.I.U2.2300.Z01.A,2026-10,3.1\n").encode()
             raise AssertionError("unexpected macro series")
         if "/pulls?" in url:
             repo=url.split("/repos/")[1].split("/pulls?")[0]
@@ -312,6 +317,60 @@ class PrimaryFollowupTests(unittest.TestCase):
         tampered["stati_coppie_kraken"]["posizioni"][1]["coppia"]="SOL/USDT"
         with self.assertRaises(ValueError):
             sources.at_read(tampered,items,T)
+
+    def test_current_solana_primary_inflation_governor_and_forged_unlock_rejected(self):
+        roster=self.items(tokens=("SOL",))
+        calls=[]
+        def rpc(url,params):
+            calls.append((url,params))
+            return {"jsonrpc":"2.0","id":1,"result":{
+                "initial":.08,"taper":.15,"terminal":.015,"foundation":.05,
+                "foundationTerm":7}}
+        first=sources.collect(T,roster,{},self.fetch,rpc_fetch=rpc)
+        self.assertEqual(len(calls),1)
+        self.assertEqual(calls[0][0],sources.SOLANA_RPC)
+        self.assertEqual(calls[0][1]["method"],"getInflationGovernor")
+        policy=first["politiche_emissioni"][0]
+        self.assertEqual(policy["stato"],"OSSERVATO")
+        self.assertEqual(policy["valori"]["initial"],.08)
+        self.assertEqual(policy["stato_unlock"],"NON_ATTESTATO")
+        self.assertEqual(policy["vendita"],"NON_ATTESTATA")
+        self.assertEqual(sources.at_read(first,roster,T)["copertura"]["politiche_emissioni_osservate"],1)
+        late=sources.at_read(first,roster,T+dt.timedelta(days=15))
+        self.assertEqual(late["politiche_emissioni"][0]["stato_alla_lettura"],"SCADUTO")
+        forged=copy.deepcopy(first)
+        forged["politiche_emissioni"][0]["valori"]["initial"]=5.5
+        with self.assertRaisesRegex(ValueError,"forged"):
+            sources.at_read(forged,roster,T)
+        forged=copy.deepcopy(first)
+        forged["politiche_emissioni"][0]["stato_unlock"]="VERIFICATO"
+        with self.assertRaises(ValueError):
+            sources.at_read(forged,roster,T)
+        changed=sources.collect(T+dt.timedelta(hours=1),roster,first,self.fetch,
+            rpc_fetch=lambda url,params:{"result":{"initial":.09,"taper":.15,
+                "terminal":.015,"foundation":.05,"foundationTerm":7},"error":None})
+        self.assertEqual(changed["politiche_emissioni"][0]["confronto"]["cambiati"],["initial"])
+        outage=sources.collect(T,roster,{},self.fetch,
+                rpc_fetch=lambda url,params:{"error":{"code":429},"result":None})
+        self.assertEqual(outage["politiche_emissioni"][0]["stato"],"FONTE_NON_DISPONIBILE")
+        self.assertIsNone(outage["politiche_emissioni"][0]["valori"])
+
+    def test_ecb_primary_rotation_includes_refinancing_and_m3_without_double_fetch(self):
+        roster=self.items(tokens=("BTC",))
+        prev={}
+        seen=[]
+        for cycle in range(5):
+            now=T+dt.timedelta(hours=cycle)
+            obs=sources.collect(now,roster,prev,
+                lambda url:(seen.append(url),self.fetch(url))[1])
+            checked=sources.at_read(obs,roster,now)
+            ids=[x["id"] for x in checked["indicatori_macro"] if x["stato"]=="OSSERVATO"]
+            self.assertEqual(ids,[sources.MACRO_SERIES[cycle][0]])
+            prev=obs
+        self.assertEqual(len({url for url in seen if url.startswith(sources.ECB)}),5)
+        self.assertEqual(len([url for url in seen if url.startswith(sources.ECB)]),5)
+        self.assertEqual(next(x for x in prev["indicatori_macro"]
+                              if x["id"]=="EA_M3_GROWTH")["valore"],3.1)
 
     def test_existing_economic_reader_consumes_followup(self):
         items=self.items(tokens=("BTC",))
