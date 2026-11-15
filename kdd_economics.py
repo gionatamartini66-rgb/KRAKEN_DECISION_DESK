@@ -510,6 +510,67 @@ def regime(btc_four, global_row, now):
     return out
 
 
+def regime_integrated(base, derivatives, primary, previous, now):
+    """Contextual reconciliation, never a buy/sell action or automatic macro causation.
+
+    Independent families: BTC spot 4H/1D already one trend source; public
+    futures CVD is another and never proof of institutional positioning.
+    Previous classified states remain dated, not extrapolated forecasts.
+    """
+    result = dict(base)
+    result["acquisito_utc"] = now.isoformat(timespec="seconds")
+    result["derivati_confronto"] = {"stato": "NON_DISPONIBILE",
+        "strumento": "PF_XBTUSD",
+        "limite": "CVD futures Kraken non equivale a tutto il mercato crypto"}
+    hist = []
+    if isinstance(previous, dict):
+        previous_regime = previous.get("regime")
+        old = previous.get("storico_regimi")
+        for h in (old if isinstance(old, list) else [])[-7:]:
+            if isinstance(h, dict) and stamp(h.get("acquisito_utc")):
+                hist.append({k: h.get(k) for k in ("acquisito_utc", "stato", "qualita")})
+        if isinstance(previous_regime, dict) and stamp(previous_regime.get("acquisito_utc")):
+            hist.append({k: previous_regime.get(k)
+                         for k in ("acquisito_utc", "stato", "qualita")})
+    result["storico_regimi"] = hist[-8:]
+    derivatives = derivatives if isinstance(derivatives, dict) else {}
+    cvd = derivatives.get("cvd")
+    if isinstance(cvd, dict) and cvd.get("ultimo_punto_provvisorio") is False:
+        observed = stamp(cvd.get("ultimo_punto_utc"))
+        latest = cvd.get("ultimo_cvd")
+        previous_value = cvd.get("cvd_4h_fa")
+        if (observed and dt.timedelta(0) <= now-observed <= dt.timedelta(hours=3)
+                and type(latest) in (float, int) and type(previous_value) in (float, int)
+                and math.isfinite(latest) and math.isfinite(previous_value)):
+            delta = latest - previous_value
+            result["derivati_confronto"] = {
+                "stato": "OSSERVATO_CON_LIMITI", "strumento": "PF_XBTUSD",
+                "fonte": "https://futures.kraken.com/api/charts/v1/analytics/",
+                "osservato_utc": observed.isoformat(timespec="seconds"),
+                "delta_cvd_4h": delta,
+                "unita": "UNITA_FONTE_DA_VERIFICARE",
+                "limite": "Futures BTC Kraken: copertura parziale, non prova flussi istituzionali"}
+            if ((result["stato"] == "RIALZISTA" and delta < 0)
+                    or (result["stato"] == "RIBASSISTA" and delta > 0)):
+                result.setdefault("contrari", []).append(
+                    "CVD futures BTC 4H in direzione opposta al regime spot aggregato")
+                result["qualita"] = "CONFLITTO_DA_RIESAMINARE"
+                result["condizione_riesame"] = (
+                    "Verificare persistenza del conflitto CVD con nuovi dati Spot, Futures e macro")
+    macro = primary.get("indicatori_macro", []) if isinstance(primary, dict) else []
+    result["macro_contestuale"] = [
+        {"id": x.get("id"), "stato": x.get("stato"),
+         "periodo_dato": x.get("periodo_dato"), "valore": x.get("valore"),
+         "unita": x.get("unita"), "fonte": x.get("fonte")}
+        for x in macro if isinstance(x, dict)]
+    result["limite_macro"] = (
+        "Tassi/cambio e titoli ufficiali sono contesto; non trasformati in causalita o previsioni del regime")
+    result["dipendenza_kdd27"] = (
+        "Richiamabile dal normale refresh; la sorveglianza futura deve verificare tempi, "
+        "contraddizioni e cambi di regime, senza creare un secondo scheduler")
+    return result
+
+
 def decision_context(identity, fundamental, event):
     """A falsifiable review question, never a buy/sell classification."""
     if identity.get("stato") != "IDENTITA_VERIFICATA_DA_CATALOGO":
