@@ -1457,6 +1457,31 @@ def context_update(args):
     latest = load('ultima_rilevazione.json')
     if latest: output(latest)
 
+def request_public_asset(args):
+    """Record at most three explicit research requests; no Kraken call or order."""
+    import re
+    token,valid=wallet_symbol(args.token)
+    if not valid or not re.fullmatch(r"[A-Z0-9]{2,20}",token):
+        raise ValueError("Asset da esaminare: simbolo non valido")
+    conf=load("config.json",{})
+    if not isinstance(conf,dict):
+        raise ValueError("Configurazione locale non valida")
+    old=conf.get("analisi_asset_richiesti",[])
+    old=old if isinstance(old,list) else []
+    current=[]
+    for record in old:
+        if isinstance(record,dict) and record.get("token")!=token:
+            current.append(record)
+    current=current[-2:]
+    current.append({"token":token,"richiesto_utc":NOW().isoformat(timespec="seconds"),
+                    "origine":"CLI_ESPLICITO_LOCALE"})
+    conf["analisi_asset_richiesti"]=current
+    save("config.json",conf)
+    print("Richiesta pubblica registrata:",token,
+          "| sara verificata al prossimo aggiorna contro AssetPairs",
+          "| nessun acquisto, nessun dato privato")
+
+
 def main():
     if not checkpoint_allineato():
         print('ATTENZIONE CHECKPOINT: codice/config/test diversi dall’ultimo stato descritto nel README. Aggiornare stato e impronta prima del subentro.', file=sys.stderr)
@@ -1464,6 +1489,8 @@ def main():
     sub = ap.add_subparsers(dest='cmd',required=True)
     sub.add_parser('aggiorna', help='Scarica prezzi e feed, genera cruscotto.html')
     sub.add_parser('rigenera', help='Rigenera HTML dall’ultima rilevazione, senza rete')
+    req=sub.add_parser('richiedi-asset', help='Richiedi analisi economica di un asset pubblico fuori wallet/scanner, nessun ordine')
+    req.add_argument('token')
     d = sub.add_parser('decisione', help='Registra una decisione temporanea, con ragione e scadenza')
     d.add_argument('token'); d.add_argument('scelta'); d.add_argument('motivo'); d.add_argument('--giorni',type=int,default=7)
     c = sub.add_parser('contesto', help='Registra una lettura documentata di macroeconomia/geopolitica')
@@ -1471,6 +1498,7 @@ def main():
     args = ap.parse_args()
     try:
         if args.cmd == 'aggiorna': refresh()
+        elif args.cmd == 'richiedi-asset': request_public_asset(args)
         elif args.cmd == 'rigenera':
             last = load('ultima_rilevazione.json')
             if not last: raise RuntimeError('Manca una rilevazione: esegui prima aggiorna.')
