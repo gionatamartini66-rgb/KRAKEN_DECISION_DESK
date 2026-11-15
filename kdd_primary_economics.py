@@ -502,29 +502,45 @@ def at_read(raw, identities, now, *, catalog=None):
             macro.append(record)
         else:
             macro.append(dict(row))
-    historical_rows = raw.get("storico", [])
-    if not isinstance(historical_rows, list) or len(historical_rows) > HISTORY_LIMIT:
-        raise ValueError("primary history cardinality invalid")
-    history_output = []
-    seen_hist = set()
-    for item in historical_rows:
-        if not isinstance(item, dict) or item.get("coingecko_id") not in allowed:
-            raise ValueError("primary historical project invalid")
-        key = item["coingecko_id"]
-        stamp_ = timestamp(item.get("acquisito_utc"))
-        if (key in seen_hist or not stamp_ or
-                stamp_ > observed + dt.timedelta(minutes=2)):
-            raise ValueError("historical observation timestamp invalid")
-        seen_hist.add(key)
-        history_output.append({
-            "coingecko_id": key, "acquisito_utc": item["acquisito_utc"],
-            "stato": item.get("stato"),
-            "stato_alla_lettura": "STORICO_NON_RICONFERMATO",
-            "eventi_rilevati": len(item.get("eventi", [])),
-            "calendario_stato": (item.get("calendario") or {}).get("stato"),
-            "proiezione_stato": (item.get("proiezione_circolazione") or {}).get("stato"),
-            "limite": "Dato precedente conservato per confronto, non nuova osservazione"})
-    return {"schema": VERSION, "acquisito_utc": raw["acquisito_utc"],
+    if "storico_sintesi" in raw:
+        summaries = raw["storico_sintesi"]
+        if not isinstance(summaries, list) or len(summaries) > HISTORY_LIMIT:
+            raise ValueError("historical summary malformed")
+        keys_seen = set()
+        for row in summaries:
+            if (not isinstance(row, dict) or row.get("coingecko_id") not in allowed
+                    or row["coingecko_id"] in keys_seen or
+                    row.get("stato_alla_lettura") != "STORICO_NON_RICONFERMATO"):
+                raise ValueError("historical summary identity invalid")
+            acquired = timestamp(row.get("acquisito_utc"))
+            if not acquired or acquired > observed + dt.timedelta(minutes=2):
+                raise ValueError("historical summary timestamp invalid")
+            keys_seen.add(row["coingecko_id"])
+        history_output = summaries
+    else:
+        historical_rows = raw.get("storico", [])
+        if not isinstance(historical_rows, list) or len(historical_rows) > HISTORY_LIMIT:
+            raise ValueError("primary history cardinality invalid")
+        history_output = []
+        seen_hist = set()
+        for item in historical_rows:
+            if not isinstance(item, dict) or item.get("coingecko_id") not in allowed:
+                raise ValueError("primary historical project invalid")
+            key = item["coingecko_id"]
+            stamp_ = timestamp(item.get("acquisito_utc"))
+            if (key in seen_hist or not stamp_ or
+                    stamp_ > observed + dt.timedelta(minutes=2)):
+                raise ValueError("historical observation timestamp invalid")
+            seen_hist.add(key)
+            history_output.append({
+                "coingecko_id": key, "acquisito_utc": item["acquisito_utc"],
+                "stato": item.get("stato"),
+                "stato_alla_lettura": "STORICO_NON_RICONFERMATO",
+                "eventi_rilevati": len(item.get("eventi", [])),
+                "calendario_stato": (item.get("calendario") or {}).get("stato"),
+                "proiezione_stato": (item.get("proiezione_circolazione") or {}).get("stato"),
+                "limite": "Dato precedente conservato per confronto, non nuova osservazione"})
+        return {"schema": VERSION, "acquisito_utc": raw["acquisito_utc"],
             "progetti": output, "storico_sintesi": history_output,
             "indicatori_macro": macro,
             "richieste_effettuate": raw["richieste_effettuate"],
