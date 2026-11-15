@@ -588,7 +588,8 @@ class PrimaryFollowupTests(unittest.TestCase):
         roster=self.items(tokens=("BTC",))
         first=sources.collect(T,roster,{},self.fetch)
         prev=first
-        for i in range(1,6):
+        rounds=len(sources.MACRO_SERIES)
+        for i in range(1,rounds+1):
             prev=sources.collect(T+dt.timedelta(hours=i),roster,prev,self.fetch)
         usd=next(x for x in prev["indicatori_macro"] if x["id"]=="USD_EUR")
         self.assertEqual(usd["stato"],"OSSERVATO")
@@ -598,29 +599,29 @@ class PrimaryFollowupTests(unittest.TestCase):
         next(x for x in forged["indicatori_macro"] if x["id"]=="USD_EUR")[
             "delta_dalla_rilevazione_precedente"]=10.5
         with self.assertRaises(ValueError):
-            sources.at_read(forged,roster,T+dt.timedelta(hours=5))
+            sources.at_read(forged,roster,T+dt.timedelta(hours=rounds))
         base={"stato":"LATERALE","qualita":"PARZIALE","favorevoli":[],"contrari":[],
               "mancanti":[],"famiglie_osservate":[]}
         before={"acquisito_utc":T.isoformat(),"stato":"TRANSIZIONE","qualita":"PARZIALE",
                 "storico_regimi":[]}
         current=economic.regime_participation(
-            base,{},prev,T+dt.timedelta(hours=5),previous=before)
+            base,{},prev,T+dt.timedelta(hours=rounds),previous=before)
         self.assertEqual(current["storico_regimi"][0]["stato"],"TRANSIZIONE")
         self.assertEqual(current["confronto_precedente"]["stato_precedente"],"TRANSIZIONE")
         row=roster["posizioni"][0]
-        snapshot={"schema":economic.VERSION,"acquisito_utc":(T+dt.timedelta(hours=5)).isoformat(),
+        snapshot={"schema":economic.VERSION,"acquisito_utc":(T+dt.timedelta(hours=rounds)).isoformat(),
                   "posizioni":[row],"candidati":[],"fonti_economiche":economic.sources_matrix(),
-                  "regime":current,"macro":economic.macro([],T+dt.timedelta(hours=5)),
+                  "regime":current,"macro":economic.macro([],T+dt.timedelta(hours=rounds)),
                   "monitor_fonti":prev}
-        economic.at_read(snapshot,[{"token":"BTC"}],[],T+dt.timedelta(hours=5))
+        economic.at_read(snapshot,[{"token":"BTC"}],[],T+dt.timedelta(hours=rounds))
         false=copy.deepcopy(snapshot)
         false["regime"]["storico_regimi"][0]["stato"]="RIALZISTA"
         with self.assertRaises(ValueError):
-            economic.at_read(false,[{"token":"BTC"}],[],T+dt.timedelta(hours=5))
+            economic.at_read(false,[{"token":"BTC"}],[],T+dt.timedelta(hours=rounds))
         future=copy.deepcopy(snapshot)
         future["regime"]["storico_regimi"][0]["acquisito_utc"]=(T+dt.timedelta(days=2)).isoformat()
         with self.assertRaises(ValueError):
-            economic.at_read(future,[{"token":"BTC"}],[],T+dt.timedelta(hours=5))
+            economic.at_read(future,[{"token":"BTC"}],[],T+dt.timedelta(hours=rounds))
 
     def test_ten_holdings_candidate_primary_review_double_read_and_source_swap(self):
         # Publicly named project identities; invented data, NOT the live wallet.
