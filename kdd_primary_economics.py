@@ -577,7 +577,7 @@ def at_read(raw, identities, now, *, catalog=None):
                 "calendario_stato": (item.get("calendario") or {}).get("stato"),
                 "proiezione_stato": (item.get("proiezione_circolazione") or {}).get("stato"),
                 "limite": "Dato precedente conservato per confronto, non nuova osservazione"})
-        return {"schema": VERSION, "acquisito_utc": raw["acquisito_utc"],
+    return {"schema": VERSION, "acquisito_utc": raw["acquisito_utc"],
             "progetti": output, "storico_sintesi": history_output,
             "indicatori_macro": macro,
             "richieste_effettuate": raw["richieste_effettuate"],
