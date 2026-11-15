@@ -87,6 +87,11 @@ class PrimaryFollowupTests(unittest.TestCase):
                          {"ethereum"})
         self.assertEqual(a["indicatori_macro"][0]["id"],"USD_EUR")
         self.assertEqual(b["indicatori_macro"][1]["id"],"EA_HICP")
+        self.assertEqual(b["indicatori_macro"][2]["stato"],"RINVIATO_BUDGET")
+        reread=sources.at_read(b,self.items(observed=T+dt.timedelta(hours=1),circ=112),T+dt.timedelta(hours=1))
+        self.assertEqual(next(p for p in reread["progetti"] if p["progetto_id"]=="ethereum")["stato"],
+                         "STORICO_NON_AGGIORNATO")
+        self.assertEqual(reread["indicatori_macro"][0]["stato"],"STORICO_NON_AGGIORNATO")
         self.assertEqual(len(b["storico_supply"]),8)
         self.assertGreaterEqual(len(b["storico_eventi"]),3)
         self.assertEqual(len(b["variazioni_supply"]),4)

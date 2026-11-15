@@ -387,7 +387,11 @@ def collect(now, items, previous, fetch, *, network_allowed=True):
             macro.append(current)
         elif s[0] in past_macro:
             retained=dict(past_macro[s[0]])
-            retained["stato"]="STORICO_NON_AGGIORNATO" if retained.get("valore") is not None else "FONTE_NON_DISPONIBILE"
+            if retained.get("valore") is not None:
+                retained["stato"]="STORICO_NON_AGGIORNATO"
+            # A previous budget deferral was NEVER a provider failure.
+            elif retained.get("stato") not in ("RINVIATO_BUDGET","RINVIATO_RATE_LIMIT_HTTP_429"):
+                retained["stato"]="FONTE_NON_DISPONIBILE"
             macro.append(retained)
         else:
             macro.append({"id":s[0],"serie":s[1]+"."+s[2],"fonte":_series_url(s),
@@ -490,7 +494,8 @@ def at_read(raw, items, now):
                         or not _time(event.get("pubblicato_utc"))
                         or event.get("stato_decisione_rete")!="NON_ATTESTATO"):
                     raise ValueError("Primary governance event forged")
-            new["stato"]="OSSERVATO" if row["stato"]=="OSSERVATO" and now-t<=dt.timedelta(days=7) else "SCADUTO"
+            new["stato"]=(row["stato"] if now-t<=dt.timedelta(days=7)
+                          else "SCADUTO")
         read_projects.append(new)
     read_schedules=[]
     for row in schedules:
@@ -532,8 +537,9 @@ def at_read(raw, items, now):
                     or type(row["valore"]) not in (int,float) or not math.isfinite(row["valore"])):
                 raise ValueError("ECB observation invalid")
             age=(now.date()-day.date()).days
-            new["stato"]=("OSSERVATO" if age<=matches[0][4]
-                          and row.get("stato")=="OSSERVATO" else "SCADUTO")
+            new["stato"]=(row.get("stato") if age<=matches[0][4]
+                          and row.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO")
+                          else "SCADUTO")
         indicators.append(new)
     # Keep original, independently validated source budget and history: this
     # reader is called by both packet build and GPT bridge (idempotent).
