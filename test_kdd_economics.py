@@ -1242,6 +1242,54 @@ class PrimaryEconomicProducerTests(unittest.TestCase):
         o = self._collect(ids=[self.ids[2]],fetch=reject_bad,registry=registry)
         self.assertEqual(o["progetti"][0]["calendario"]["stato"],"NON_VERIFICATO")
 
+    def test_primary_monthly_circulation_forecast_has_no_fake_unlock(self):
+        import datetime
+        import kdd_primary_economics as primary
+        url = "https://sui-circulation.suiexplorer.com/api/sui_circulation"
+        registry = dict(self.catalog)
+        registry["SUI"] = dict(registry["SUI"],
+            circulation_schedule_primary={
+                "type": "MONTHLY_CIRCULATION_PROJECTION",
+                "url": url, "max_supply_tokens": 10_000_000_000})
+        def public(url_requested,payload=None):
+            if url_requested == url:
+                return [{"year":2026,"month":11,
+                         "circulatingSupplyValue":4_139_043_544.13,
+                         "circulatingSupplyPercentage":.413904354413},
+                        {"year":2026,"month":12,
+                         "circulatingSupplyValue":4_159_640_598.62,
+                         "circulatingSupplyPercentage":.415964059862},
+                        {"year":2027,"month":1,
+                         "circulatingSupplyValue":4_180_107_445.11,
+                         "circulatingSupplyPercentage":.418010744511}]
+            return self._request(url_requested,payload)
+        raw = self._collect(ids=[self.ids[3]],fetch=public,registry=registry)
+        record=raw["progetti"][0]["proiezione_circolazione"]
+        self.assertEqual(record["stato"],"OSSERVATO")
+        self.assertEqual(len(record["eventi"]),3)
+        self.assertEqual(record["eventi"][1]["vendita"],"NON_ATTESTATA")
+        self.assertEqual(record["eventi"][1]["immissione_effettiva"],"NON_ATTESTATA")
+        self.assertNotIn("UNLOCK_PROGRAMMATO",str(record))
+        observed = primary.at_read(raw,[self.ids[3]],self.now,catalog=registry)
+        self.assertEqual(observed["progetti"][0]["proiezione_circolazione"]["stato"],"OSSERVATO")
+        with self.assertRaises(ValueError):
+            primary.at_read(raw,[self.ids[3]],self.now,catalog=self.catalog)
+
+    def test_monthly_supply_malformed_or_wrong_cap_fails_closed(self):
+        import kdd_primary_economics as primary
+        endpoint="https://sui-circulation.suiexplorer.com/api/sui_circulation"
+        doc=[{"year":2026,"month":11,"circulatingSupplyValue":4_000_000_000,
+              "circulatingSupplyPercentage":.4},
+             {"year":2026,"month":12,"circulatingSupplyValue":3_900_000_000,
+              "circulatingSupplyPercentage":.39}]
+        o=primary.parse_monthly_projection(self.ids[3],doc,endpoint,self.now,
+                                            maximum=10_000_000_000)
+        self.assertEqual(o["stato"],"NON_VERIFICATO")
+        bigger=[dict(x,circulatingSupplyValue=12_000_000_000) for x in doc]
+        b=primary.parse_monthly_projection(self.ids[3],bigger,endpoint,self.now,
+                                            maximum=10_000_000_000)
+        self.assertEqual(b["stato"],"NON_VERIFICATO")
+
     def test_verified_proposal_is_not_effective_governance(self):
         import kdd_primary_economics as primary
         issue = {"html_url": "https://github.com/bitcoin/bitcoin/issues/123",
