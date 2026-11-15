@@ -36,7 +36,8 @@
     "SOL": {
       "id": "solana",
       "name": "Solana",
-      "repository": "anza-xyz/agave"
+      "repository": "anza-xyz/agave",
+      "emission_primary": "SOLANA_RPC_GOVERNOR"
     },
     "ADA": {
       "id": "cardano",
@@ -49,11 +50,13 @@
     },
     "NEAR": {
       "id": "near",
-      "name": "NEAR Protocol"
+      "name": "NEAR Protocol",
+      "repository": "near/nearcore"
     },
     "SUI": {
       "id": "sui",
-      "name": "Sui"
+      "name": "Sui",
+      "repository": "MystenLabs/sui"
     },
     "XRP": {
       "id": "ripple",
