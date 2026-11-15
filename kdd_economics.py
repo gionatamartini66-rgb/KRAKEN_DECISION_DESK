@@ -624,7 +624,7 @@ def decision_context(identity, fundamental, event):
                                  "per release verificare adozione/rete e non solo annuncio"}
 
 
-def at_read(source, positions, shortlist, now):
+def at_read(source, positions, shortlist, now, *, requested=None):
     """Validate attribution and recalculate economic age, without source fetches."""
     if not isinstance(source, dict) or source.get("schema") != VERSION:
         raise ValueError("Schema evidenza economica")
@@ -633,9 +633,15 @@ def at_read(source, positions, shortlist, now):
         raise ValueError("Tempo evidenza economica")
     original_positions = source.get("posizioni")
     original_candidates = source.get("candidati")
-    if not isinstance(original_positions, list) or not isinstance(original_candidates, list):
+    original_requested = source.get("richiesti",[])
+    expected_requested = requested if requested is not None else []
+    if (not isinstance(original_positions,list) or not isinstance(original_candidates,list)
+            or not isinstance(original_requested,list) or not isinstance(expected_requested,list)
+            or len(original_requested)>3 or len(expected_requested)>3):
         raise ValueError("Copertura economica")
-    if len(original_positions) != len(positions) or len(original_candidates) != len(shortlist):
+    if (len(original_positions)!=len(positions)
+            or len(original_candidates)!=len(shortlist)
+            or len(original_requested)!=len(expected_requested)):
         raise ValueError("Cardinalita economica")
     matrix = source.get("fonti_economiche")
     if matrix is not None and matrix != sources_matrix():
@@ -643,15 +649,23 @@ def at_read(source, positions, shortlist, now):
     result = {"schema": VERSION, "acquisito_utc": source["acquisito_utc"],
               "letto_utc": now.isoformat(timespec="seconds"),
               "fonti_economiche": matrix if matrix is not None else [],
-              "posizioni": [], "candidati": []}
+              "posizioni": [], "candidati": [], "richiesti": []}
     for name, source_rows, expected in (
             ("posizioni", original_positions, positions),
-            ("candidati", original_candidates, shortlist)):
+            ("candidati", original_candidates, shortlist),
+            ("richiesti", original_requested, expected_requested)):
         for i, (row, target) in enumerate(zip(source_rows, expected)):
             if not isinstance(row, dict) or row.get("indice") != i or row.get("token") != target.get("token"):
                 raise ValueError("Identita economica discordante")
-            if name == "candidati" and row.get("coppia_analisi") != target.get("coppia_analisi"):
-                raise ValueError("Coppia candidato discordante")
+            if name in ("candidati","richiesti") and row.get("coppia_analisi") != target.get("coppia_analisi"):
+                raise ValueError("Coppia candidato o richiesto discordante")
+            if name == "richiesti":
+                when=stamp(row.get("richiesto_utc"))
+                if (not when or when>acquired+dt.timedelta(minutes=2)
+                        or row.get("richiesto_utc")!=target.get("richiesto_utc")
+                        or row.get("origine")!="CLI_ESPLICITO_LOCALE"
+                        or target.get("origine")!="CLI_ESPLICITO_LOCALE"):
+                    raise ValueError("Origine o data asset richiesto non verificabile")
             identity = row.get("identita")
             if not isinstance(identity, dict) or identity.get("token") != row["token"]:
                 raise ValueError("Identita economica non valida")
@@ -674,9 +688,15 @@ def at_read(source, positions, shortlist, now):
                         or not identity["pair_key"]
                         or identity.get("asset_base_kraken", pair.split("/")[0] if pair_ok else None)
                            != (pair.split("/")[0] if pair_ok else None)
-                        or (name == "candidati" and pair != target.get("coppia_analisi"))):
+                        or (name in ("candidati","richiesti")
+                            and pair != target.get("coppia_analisi"))):
                     raise ValueError("Identita CoinGecko non attribuibile")
             row_copy = dict(row)
+            if name=="richiesti":
+                requested_at=stamp(row["richiesto_utc"])
+                row_copy["stato_richiesta"]=(
+                    "RICHIESTA_ATTIVA" if dt.timedelta(0)<=now-requested_at<=dt.timedelta(days=7)
+                    else "RICHIESTA_SCADUTA_DA_RINNOVARE")
             if identity.get("metodo") == "KRAKEN_COINGECKO_MARKET":
                 verified = stamp(identity["prova_mercato"].get("verificato_utc"))
                 if not verified or now-verified > dt.timedelta(days=7):
@@ -718,6 +738,9 @@ def at_read(source, positions, shortlist, now):
         "posizioni_totali": len(result["posizioni"]),
         "posizioni_verificate_alla_lettura": sum(
             r["fondamentali"].get("stato") == "VERIFICATO" for r in result["posizioni"]),
+        "richiesti_espliciti_totali":len(result["richiesti"]),
+        "richiesti_identificati":sum(r["identita"].get("stato")=="IDENTITA_VERIFICATA_DA_CATALOGO"
+                                    for r in result["richiesti"]),
         "candidati_totali": len(result["candidati"]),
         "candidati_verificati_alla_lettura": sum(
             r["fondamentali"].get("stato") == "VERIFICATO" for r in result["candidati"]),
@@ -777,8 +800,8 @@ def at_read(source, positions, shortlist, now):
         previous_read = stamp(source.get("letto_utc"))
         same_read = bool(previous_read and
                          abs((now-previous_read).total_seconds()) <= 1)
-        for group in ("posizioni","candidati"):
-            for original, item in zip(source[group],result[group]):
+        for group in ("posizioni","candidati","richiesti"):
+            for original, item in zip(source.get(group,[]),result[group]):
                 derived = primary.decision_review(verified,item,group)
                 old = original.get("valutazione_fonti_primarie")
                 if same_read and old is not None and old != derived:

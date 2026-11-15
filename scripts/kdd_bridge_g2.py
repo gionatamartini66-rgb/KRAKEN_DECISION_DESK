@@ -869,7 +869,8 @@ def read_context(bundle, *, now=None, expected_sha256=None):
         try:
             economic_read = kdd_economics.at_read(
                 multifonte["economia"], rows,
-                pkt.get("opportunita_esterne_scanner") or [], moment)
+                pkt.get("opportunita_esterne_scanner") or [], moment,
+                requested=multifonte.get("asset_richiesti_espliciti",[]))
         except (ValueError, TypeError, KeyError, OverflowError) as exc:
             raise BridgeError("Evidenza economica non verificabile") from exc
     # Re-evaluate persisted Futures evidence at the actual GPT read, not only
