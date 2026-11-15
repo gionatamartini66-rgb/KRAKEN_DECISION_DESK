@@ -149,7 +149,11 @@ def parse_ecb_csv(raw, series, unit, now):
             t = dt.date.fromisoformat(period)
         except (ValueError, TypeError, OverflowError):
             continue
-        if not math.isfinite(n) or t > now.date() or n <= 0 if unit == "USD_PER_EUR" else not math.isfinite(n) or t > now.date() or not (0 <= n <= 50):
+        if not math.isfinite(n) or t > now.date():
+            continue
+        if unit == "USD_PER_EUR" and n <= 0:
+            continue
+        if unit != "USD_PER_EUR" and not (0 <= n <= 50):
             continue
         valid.append((t, n))
     if not valid:
@@ -190,7 +194,8 @@ def collect(now, identities, previous, *, fetch_json, fetch_csv, catalog):
                   if isinstance(r, dict) and r.get("coingecko_id") in names}
     historical = {r.get("coingecko_id"): r for r in old.get("storico", [])
                   if isinstance(r, dict) and r.get("coingecko_id") in names}
-    historical.update(prior_rows)
+    historical.update({k: v for k, v in prior_rows.items()
+                       if v.get("stato") not in ("RINVIATO_BUDGET",)})
     start = next((i for i, k in enumerate(keys)
                   if isinstance(old.get("prossimo_progetto"), str) and k >= old["prossimo_progetto"]), 0)
     chosen = [keys[(start+i) % len(keys)] for i in range(min(MAX_PROJECTS, len(keys)))]
