@@ -269,6 +269,68 @@ class WalletPacketG0Tests(unittest.TestCase):
         with self.assertRaisesRegex(bridge.BridgeError,"economica"):
             bridge.read_context(fake,now=T)
 
+    def test_requested_pepe_third_group_packet_bridge_does_not_invent_scanner_position(self):
+        import kdd_economics as econ
+        import kdd_economic_sources as primary
+        import kdd_bridge_g2 as bridge
+        self._analytic_fixture()
+        rows=[]
+        for i,entry in enumerate(self.portfolio["posizioni"]):
+            token=entry["token"]
+            ident=econ.identify(token,None,None)
+            rows.append({"indice":i,"token":token,"identita":ident,
+                        "fondamentali":econ.fundamentals(ident,None,T,T),
+                        "evento":econ.release_event(ident,None,T,T)})
+        sol=econ.identify("SOL","SOL/USD","SOLUSD",catalog={
+            "SOLUSD":{"pair_key":"SOLUSD","pair":"SOL/USD",
+                      "base":"SOL","quote":"USD"}})
+        candidate={"indice":0,"token":"SOL","coppia_analisi":"SOL/USD",
+                   "identita":sol,"fondamentali":econ.fundamentals(sol,None,T,T),
+                   "evento":econ.release_event(sol,None,T,T)}
+        pep=econ.identify("PEPE","PEPE/EUR","PEPEEUR",catalog={
+            "PEPEEUR":{"pair_key":"PEPEEUR","pair":"PEPE/EUR",
+                       "base":"PEPE","quote":"EUR"}})
+        requested={"indice":0,"token":"PEPE","coppia_analisi":"PEPE/EUR",
+                    "richiesto_utc":T.isoformat(),"origine":"CLI_ESPLICITO_LOCALE",
+                    "identita":pep,"fondamentali":econ.fundamentals(pep,None,T,T),
+                    "evento":econ.release_event(pep,None,T,T)}
+        reqmeta={"token":"PEPE","coppia_analisi":"PEPE/EUR",
+                 "richiesto_utc":T.isoformat(),"origine":"CLI_ESPLICITO_LOCALE"}
+        monitoring=primary.collect(T,{"posizioni":rows,
+                      "candidati":[candidate],"richiesti":[requested]},
+                      {},lambda url:b"[]",network_allowed=False,
+                      asset_pairs={"PEPEEUR":{"wsname":"PEPE/EUR","status":"online"}})
+        self.dossier["asset_richiesti_espliciti"]=[reqmeta]
+        self.dossier["evidenze_economiche"]={
+            "schema":econ.VERSION,"acquisito_utc":T.isoformat(),
+            "posizioni":rows,"candidati":[candidate],"richiesti":[requested],
+            "monitor_fonti":monitoring,"macro":econ.macro([],T),
+            "fonti_economiche":econ.sources_matrix(),
+            "regime":{"stato":"INDETERMINATO","qualita":"INSUFFICIENTE"}}
+        self.dump()
+        packet=self.pack()
+        self.assertEqual(packet["patrimonio"]["n_posizioni"],3)
+        self.assertEqual(len(packet["opportunita_esterne_scanner"]),1)
+        ev=packet["evidenze_multifonte"]
+        self.assertEqual(len(ev["economia"]["richiesti"]),1)
+        self.assertEqual(ev["asset_richiesti_espliciti"],[reqmeta])
+        read=bridge.read_context({"schema":bridge.SCHEMA_BUNDLE,
+            "packet":packet,"packet_sha256":bridge.digest(packet),
+            "preparato_utc":T.isoformat(),
+            "provenienza":"KDD_LOCALE_DICHIARATA_NON_AUTENTICATA",
+            "trasporto":"MANUALE_NON_ESEGUITO"},now=T)
+        self.assertEqual(read["evidenze_economiche_alla_lettura"]
+                         ["richiesti"][0]["token"],"PEPE")
+        self.assertEqual(len(read["evidenze_economiche_alla_lettura"]["posizioni"]),3)
+        forged=json.loads(json.dumps(packet))
+        forged["evidenze_multifonte"]["asset_richiesti_espliciti"][0]["token"]="BTC"
+        with self.assertRaisesRegex(bridge.BridgeError,"economica"):
+            bridge.read_context({"schema":bridge.SCHEMA_BUNDLE,
+                "packet":forged,"packet_sha256":bridge.digest(forged),
+                "preparato_utc":T.isoformat(),
+                "provenienza":"KDD_LOCALE_DICHIARATA_NON_AUTENTICATA",
+                "trasporto":"MANUALE_NON_ESEGUITO"},now=T)
+
     def test_issue43_economic_source_tamper_stops_packet(self):
         import kdd_economics as econ
         self._analytic_fixture()

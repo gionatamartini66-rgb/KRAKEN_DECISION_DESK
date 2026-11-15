@@ -294,6 +294,47 @@ class PrimaryFollowupTests(unittest.TestCase):
         b=sources.at_read(a,self.items(),T)
         self.assertEqual(b["copertura"]["governance_osservati"],0)
 
+    def test_requested_pepe_outside_wallet_scanner_is_a_third_verified_group(self):
+        import dossier_trade as producer
+        from unittest import mock
+        record={"token":"PEPE","richiesto_utc":T.isoformat(),
+                "origine":"CLI_ESPLICITO_LOCALE"}
+        pairs={"PEPEEUR":{"wsname":"PEPE/EUR","status":"online"}}
+        def forbidden(url, timeout=12):
+            raise OSError("provider offline for this test")
+        with mock.patch.object(producer.desk,"request",side_effect=forbidden), \
+             mock.patch.object(producer.time,"sleep"):
+            result=producer.economic_evidence({"feed":[]},
+                {"posizioni":[]},{"posizioni":[]},[],T,asset_pairs=pairs,
+                requested=[record])
+        self.assertEqual(result["posizioni"],[])
+        self.assertEqual(result["candidati"],[])
+        self.assertEqual(len(result["richiesti"]),1)
+        self.assertEqual(result["richiesti"][0]["token"],"PEPE")
+        self.assertEqual(result["richiesti"][0]["identita"]["coingecko_id"],"pepe")
+        expected=[{"token":"PEPE","coppia_analisi":"PEPE/EUR",
+                   "richiesto_utc":T.isoformat(),"origine":"CLI_ESPLICITO_LOCALE"}]
+        got=economic.at_read(result,[],[],T,requested=expected)
+        self.assertEqual(got["richiesti"][0]["valutazione_fonti_primarie"]["progetto_id"],"pepe")
+        self.assertEqual(next(x for x in got["monitor_fonti"]["calendari"]
+                              if x["progetto_id"]=="pepe")["stato"],"SENZA_CALENDARIO_PRIMARIO")
+        self.assertEqual(got["richiesti"][0]["stato_richiesta"],"RICHIESTA_ATTIVA")
+        expired=economic.at_read(got,[],[],T+dt.timedelta(days=8),requested=expected)
+        self.assertEqual(expired["richiesti"][0]["stato_richiesta"],
+                         "RICHIESTA_SCADUTA_DA_RINNOVARE")
+        forged=copy.deepcopy(result)
+        forged["richiesti"][0]["token"]="BTC"
+        with self.assertRaises(ValueError):
+            economic.at_read(forged,[],[],T,requested=expected)
+        # Once the request is removed at next refresh, no phantom PEPE is kept.
+        with mock.patch.object(producer.desk,"request",side_effect=forbidden), \
+             mock.patch.object(producer.time,"sleep"):
+            removed=producer.economic_evidence({"feed":[]},
+                {"posizioni":[]},{"posizioni":[]},[],T+dt.timedelta(minutes=1),
+                asset_pairs=pairs,previous=result,requested=[])
+        self.assertEqual(removed["richiesti"],[])
+        self.assertEqual(removed["monitor_fonti"]["progetti"],[])
+
     def test_new_dynamic_asset_and_replaced_universe(self):
         coin={"id":"new-unseen-token","name":"Unseen Project","symbol":"UNSEEN"}
         search={"coins":[coin]}
