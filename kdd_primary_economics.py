@@ -178,7 +178,7 @@ def _empty(coin, reason, now):
             "limite": "Fonte primaria assente o non interrogata: nessun evento o unlock inferito"}
 
 
-def collect(now, identities, previous, *, fetch_json, fetch_csv, catalog):
+def collect(now, identities, previous, *, fetch_json, fetch_csv, catalog, enabled=True):
     """Rotate dynamic project IDs within a small public budget; persist bounded history."""
     if now.tzinfo is None:
         raise ValueError("UTC required")
@@ -189,6 +189,14 @@ def collect(now, identities, previous, *, fetch_json, fetch_csv, catalog):
         if coin:
             names.setdefault(coin, identity)
     keys = sorted(names)
+    if not enabled:
+        return {"schema": VERSION, "acquisito_utc": moment.isoformat(timespec="seconds"),
+                "progetti": [_empty(k, "NON_ACQUISITO_FUORI_REFRESH", moment) for k in keys],
+                "storico": [], "prossimo_progetto": keys[0] if keys else None,
+                "indicatori_macro": [{"id": k, "stato": "NON_ACQUISITO_FUORI_REFRESH"}
+                                      for k in ECB_SERIES],
+                "richieste_effettuate": 0, "limite_richieste": MAX_REQUESTS,
+                "limite": "Nessuna fonte interrogata fuori dal refresh KDD autorizzato"}
     old = previous if isinstance(previous, dict) and previous.get("schema") == VERSION else {}
     prior_rows = {r.get("coingecko_id"): r for r in old.get("progetti", [])
                   if isinstance(r, dict) and r.get("coingecko_id") in names}
