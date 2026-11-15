@@ -711,7 +711,9 @@ def collect(source=None, *, asset_pairs=None):
                 if r.get("token") == "BTC"), {})
     economic["regime"] = econ.regime_participation(
         econ.regime(btc, external.get("coingecko_global"), now),
-        derivatives, economic.get("monitor_fonti"), now)
+        derivatives, economic.get("monitor_fonti"), now,
+        previous=(previous_economic or {}).get("regime")
+                 if isinstance(previous_economic,dict) else None)
     # One additional public-only evidence family. No private balances, amounts,
     # addresses or the on-chain prototypes #9-14 ever enter these requests.
     # Manual/legacy dossier creation without a real refresh has no new-source

@@ -372,6 +372,44 @@ class PrimaryFollowupTests(unittest.TestCase):
         self.assertEqual(next(x for x in prev["indicatori_macro"]
                               if x["id"]=="EA_M3_GROWTH")["valore"],3.1)
 
+    def test_ecb_temporal_comparison_and_regime_history_are_not_false_consensus(self):
+        roster=self.items(tokens=("BTC",))
+        first=sources.collect(T,roster,{},self.fetch)
+        prev=first
+        for i in range(1,6):
+            prev=sources.collect(T+dt.timedelta(hours=i),roster,prev,self.fetch)
+        usd=next(x for x in prev["indicatori_macro"] if x["id"]=="USD_EUR")
+        self.assertEqual(usd["stato"],"OSSERVATO")
+        self.assertEqual(usd["delta_dalla_rilevazione_precedente"],0)
+        self.assertIn("non sorpresa",usd["limite_confronto"])
+        forged=copy.deepcopy(prev)
+        next(x for x in forged["indicatori_macro"] if x["id"]=="USD_EUR")[
+            "delta_dalla_rilevazione_precedente"]=10.5
+        with self.assertRaises(ValueError):
+            sources.at_read(forged,roster,T+dt.timedelta(hours=5))
+        base={"stato":"LATERALE","qualita":"PARZIALE","favorevoli":[],"contrari":[],
+              "mancanti":[],"famiglie_osservate":[]}
+        before={"acquisito_utc":T.isoformat(),"stato":"TRANSIZIONE","qualita":"PARZIALE",
+                "storico_regimi":[]}
+        current=economic.regime_participation(
+            base,{},prev,T+dt.timedelta(hours=5),previous=before)
+        self.assertEqual(current["storico_regimi"][0]["stato"],"TRANSIZIONE")
+        self.assertEqual(current["confronto_precedente"]["stato_precedente"],"TRANSIZIONE")
+        row=roster["posizioni"][0]
+        snapshot={"schema":economic.VERSION,"acquisito_utc":(T+dt.timedelta(hours=5)).isoformat(),
+                  "posizioni":[row],"candidati":[],"fonti_economiche":economic.sources_matrix(),
+                  "regime":current,"macro":economic.macro([],T+dt.timedelta(hours=5)),
+                  "monitor_fonti":prev}
+        economic.at_read(snapshot,[{"token":"BTC"}],[],T+dt.timedelta(hours=5))
+        false=copy.deepcopy(snapshot)
+        false["regime"]["storico_regimi"][0]["stato"]="RIALZISTA"
+        with self.assertRaises(ValueError):
+            economic.at_read(false,[{"token":"BTC"}],[],T+dt.timedelta(hours=5))
+        future=copy.deepcopy(snapshot)
+        future["regime"]["storico_regimi"][0]["acquisito_utc"]=(T+dt.timedelta(days=2)).isoformat()
+        with self.assertRaises(ValueError):
+            economic.at_read(future,[{"token":"BTC"}],[],T+dt.timedelta(hours=5))
+
     def test_existing_economic_reader_consumes_followup(self):
         items=self.items(tokens=("BTC",))
         a=sources.collect(T,items,{},self.fetch)

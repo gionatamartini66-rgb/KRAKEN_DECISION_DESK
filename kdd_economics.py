@@ -511,7 +511,7 @@ def regime(btc_four, global_row, now):
 
 
 
-def regime_participation(base, derivatives, primary, now):
+def regime_participation(base, derivatives, primary, now, previous=None):
     """KDD-22: independently dated futures participation and ECB facts.
 
     OI is leverage exposure, not institutional capital. CVD of one Kraken
@@ -523,6 +523,27 @@ def regime_participation(base, derivatives, primary, now):
     out["mancanti"] = list(base.get("mancanti") or [])
     out["contrari"] = list(base.get("contrari") or [])
     out["favorevoli"] = list(base.get("favorevoli") or [])
+    out["acquisito_utc"]=now.isoformat(timespec="seconds")
+    prior=previous if isinstance(previous,dict) else {}
+    old_history=prior.get("storico_regimi")
+    old_history=old_history if isinstance(old_history,list) else []
+    chronology=[]
+    for point in old_history[-8:]+([prior] if prior else []):
+        if not isinstance(point,dict):
+            continue
+        when=stamp(point.get("acquisito_utc"))
+        state=point.get("stato")
+        if (when and dt.timedelta(0)<=now-when<=dt.timedelta(days=7)
+                and state in ("RIALZISTA","RIBASSISTA","LATERALE","TRANSIZIONE","INDETERMINATO")
+                and (not chronology or chronology[-1]["acquisito_utc"]!=when.isoformat(timespec="seconds"))):
+            chronology.append({"acquisito_utc":when.isoformat(timespec="seconds"),
+                               "stato":state,"qualita":str(point.get("qualita") or "NON_NOTA")[:70]})
+    out["storico_regimi"]=chronology[-8:]
+    if chronology:
+        out["confronto_precedente"]={
+            "stato_precedente":chronology[-1]["stato"],
+            "acquisito_precedente_utc":chronology[-1]["acquisito_utc"],
+            "nota":"Un cambiamento di classificazione è una revisione del modello, non un evento di mercato"}
     out["ipotesi"] = "Partecipazione futures e condizioni macro potrebbero modificare la robustezza del regime"
     out["controipotesi"] = "CVD e OI di un singolo future non rappresentano il mercato crypto né i flussi Spot"
     out["condizione_di_riesame"] = "Rilevare nuovamente chiusure 4H/1D, attività aggregata e flussi futures con orari coerenti"
@@ -705,6 +726,29 @@ def at_read(source, positions, shortlist, now):
     if not isinstance(regime_data, dict):
         raise ValueError("Regime economico mancante")
     result["regime"] = dict(regime_data)
+    # The bridge must not launder a forged regime history into verified
+    # evidence, including when called on an already-normalized packet.
+    if "storico_regimi" in regime_data:
+        history=regime_data["storico_regimi"]
+        if not isinstance(history,list) or len(history)>8:
+            raise ValueError("Historical regime structure invalid")
+        last=None
+        for point in history:
+            if not isinstance(point,dict):
+                raise ValueError("Historical regime row invalid")
+            when=stamp(point.get("acquisito_utc"))
+            if (not when or when>acquired+dt.timedelta(minutes=2)
+                    or (last is not None and when<=last)
+                    or point.get("stato") not in ("RIALZISTA","RIBASSISTA","LATERALE",
+                                                "TRANSIZIONE","INDETERMINATO")):
+                raise ValueError("Historical regime timestamp or classification forged")
+            last=when
+        previous=regime_data.get("confronto_precedente")
+        if previous is not None and (
+                not history or not isinstance(previous,dict)
+                or previous.get("stato_precedente")!=history[-1]["stato"]
+                or previous.get("acquisito_precedente_utc")!=history[-1]["acquisito_utc"]):
+            raise ValueError("Historical regime comparison forged")
     if now-acquired > dt.timedelta(hours=2):
         result["regime"].update(stato="INDETERMINATO", qualita="SCADUTO",
                                 limite="Regime storico; ricalcolo necessario")

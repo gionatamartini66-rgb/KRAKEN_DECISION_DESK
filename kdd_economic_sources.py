@@ -706,6 +706,23 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
                  "stato":"FONTE_NON_DISPONIBILE","motivo":error or "CSV_INCOERENTE",
                  "acquisito_utc":_iso(now),"valore":None,"unita":spec[3],
                  "limite":"Dato non acquisito, mai assimilare a zero"}
+    # A revisited official series may be compared with the prior source
+    # observation; never equate this with surprise versus market consensus.
+    previous_macro=past_macro.get(spec[0])
+    if (current.get("stato")=="OSSERVATO" and isinstance(previous_macro,dict)
+            and previous_macro.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO")
+            and previous_macro.get("fonte")==current.get("fonte")
+            and isinstance(previous_macro.get("periodo"),str)
+            and previous_macro["periodo"]<=current["periodo"]
+            and type(previous_macro.get("valore")) in (int,float)
+            and math.isfinite(previous_macro["valore"])
+            and _time(previous_macro.get("acquisito_utc"))):
+        current["confronto_precedente"]={
+            "periodo":previous_macro["periodo"],"valore":previous_macro["valore"],
+            "acquisito_utc":previous_macro["acquisito_utc"]}
+        current["delta_dalla_rilevazione_precedente"]=round(
+            current["valore"]-previous_macro["valore"],7)
+        current["limite_confronto"]="Delta tra osservazioni BCE, non sorpresa rispetto al consenso e non reazione di mercato"
     macro=[]
     for s in series:
         if s[0]==spec[0]:
@@ -952,6 +969,17 @@ def at_read(raw, items, now):
             if (day is None or day>now+dt.timedelta(days=1)
                     or type(row["valore"]) not in (int,float) or not math.isfinite(row["valore"])):
                 raise ValueError("ECB observation invalid")
+            old_point=row.get("confronto_precedente")
+            if old_point is not None:
+                if (not isinstance(old_point,dict)
+                        or type(old_point.get("valore")) not in (int,float)
+                        or not math.isfinite(old_point["valore"])
+                        or not isinstance(old_point.get("periodo"),str)
+                        or old_point["periodo"]>row.get("periodo","")
+                        or not _time(old_point.get("acquisito_utc"))
+                        or row.get("delta_dalla_rilevazione_precedente")!=round(
+                           row["valore"]-old_point["valore"],7)):
+                    raise ValueError("ECB temporal delta fabricated")
             age=(now.date()-day.date()).days
             new["stato"]=(row.get("stato") if age<=matches[0][4]
                           and row.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO")
