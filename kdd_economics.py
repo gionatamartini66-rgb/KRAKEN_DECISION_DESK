@@ -711,15 +711,18 @@ def at_read(source, positions, shortlist, now):
                 expected = raw_primary.get(coin)
                 attached = row.get("osservazioni_primarie")
                 if expected is None:
-                    if attached not in (None, {"stato": "NON_VERIFICATO_IDENTITA",
-                                            "limite": "Progetto non attribuibile con fonte indipendente"}):
+                    if attached not in (None, {"stato": "NON_VERIFICATO_IDENTITA"},
+                                        {"stato": "NON_VERIFICATO_IDENTITA",
+                                         "limite": "Progetto non attribuibile con fonte indipendente"}):
                         raise ValueError("Fonte primaria senza identita")
                     row_copy["osservazioni_primarie"] = {
                         "stato": "NON_VERIFICATO_IDENTITA"}
                 else:
                     # When invoked on an already read-time-normalized packet,
                     # it carries the validated row instead of the raw producer.
-                    if attached != expected and attached != verified_primary.get(coin):
+                    if (attached != expected and attached != verified_primary.get(coin)
+                            and not (row_copy["identita"].get("stato") != "IDENTITA_VERIFICATA_DA_CATALOGO"
+                                     and attached == {"stato": "NON_VERIFICATO_IDENTITA"})):
                         raise ValueError("Fonte primaria scambiata tra progetti")
                     row_copy["osservazioni_primarie"] = (
                         verified_primary.get(coin) if row_copy["identita"].get("stato")
