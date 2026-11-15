@@ -1311,8 +1311,16 @@ def decision_review(evidence, row, group):
             if governance.get("stato")=="OSSERVATO" else 0,
         "ISSUE_TECNICA_ETICHETTATA":len(issues.get("eventi",[]))
             if issues.get("stato_alla_lettura")=="OSSERVATO" else 0}
-    hidden={k:n-shown.get(k,0) for k,n in available.items()
-            if n>shown.get(k,0)}
+    # Count both facts beyond the twenty-row output bound and source events
+    # beyond per-family presentation limits. No hidden observed fact is zero.
+    hidden={}
+    for fact in facts[len(visible):]:
+        kind=fact["tipo"]
+        hidden[kind]=hidden.get(kind,0)+1
+    for kind,total in available.items():
+        in_full=sum(f["tipo"]==kind for f in facts)
+        if total>in_full:
+            hidden[kind]=hidden.get(kind,0)+total-in_full
     other=[{"tipo":kind,"ipotesi_non_attestata":hyp,
             "controipotesi":counter,"condizione_di_riesame":recheck}
            for kind,hyp,counter,recheck in priority
@@ -1321,7 +1329,8 @@ def decision_review(evidence, row, group):
                +str(hidden) if hidden else ""))
     return dict(base,stato="COPERTURA_PRIMARIA_PARZIALE",
                 fatti=visible,numero_fatti_visibili=len(visible),
-                eventi_concorrenti_nel_campione=len(facts),
+                eventi_concorrenti_nel_campione=len(visible)+sum(hidden.values()),
+                fatti_totali_nel_campione=len(visible)+sum(hidden.values()),
                 non_mostrati_per_tipo=hidden,
                 ipotesi_concorrenti=other,
                 ipotesi_non_attestata=selected[0],

@@ -234,6 +234,8 @@ class PrimaryFollowupTests(unittest.TestCase):
         self.assertEqual(types.count("ISSUE_TECNICA_ETICHETTATA"),4)
         self.assertEqual(types.count("PROPOSTA_GOVERNANCE_DOCUMENTALE"),3)
         self.assertEqual(r["non_mostrati_per_tipo"]["ISSUE_TECNICA_ETICHETTATA"],4)
+        self.assertEqual(r["numero_fatti_visibili"],12)
+        self.assertEqual(r["fatti_totali_nel_campione"],19)
         self.assertEqual(r["non_mostrati_per_tipo"]["PROPOSTA_GOVERNANCE_DOCUMENTALE"],3)
         self.assertGreaterEqual(len(r["ipotesi_concorrenti"]),3)
         self.assertIn("RIVEDERE",r["condizione_di_riesame"])
