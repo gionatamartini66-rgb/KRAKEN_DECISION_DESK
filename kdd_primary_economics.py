@@ -338,6 +338,12 @@ def collect(now, identities, previous, *, fetch_json, fetch_csv, catalog, enable
             old_time = timestamp(old_row.get("acquisito_utc"))
             if old_time and dt.timedelta(0) <= moment-old_time <= dt.timedelta(days=7):
                 record["confronto_precedente_utc"] = old_row["acquisito_utc"]
+                old_emission = old_row.get("politica_emissioni", {})
+                fresh_emission = record.get("politica_emissioni", {})
+                if (old_emission.get("stato") == "OSSERVATO" and
+                        fresh_emission.get("stato") == "OSSERVATO" and
+                        old_emission.get("valori") != fresh_emission.get("valori")):
+                    record["variazioni"].append("PARAMETRI_EMISSIONE_MODIFICATI")
                 old_calendar = old_row.get("calendario", {})
                 if record["calendario"].get("stato") == "OSSERVATO" and old_calendar.get("stato") == "OSSERVATO":
                     if old_calendar.get("eventi") != record["calendario"].get("eventi"):
@@ -369,6 +375,25 @@ def collect(now, identities, previous, *, fetch_json, fetch_csv, catalog, enable
             item = {"id": key, "stato": "NON_DISPONIBILE", "fonte": url,
                     "acquisito_utc": moment.isoformat(timespec="seconds")}
         macro.append(item)
+    previous_macro = {row.get("id"): row for row in old.get("indicatori_macro", [])
+                      if isinstance(row, dict)}
+    for item in macro:
+        past = previous_macro.get(item["id"])
+        if (item.get("stato") == "OSSERVATO" and isinstance(past, dict)
+                and past.get("stato") == "OSSERVATO" and
+                isinstance(past.get("periodo_dato"), str) and
+                past["periodo_dato"] <= item["periodo_dato"] and
+                type(past.get("valore")) in (int, float) and
+                math.isfinite(past["valore"])):
+            item["confronto_precedente"] = {
+                "periodo_dato": past["periodo_dato"],
+                "valore": past["valore"],
+                "acquisito_utc": past.get("acquisito_utc")}
+            item["variazione_da_ultima_lettura"] = round(
+                item["valore"]-past["valore"], 7)
+            item["limite_comparazione"] = (
+                "Differenza tra osservazioni successive della fonte istituzionale, "
+                "non sorpresa rispetto al consenso e non reazione di prezzo")
     history = [observed[k] if observed[k]["stato"] != "RINVIATO_BUDGET" else historical.get(k)
                for k in keys]
     history = [x for x in history if isinstance(x, dict)][:HISTORY_LIMIT]
@@ -462,10 +487,45 @@ def at_read(raw, identities, now, *, catalog=None):
             record = dict(row)
             record["stato_alla_lettura"] = ("SCADUTO" if now-observed > dt.timedelta(days=2)
                                             else "OSSERVATO")
+            past = record.get("confronto_precedente")
+            if past is not None and (
+                    not isinstance(past, dict) or
+                    type(past.get("valore")) not in (int, float) or
+                    not math.isfinite(past["valore"]) or
+                    not isinstance(past.get("periodo_dato"), str) or
+                    past["periodo_dato"] > record.get("periodo_dato", "")):
+                raise ValueError("macro comparison malformed")
+            if past is not None:
+                expected_delta = round(record["valore"]-past["valore"], 7)
+                if record.get("variazione_da_ultima_lettura") != expected_delta:
+                    raise ValueError("macro comparison fabricated")
             macro.append(record)
         else:
             macro.append(dict(row))
+    historical_rows = raw.get("storico", [])
+    if not isinstance(historical_rows, list) or len(historical_rows) > HISTORY_LIMIT:
+        raise ValueError("primary history cardinality invalid")
+    history_output = []
+    seen_hist = set()
+    for item in historical_rows:
+        if not isinstance(item, dict) or item.get("coingecko_id") not in allowed:
+            raise ValueError("primary historical project invalid")
+        key = item["coingecko_id"]
+        stamp_ = timestamp(item.get("acquisito_utc"))
+        if (key in seen_hist or not stamp_ or
+                stamp_ > observed + dt.timedelta(minutes=2)):
+            raise ValueError("historical observation timestamp invalid")
+        seen_hist.add(key)
+        history_output.append({
+            "coingecko_id": key, "acquisito_utc": item["acquisito_utc"],
+            "stato": item.get("stato"),
+            "stato_alla_lettura": "STORICO_NON_RICONFERMATO",
+            "eventi_rilevati": len(item.get("eventi", [])),
+            "calendario_stato": (item.get("calendario") or {}).get("stato"),
+            "proiezione_stato": (item.get("proiezione_circolazione") or {}).get("stato"),
+            "limite": "Dato precedente conservato per confronto, non nuova osservazione"})
     return {"schema": VERSION, "acquisito_utc": raw["acquisito_utc"],
-            "progetti": output, "indicatori_macro": macro,
+            "progetti": output, "storico_sintesi": history_output,
+            "indicatori_macro": macro,
             "richieste_effettuate": raw["richieste_effettuate"],
             "limite": raw.get("limite")}
