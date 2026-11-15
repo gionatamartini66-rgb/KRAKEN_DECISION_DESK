@@ -21,6 +21,9 @@ MAX_MACRO_CALLS = 1
 MAX_SCHEDULE_CALLS = 1
 MAX_SAMPLES = 96
 ECON_SCHEDULE_SCHEMA = "kdd-official-token-schedule-v001"
+SUI_CIRCULATION = "https://sui-circulation.suiexplorer.com/api/sui_circulation"
+SUI_SCHEDULE_HOME = "https://www.sui.io/token-schedule"
+MONTHLY_FORMAT = "official-monthly-circulation-v001"
 MACRO_SERIES = (
     ("USD_EUR", "EXR", "D.USD.EUR.SP00.A", "USD per EUR", 8),
     ("EA_HICP", "HICP", "M.U2.N.000000.4D0.ANR", "variazione percentuale a/a", 65),
@@ -101,13 +104,18 @@ def _schedule_descriptor(descriptor):
     raw = descriptor.get("official_schedule") if isinstance(descriptor, dict) else None
     if not isinstance(raw, dict):
         return None
+    if (raw.get("format") == MONTHLY_FORMAT and raw.get("url") == SUI_CIRCULATION
+            and raw.get("homepage") == SUI_SCHEDULE_HOME
+            and type(raw.get("max_supply_token")) is int
+            and raw["max_supply_token"] == 10_000_000_000):
+        return dict(raw)
     repo, path, ref = raw.get("repository"), raw.get("path"), raw.get("ref")
     if (not isinstance(repo, str) or not REPO.fullmatch(repo)
             or not isinstance(path, str) or not PATH.fullmatch(path)
             or ".." in path.split("/") or path.startswith("/")
             or not isinstance(ref, str) or not SHA_OR_REF.fullmatch(ref)):
         return None
-    return {"repository": repo, "path": path, "ref": ref}
+    return {"format":"repository-json-v001","repository": repo, "path": path, "ref": ref}
 
 
 def _fetch(fetch, url, *, json_data=True):
@@ -234,6 +242,90 @@ def _official_schedule(raw, project_id, source, now):
             "acquisito_utc": _iso(now), "unita": "TOKEN",
             "eventi": validated,
             "limite": "Programmazione documentata; sblocco, immissione e vendita sono tre fatti diversi"}
+
+
+
+def _official_monthly(raw, project_id, descriptor, now):
+    """Source's month-level circulation estimates, not actual unlock dates."""
+    if (not isinstance(raw,list) or not 3 <= len(raw) <= 180
+            or descriptor.get("format") != MONTHLY_FORMAT):
+        return None
+    months={}
+    cap=descriptor["max_supply_token"]
+    for x in raw:
+        if not isinstance(x,dict):
+            return None
+        year,month=x.get("year"),x.get("month")
+        qty,pct=x.get("circulatingSupplyValue"),x.get("circulatingSupplyPercentage")
+        if (type(year) is not int or not 2020<=year<=2100
+                or type(month) is not int or not 1<=month<=12
+                or type(qty) not in (int,float) or not math.isfinite(qty)
+                or not 0<=qty<=cap or type(pct) not in (int,float)
+                or not math.isfinite(pct) or not 0<=pct<=1
+                or abs(qty/cap-pct)>1e-6):
+            return None
+        key=f"{year:04d}-{month:02d}"
+        if key in months:
+            return None
+        months[key]=float(qty)
+    ordered=sorted(months)
+    if any(months[a]>months[b] for a,b in zip(ordered,ordered[1:])):
+        return None
+    current=now.strftime("%Y-%m")
+    known=[p for p in ordered if p<=current]
+    future=[p for p in ordered if p>current][:12]
+    if not known or not future:
+        return None
+    before=max(known)
+    estimates=[]
+    for month in future:
+        estimates.append({"mese":month,"circolante_proiettato_token":months[month],
+                          "aumento_previsto_token":round(months[month]-months[before],5),
+                          "tipo":"PROIEZIONE_NON_UNLOCK",
+                          "data_sblocco_utc":None,"vendita":"NON_ATTESTATA"})
+        before=month
+    return {"progetto_id":project_id,
+            "stato":"PROIEZIONE_PRIMARIA_NON_UNLOCK",
+            "fonte":descriptor["url"],"fonte_documentale":descriptor["homepage"],
+            "acquisito_utc":_iso(now),"pubblicato_utc":None,
+            "pubblicazione":"DATA_NON_ESPOSTA_DALL_API",
+            "mese_circolazione":max(known),"circolante_mese_token":months[max(known)],
+            "max_supply_token":cap,"unita":"TOKEN",
+            "stime_mensili":estimates,"eventi":[],
+            "stato_vesting":"NON_VERIFICATO","stato_vendita":"NON_ATTESTATA",
+            "limite":"Stima mensile ufficiale di circolazione: non è un calendario unlock per allocazione né un fatto di vendita"}
+
+
+def _monthly_valid(row, descriptor):
+    if (not isinstance(row,dict) or not descriptor or descriptor.get("format")!=MONTHLY_FORMAT
+            or row.get("fonte")!=descriptor["url"] or row.get("fonte_documentale")!=descriptor["homepage"]
+            or row.get("eventi")!=[] or row.get("pubblicato_utc") is not None
+            or row.get("stato_vesting")!="NON_VERIFICATO" or row.get("stato_vendita")!="NON_ATTESTATA"
+            or row.get("max_supply_token")!=descriptor["max_supply_token"]
+            or row.get("unita")!="TOKEN" or not _time(row.get("acquisito_utc"))):
+        return False
+    month=row.get("mese_circolazione")
+    q=row.get("circolante_mese_token")
+    points=row.get("stime_mensili")
+    if (not isinstance(month,str) or not re.fullmatch(r"20[0-9]{2}-(0[1-9]|1[0-2])",month)
+            or type(q) not in (int,float) or not math.isfinite(q)
+            or not 0<=q<=descriptor["max_supply_token"]
+            or not isinstance(points,list) or not 1<=len(points)<=12):
+        return False
+    for x in points:
+        if not isinstance(x,dict):
+            return False
+        p,v,d=x.get("mese"),x.get("circolante_proiettato_token"),x.get("aumento_previsto_token")
+        if (not isinstance(p,str) or not re.fullmatch(r"20[0-9]{2}-(0[1-9]|1[0-2])",p)
+                or p<=month or type(v) not in (int,float) or not math.isfinite(v)
+                or not q<=v<=descriptor["max_supply_token"]
+                or type(d) not in (int,float) or not math.isfinite(d)
+                or abs((v-q)-d)>1e-4
+                or x.get("tipo")!="PROIEZIONE_NON_UNLOCK"
+                or x.get("data_sblocco_utc") is not None or x.get("vendita")!="NON_ATTESTATA"):
+            return False
+        month,q=p,v
+    return True
 
 
 def _prior(previous, now):
@@ -414,10 +506,15 @@ def collect(now, items, previous, fetch, *, network_allowed=True):
              "fonte":None,"eventi":[],"limite":"Supply e FDV non sono un calendario unlock"}
         if descriptor and project in sch_selected:
             used+=1
-            url=("https://raw.githubusercontent.com/"+descriptor["repository"]+"/"+
-                 quote(descriptor["ref"],safe="")+"/"+descriptor["path"])
-            raw,error=_fetch(fetch,url)
-            result=_official_schedule(raw,project,url,now) if not error else None
+            if descriptor.get("format")==MONTHLY_FORMAT:
+                url=descriptor["url"]
+                raw,error=_fetch(fetch,url)
+                result=_official_monthly(raw,project,descriptor,now) if not error else None
+            else:
+                url=("https://raw.githubusercontent.com/"+descriptor["repository"]+"/"+
+                     quote(descriptor["ref"],safe="")+"/"+descriptor["path"])
+                raw,error=_fetch(fetch,url)
+                result=_official_schedule(raw,project,url,now) if not error else None
             if result:
                 row.update(result)
             else:
@@ -425,16 +522,34 @@ def collect(now, items, previous, fetch, *, network_allowed=True):
                            motivo=error or "SCHEDULE_NON_ATTESTATO")
         elif descriptor:
             history=previous_schedules.get(project)
-            if history and history.get("stato") in ("DOCUMENTO_PRIMARIO_CON_SCHEDULE","STORICO_DA_RICONFERMARE"):
-                row.update(history,stato="STORICO_DA_RICONFERMARE")
+            if history and history.get("stato") in (
+                    "DOCUMENTO_PRIMARIO_CON_SCHEDULE","STORICO_DA_RICONFERMARE",
+                    "PROIEZIONE_PRIMARIA_NON_UNLOCK","PROIEZIONE_STORICA"):
+                row.update(history,stato=("PROIEZIONE_STORICA"
+                           if history.get("stato") in ("PROIEZIONE_PRIMARIA_NON_UNLOCK","PROIEZIONE_STORICA")
+                           else "STORICO_DA_RICONFERMARE"))
             else:
                 row.update(stato="RINVIATO_RATE_LIMIT_HTTP_429" if not network_allowed
                            else "RINVIATO_BUDGET")
         schedules.append(row)
+    # Compare the attributable planned monthly figures, without calling them unlocks.
+    changes_calendar=[]
+    for row in schedules:
+        former=previous_schedules.get(row["progetto_id"])
+        if (former and row.get("stato") in ("PROIEZIONE_PRIMARIA_NON_UNLOCK","DOCUMENTO_PRIMARIO_CON_SCHEDULE")
+                and former.get("fonte")==row.get("fonte")
+                and (former.get("stime_mensili")!=row.get("stime_mensili")
+                     or former.get("eventi")!=row.get("eventi"))):
+            changes_calendar.append({"progetto_id":row["progetto_id"],
+                "fonte":row.get("fonte"),"stato":"REVISIONE_PIANO_PUBBLICATO",
+                "acquisizione_precedente_utc":former.get("acquisito_utc"),
+                "acquisizione_corrente_utc":row.get("acquisito_utc"),
+                "limite":"Revisione del documento, non prova sblocco o vendita"})
     history,changes=_supply_samples(roster,old,now)
     retained_events=sorted(event_history.values(),key=lambda r:(r["acquisito_utc"],r["progetto_id"],r["documento_id"]),reverse=True)[:MAX_SAMPLES]
     return {"schema":SCHEMA,"acquisito_utc":_iso(now),"progetti":projects,
             "indicatori_macro":macro,"calendari":schedules,
+            "revisioni_piani":changes_calendar,
             "storico_supply":history,"variazioni_supply":changes,
             "storico_eventi":retained_events,
             "prossimo_progetto":next_project,
@@ -502,8 +617,16 @@ def at_read(raw, items, now):
         p=row["progetto_id"]
         expected=_schedule_descriptor(roster[p]["source"])
         new=dict(row)
+        if row.get("stato") in ("PROIEZIONE_PRIMARIA_NON_UNLOCK","PROIEZIONE_STORICA"):
+            if not _monthly_valid(row,expected):
+                raise ValueError("Primary monthly circulation evidence forged")
+            observed=_time(row.get("acquisito_utc"))
+            new["stato"]=("PROIEZIONE_PRIMARIA_NON_UNLOCK"
+                          if row["stato"]=="PROIEZIONE_PRIMARIA_NON_UNLOCK"
+                          and observed and dt.timedelta(0)<=now-observed<=dt.timedelta(days=35)
+                          else "PROIEZIONE_STORICA")
         if row.get("stato") in ("DOCUMENTO_PRIMARIO_CON_SCHEDULE","STORICO_DA_RICONFERMARE"):
-            if not expected or not isinstance(row.get("fonte"),str):
+            if not expected or expected.get("format")!="repository-json-v001" or not isinstance(row.get("fonte"),str):
                 raise ValueError("Primary calendar unbound")
             prefix=("https://raw.githubusercontent.com/"+expected["repository"]+"/"+
                     quote(expected["ref"],safe="")+"/"+expected["path"])

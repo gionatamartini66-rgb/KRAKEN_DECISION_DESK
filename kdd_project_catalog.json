@@ -56,7 +56,13 @@
     },
     "SUI": {
       "id": "sui",
-      "name": "Sui"
+      "name": "Sui",
+      "official_schedule": {
+        "format": "official-monthly-circulation-v001",
+        "url": "https://sui-circulation.suiexplorer.com/api/sui_circulation",
+        "homepage": "https://www.sui.io/token-schedule",
+        "max_supply_token": 10000000000
+      }
     },
     "XRP": {
       "id": "ripple",
