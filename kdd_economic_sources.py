@@ -22,6 +22,11 @@ MAX_MACRO_CALLS = 1
 MAX_SCHEDULE_CALLS = 1
 MAX_SECURITY_CALLS = 1
 MAX_ISSUE_CALLS = 1
+# Kraken REST AssetPairs documented market states, not an arbitrary label
+# or a token listing/delisting announcement.
+KRAKEN_PAIR_STATES = frozenset((
+    "online", "cancel_only", "post_only", "limit_only", "reduce_only",
+    "maintenance"))
 MAX_EMISSION_CALLS = 1
 MAX_SAMPLES = 96
 ECON_SCHEDULE_SCHEMA = "kdd-official-token-schedule-v001"
@@ -464,7 +469,7 @@ def _spot_status(now, items, asset_pairs, previous):
                     entry["stato"]="COPPIA_NON_PRESENTE_NELLA_RISPOSTA"
                 elif not isinstance(observed,dict) or observed.get("wsname")!=pair:
                     entry["stato"]="IDENTITA_COPPIA_INCOERENTE"
-                elif isinstance(observed.get("status"),str) and re.fullmatch(r"[a-z_]{3,30}",observed["status"]):
+                elif observed.get("status") in KRAKEN_PAIR_STATES:
                     entry.update(stato="OSSERVATO",status_kraken=observed["status"])
                     earlier=old.get((group,key,pair))
                     if (earlier and earlier.get("stato")=="OSSERVATO"
@@ -504,7 +509,7 @@ def _spot_status_read(raw, items, now):
                 raise ValueError("Kraken pair observation clock")
             status=entry.get("status_kraken")
             if entry.get("stato")=="OSSERVATO" and (
-                    not isinstance(status,str) or not re.fullmatch(r"[a-z_]{3,30}",status)):
+                    status not in KRAKEN_PAIR_STATES):
                 raise ValueError("Kraken pair status forged")
             change=entry.get("cambiamento")
             if change is not None and (

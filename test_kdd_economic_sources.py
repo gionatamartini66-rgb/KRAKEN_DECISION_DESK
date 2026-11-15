@@ -428,6 +428,16 @@ class PrimaryFollowupTests(unittest.TestCase):
         tampered["stati_coppie_kraken"]["posizioni"][1]["coppia"]="SOL/USDT"
         with self.assertRaises(ValueError):
             sources.at_read(tampered,items,T)
+        # A forged listing/delisting label cannot pass as a Kraken trading mode.
+        fake=copy.deepcopy(first)
+        fake["stati_coppie_kraken"]["posizioni"][1]["status_kraken"]="delisted"
+        with self.assertRaises(ValueError):
+            sources.at_read(fake,items,T)
+        fabricated=sources.collect(T,items,{},self.fetch,
+                        asset_pairs={"BTCEUR":pairs["BTCEUR"],
+                                     "SOLEUR":{"wsname":"SOL/EUR","status":"delisted"}})
+        self.assertEqual(fabricated["stati_coppie_kraken"]["posizioni"][1]
+                         ["stato"],"STATUS_NON_CONFORME")
 
     def test_current_solana_primary_inflation_governor_and_forged_unlock_rejected(self):
         roster=self.items(tokens=("SOL",))
