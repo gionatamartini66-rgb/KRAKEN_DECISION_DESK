@@ -88,6 +88,7 @@ class PrimaryFollowupTests(unittest.TestCase):
         self.assertEqual(a["indicatori_macro"][0]["id"],"USD_EUR")
         self.assertEqual(b["indicatori_macro"][1]["id"],"EA_HICP")
         self.assertEqual(len(b["storico_supply"]),8)
+        self.assertGreaterEqual(len(b["storico_eventi"]),3)
         self.assertEqual(len(b["variazioni_supply"]),4)
         for x in b["variazioni_supply"]:
             self.assertEqual(x["variazioni"]["offerta_circolante"],12)
@@ -115,6 +116,10 @@ class PrimaryFollowupTests(unittest.TestCase):
             sources.at_read(forged,self.items(),T)
         forged=copy.deepcopy(a)
         forged["progetti"][0]["eventi"][0]["fonte"]="https://github.com/attacker/bips/pull/701"
+        with self.assertRaises(ValueError):
+            sources.at_read(forged,self.items(),T)
+        forged=copy.deepcopy(a)
+        forged["storico_eventi"][0]["fonte"]="https://github.com/attacker/changed/pull/701"
         with self.assertRaises(ValueError):
             sources.at_read(forged,self.items(),T)
         forged=copy.deepcopy(a)

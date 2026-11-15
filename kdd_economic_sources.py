@@ -297,6 +297,18 @@ def collect(now, items, previous, fetch, *, network_allowed=True):
     next_project=(eligible[(first+len(selected))%len(eligible)] if eligible else None)
     projects=[]
     used=0
+    # Keep a bounded public event ledger through intervening rotation cycles.
+    event_history={}
+    for old_event in old.get("storico_eventi",[])[:MAX_SAMPLES]:
+        if not isinstance(old_event,dict):
+            continue
+        project=old_event.get("progetto_id")
+        doc=old_event.get("documento_id")
+        t=_time(old_event.get("acquisito_utc"))
+        if (project in roster and _source_repo(roster[project]["source"])
+                and isinstance(doc,str) and doc.isdecimal()
+                and t and dt.timedelta(0)<=now-t<=dt.timedelta(days=30)):
+            event_history[(project,doc,old_event.get("aggiornato_fonte_utc"))]=old_event
     for project,desc in roster.items():
         official_repo=_source_repo(desc["source"])
         previous_row=old_governance.get(project)
@@ -322,7 +334,14 @@ def collect(now, items, previous, fetch, *, network_allowed=True):
                                   or old_events[e["id"]].get("aggiornato_fonte_utc")!=e["aggiornato_fonte_utc"])]
                 entry.update(stato="OSSERVATO",eventi=events,confronto=differences,
                              acquisito_utc=_iso(now))
-        elif official_repo and previous_row and previous_row.get("stato")=="OSSERVATO":
+                for ev in events:
+                    event_history[(project,ev["id"],ev["aggiornato_fonte_utc"])]={
+                        "progetto_id":project,"documento_id":ev["id"],
+                        "fonte":ev["fonte"],"pubblicato_utc":ev["pubblicato_utc"],
+                        "aggiornato_fonte_utc":ev["aggiornato_fonte_utc"],
+                        "acquisito_utc":_iso(now),"stato_documento":ev["stato_documento"],
+                        "stato_decisione_rete":"NON_ATTESTATO"}
+        elif official_repo and previous_row and previous_row.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO"):
             t=_time(previous_row.get("acquisito_utc"))
             if t and now-t<=dt.timedelta(days=7):
                 entry.update(stato="STORICO_NON_AGGIORNATO",
@@ -392,16 +411,18 @@ def collect(now, items, previous, fetch, *, network_allowed=True):
                            motivo=error or "SCHEDULE_NON_ATTESTATO")
         elif descriptor:
             history=previous_schedules.get(project)
-            if history and history.get("stato")=="DOCUMENTO_PRIMARIO_CON_SCHEDULE":
+            if history and history.get("stato") in ("DOCUMENTO_PRIMARIO_CON_SCHEDULE","STORICO_DA_RICONFERMARE"):
                 row.update(history,stato="STORICO_DA_RICONFERMARE")
             else:
                 row.update(stato="RINVIATO_RATE_LIMIT_HTTP_429" if not network_allowed
                            else "RINVIATO_BUDGET")
         schedules.append(row)
     history,changes=_supply_samples(roster,old,now)
+    retained_events=sorted(event_history.values(),key=lambda r:(r["acquisito_utc"],r["progetto_id"],r["documento_id"]),reverse=True)[:MAX_SAMPLES]
     return {"schema":SCHEMA,"acquisito_utc":_iso(now),"progetti":projects,
             "indicatori_macro":macro,"calendari":schedules,
             "storico_supply":history,"variazioni_supply":changes,
+            "storico_eventi":retained_events,
             "prossimo_progetto":next_project,
             "prossimo_indicatore":series[(pick+(1 if network_allowed else 0))%len(series)][0],
             "prossimo_schedule":sch_next,
@@ -428,6 +449,20 @@ def at_read(raw, items, now):
         raise ValueError("Primary schedule identity mismatch")
     if type(raw.get("richieste_pubbliche")) is not int or not 0<=raw["richieste_pubbliche"]<=4:
         raise ValueError("Primary economics budget")
+    retained=raw.get("storico_eventi",[])
+    if not isinstance(retained,list) or len(retained)>MAX_SAMPLES:
+        raise ValueError("Public event history bound")
+    for old_event in retained:
+        if not isinstance(old_event,dict) or old_event.get("progetto_id") not in roster:
+            raise ValueError("Public event history project")
+        project=old_event["progetto_id"]
+        repo=_source_repo(roster[project]["source"])
+        if (not repo or not isinstance(old_event.get("documento_id"),str)
+                or not old_event["documento_id"].isdecimal()
+                or old_event.get("fonte")!="https://github.com/"+repo+"/pull/"+old_event["documento_id"]
+                or not _time(old_event.get("acquisito_utc"))
+                or old_event.get("stato_decisione_rete")!="NON_ATTESTATO"):
+            raise ValueError("Public event history attribution")
     read_projects=[]
     for row in projects:
         repo=_source_repo(roster[row["progetto_id"]]["source"])
