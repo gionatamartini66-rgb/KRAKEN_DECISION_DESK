@@ -70,7 +70,7 @@ raw=None
 for cycle in range(1,6):
     moment=dt.datetime.now(dt.timezone.utc)
     before=len(seen)
-    raw=primary.collect(moment,roster,raw,counted,rpc_fetch=rpc_fetch)
+    raw=primary.collect(moment,roster,raw,counted,rpc_fetch=rpc_fetch,collect_project_issues=True)
     checked=primary.at_read(raw,roster,moment)
     assert checked["schema"]==primary.SCHEMA
     assert checked["copertura"]["progetti"]==4
@@ -93,6 +93,8 @@ for cycle in range(1,6):
           "next_macro",raw["prossimo_indicatore"])
     print("solana_inflation",[(p["progetto_id"],p["stato"],p.get("valori"))
                               for p in checked.get("politiche_emissioni") or [] if p["progetto_id"]=="solana"])
+    print("project_labelled_issues",[(p["progetto_id"],p["stato"],len(p["eventi"]))
+                                   for p in checked.get("segnalazioni_repo") or []])
     print("repository_security",[(r["progetto_id"],r["stato"],len(r["avvisi"])) for r in checked.get("avvisi_repository") or []])
     print("unlock_schedule",[(r["progetto_id"],r["stato"]) for r in checked["calendari"]])
     sui=next(r for r in checked["calendari"] if r["progetto_id"]=="sui")

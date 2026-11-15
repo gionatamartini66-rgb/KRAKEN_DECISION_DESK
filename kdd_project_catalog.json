@@ -50,7 +50,8 @@
       "id": "ethereum",
       "name": "Ethereum",
       "governance_repository": "ethereum/EIPs",
-      "security_repository": "ethereum/go-ethereum"
+      "security_repository": "ethereum/go-ethereum",
+      "repository": "ethereum/go-ethereum"
     },
     "NEAR": {
       "id": "near",

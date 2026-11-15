@@ -21,6 +21,7 @@ MAX_GOVERNANCE_CALLS = 2
 MAX_MACRO_CALLS = 1
 MAX_SCHEDULE_CALLS = 1
 MAX_SECURITY_CALLS = 1
+MAX_ISSUE_CALLS = 1
 MAX_EMISSION_CALLS = 1
 MAX_SAMPLES = 96
 ECON_SCHEDULE_SCHEMA = "kdd-official-token-schedule-v001"
@@ -36,6 +37,8 @@ MACRO_SERIES = (
     ("ECB_MAIN_REFI_RATE", "FM", "D.U2.EUR.4F.KR.MRR_FR.LEV", "percentuale annua", 8),
     ("EA_M3_GROWTH", "BSI", "M.U2.Y.V.M30.X.I.U2.2300.Z01.A", "variazione percentuale a/a", 65),
 )
+ISSUE_LABELS = {"governance","security","tokenomics","protocol","upgrade",
+                "migration","breaking-change","deprecation"}
 GITHUB = "https://api.github.com/repos/"
 ECB = "https://data-api.ecb.europa.eu/service/data/"
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
@@ -105,6 +108,44 @@ def _roster(items):
 def _source_repo(descriptor):
     repo = descriptor.get("governance_repository") if isinstance(descriptor, dict) else None
     return repo if isinstance(repo, str) and REPO.fullmatch(repo) else None
+
+
+def _issue_repo(descriptor):
+    repo=descriptor.get("repository") if isinstance(descriptor,dict) else None
+    return repo if isinstance(repo,str) and REPO.fullmatch(repo) else None
+
+
+def _labelled_issues(payload, repo, now):
+    """Project/client repository issues are notices, not confirmed upgrades."""
+    if not isinstance(payload,list) or len(payload)>30: return None
+    out=[]
+    for raw in payload[:12]:
+        if not isinstance(raw,dict): return None
+        if "pull_request" in raw: continue
+        num=raw.get("number")
+        created=_time(raw.get("created_at"))
+        updated=_time(raw.get("updated_at"))
+        expected="https://github.com/"+repo+"/issues/"+str(num)
+        if (type(num) is not int or num<=0 or raw.get("html_url")!=expected
+                or not created or created>now+dt.timedelta(minutes=2)
+                or not updated or updated<created):
+            return None
+        labels=raw.get("labels") or []
+        if not isinstance(labels,list): return None
+        matches=sorted({tag["name"].lower() for tag in labels
+                        if isinstance(tag,dict) and isinstance(tag.get("name"),str)}
+                        & ISSUE_LABELS)
+        if not matches: continue
+        title=raw.get("title")
+        if not isinstance(title,str) or not title.strip(): return None
+        out.append({"id":str(num),"tipo":"ISSUE_ETICHETTATA_REPOSITORY",
+                    "emittente":repo,"fonte":expected,
+                    "titolo":title.strip()[:220],"categorie":matches,
+                    "pubblicato_utc":_iso(created),"aggiornato_fonte_utc":_iso(updated),
+                    "evento_utc":None,"stato":"PUBBLICATO_DA_VERIFICARE",
+                    "esito_proposta":"NON_ATTESTATO",
+                    "limite":"Issue ufficiale: etichetta non attesta delibera, exploit riuscito, upgrade attivato o conseguenze sul prezzo"})
+    return out[:8]
 
 
 def _security_repo(descriptor):
@@ -533,7 +574,7 @@ def _supply_samples(roster, old, now):
     return retained,changes[:30]
 
 
-def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=None, rpc_fetch=None):
+def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=None, rpc_fetch=None, collect_project_issues=False):
     """One shared, reusable, bounded producer for all current asset identities."""
     now = _utc(now)
     roster = _roster(items)
@@ -654,6 +695,46 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
             if not network_allowed and row["stato"]=="RINVIATO_BUDGET":
                 row["stato"]="RINVIATO_RATE_LIMIT_HTTP_429"
         emissions.append(row)
+    # KDD-20: labelled technical issues from the project's registered
+    # repository. Distinct from GHSA advisories and documentation PRs.
+    issue_projects=[key for key in roster if _issue_repo(roster[key]["source"])]
+    past_issues={x["progetto_id"]:x for x in old.get("segnalazioni_repo",[])
+                 if isinstance(x,dict) and x.get("progetto_id") in roster}
+    old_issue_cursor=old.get("prossima_issue")
+    issue_start=next((i for i,project in enumerate(issue_projects)
+                      if isinstance(old_issue_cursor,str) and project>=old_issue_cursor),0)
+    issue_selected=(issue_projects[issue_start:issue_start+MAX_ISSUE_CALLS]
+                    if network_allowed and collect_project_issues else [])
+    next_issue=(issue_projects[(issue_start+len(issue_selected))%len(issue_projects)]
+                if issue_projects else None)
+    issues=[]
+    for project in roster:
+        repo=_issue_repo(roster[project]["source"])
+        row={"progetto_id":project,"repository_issue":repo,"acquisito_utc":None,
+             "stato":"SENZA_REPOSITORY" if not repo else "NON_RICHIESTO",
+             "eventi":[],"limite":"Campione senza issue etichettate non prova assenza di incidenti"}
+        if repo and project in issue_selected:
+            used+=1
+            url=GITHUB+repo+"/issues?state=all&sort=updated&per_page=12"
+            payload,error=_fetch(fetch,url)
+            parsed=_labelled_issues(payload,repo,now) if not error else None
+            if parsed is None:
+                row.update(stato="FONTE_NON_DISPONIBILE",errore=error or "RISPOSTA_INCOERENTE")
+            else:
+                row.update(stato="OSSERVATO" if parsed else "NESSUNA_ISSUE_NEL_CAMPIONE",
+                           acquisito_utc=_iso(now),eventi=parsed)
+        elif repo and collect_project_issues:
+            before=past_issues.get(project)
+            if before and before.get("stato") in ("OSSERVATO","NESSUNA_ISSUE_NEL_CAMPIONE","STORICO"):
+                last=_time(before.get("acquisito_utc"))
+                if last and dt.timedelta(0)<=now-last<=dt.timedelta(days=14):
+                    row.update(stato="STORICO",acquisito_utc=before["acquisito_utc"],
+                               eventi=before.get("eventi",[])[:8])
+            if not network_allowed and row["stato"]=="NON_RICHIESTO":
+                row["stato"]="RINVIATO_RATE_LIMIT_HTTP_429"
+            elif row["stato"]=="NON_RICHIESTO":
+                row["stato"]="RINVIATO_BUDGET"
+        issues.append(row)
     # KDD-20: independent capped rotation of repository security advisories.
     # PR #66 acquires issue labels, not published GHSA alerts; no duplication.
     security_eligible=[p for p in roster if _security_repo(roster[p]["source"])]
@@ -806,6 +887,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
     return {"schema":SCHEMA,"acquisito_utc":_iso(now),"progetti":projects,
             "stati_coppie_kraken":kraken_status,
             "avvisi_repository":advisories,"prossimo_security":sec_cursor,
+            "segnalazioni_repo":issues,"prossima_issue":next_issue,
             "politiche_emissioni":emissions,"prossima_emissione":emission_next,
             "indicatori_macro":macro,"calendari":schedules,
             "revisioni_piani":changes_calendar,
@@ -814,7 +896,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
             "prossimo_progetto":next_project,
             "prossimo_indicatore":series[(pick+(1 if network_allowed else 0))%len(series)][0],
             "prossimo_schedule":sch_next,
-            "richieste_pubbliche":used,"limite_richieste":MAX_GOVERNANCE_CALLS+MAX_MACRO_CALLS+MAX_SCHEDULE_CALLS+MAX_SECURITY_CALLS+MAX_EMISSION_CALLS,
+            "richieste_pubbliche":used,"limite_richieste":MAX_GOVERNANCE_CALLS+MAX_MACRO_CALLS+MAX_SCHEDULE_CALLS+MAX_SECURITY_CALLS+MAX_EMISSION_CALLS+MAX_ISSUE_CALLS,
             "limite":"Campioni pubblici: proposal != approvazione; unlock != circolazione != vendita; nessuna direzione di mercato inferita"}
 
 
@@ -835,7 +917,7 @@ def at_read(raw, items, now):
         raise ValueError("Primary economics identity mismatch")
     if [r.get("progetto_id") for r in schedules if isinstance(r,dict)] != list(roster):
         raise ValueError("Primary schedule identity mismatch")
-    if type(raw.get("richieste_pubbliche")) is not int or not 0<=raw["richieste_pubbliche"]<=6:
+    if type(raw.get("richieste_pubbliche")) is not int or not 0<=raw["richieste_pubbliche"]<=7:
         raise ValueError("Primary economics budget")
     retained=raw.get("storico_eventi",[])
     if not isinstance(retained,list) or len(retained)>MAX_SAMPLES:
@@ -851,6 +933,41 @@ def at_read(raw, items, now):
                 or not _time(old_event.get("acquisito_utc"))
                 or old_event.get("stato_decisione_rete")!="NON_ATTESTATO"):
             raise ValueError("Public event history attribution")
+    read_issues=[]
+    source_issues=raw.get("segnalazioni_repo")
+    if source_issues is not None:
+        if (not isinstance(source_issues,list) or len(source_issues)!=len(roster)
+                or [x.get("progetto_id") for x in source_issues if isinstance(x,dict)]!=list(roster)):
+            raise ValueError("Repository issues roster mismatch")
+        for group in source_issues:
+            repo=_issue_repo(roster[group["progetto_id"]]["source"])
+            if group.get("repository_issue")!=repo:
+                raise ValueError("Repository issue project attribution forged")
+            copy=dict(group)
+            if group.get("stato") in ("OSSERVATO","NESSUNA_ISSUE_NEL_CAMPIONE","STORICO"):
+                t=_time(group.get("acquisito_utc"))
+                entries=group.get("eventi")
+                if (not repo or not t or t>now+dt.timedelta(minutes=2)
+                        or not isinstance(entries,list) or len(entries)>8):
+                    raise ValueError("Issue observation invalid")
+                for event in entries:
+                    if not isinstance(event,dict): raise ValueError("Issue event malformed")
+                    num=event.get("id")
+                    tags=event.get("categorie")
+                    if (not isinstance(num,str) or not num.isdecimal()
+                            or event.get("fonte")!="https://github.com/"+repo+"/issues/"+num
+                            or event.get("emittente")!=repo
+                            or event.get("tipo")!="ISSUE_ETICHETTATA_REPOSITORY"
+                            or not isinstance(tags,list) or not tags
+                            or any(tag not in ISSUE_LABELS for tag in tags)
+                            or not _time(event.get("pubblicato_utc"))
+                            or event.get("evento_utc") is not None
+                            or event.get("stato")!="PUBBLICATO_DA_VERIFICARE"
+                            or event.get("esito_proposta")!="NON_ATTESTATO"):
+                        raise ValueError("Issue attribution or decision forged")
+                copy["stato_alla_lettura"]=("SCADUTO" if now-t>dt.timedelta(days=14)
+                                             else group["stato"])
+            read_issues.append(copy)
     verified_emissions=[]
     source_emissions=raw.get("politiche_emissioni")
     if source_emissions is not None:
@@ -1002,11 +1119,13 @@ def at_read(raw, items, now):
             stati_coppie_kraken=pairs_read,
             avvisi_repository=verified_advisories if raw_advisories is not None else None,
             politiche_emissioni=verified_emissions if source_emissions is not None else None,
+            segnalazioni_repo=read_issues if source_issues is not None else None,
             indicatori_macro=indicators,calendari=read_schedules,
             variazioni_supply=raw.get("variazioni_supply",[])[:30],
             copertura={"progetti":len(projects),"governance_osservati":sum(p["stato"]=="OSSERVATO" for p in read_projects),
                         "indicatori_macro_osservati":sum(m["stato"]=="OSSERVATO" for m in indicators),
                         "calendari_primari_attuali":sum(s["stato"]=="DOCUMENTO_PRIMARIO_CON_SCHEDULE" for s in read_schedules),
                         "security_repository_osservati":sum(a.get("stato_alla_lettura") in ("OSSERVATO","NESSUN_AVVISO_NEL_CAMPIONE") for a in verified_advisories),
-                        "politiche_emissioni_osservate":sum(e.get("stato_alla_lettura")=="OSSERVATO" for e in verified_emissions)},
+                        "politiche_emissioni_osservate":sum(e.get("stato_alla_lettura")=="OSSERVATO" for e in verified_emissions),
+                        "repository_issue_osservati":sum(e.get("stato_alla_lettura") in ("OSSERVATO","NESSUNA_ISSUE_NEL_CAMPIONE") for e in read_issues)},
             limite=raw.get("limite"))

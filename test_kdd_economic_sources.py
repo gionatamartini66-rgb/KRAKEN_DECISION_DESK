@@ -35,6 +35,13 @@ class PrimaryFollowupTests(unittest.TestCase):
         return {"posizioni":rows,"candidati":candidates}
 
     def fetch(self, url):
+        if "/issues?" in url:
+            repo=url.split("/repos/")[1].split("/issues?")[0]
+            return json.dumps([{"number":8234,"title":"Project issue about upgrade",
+                "html_url":"https://github.com/"+repo+"/issues/8234",
+                "created_at":"2026-11-12T00:00:00+00:00",
+                "updated_at":"2026-11-13T00:00:00+00:00",
+                "labels":[{"name":"upgrade"}]}]).encode()
         if "/security-advisories?" in url:
             name=url.split("/repos/")[1].split("/security-advisories?")[0]
             return json.dumps([{"ghsa_id":"GHSA-abcd-efgh-ijkl",
@@ -76,6 +83,35 @@ class PrimaryFollowupTests(unittest.TestCase):
                     "tipo":"UNLOCK_PROGRAMMATO","evento_utc":"2026-12-01T12:00:00+00:00",
                     "quantita_token":100,"allocazione":"example"}]}).encode()
         raise AssertionError("source URL not registered: "+url)
+
+    def test_primary_labelled_issues_are_not_verified_network_upgrades(self):
+        roster=self.items(tokens=("BTC","ETH","SOL"))
+        first=sources.collect(T,roster,{},self.fetch,collect_project_issues=True)
+        self.assertEqual(first["richieste_pubbliche"],5)
+        self.assertEqual(first["segnalazioni_repo"][0]["stato"],"OSSERVATO")
+        ev=first["segnalazioni_repo"][0]["eventi"][0]
+        self.assertEqual(ev["esito_proposta"],"NON_ATTESTATO")
+        self.assertIsNone(ev["evento_utc"])
+        self.assertIn("non attesta",ev["limite"])
+        second=sources.collect(T+dt.timedelta(hours=1),roster,first,self.fetch,
+                               collect_project_issues=True)
+        self.assertEqual(second["segnalazioni_repo"][0]["stato"],"STORICO")
+        self.assertEqual(second["segnalazioni_repo"][1]["stato"],"OSSERVATO")
+        sources.at_read(second,roster,T+dt.timedelta(hours=1))
+        forged=copy.deepcopy(first)
+        forged["segnalazioni_repo"][0]["eventi"][0]["esito_proposta"]="APPROVATO"
+        with self.assertRaises(ValueError):
+            sources.at_read(forged,roster,T)
+        forged=copy.deepcopy(first)
+        forged["segnalazioni_repo"][0]["eventi"][0]["fonte"]="https://github.com/attacker/code/issues/8234"
+        with self.assertRaises(ValueError):
+            sources.at_read(forged,roster,T)
+        empty=sources.collect(T,roster,{},lambda url:
+            b"[]" if "/issues?" in url else self.fetch(url),collect_project_issues=True)
+        self.assertEqual(empty["segnalazioni_repo"][0]["stato"],"NESSUNA_ISSUE_NEL_CAMPIONE")
+        no_extra=sources.collect(T,roster,{},self.fetch)
+        self.assertEqual(no_extra["segnalazioni_repo"][0]["stato"],"NON_RICHIESTO")
+        self.assertEqual(no_extra["richieste_pubbliche"],4)
 
     def test_repositories_rotate_security_advisories_without_claiming_token_compromise(self):
         roster=self.items(tokens=("BTC","ETH","SOL"))
