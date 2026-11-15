@@ -323,6 +323,51 @@ class PrimaryFollowupTests(unittest.TestCase):
                          "SENZA_CALENDARIO_PRIMARIO")
         self.assertEqual(sources.at_read(b,replaced,T+dt.timedelta(hours=1))["copertura"]["progetti"],2)
 
+    def test_arb_real_project_primary_mdx_rule_and_missing_exact_unlocks(self):
+        raw=(
+            "all investor and team tokens are subject to 4 year lockups, "
+            "with the first unlocks happening one year after the "
+            "[token generation event (3/16/2023)](https://arbiscan.io/tx/example) "
+            "and then monthly unlocks for the remaining three years. "
+            "The Arbitrum Foundation's allocation is subject to a lockup "
+            "that began on 4/17/2023 and linearly unlocks over the course "
+            "of four years.")
+        def firstparty(url):
+            if url==sources.ARB_VESTING_URL: return raw.encode()
+            return self.fetch(url)
+        item=self.items(tokens=("ARB","SUI","PEPE"))
+        first=sources.collect(T,item,{},firstparty)
+        self.assertEqual(first["richieste_pubbliche"],2)
+        arb=next(x for x in first["calendari"] if x["progetto_id"]=="arbitrum")
+        self.assertEqual(arb["stato"],"DOCUMENTO_PRIMARIO_REGOLA_VESTING")
+        self.assertEqual(arb["eventi"],[])
+        self.assertEqual(arb["regole"][0]["quantita_token"],None)
+        self.assertEqual(arb["periodi_mensili_derivati"][0],"2026-11")
+        checked=sources.at_read(first,item,T)
+        self.assertEqual(checked["copertura"]["regole_vesting_primarie_attuali"],1)
+        review=sources.decision_review(checked,item["posizioni"][0],"posizioni")
+        self.assertTrue(any(x["tipo"]=="REGOLA_VESTING_MENSILE_PRIMARIA"
+                            for x in review["fatti"]))
+        self.assertFalse(any("UNLOCK_SOLO_PROGRAMMATO"==x["tipo"] for x in review["fatti"]))
+        later=sources.at_read(first,item,T+dt.timedelta(days=31))
+        self.assertEqual(next(x for x in later["calendari"] if x["progetto_id"]=="arbitrum")
+                         ["stato"],"REGOLA_VESTING_STORICA")
+        forged=copy.deepcopy(first)
+        event=next(x for x in forged["calendari"] if x["progetto_id"]=="arbitrum")
+        event["eventi"]=[{"tipo":"UNLOCK_PROGRAMMATO","evento_utc":"2026-12-16T00:00:00Z",
+                         "quantita_token":1,"allocazione":"team"}]
+        with self.assertRaises(ValueError):sources.at_read(forged,item,T)
+        forged=copy.deepcopy(first)
+        next(x for x in forged["calendari"] if x["progetto_id"]=="arbitrum")[
+            "regole"][0]["quantita_token"]=123000
+        with self.assertRaises(ValueError):sources.at_read(forged,item,T)
+        missing=sources.collect(T,item,{},lambda url:
+                b"not an official source" if url==sources.ARB_VESTING_URL else self.fetch(url))
+        self.assertEqual(next(x for x in missing["calendari"] if x["progetto_id"]=="arbitrum")
+                         ["stato"],"FONTE_NON_DISPONIBILE")
+        absent=next(x for x in first["calendari"] if x["progetto_id"]=="pepe")
+        self.assertEqual(absent["stato"],"SENZA_CALENDARIO_PRIMARIO")
+
     def test_machine_readable_primary_schedule_is_planned_not_sale(self):
         existing=dict(economic._CURATED["BTC"])
         existing["official_schedule"]={"repository":"bitcoin/bips","path":"schedules/btc.json","ref":"main"}

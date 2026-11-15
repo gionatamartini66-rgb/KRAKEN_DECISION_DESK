@@ -35,6 +35,12 @@ SUI_SCHEDULE_HOME = "https://www.sui.io/token-schedule"
 SOLANA_RPC = "https://api.mainnet.solana.com"
 SOLANA_GOVERNOR_DOC = "https://solana.com/docs/rpc/http/getinflationgovernor"
 MONTHLY_FORMAT = "official-monthly-circulation-v001"
+ARB_VESTING_FORMAT = "arbitrum-primary-vesting-mdx-v001"
+ARB_VESTING_REPO = "ArbitrumFoundation/docs"
+ARB_VESTING_PATH = "content/docs/airdrop-eligibility-distribution.mdx"
+ARB_VESTING_URL = ("https://raw.githubusercontent.com/"+ARB_VESTING_REPO+
+                   "/main/"+ARB_VESTING_PATH)
+ARB_VESTING_HOME = "https://docs.arbitrum.foundation/airdrop-eligibility-distribution"
 MACRO_SERIES = (
     ("USD_EUR", "EXR", "D.USD.EUR.SP00.A", "USD per EUR", 8),
     ("EA_HICP", "HICP", "M.U2.N.000000.4D0.ANR", "variazione percentuale a/a", 65),
@@ -216,6 +222,12 @@ def _schedule_descriptor(descriptor):
     raw = descriptor.get("official_schedule") if isinstance(descriptor, dict) else None
     if not isinstance(raw, dict):
         return None
+    if (raw.get("format") == ARB_VESTING_FORMAT
+            and raw.get("repository")==ARB_VESTING_REPO
+            and raw.get("path")==ARB_VESTING_PATH
+            and raw.get("ref")=="main"
+            and raw.get("homepage")==ARB_VESTING_HOME):
+        return dict(raw)
     if (raw.get("format") == MONTHLY_FORMAT and raw.get("url") == SUI_CIRCULATION
             and raw.get("homepage") == SUI_SCHEDULE_HOME
             and type(raw.get("max_supply_token")) is int
@@ -359,6 +371,90 @@ def _official_schedule(raw, project_id, source, now):
             "eventi": validated,
             "limite": "Programmazione documentata; sblocco, immissione e vendita sono tre fatti diversi"}
 
+
+
+def _arb_vesting_document(raw, project_id, descriptor, now):
+    """Read the *real* project-owned primary MDX, not a fictitious JSON feed.
+
+    A monthly vesting rule is evidenced, but no exact future unlock day,
+    allocation amount, transfer, exchange inflow or sale can be deduced.
+    """
+    if (project_id!="arbitrum" or descriptor.get("format")!=ARB_VESTING_FORMAT
+            or not isinstance(raw,str) or len(raw)>150000):
+        return None
+    normalized=re.sub(r"\\s+"," ",raw).lower()
+    if (not re.search(
+            r"all investor and team tokens are subject to 4 year lockups,"
+            r".*?first unlocks happening one year after the"
+            r".*?token generation event \\(3/16/2023\\)"
+            r".*?then monthly unlocks for the remaining three years",
+            normalized)
+            or not re.search(
+                r"arbitrum foundation's allocation is subject to a lockup"
+                r".*?began on 4/17/2023"
+                r".*?linearly unlocks over the course of four years",
+                normalized)):
+        return None
+    # Months, not event timestamps; the text does not identify the exact
+    # monthly day or tranche amounts. Limit to the next 8 month periods.
+    months=[]
+    for offset in range(8):
+        month0=now.year*12+now.month-1+offset
+        y,m=divmod(month0,12)
+        label=f"{y:04d}-{m+1:02d}"
+        if "2024-03"<=label<="2027-03":
+            months.append(label)
+    return {"progetto_id":project_id,
+            "stato":"DOCUMENTO_PRIMARIO_REGOLA_VESTING",
+            "fonte":ARB_VESTING_URL,"fonte_documentale":ARB_VESTING_HOME,
+            "acquisito_utc":_iso(now),"pubblicato_utc":None,
+            "data_pubblicazione":"NON_ESPOSTA_DALLA_FONTE_MDX",
+            "tipo":"REGOLA_VESTING_MENSILE",
+            "beneficiari":["TEAM_E_INVESTITORI","ARBITRUM_FOUNDATION"],
+            "regole":[{"gruppo":"TEAM_E_INVESTITORI",
+                       "evento_originale":"2023-03-16",
+                       "prima_finestra_mese":"2024-03",
+                       "ultima_finestra_mese":"2027-03",
+                       "frequenza":"MENSILE_DA_DOCUMENTO",
+                       "quantita_token":None},
+                      {"gruppo":"ARBITRUM_FOUNDATION",
+                       "inizio_utc_data":"2023-04-17",
+                       "durata_anni":4,
+                       "frequenza":"LINEARE_SENZA_EVENTI_DATATI",
+                       "quantita_token":None}],
+            "periodi_mensili_derivati":months,
+            "eventi":[],"unita":"TOKEN","stato_sblocco_effettivo":"NON_ATTESTATO",
+            "stato_vendita":"NON_ATTESTATA",
+            "limite":"Acquisizione MDX ufficiale: vesting come REGOLA, senza giorni, quantità per scadenza o vendita. Finestra mensile derivata dichiarata, non singoli unlock osservati"}
+
+
+def _arb_vesting_valid(row, descriptor):
+    if (not descriptor or descriptor.get("format")!=ARB_VESTING_FORMAT
+            or row.get("progetto_id")!="arbitrum"
+            or row.get("fonte")!=ARB_VESTING_URL
+            or row.get("fonte_documentale")!=ARB_VESTING_HOME
+            or row.get("pubblicato_utc") is not None
+            or row.get("data_pubblicazione")!="NON_ESPOSTA_DALLA_FONTE_MDX"
+            or row.get("tipo")!="REGOLA_VESTING_MENSILE"
+            or row.get("unita")!="TOKEN"
+            or row.get("eventi")!=[]
+            or row.get("stato_sblocco_effettivo")!="NON_ATTESTATO"
+            or row.get("stato_vendita")!="NON_ATTESTATA"):
+        return False
+    t=_time(row.get("acquisito_utc"))
+    if not t:
+        return False
+    # Reconstruct all constant fields from the verified text contract at its
+    # acquisition time. A packet cannot insert an invented day or quantity.
+    expected=_arb_vesting_document(
+        "all investor and team tokens are subject to 4 year lockups, "
+        "with the first unlocks happening one year after the token generation event (3/16/2023) "
+        "and then monthly unlocks for the remaining three years. "
+        "the arbitrum foundation's allocation is subject to a lockup that began on 4/17/2023 "
+        "and linearly unlocks over the course of four years.",
+        "arbitrum",descriptor,t)
+    return bool(expected and all(row.get(k)==expected[k] for k in (
+        "beneficiari","regole","periodi_mensili_derivati")))
 
 
 def _official_monthly(raw, project_id, descriptor, now):
@@ -855,6 +951,10 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
                 url=descriptor["url"]
                 raw,error=_fetch(fetch,url)
                 result=_official_monthly(raw,project,descriptor,now) if not error else None
+            elif descriptor.get("format")==ARB_VESTING_FORMAT:
+                url=ARB_VESTING_URL
+                raw,error=_fetch(fetch,url,json_data=False)
+                result=_arb_vesting_document(raw,project,descriptor,now) if not error else None
             else:
                 url=("https://raw.githubusercontent.com/"+descriptor["repository"]+"/"+
                      quote(descriptor["ref"],safe="")+"/"+descriptor["path"])
@@ -869,9 +969,12 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
             history=previous_schedules.get(project)
             if history and history.get("stato") in (
                     "DOCUMENTO_PRIMARIO_CON_SCHEDULE","STORICO_DA_RICONFERMARE",
-                    "PROIEZIONE_PRIMARIA_NON_UNLOCK","PROIEZIONE_STORICA"):
+                    "PROIEZIONE_PRIMARIA_NON_UNLOCK","PROIEZIONE_STORICA",
+                    "DOCUMENTO_PRIMARIO_REGOLA_VESTING","REGOLA_VESTING_STORICA"):
                 row.update(history,stato=("PROIEZIONE_STORICA"
                            if history.get("stato") in ("PROIEZIONE_PRIMARIA_NON_UNLOCK","PROIEZIONE_STORICA")
+                           else "REGOLA_VESTING_STORICA"
+                           if history.get("stato") in ("DOCUMENTO_PRIMARIO_REGOLA_VESTING","REGOLA_VESTING_STORICA")
                            else "STORICO_DA_RICONFERMARE"))
             else:
                 row.update(stato=paused if not network_allowed
@@ -980,6 +1083,13 @@ def decision_review(evidence, row, group):
                 schedule.get("fonte"),event.get("evento_utc"),schedule.get("acquisito_utc"),
                 "PROGRAMMA_PRIMARIO",schedule.get("limite"),
                 {"allocazione":event.get("allocazione"),"quantita_token":event.get("quantita_token")})
+    if schedule.get("stato")=="DOCUMENTO_PRIMARIO_REGOLA_VESTING":
+        add("REGOLA_VESTING_MENSILE_PRIMARIA",
+            "La Foundation documenta regole mensili e lineari di vesting, senza quantità o giorni esatti per i futuri unlock",
+            schedule.get("fonte"),None,schedule.get("acquisito_utc"),
+            "REGOLA_PRIMARIA_NON_EVENTO_ESEGUITO",schedule.get("limite"),
+            {"periodi_mensili_derivati":schedule.get("periodi_mensili_derivati"),
+             "regole":schedule.get("regole")})
     monthly=by_project("calendari")
     if monthly.get("stato")=="PROIEZIONE_PRIMARIA_NON_UNLOCK":
         add("PROIEZIONE_CIRCOLAZIONE",
@@ -1044,6 +1154,10 @@ def decision_review(evidence, row, group):
     priority=(("STATO_COPPIA_KRAKEN", "Una restrizione della coppia potrebbe impedire l'operatività prevista",
                "Lo stato pubblico non attesta operatività o sospensione del singolo account",
                "Ricontrollare AssetPairs e mercato/account prima di considerare operazioni"),
+              ("REGOLA_VESTING_MENSILE_PRIMARIA",
+               "I periodi mensili documentati potrebbero influire sulla supply futura",
+               "Mancano giorno esatto, quantità della tranche, circolazione e vendita",
+               "Rileggere la regola pubblicata e verificare eventuali eventi effettivi prima di stimare l'impatto"),
               ("UNLOCK_SOLO_PROGRAMMATO",
                "Una distribuzione programmata potrebbe modificare la disponibilità futura di token",
                "Il documento non attesta immissione effettiva, domanda o vendite",
@@ -1228,6 +1342,14 @@ def at_read(raw, items, now):
         p=row["progetto_id"]
         expected=_schedule_descriptor(roster[p]["source"])
         new=dict(row)
+        if row.get("stato") in ("DOCUMENTO_PRIMARIO_REGOLA_VESTING","REGOLA_VESTING_STORICA"):
+            if not _arb_vesting_valid(row,expected):
+                raise ValueError("Primary vesting rule is not attributable to foundation MDX")
+            observed=_time(row.get("acquisito_utc"))
+            new["stato"]=("DOCUMENTO_PRIMARIO_REGOLA_VESTING"
+                          if row["stato"]=="DOCUMENTO_PRIMARIO_REGOLA_VESTING"
+                          and observed and dt.timedelta(0)<=now-observed<=dt.timedelta(days=30)
+                          else "REGOLA_VESTING_STORICA")
         if row.get("stato") in ("PROIEZIONE_PRIMARIA_NON_UNLOCK","PROIEZIONE_STORICA"):
             if not _monthly_valid(row,expected):
                 raise ValueError("Primary monthly circulation evidence forged")
@@ -1304,6 +1426,7 @@ def at_read(raw, items, now):
             copertura={"progetti":len(projects),"governance_osservati":sum(p["stato"]=="OSSERVATO" for p in read_projects),
                         "indicatori_macro_osservati":sum(m["stato"]=="OSSERVATO" for m in indicators),
                         "calendari_primari_attuali":sum(s["stato"]=="DOCUMENTO_PRIMARIO_CON_SCHEDULE" for s in read_schedules),
+            "regole_vesting_primarie_attuali":sum(s["stato"]=="DOCUMENTO_PRIMARIO_REGOLA_VESTING" for s in read_schedules),
                         "security_repository_osservati":sum(a.get("stato_alla_lettura") in ("OSSERVATO","NESSUN_AVVISO_NEL_CAMPIONE") for a in verified_advisories),
                         "politiche_emissioni_osservate":sum(e.get("stato_alla_lettura")=="OSSERVATO" for e in verified_emissions),
                         "repository_issue_osservati":sum(e.get("stato_alla_lettura") in ("OSSERVATO","NESSUNA_ISSUE_NEL_CAMPIONE") for e in read_issues)},

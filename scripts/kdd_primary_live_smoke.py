@@ -55,7 +55,7 @@ def identity(token):
 
 
 roster={"posizioni":[],"candidati":[]}
-for n,token in enumerate(("BTC","ETH","SOL","SUI")):
+for n,token in enumerate(("BTC","ETH","SOL","SUI","ARB")):
     ident=identity(token)
     assert ident["stato"]=="IDENTITA_VERIFICATA_DA_CATALOGO"
     roster["posizioni"].append({"indice":n,"token":token,"identita":ident,
@@ -73,7 +73,7 @@ for cycle in range(1,6):
     raw=primary.collect(moment,roster,raw,counted,rpc_fetch=rpc_fetch,collect_project_issues=True)
     checked=primary.at_read(raw,roster,moment)
     assert checked["schema"]==primary.SCHEMA
-    assert checked["copertura"]["progetti"]==4
+    assert checked["copertura"]["progetti"]==5
     assert raw["richieste_pubbliche"] <= raw["limite_richieste"]
     assert raw["richieste_pubbliche"]==len(seen)-before
     print("PUBLIC_G2_SMOKE_UTC",moment.isoformat(timespec="seconds"),"cycle",cycle)
@@ -97,6 +97,10 @@ for cycle in range(1,6):
                                    for p in checked.get("segnalazioni_repo") or []])
     print("repository_security",[(r["progetto_id"],r["stato"],len(r["avvisi"])) for r in checked.get("avvisi_repository") or []])
     print("unlock_schedule",[(r["progetto_id"],r["stato"]) for r in checked["calendari"]])
+    arb=next(r for r in checked["calendari"] if r["progetto_id"]=="arbitrum")
+    print("ARB_VESTING_PRIMARY",arb["stato"],"source",arb.get("fonte"),
+          "months",arb.get("periodi_mensili_derivati"),
+          "events_observed",len(arb.get("eventi",[])))
     sui=next(r for r in checked["calendari"] if r["progetto_id"]=="sui")
     print("sui_official_monthly",sui["stato"],"source",sui.get("fonte"),
           "reference_month",sui.get("mese_circolazione"),
