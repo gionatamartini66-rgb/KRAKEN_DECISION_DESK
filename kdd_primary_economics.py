@@ -319,9 +319,11 @@ def collect(now, identities, previous, *, fetch_json, fetch_csv, catalog, enable
                     identity, fetch_json(projection["url"], None),
                     projection["url"], moment,
                     maximum=projection.get("max_supply_tokens"))
-            except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+            except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
                 record["proiezione_circolazione"] = {
                     "stato": "NON_DISPONIBILE_FONTE", "fonte": projection["url"],
+                    "motivo": (f"HTTP_{exc.code}" if isinstance(exc, __import__("urllib.error", fromlist=["HTTPError"]).HTTPError)
+                               else type(exc).__name__),
                     "eventi": [], "acquisito_utc": moment.isoformat(timespec="seconds")}
         repo = identity.get("repository_primario")
         if isinstance(repo, str) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) and requests+1 <= MAX_REQUESTS:
