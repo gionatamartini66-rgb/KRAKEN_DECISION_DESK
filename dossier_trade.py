@@ -1,5 +1,19 @@
 """Dossier verificabile per ragionamento GPT in chat, senza API private né ordini."""
 import datetime as dt
+import contextlib
+import contextvars
+_PRIMARY_REAL_REFRESH = contextvars.ContextVar("kdd_primary_real_refresh", default=False)
+
+
+@contextlib.contextmanager
+def primary_refresh_context():
+    """Permit ordinary primary-source requests only during the KDD refresh."""
+    marker = _PRIMARY_REAL_REFRESH.set(True)
+    try:
+        yield
+    finally:
+        _PRIMARY_REAL_REFRESH.reset(marker)
+
 import json
 import math
 import time
@@ -299,7 +313,7 @@ def finanziamento_150_book(source, portfolio, *, saldo_recente, kraken_client=No
 
 
 def economic_evidence(source, wallet, four, candidates, now, *,
-                      asset_pairs=None, previous=None, primary_live=False):
+                      asset_pairs=None, previous=None):
     """Patrimonio dinamico: catalogo Kraken reale, progetti curati o ricerca incrociata.
 
     The previous dossier is a dated, local public-evidence cache, never a
@@ -575,7 +589,7 @@ def economic_evidence(source, wallet, four, candidates, now, *,
         fetch_json=onchain._http,
         fetch_csv=lambda url: desk.request(url, timeout=12)[:400_000],
         catalog=econ._CURATED,
-        enabled=primary_live)
+        enabled=_PRIMARY_REAL_REFRESH.get())
     primary_by_id = {x["coingecko_id"]: x
                      for x in primary_evidence["progetti"]}
     for group in ("posizioni", "candidati"):
@@ -617,7 +631,7 @@ def economic_evidence(source, wallet, four, candidates, now, *,
             "richieste_effettuate": discovery_calls+cg_calls+release_calls,
             "limite": "Risoluzione pubblica incrociata, non prova chain/contract, unlock, acquisti o ordini"}
 
-def collect(source=None, *, asset_pairs=None, primary_live=False):
+def collect(source=None, *, asset_pairs=None):
     """Prepara il dossier sullo snapshot appena acquisito, senza iniziare un'analisi GPT."""
     now=desk.NOW()
     if source is None:
@@ -720,8 +734,7 @@ def collect(source=None, *, asset_pairs=None, primary_live=False):
         dict(source, _verified_asset_pairs=asset_pairs), portafoglio,
         saldo_recente=qualita.get("saldo_recente_verificato", False))
     economic = economic_evidence(source, portafoglio, analisi_patrimonio, candidates, now,
-                                 asset_pairs=asset_pairs, previous=previous_economic,
-                                 primary_live=primary_live)
+                                 asset_pairs=asset_pairs, previous=previous_economic)
     # Global market data is obtained independently and may be unavailable.
     import kdd_economics as econ
     btc = next((r for r in (analisi_patrimonio.get("posizioni") or [])
