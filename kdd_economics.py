@@ -769,7 +769,19 @@ def at_read(source, positions, shortlist, now):
     result["macro"] = macro(normalized, now)
     if "monitor_fonti" in source:
         import kdd_economic_sources as primary
-        # Validation occurs after the original per-asset Kraken/project binding;
-        # no extra fetch, write or source refresh is permitted at GPT read-time.
-        result["monitor_fonti"] = primary.at_read(source["monitor_fonti"], source, now)
+        # Verify all original source attributions, then derive independent
+        # decision-review questions for EVERY holding and shortlist entry.
+        # Do not carry the old read-time view into the next GPT read.
+        verified = primary.at_read(source["monitor_fonti"], source, now)
+        result["monitor_fonti"] = verified
+        previous_read = stamp(source.get("letto_utc"))
+        same_read = bool(previous_read and
+                         abs((now-previous_read).total_seconds()) <= 1)
+        for group in ("posizioni","candidati"):
+            for original, item in zip(source[group],result[group]):
+                derived = primary.decision_review(verified,item,group)
+                old = original.get("valutazione_fonti_primarie")
+                if same_read and old is not None and old != derived:
+                    raise ValueError("Lettura primaria per asset alterata")
+                item["valutazione_fonti_primarie"] = derived
     return result

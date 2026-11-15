@@ -904,6 +904,146 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
             "limite":"Campioni pubblici: proposal != approvazione; unlock != circolazione != vendita; nessuna direzione di mercato inferita"}
 
 
+def decision_review(evidence, row, group):
+    """Condense *already read-time-validated* primary facts for one asset row.
+
+    This is a view of the same economic monitor, not another source producer.
+    A documented proposal, advisory or plan is never relabelled as an actual
+    exploit, network activation, unlock, sale, price cause or trading signal.
+    """
+    identity=row.get("identita") if isinstance(row,dict) else None
+    identity=identity if isinstance(identity,dict) else {}
+    token=row.get("token") if isinstance(row,dict) else None
+    pid=identity.get("coingecko_id")
+    base={"token":token,"coppia":identity.get("coppia"),"progetto_id":pid,
+          "stato":"NESSUNA_EVIDENZA_PRIMARIA_ATTUALE","fatti":[],
+          "ipotesi_non_attestata":None,"controipotesi":None,
+          "condizione_di_riesame":"Acquisire o rivalidare una fonte primaria attribuibile al progetto",
+          "limite":"L'assenza di un fatto nel campione non prova sicurezza, crescita o peggioramento"}
+    if (identity.get("stato")!="IDENTITA_VERIFICATA_DA_CATALOGO"
+            or not isinstance(pid,str)):
+        return dict(base,stato="IDENTITA_NON_VERIFICATA",
+                    condizione_di_riesame="Verificare identità Kraken/progetto prima di attribuire eventi")
+    def by_project(family):
+        rows=evidence.get(family)
+        if not isinstance(rows,list): return {}
+        return next((x for x in rows if isinstance(x,dict) and x.get("progetto_id")==pid),{})
+    facts=[]
+    def add(kind,fact,source,observed,acquired,proof,limit,details=None):
+        if not isinstance(source,str) or not source.startswith("https://"):
+            return
+        facts.append({"tipo":kind,"fatto":fact,"fonte":source,
+                      "pubblicato_o_periodo_utc":observed,
+                      "acquisito_utc":acquired,"stato_prova":proof,
+                      "dettaglio":details,"limite":limit})
+    schedule=by_project("calendari")
+    if schedule.get("stato")=="DOCUMENTO_PRIMARIO_CON_SCHEDULE":
+        event=next((x for x in schedule.get("eventi",[]) if isinstance(x,dict)),None)
+        if event:
+            add("UNLOCK_SOLO_PROGRAMMATO",
+                "Documento del progetto con unlock programmato; rilascio effettivo e vendita non attestati",
+                schedule.get("fonte"),event.get("evento_utc"),schedule.get("acquisito_utc"),
+                "PROGRAMMA_PRIMARIO",schedule.get("limite"),
+                {"allocazione":event.get("allocazione"),"quantita_token":event.get("quantita_token")})
+    monthly=by_project("calendari")
+    if monthly.get("stato")=="PROIEZIONE_PRIMARIA_NON_UNLOCK":
+        add("PROIEZIONE_CIRCOLAZIONE",
+            "La fonte ufficiale pubblica stime mensili di token circolanti, non singoli unlock",
+            monthly.get("fonte"),monthly.get("mese_circolazione"),
+            monthly.get("acquisito_utc"),"PROIEZIONE_NON_REALIZZAZIONE",
+            monthly.get("limite"),
+            {"circolante_mese_token":monthly.get("circolante_mese_token"),
+             "mesi_futuri":len(monthly.get("stime_mensili",[]))})
+    pairs=evidence.get("stati_coppie_kraken")
+    observed_pairs=pairs.get(group) if isinstance(pairs,dict) else None
+    if isinstance(observed_pairs,list):
+        entry=next((x for x in observed_pairs if isinstance(x,dict)
+                    and x.get("indice")==row.get("indice")
+                    and x.get("token")==token and x.get("coppia")==identity.get("coppia")
+                    and x.get("pair_key")==identity.get("pair_key")),None)
+        if entry and entry.get("stato_alla_lettura")=="OSSERVATO":
+            add("STATO_COPPIA_KRAKEN",
+                "Kraken AssetPairs indica lo stato pubblico "+str(entry.get("status_kraken"))
+                +" per "+str(entry.get("coppia")),
+                entry.get("fonte"),None,entry.get("acquisito_utc"),"OSSERVAZIONE_API",
+                entry.get("limite"),
+                {"status":entry.get("status_kraken"),"cambiamento":entry.get("cambiamento")})
+    security=by_project("avvisi_repository")
+    if security.get("stato_alla_lettura")=="OSSERVATO":
+        event=next((e for e in security.get("avvisi",[]) if isinstance(e,dict)),None)
+        if event:
+            add("AVVISO_SICUREZZA_REPOSITORY",
+                "Il repository associato pubblica un avviso di sicurezza: impatto sul token non attestato",
+                event.get("fonte"),event.get("pubblicato_utc"),
+                security.get("acquisito_utc"),"DOCUMENTO_REPOSITORY",
+                event.get("limite"),{"titolo":event.get("titolo"),"stato":event.get("stato")})
+    emission=by_project("politiche_emissioni")
+    if emission.get("stato_alla_lettura")=="OSSERVATO":
+        add("PARAMETRI_EMISSIONE",
+            "Il progetto espone parametri di emissione correnti, non un calendario vesting",
+            emission.get("fonte"),None,emission.get("acquisito_utc"),
+            "PARAMETRI_RPC",emission.get("limite"),
+            {"valori":emission.get("valori")})
+    governance=by_project("progetti")
+    if governance.get("stato")=="OSSERVATO":
+        event=next((e for e in governance.get("eventi",[]) if isinstance(e,dict)),None)
+        if event:
+            add("PROPOSTA_GOVERNANCE_DOCUMENTALE",
+                "Esiste una proposta di documentazione; attivazione sulla rete non attestata",
+                event.get("fonte"),event.get("pubblicato_utc"),
+                governance.get("acquisito_utc"),"PROPOSTA_DOCUMENTALE",
+                event.get("limite"),{"titolo":event.get("titolo"),
+                                      "stato_documento":event.get("stato_documento")})
+    issues=by_project("segnalazioni_repo")
+    if issues.get("stato_alla_lettura")=="OSSERVATO":
+        event=next((e for e in issues.get("eventi",[]) if isinstance(e,dict)),None)
+        if event:
+            add("ISSUE_TECNICA_ETICHETTATA",
+                "È pubblicata una issue etichettata: l'esito tecnico non è accertato",
+                event.get("fonte"),event.get("pubblicato_utc"),
+                issues.get("acquisito_utc"),"SEGNALAZIONE_NON_CONFERMA",
+                event.get("limite"),{"titolo":event.get("titolo"),
+                                      "categorie":event.get("categorie")})
+    if not facts:
+        return base
+    priority=(("STATO_COPPIA_KRAKEN", "Una restrizione della coppia potrebbe impedire l'operatività prevista",
+               "Lo stato pubblico non attesta operatività o sospensione del singolo account",
+               "Ricontrollare AssetPairs e mercato/account prima di considerare operazioni"),
+              ("UNLOCK_SOLO_PROGRAMMATO",
+               "Una distribuzione programmata potrebbe modificare la disponibilità futura di token",
+               "Il documento non attesta immissione effettiva, domanda o vendite",
+               "Verificare il calendario aggiornato, la circolazione effettiva e l'eventuale esecuzione"),
+              ("AVVISO_SICUREZZA_REPOSITORY",
+               "Un avviso del client potrebbe richiedere valutare esposizione e aggiornamenti",
+               "L'avviso del repository potrebbe non riguardare la rete o l'asset posseduto",
+               "Accertare versioni coinvolte e comunicati ufficiali sull'impatto"),
+              ("PROIEZIONE_CIRCOLAZIONE",
+               "Un cambiamento della circolazione prevista potrebbe influire sulla futura diluizione",
+               "La proiezione può variare e non dimostra unlock, vendita né impatto sul prezzo",
+               "Confrontare una nuova versione del piano con dati circolanti osservati"),
+              ("PARAMETRI_EMISSIONE",
+               "Modifiche alla politica di emissione potrebbero alterare la supply futura",
+               "I parametri RPC non misurano i token venduti né dimostrano effetto sul prezzo",
+               "Verificare i parametri aggiornati e l'emissione effettivamente osservata"),
+              ("ISSUE_TECNICA_ETICHETTATA",
+               "Una issue potrebbe anticipare un cambiamento se confermato e implementato",
+               "La segnalazione può non portare ad alcun cambiamento della rete",
+               "Controllare risoluzione e annunci di rilascio o attivazione"),
+              ("PROPOSTA_GOVERNANCE_DOCUMENTALE",
+               "Una proposta potrebbe modificare le condizioni del progetto se effettivamente adottata",
+               "Un merge documentale non prova adozione sulla rete né effetto economico",
+               "Accertare eventuale approvazione, attivazione e dati successivi"))
+    present={f["tipo"] for f in facts}
+    selected=next(((a,b,c) for kind,a,b,c in priority if kind in present),None)
+    # A plain 'online' pair is weaker than a published security/supply fact.
+    pair=next((f for f in facts if f["tipo"]=="STATO_COPPIA_KRAKEN"),None)
+    if pair and pair["dettaglio"]["status"]=="online":
+        selected=next(((a,b,c) for kind,a,b,c in priority[1:] if kind in present),selected)
+    return dict(base,stato="COPERTURA_PRIMARIA_PARZIALE",
+                fatti=facts[:7],ipotesi_non_attestata=selected[0],
+                controipotesi=selected[1],condizione_di_riesame=selected[2])
+
+
 def at_read(raw, items, now):
     """Validate current roster and primary URLs, recalculate age, never refresh."""
     now=_utc(now)
