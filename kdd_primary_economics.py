@@ -4,6 +4,7 @@ Bounded read-only ingestion. No wallet, balances, trading, scheduled service or
 vendor secrets. All project bindings come from verified economic identities.
 """
 import csv
+import calendar
 import datetime as dt
 import io
 import json
@@ -102,6 +103,64 @@ def parse_calendar(identity, payload, source, now):
     return out
 
 
+def parse_monthly_projection(identity, rows, source, now, *, maximum=None):
+    """Primary *planned* month-end circulation, NOT a confirmed vesting/unlock.
+
+    Schema per the official project's public API: year/month,
+    circulatingSupplyValue and circulatingSupplyPercentage. Future month-end
+    figures are projected availability, not executed distributions or sales.
+    """
+    blank = {"stato": "NON_VERIFICATO", "tipo": "PROIEZIONE_CIRCOLAZIONE",
+             "fonte": source, "pubblicato_utc": None,
+             "acquisito_utc": now.isoformat(timespec="seconds"), "eventi": [],
+             "limite": "API primaria assente o struttura/ordine non verificabile"}
+    if name(identity) is None or not isinstance(rows, list) or not 1 < len(rows) <= 180:
+        return blank
+    if numeric(maximum) is None or maximum <= 0:
+        return blank
+    parsed = []
+    for item in rows:
+        if not isinstance(item, dict) or type(item.get("year")) is not int or type(item.get("month")) is not int:
+            return blank
+        year, month = item["year"], item["month"]
+        if not (2020 <= year <= now.year+20 and 1 <= month <= 12):
+            return blank
+        value = numeric(item.get("circulatingSupplyValue"))
+        percent = numeric(item.get("circulatingSupplyPercentage"))
+        if (value is None or percent is None or value > maximum or percent > 1
+                or abs(value/maximum-percent) > .001):
+            return blank
+        date = dt.date(year, month, calendar.monthrange(year, month)[1])
+        parsed.append((date, value))
+    parsed.sort()
+    if (len({row[0] for row in parsed}) != len(parsed)
+            or any(b[1]+.001 < a[1] for a,b in zip(parsed, parsed[1:]))):
+        return blank
+    current_month = dt.date(now.year, now.month, 1)
+    forecast = []
+    for i, (date, value) in enumerate(parsed):
+        if date < current_month or len(forecast) >= 24:
+            continue
+        before = parsed[i-1][1] if i else None
+        forecast.append({"periodo_fine_mese": date.isoformat(),
+                         "circolante_previsto_token": value,
+                         "incremento_previsto_token": round(value-before, 6) if before is not None else None,
+                         "sblocco_individuale": "NON_ATTESTATO",
+                         "immissione_effettiva": "NON_ATTESTATA",
+                         "vendita": "NON_ATTESTATA",
+                         "unita": "TOKEN"})
+    if not forecast:
+        return blank
+    return {"stato": "OSSERVATO", "tipo": "PROIEZIONE_CIRCOLAZIONE",
+            "fonte": source, "pubblicato_utc": None,
+            "acquisito_utc": now.isoformat(timespec="seconds"),
+            "intervallo_fonte": {"dal": parsed[0][0].isoformat(),
+                                 "al": parsed[-1][0].isoformat()},
+            "eventi": forecast, "unita": "TOKEN",
+            "limite": ("Proiezione ufficiale fine mese soggetta a cambiamenti; "
+                       "incremento circolante non equivale a unlock certo né vendita")}
+
+
 def parse_issues(identity, rows, now):
     """Official repository issues are proposals/alerts, not adopted decisions."""
     repo = identity.get("repository_primario")
@@ -174,6 +233,7 @@ def _empty(coin, reason, now):
     return {"coingecko_id": coin, "stato": reason, "acquisito_utc": now.isoformat(timespec="seconds"),
             "politica_emissioni": {"stato": "NON_DISPONIBILE", "valori": None},
             "calendario": {"stato": "NON_VERIFICATO", "eventi": [], "fonte": None},
+            "proiezione_circolazione": {"stato": "NON_VERIFICATO", "eventi": [], "fonte": None},
             "eventi": [], "confronto_precedente_utc": None, "variazioni": [],
             "limite": "Fonte primaria assente o non interrogata: nessun evento o unlock inferito"}
 
@@ -238,6 +298,22 @@ def collect(now, identities, previous, *, fetch_json, fetch_csv, catalog, enable
                     record["calendario"] = parse_calendar(identity, fetch_json(url, None), url, moment)
                 except (OSError, ValueError, TypeError, KeyError, RuntimeError):
                     record["calendario"]["stato"] = "NON_DISPONIBILE_FONTE"
+        projection = registry.get("circulation_schedule_primary")
+        if (isinstance(projection, dict) and
+                projection.get("type") == "MONTHLY_CIRCULATION_PROJECTION" and
+                projection.get("url") ==
+                "https://sui-circulation.suiexplorer.com/api/sui_circulation" and
+                requests+1 <= MAX_REQUESTS):
+            requests += 1
+            try:
+                record["proiezione_circolazione"] = parse_monthly_projection(
+                    identity, fetch_json(projection["url"], None),
+                    projection["url"], moment,
+                    maximum=projection.get("max_supply_tokens"))
+            except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+                record["proiezione_circolazione"] = {
+                    "stato": "NON_DISPONIBILE_FONTE", "fonte": projection["url"],
+                    "eventi": [], "acquisito_utc": moment.isoformat(timespec="seconds")}
         repo = identity.get("repository_primario")
         if isinstance(repo, str) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) and requests+1 <= MAX_REQUESTS:
             url = "https://api.github.com/repos/" + repo + "/issues?state=all&per_page=15&sort=updated"
@@ -255,6 +331,12 @@ def collect(now, identities, previous, *, fetch_json, fetch_csv, catalog, enable
                 if record["calendario"].get("stato") == "OSSERVATO" and old_calendar.get("stato") == "OSSERVATO":
                     if old_calendar.get("eventi") != record["calendario"].get("eventi"):
                         record["variazioni"].append("CALENDARIO_PRIMARIO_MODIFICATO")
+                old_projection = old_row.get("proiezione_circolazione", {})
+                new_projection = record.get("proiezione_circolazione", {})
+                if (new_projection.get("stato") == "OSSERVATO" and
+                        old_projection.get("stato") == "OSSERVATO" and
+                        new_projection.get("eventi") != old_projection.get("eventi")):
+                    record["variazioni"].append("PROIEZIONE_CIRCOLAZIONE_MODIFICATA")
                 old_events = {e.get("fonte") for e in old_row.get("eventi", [])}
                 new_events = {e.get("fonte") for e in record["eventi"]}
                 if new_events-old_events:
@@ -332,6 +414,16 @@ def at_read(raw, identities, now):
                         or numeric(event.get("quantita_token")) is None
                         or event.get("vendita") != "NON_ATTESTATA"):
                     raise ValueError("invented unlock evidence")
+        projection = rec.get("proiezione_circolazione")
+        if isinstance(projection, dict) and projection.get("stato") == "OSSERVATO":
+            if (coin != "sui" or projection.get("fonte") !=
+                    "https://sui-circulation.suiexplorer.com/api/sui_circulation"):
+                raise ValueError("unbound monthly supply source")
+            for event in projection.get("eventi", []):
+                if (event.get("vendita") != "NON_ATTESTATA"
+                        or event.get("immissione_effettiva") != "NON_ATTESTATA"
+                        or numeric(event.get("circolante_previsto_token")) is None):
+                    raise ValueError("false circulation forecast")
         identity = next(x for x in identities if name(x) == coin)
         repo = identity.get("repository_primario")
         for event in rec.get("eventi", []):
