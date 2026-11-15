@@ -382,11 +382,11 @@ def _arb_vesting_document(raw, project_id, descriptor, now):
     if (project_id!="arbitrum" or descriptor.get("format")!=ARB_VESTING_FORMAT
             or not isinstance(raw,str) or len(raw)>150000):
         return None
-    normalized=re.sub(r"\\s+"," ",raw).lower()
+    normalized=re.sub(r"\s+"," ",raw).lower()
     if (not re.search(
             r"all investor and team tokens are subject to 4 year lockups,"
             r".*?first unlocks happening one year after the"
-            r".*?token generation event \\(3/16/2023\\)"
+            r".*?token generation event \(3/16/2023\)"
             r".*?then monthly unlocks for the remaining three years",
             normalized)
             or not re.search(
