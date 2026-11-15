@@ -278,7 +278,7 @@ def _supply_samples(roster, old, now):
     return retained,changes[:30]
 
 
-def collect(now, items, previous, fetch):
+def collect(now, items, previous, fetch, *, network_allowed=True):
     """One shared, reusable, bounded producer for all current asset identities."""
     now = _utc(now)
     roster = _roster(items)
@@ -290,8 +290,8 @@ def collect(now, items, previous, fetch):
     eligible=[p for p in roster if _source_repo(roster[p]["source"])]
     cursor=old.get("prossimo_progetto")
     first=next((i for i,p in enumerate(eligible) if isinstance(cursor,str) and p>=cursor),0)
-    selected=eligible[first:first+MAX_GOVERNANCE_CALLS]
-    if len(selected)<min(MAX_GOVERNANCE_CALLS,len(eligible)):
+    selected=eligible[first:first+MAX_GOVERNANCE_CALLS] if network_allowed else []
+    if network_allowed and len(selected)<min(MAX_GOVERNANCE_CALLS,len(eligible)):
         selected += eligible[:min(MAX_GOVERNANCE_CALLS,len(eligible))-len(selected)]
     next_project=(eligible[(first+len(selected))%len(eligible)] if eligible else None)
     projects=[]
@@ -327,6 +327,9 @@ def collect(now, items, previous, fetch):
                 entry.update(stato="STORICO_NON_AGGIORNATO",
                              eventi=previous_row.get("eventi",[])[:6],
                              acquisito_utc=previous_row["acquisito_utc"])
+        if not network_allowed and entry["stato"]=="RINVIATO_BUDGET":
+            entry.update(stato="RINVIATO_RATE_LIMIT_HTTP_429",
+                         limite="HTTP 429 upstream: nessuna richiesta supplementare")
         projects.append(entry)
     # ECB source rotation is independent from project and wallet membership.
     series=MACRO_SERIES
@@ -336,9 +339,13 @@ def collect(now, items, previous, fetch):
     pick=next((i for i,s in enumerate(series) if s[0]==macro_cursor),0)
     spec=series[pick]
     url=_series_url(spec)
-    used+=1
-    raw,error=_fetch(fetch,url,json_data=False)
-    current=_ecb_csv(raw,spec,now) if not error else None
+    if network_allowed:
+        used+=1
+        raw,error=_fetch(fetch,url,json_data=False)
+        current=_ecb_csv(raw,spec,now) if not error else None
+    else:
+        error="RINVIATO_RATE_LIMIT_HTTP_429"
+        current=None
     if current is None:
         current={"id":spec[0],"serie":spec[1]+"."+spec[2],"fonte":url,
                  "stato":"FONTE_NON_DISPONIBILE","motivo":error or "CSV_INCOERENTE",
@@ -362,7 +369,7 @@ def collect(now, items, previous, fetch):
     sch_cursor=old.get("prossimo_schedule")
     sch_first=next((i for i,p in enumerate(schedule_candidates)
                     if isinstance(sch_cursor,str) and p>=sch_cursor),0)
-    sch_selected=schedule_candidates[sch_first:sch_first+MAX_SCHEDULE_CALLS]
+    sch_selected=schedule_candidates[sch_first:sch_first+MAX_SCHEDULE_CALLS] if network_allowed else []
     sch_next=(schedule_candidates[(sch_first+len(sch_selected))%len(schedule_candidates)]
               if schedule_candidates else None)
     previous_schedules={x["progetto_id"]:x for x in old.get("calendari",[])
@@ -387,14 +394,15 @@ def collect(now, items, previous, fetch):
             if history and history.get("stato")=="DOCUMENTO_PRIMARIO_CON_SCHEDULE":
                 row.update(history,stato="STORICO_DA_RICONFERMARE")
             else:
-                row.update(stato="RINVIATO_BUDGET")
+                row.update(stato="RINVIATO_RATE_LIMIT_HTTP_429" if not network_allowed
+                           else "RINVIATO_BUDGET")
         schedules.append(row)
     history,changes=_supply_samples(roster,old,now)
     return {"schema":SCHEMA,"acquisito_utc":_iso(now),"progetti":projects,
             "indicatori_macro":macro,"calendari":schedules,
             "storico_supply":history,"variazioni_supply":changes,
             "prossimo_progetto":next_project,
-            "prossimo_indicatore":series[(pick+1)%len(series)][0],
+            "prossimo_indicatore":series[(pick+(1 if network_allowed else 0))%len(series)][0],
             "prossimo_schedule":sch_next,
             "richieste_pubbliche":used,"limite_richieste":MAX_GOVERNANCE_CALLS+MAX_MACRO_CALLS+MAX_SCHEDULE_CALLS,
             "limite":"Campioni pubblici: proposal != approvazione; unlock != circolazione != vendita; nessuna direzione di mercato inferita"}
@@ -481,11 +489,12 @@ def at_read(raw, items, now):
             new["stato"]=("OSSERVATO" if age<=matches[0][4]
                           and row.get("stato")=="OSSERVATO" else "SCADUTO")
         indicators.append(new)
-    return {"schema":SCHEMA,"acquisito_utc":raw["acquisito_utc"],
-            "letto_utc":_iso(now),"progetti":read_projects,
-            "indicatori_macro":indicators,"calendari":read_schedules,
-            "variazioni_supply":raw.get("variazioni_supply",[])[:30],
-            "copertura":{"progetti":len(projects),"governance_osservati":sum(p["stato"]=="OSSERVATO" for p in read_projects),
+    # Keep original, independently validated source budget and history: this
+    # reader is called by both packet build and GPT bridge (idempotent).
+    return dict(raw,letto_utc=_iso(now),progetti=read_projects,
+            indicatori_macro=indicators,calendari=read_schedules,
+            variazioni_supply=raw.get("variazioni_supply",[])[:30],
+            copertura={"progetti":len(projects),"governance_osservati":sum(p["stato"]=="OSSERVATO" for p in read_projects),
                         "indicatori_macro_osservati":sum(m["stato"]=="OSSERVATO" for m in indicators),
                         "calendari_primari_attuali":sum(s["stato"]=="DOCUMENTO_PRIMARIO_CON_SCHEDULE" for s in read_schedules)},
-            "limite":raw.get("limite")}
+            limite=raw.get("limite"))
