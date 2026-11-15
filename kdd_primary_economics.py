@@ -447,13 +447,32 @@ def at_read(raw, identities, now, *, catalog=None):
             rec["stato_alla_lettura"] = "SCADUTO"
         else:
             rec["stato_alla_lettura"] = rec.get("stato")
+        identity = next(x for x in identities if name(x) == coin)
+        entry = (catalog or {}).get(identity.get("token_progetto"), {})
+        emission = rec.get("politica_emissioni") or {}
+        if emission.get("stato") == "OSSERVATO":
+            if (entry.get("id") != coin or
+                    entry.get("emission_primary") != "SOLANA_RPC_GOVERNOR" or
+                    emission.get("fonte") != RPC_SOL or
+                    emission.get("tipo") != "PARAMETRI_EMISSIONE_SOLANA"):
+                raise ValueError("primary issuance not bound to project")
+            values = emission.get("valori")
+            if (not isinstance(values, dict) or
+                    any(numeric(values.get(k)) is None for k in
+                        ("initial", "taper", "terminal", "foundation", "foundationTerm")) or
+                    any(values[k] > 1 for k in ("initial","taper","terminal","foundation"))):
+                raise ValueError("primary issuance values malformed")
         calendar = rec.get("calendario", {})
         if calendar.get("stato") == "OSSERVATO":
             identity = next(x for x in identities if name(x) == coin)
             repo = identity.get("repository_primario")
             source = calendar.get("fonte")
-            if not isinstance(repo, str) or not isinstance(source, str) or not source.startswith(
-                    "https://raw.githubusercontent.com/" + repo + "/main/"):
+            schedule_entry = entry.get("schedule_primary", {})
+            path = schedule_entry.get("path") if isinstance(schedule_entry, dict) else None
+            expected_schedule = ("https://raw.githubusercontent.com/" + repo + "/main/" + path
+                                 if isinstance(repo, str) and isinstance(path, str) else None)
+            if (not isinstance(source, str) or source != expected_schedule or
+                    not isinstance(path, str) or ".." in path):
                 raise ValueError("schedule source not bound to project")
             if timestamp(calendar.get("pubblicato_utc")) is None:
                 raise ValueError("schedule has no publication time")
@@ -483,7 +502,9 @@ def at_read(raw, identities, now, *, catalog=None):
                     or not isinstance(event.get("fonte"), str)
                     or not event["fonte"].startswith("https://github.com/" + repo + "/issues/")
                     or timestamp(event.get("pubblicato_utc")) is None
-                    or event.get("evento_utc") is not None):
+                    or event.get("evento_utc") is not None
+                    or event.get("stato") != "PUBBLICATO_DA_VERIFICARE"
+                    or event.get("esito_proposta") != "NON_ATTESTATO"):
                 raise ValueError("project news not attributable")
         output.append(rec)
     macro = []
