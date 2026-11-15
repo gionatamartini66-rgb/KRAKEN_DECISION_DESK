@@ -355,11 +355,46 @@ def economic_evidence(source, wallet, four, candidates, now, *,
     wallet_rows = wallet_rows if isinstance(wallet_rows, list) else []
     four_rows = four.get("posizioni") if isinstance(four, dict) else None
     four_rows = four_rows if isinstance(four_rows, list) else []
+    def _prior_pair_for_public_status(index, token):
+        """Recover only a *pair reference*, never an old project verification.
+
+        The live AssetPairs REST key and wsname must still match. The standard
+        online-only spot catalogue remains unchanged, so a restricted pair
+        cannot regain eligibility for trading or priced 4TF inference.
+        """
+        if not allowed_history or not isinstance(asset_pairs,dict):
+            return None
+        prior_positions=prior.get("posizioni")
+        if not isinstance(prior_positions,list) or index>=len(prior_positions):
+            return None
+        previous_row=prior_positions[index]
+        if (not isinstance(previous_row,dict) or previous_row.get("indice")!=index
+                or previous_row.get("token")!=token):
+            return None
+        identity=previous_row.get("identita")
+        if not isinstance(identity,dict) or identity.get("stato")!="IDENTITA_VERIFICATA_DA_CATALOGO":
+            return None
+        key,pair=identity.get("pair_key"),identity.get("coppia")
+        if not isinstance(key,str) or not isinstance(pair,str) or pair.count("/")!=1:
+            return None
+        base,quote=pair.split("/")
+        if (econ.canonical_token(base)!=econ.canonical_token(token)
+                or quote not in ("EUR","USD","USDC")):
+            return None
+        current=asset_pairs.get(key)
+        if not isinstance(current,dict) or current.get("wsname")!=pair:
+            return None
+        return (pair,key)
+
     items = {"posizioni": [], "candidati": []}
     for index, row in enumerate(wallet_rows):
         tf = four_rows[index] if index < len(four_rows) and isinstance(four_rows[index], dict) else {}
         token, valid = desk.wallet_symbol(row.get("token") if isinstance(row, dict) else None)
         pair, key = tf.get("coppia"), tf.get("pair_key")
+        if valid and (not isinstance(pair,str) or not isinstance(key,str)):
+            old_pair=_prior_pair_for_public_status(index,token)
+            if old_pair is not None:
+                pair,key=old_pair
         identity = econ.identify(token, pair, key,
                                  catalog=catalog if valid and tf.get("token") == token else {},
                                  discovered=previous_dynamic.get((token, pair)))

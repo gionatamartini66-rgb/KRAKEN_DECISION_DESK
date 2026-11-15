@@ -922,6 +922,36 @@ def decision_review(evidence, row, group):
           "limite":"L'assenza di un fatto nel campione non prova sicurezza, crescita o peggioramento"}
     if (identity.get("stato")!="IDENTITA_VERIFICATA_DA_CATALOGO"
             or not isinstance(pid,str)):
+        # A previously verified market can become restricted. The online-only
+        # project catalogue then *rightly* refuses to verify the project.
+        # An exact, current AssetPairs observation remains usable solely as
+        # a pair-status fact: never restore old project/supply assertions.
+        pairs=evidence.get("stati_coppie_kraken")
+        group_rows=pairs.get(group) if isinstance(pairs,dict) else None
+        match=next((x for x in group_rows if isinstance(x,dict)
+                    and x.get("indice")==row.get("indice")
+                    and x.get("token")==token
+                    and x.get("pair_key")==identity.get("pair_key")
+                    and x.get("coppia")==identity.get("coppia")
+                    and x.get("stato_alla_lettura")=="OSSERVATO"),
+                   None) if isinstance(group_rows,list) else None
+        if match:
+            status=match["status_kraken"]
+            fact={"tipo":"STATO_COPPIA_KRAKEN",
+                  "fatto":"Kraken AssetPairs segnala "+status+" per "+str(match["coppia"]),
+                  "fonte":match["fonte"],"pubblicato_o_periodo_utc":None,
+                  "acquisito_utc":match["acquisito_utc"],
+                  "stato_prova":"SOLO_COPPIA_NON_PROGETTO",
+                  "dettaglio":{"status":status,"cambiamento":match.get("cambiamento")},
+                  "limite":"Risposta pubblica di coppia; progetto, account e motivi dello stato non verificati"}
+            return dict(base,stato="SOLO_COPPIA_KRAKEN_VERIFICATA",
+                progetto_id=None,fatti=[fact],
+                ipotesi_non_attestata=(
+                    "Le limitazioni della coppia potrebbero condizionare eventuali operazioni"
+                    if status!="online" else
+                    "L'indicazione online non prova l'accessibilità sul conto"),
+                controipotesi="Lo stato della coppia non identifica il progetto e non prova un delisting",
+                condizione_di_riesame="Verificare nuovamente AssetPairs, identità progetto e condizioni del conto")
         return dict(base,stato="IDENTITA_NON_VERIFICATA",
                     condizione_di_riesame="Verificare identità Kraken/progetto prima di attribuire eventi")
     def by_project(family):

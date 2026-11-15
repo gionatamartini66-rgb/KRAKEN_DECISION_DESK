@@ -105,6 +105,60 @@ class PrimaryFollowupTests(unittest.TestCase):
         self.assertEqual(result["politiche_emissioni"][1]["stato"],"NON_ACQUISITO_FUORI_REFRESH")
         sources.at_read(result,items,T)
 
+    def test_restricted_kraken_pair_remains_visible_without_revalidating_project(self):
+        import dossier_trade as producer
+        from unittest import mock
+        ident=self.identity("SOL")
+        self.assertEqual(ident["stato"],"IDENTITA_VERIFICATA_DA_CATALOGO")
+        previous={"schema":economic.VERSION,
+                  "acquisito_utc":(T-dt.timedelta(hours=1)).isoformat(),
+                  "posizioni":[{"indice":0,"token":"SOL","identita":ident}],
+                  "candidati":[]}
+        # Today's four-timeframe row has lost the online pair. The *same*
+        # AssetPairs response still carries that REST key and restricted mode.
+        pairs={"SOLEUR":{"wsname":"SOL/EUR","status":"cancel_only"}}
+        with mock.patch.object(producer.desk,"request",side_effect=OSError("offline")), \
+             mock.patch.object(producer.time,"sleep"):
+            actual=producer.economic_evidence(
+                {"feed":[]},{"posizioni":[{"token":"SOL"}]},
+                {"posizioni":[{"token":"SOL","coppia":None,"pair_key":None}]},
+                [],T,asset_pairs=pairs,previous=previous)
+        self.assertEqual(actual["posizioni"][0]["identita"]["stato"],"NON_VERIFICATO")
+        self.assertEqual(actual["posizioni"][0]["identita"]["pair_key"],"SOLEUR")
+        self.assertEqual(actual["posizioni"][0]["identita"]["coppia"],"SOL/EUR")
+        self.assertEqual(actual["monitor_fonti"]["stati_coppie_kraken"]
+                         ["posizioni"][0]["status_kraken"],"cancel_only")
+        got=economic.at_read(actual,[{"token":"SOL"}],[],T)
+        review=got["posizioni"][0]["valutazione_fonti_primarie"]
+        self.assertEqual(review["stato"],"SOLO_COPPIA_KRAKEN_VERIFICATA")
+        self.assertIsNone(review["progetto_id"])
+        self.assertEqual(len(review["fatti"]),1)
+        self.assertEqual(review["fatti"][0]["dettaglio"]["status"],"cancel_only")
+        self.assertFalse(any(f["tipo"]=="PARAMETRI_EMISSIONE" for f in review["fatti"]))
+        self.assertEqual(economic.at_read(got,[{"token":"SOL"}],[],T)
+                         ["posizioni"][0]["valutazione_fonti_primarie"],review)
+        late=economic.at_read(got,[{"token":"SOL"}],[],T+dt.timedelta(hours=2))
+        self.assertEqual(late["posizioni"][0]["valutazione_fonti_primarie"]
+                         ["stato"],"IDENTITA_NON_VERIFICATA")
+        # Different current wsname: old key MUST NOT be reused.
+        different={"SOLEUR":{"wsname":"ETH/EUR","status":"cancel_only"}}
+        with mock.patch.object(producer.desk,"request",side_effect=OSError("offline")), \
+             mock.patch.object(producer.time,"sleep"):
+            mismatched=producer.economic_evidence(
+                {"feed":[]},{"posizioni":[{"token":"SOL"}]},
+                {"posizioni":[{"token":"SOL","coppia":None,"pair_key":None}]},
+                [],T,asset_pairs=different,previous=previous)
+        self.assertIsNone(mismatched["posizioni"][0]["identita"]["pair_key"])
+        # Stale prior reference, likewise never granted.
+        old=dict(previous,acquisito_utc=(T-dt.timedelta(days=8)).isoformat())
+        with mock.patch.object(producer.desk,"request",side_effect=OSError("offline")), \
+             mock.patch.object(producer.time,"sleep"):
+            stale=producer.economic_evidence(
+                {"feed":[]},{"posizioni":[{"token":"SOL"}]},
+                {"posizioni":[{"token":"SOL","coppia":None,"pair_key":None}]},
+                [],T,asset_pairs=pairs,previous=old)
+        self.assertIsNone(stale["posizioni"][0]["identita"]["pair_key"])
+
     def test_primary_labelled_issues_are_not_verified_network_upgrades(self):
         roster=self.items(tokens=("BTC","ETH","SOL"))
         first=sources.collect(T,roster,{},self.fetch,collect_project_issues=True)
