@@ -328,6 +328,88 @@ def _monthly_valid(row, descriptor):
     return True
 
 
+def _spot_status(now, items, asset_pairs, previous):
+    """Read the already-fetched public Kraken AssetPairs, never a new API."""
+    origin="https://api.kraken.com/0/public/AssetPairs"
+    old={}
+    if isinstance(previous,dict):
+        for group in ("posizioni","candidati"):
+            for row in (previous.get("stati_coppie_kraken") or {}).get(group,[]):
+                if isinstance(row,dict):
+                    old[(group,row.get("pair_key"),row.get("coppia"))]=row
+    result={}
+    for group in ("posizioni","candidati"):
+        out=[]
+        for i,row in enumerate(items.get(group,[])):
+            ident=row.get("identita") or {}
+            key,pair=ident.get("pair_key"),ident.get("coppia")
+            entry={"indice":i,"token":row.get("token"),"pair_key":key,
+                   "coppia":pair,"fonte":origin,"acquisito_utc":_iso(now),
+                   "stato":"NON_ACQUISITO","status_kraken":None,"cambiamento":None,
+                   "limite":"Lo stato di una coppia Kraken non è una notizia di delisting o prova di negoziabilità dell'account"}
+            if isinstance(asset_pairs,dict) and asset_pairs and isinstance(key,str) and isinstance(pair,str):
+                observed=asset_pairs.get(key)
+                if observed is None:
+                    entry["stato"]="COPPIA_NON_PRESENTE_NELLA_RISPOSTA"
+                elif not isinstance(observed,dict) or observed.get("wsname")!=pair:
+                    entry["stato"]="IDENTITA_COPPIA_INCOERENTE"
+                elif isinstance(observed.get("status"),str) and re.fullmatch(r"[a-z_]{3,30}",observed["status"]):
+                    entry.update(stato="OSSERVATO",status_kraken=observed["status"])
+                    earlier=old.get((group,key,pair))
+                    if (earlier and earlier.get("stato")=="OSSERVATO"
+                            and isinstance(earlier.get("status_kraken"),str)
+                            and earlier["status_kraken"]!=observed["status"]):
+                        entry["cambiamento"]={"prima":earlier["status_kraken"],
+                            "dopo":observed["status"],"acquisito_precedente_utc":earlier.get("acquisito_utc"),
+                            "acquisito_corrente_utc":_iso(now),
+                            "limite":"Transizione osservata, causa ed evento di listing/delisting non attestati"}
+                else:
+                    entry["stato"]="STATUS_NON_CONFORME"
+            out.append(entry)
+        result[group]=out
+    return result
+
+
+def _spot_status_read(raw, items, now):
+    if not isinstance(raw,dict):
+        raise ValueError("Kraken public status not structured")
+    result={}
+    for group in ("posizioni","candidati"):
+        expected=items.get(group,[])
+        rows=raw.get(group)
+        if not isinstance(rows,list) or len(rows)!=len(expected):
+            raise ValueError("Kraken pair roster mismatch")
+        out=[]
+        for i,(entry,row) in enumerate(zip(rows,expected)):
+            ident=row.get("identita") or {}
+            if (not isinstance(entry,dict) or entry.get("indice")!=i
+                    or entry.get("token")!=row.get("token")
+                    or entry.get("pair_key")!=ident.get("pair_key")
+                    or entry.get("coppia")!=ident.get("coppia")
+                    or entry.get("fonte")!="https://api.kraken.com/0/public/AssetPairs"):
+                raise ValueError("Kraken pair attribution mismatch")
+            observed=_time(entry.get("acquisito_utc"))
+            if not observed or observed>now+dt.timedelta(minutes=2):
+                raise ValueError("Kraken pair observation clock")
+            status=entry.get("status_kraken")
+            if entry.get("stato")=="OSSERVATO" and (
+                    not isinstance(status,str) or not re.fullmatch(r"[a-z_]{3,30}",status)):
+                raise ValueError("Kraken pair status forged")
+            change=entry.get("cambiamento")
+            if change is not None and (
+                    not isinstance(change,dict) or entry.get("stato")!="OSSERVATO"
+                    or change.get("dopo")!=status or change.get("prima")==status
+                    or change.get("acquisito_corrente_utc")!=entry.get("acquisito_utc")
+                    or not _time(change.get("acquisito_precedente_utc"))):
+                raise ValueError("Kraken transition forged")
+            out.append(dict(entry,stato_alla_lettura=(
+                "SCADUTO" if entry.get("stato")=="OSSERVATO"
+                and now-observed>dt.timedelta(minutes=45)
+                else entry.get("stato"))))
+        result[group]=out
+    return result
+
+
 def _prior(previous, now):
     if not isinstance(previous, dict) or previous.get("schema") != SCHEMA:
         return {}
@@ -381,7 +463,7 @@ def _supply_samples(roster, old, now):
     return retained,changes[:30]
 
 
-def collect(now, items, previous, fetch, *, network_allowed=True):
+def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=None):
     """One shared, reusable, bounded producer for all current asset identities."""
     now = _utc(now)
     roster = _roster(items)
@@ -547,7 +629,9 @@ def collect(now, items, previous, fetch, *, network_allowed=True):
                 "limite":"Revisione del documento, non prova sblocco o vendita"})
     history,changes=_supply_samples(roster,old,now)
     retained_events=sorted(event_history.values(),key=lambda r:(r["acquisito_utc"],r["progetto_id"],r["documento_id"]),reverse=True)[:MAX_SAMPLES]
+    kraken_status=_spot_status(now,items,asset_pairs,old)
     return {"schema":SCHEMA,"acquisito_utc":_iso(now),"progetti":projects,
+            "stati_coppie_kraken":kraken_status,
             "indicatori_macro":macro,"calendari":schedules,
             "revisioni_piani":changes_calendar,
             "storico_supply":history,"variazioni_supply":changes,
@@ -664,9 +748,12 @@ def at_read(raw, items, now):
                           and row.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO")
                           else "SCADUTO")
         indicators.append(new)
+    pairs_read=(_spot_status_read(raw["stati_coppie_kraken"],items,now)
+                if "stati_coppie_kraken" in raw else None)
     # Keep original, independently validated source budget and history: this
     # reader is called by both packet build and GPT bridge (idempotent).
     return dict(raw,letto_utc=_iso(now),progetti=read_projects,
+            stati_coppie_kraken=pairs_read,
             indicatori_macro=indicators,calendari=read_schedules,
             variazioni_supply=raw.get("variazioni_supply",[])[:30],
             copertura={"progetti":len(projects),"governance_osservati":sum(p["stato"]=="OSSERVATO" for p in read_projects),

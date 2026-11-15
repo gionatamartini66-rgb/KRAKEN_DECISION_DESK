@@ -256,6 +256,34 @@ class PrimaryFollowupTests(unittest.TestCase):
         self.assertEqual(bad["calendari"][0]["stato"],"FONTE_NON_DISPONIBILE")
         self.assertEqual(bad["calendari"][0]["eventi"],[])
 
+    def test_kraken_spot_pair_status_reused_without_extra_api_and_no_fake_delisting(self):
+        items=self.items(tokens=("BTC","SOL"))
+        pairs={"BTCEUR":{"wsname":"BTC/EUR","status":"online"},
+               "SOLEUR":{"wsname":"SOL/EUR","status":"cancel_only"}}
+        first=sources.collect(T,items,{},self.fetch,asset_pairs=pairs)
+        states=first["stati_coppie_kraken"]["posizioni"]
+        self.assertEqual([p["status_kraken"] for p in states],["online","cancel_only"])
+        self.assertEqual(first["richieste_pubbliche"],3)
+        self.assertEqual(sources.at_read(first,items,T)
+                         ["stati_coppie_kraken"]["posizioni"][1]["stato_alla_lettura"],"OSSERVATO")
+        pairs2=copy.deepcopy(pairs)
+        pairs2["SOLEUR"]["status"]="post_only"
+        second=sources.collect(T+dt.timedelta(minutes=10),items,first,self.fetch,asset_pairs=pairs2)
+        changed=second["stati_coppie_kraken"]["posizioni"][1]["cambiamento"]
+        self.assertEqual((changed["prima"],changed["dopo"]),("cancel_only","post_only"))
+        self.assertIn("non attestati",changed["limite"])
+        self.assertEqual(sources.at_read(second,items,T+dt.timedelta(hours=2))
+                         ["stati_coppie_kraken"]["posizioni"][1]["stato_alla_lettura"],"SCADUTO")
+        third=sources.collect(T+dt.timedelta(minutes=10),items,first,self.fetch,
+                              asset_pairs={"BTCEUR":pairs["BTCEUR"]})
+        self.assertEqual(third["stati_coppie_kraken"]["posizioni"][1]["stato"],
+                         "COPPIA_NON_PRESENTE_NELLA_RISPOSTA")
+        self.assertIsNone(third["stati_coppie_kraken"]["posizioni"][1]["cambiamento"])
+        tampered=copy.deepcopy(first)
+        tampered["stati_coppie_kraken"]["posizioni"][1]["coppia"]="SOL/USDT"
+        with self.assertRaises(ValueError):
+            sources.at_read(tampered,items,T)
+
     def test_existing_economic_reader_consumes_followup(self):
         items=self.items(tokens=("BTC",))
         a=sources.collect(T,items,{},self.fetch)

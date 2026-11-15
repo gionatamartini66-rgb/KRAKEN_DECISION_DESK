@@ -582,7 +582,7 @@ def economic_evidence(source, wallet, four, candidates, now, *,
     monitoring = primary.collect(
         now, items, prior.get("monitor_fonti"),
         lambda url: desk.request(url, timeout=10),
-        network_allowed=not rate_limited)
+        network_allowed=not rate_limited, asset_pairs=asset_pairs)
     btc = next((r for r in four_rows if isinstance(r, dict) and r.get("token") == "BTC"), {})
     return {"schema": econ.VERSION, "acquisito_utc": now.isoformat(timespec="seconds"),
             "posizioni": items["posizioni"], "candidati": items["candidati"],
