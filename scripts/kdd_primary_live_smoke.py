@@ -108,5 +108,15 @@ for cycle in range(1,7):
           "declared_circulation",sui.get("circolante_mese_token"),
           "future_months",len(sui.get("stime_mensili",[])),
           "unlock_verified",sui.get("stato_vesting"))
+    if cycle==len(primary.MACRO_SERIES):
+        cftc=next(x for x in checked["indicatori_macro"] if x["id"]=="CFTC_BTC_TFF")
+        assert cftc["stato"] in ("OSSERVATO","SCADUTO"), (
+            "CFTC official 5-BTC futures data not parsed in live test: "
+            +str(cftc.get("motivo")))
+        assert cftc["classificazioni"]["asset_manager"]["saldo_long_meno_short"] == (
+            cftc["classificazioni"]["asset_manager"]["long_contratti"] -
+            cftc["classificazioni"]["asset_manager"]["short_contratti"])
+        print("CFTC_BTC_FUTURES_PRIMARY_CONFIRMED",cftc["periodo"],
+              cftc["valore"],cftc["classificazioni"])
     if checked["copertura"]["governance_osservati"]==0 and checked["copertura"]["indicatori_macro_osservati"]==0:
         print("WARNING: NO LIVE PROVIDER EVIDENCE THIS CYCLE",file=sys.stderr)

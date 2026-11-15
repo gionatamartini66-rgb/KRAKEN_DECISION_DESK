@@ -355,9 +355,13 @@ def _cftc_btc_tff(raw, spec, now):
         return None
     if not 1<=len(rows)<=300:
         return None
-    target=[r for r in rows if len(r)>90 and r[0].strip()==CFTC_BTC_CONTRACT
+    # The live CFTC TFF flat-file rows contain 87 CSV fields (not >90).
+    # Validate BOTH leading ID and trailing contract multiplier / report type.
+    target=[r for r in rows if 80<=len(r)<=100 and r[0].strip()==CFTC_BTC_CONTRACT
             and r[3].strip()==CFTC_BTC_MARKET_CODE
-            and r[5].strip()=="00" and r[-1].strip()=="FutOnly"]
+            and r[5].strip()=="00" and r[-6].strip()=="(5 Bitcoins)"
+            and r[-5].strip()==CFTC_BTC_MARKET_CODE
+            and r[-1].strip()=="FutOnly"]
     if len(target)!=1:
         return None
     r=target[0]

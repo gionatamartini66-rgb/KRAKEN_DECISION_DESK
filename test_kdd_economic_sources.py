@@ -571,14 +571,33 @@ class PrimaryFollowupTests(unittest.TestCase):
         btc+=["17527","6027","5548","490","4379","1976","187",
               "5114","7705","427","124","308","17","16765",
               "16658","762","869"]
-        btc+=["0"]*70+["FutOnly"]
+        btc+=["0"]*70+["(5 Bitcoins)","133741","CME ","133 ","F85","FutOnly"]
         rows.append(btc)
-        text="\n".join(__import__("csv").writer(__import__("io").StringIO()) or [] ) if False else ""
         import csv,io
         output=io.StringIO()
         writer=csv.writer(output)
         writer.writerows(rows)
         got=sources._cftc_btc_tff(output.getvalue(),spec,T)
+        # Canonical live CFTC row shape as published 2026-11-03: 87
+        # columns. Earlier synthetic 90+ columns concealed the parser bug.
+        real_head=[
+            sources.CFTC_BTC_CONTRACT,"261103","2026-11-03","133741",
+            "CME ","00","133 ",
+            "17527","6027","5548","490","4379","1976","187",
+            "5114","7705","427","124","308","17","16765","16658",
+            "762","869"]
+        real_line=real_head+["0"]*(87-24-6)+[
+             "(5 Bitcoins)","133741","CME ","133 ","F85","FutOnly"]
+        self.assertEqual(len(real_line),87)
+        output=io.StringIO();csv.writer(output).writerow(real_line)
+        official_shape=sources._cftc_btc_tff(output.getvalue(),spec,T)
+        self.assertIsNotNone(official_shape)
+        self.assertEqual(official_shape["classificazioni"]["asset_manager"]
+                         ["saldo_long_meno_short"],2403)
+        wrong_multiplier=real_line[:]
+        wrong_multiplier[-6]="(0.1 Bitcoin)"
+        output=io.StringIO();csv.writer(output).writerow(wrong_multiplier)
+        self.assertIsNone(sources._cftc_btc_tff(output.getvalue(),spec,T))
         self.assertEqual(got["valore"],17527)
         self.assertEqual(got["classificazioni"]["asset_manager"]["saldo_long_meno_short"],2403)
         self.assertEqual(got["classificazioni"]["leveraged_money"]["saldo_long_meno_short"],-2591)
