@@ -558,10 +558,25 @@ def at_read(source, positions, shortlist, now):
     matrix = source.get("fonti_economiche")
     if matrix is not None and matrix != sources_matrix():
         raise ValueError("Matrice fonti economiche alterata")
+    # Validate primary project sources once against the original roster.
+    # The packet reads this again: no second fetch, no reinstatement of stale data.
+    import kdd_primary_economics as primary
+    original_primary = source.get("fonti_primarie")
+    identities = [row.get("identita") for rows in (original_positions, original_candidates)
+                  for row in rows if isinstance(row, dict)]
+    primary_read = (primary.at_read(original_primary, identities, now)
+                    if original_primary is not None else None)
+    raw_primary = ({row["coingecko_id"]: row
+                    for row in original_primary.get("progetti", [])}
+                   if primary_read is not None else {})
+    verified_primary = ({row["coingecko_id"]: row
+                         for row in primary_read["progetti"]}
+                        if primary_read is not None else {})
     result = {"schema": VERSION, "acquisito_utc": source["acquisito_utc"],
               "letto_utc": now.isoformat(timespec="seconds"),
               "fonti_economiche": matrix if matrix is not None else [],
-              "posizioni": [], "candidati": []}
+              "posizioni": [], "candidati": [],
+              "fonti_primarie": primary_read}
     for name, source_rows, expected in (
             ("posizioni", original_positions, positions),
             ("candidati", original_candidates, shortlist)):
@@ -628,6 +643,27 @@ def at_read(source, positions, shortlist, now):
                     fundamentals({}, None, now, now), stato="NON_VERIFICATO_IDENTITA",
                     motivo="ATTESTAZIONE_IDENTITA_SCADUTA")
                 row_copy["evento"] = release_event({}, None, now, now)
+            # A forged/swap-bound project observation must not survive the
+            # wallet/shortlist rebinding or the second GPT-side validation.
+            if primary_read is not None:
+                coin = identity.get("coingecko_id")
+                expected = raw_primary.get(coin)
+                attached = row.get("osservazioni_primarie")
+                if expected is None:
+                    if attached not in (None, {"stato": "NON_VERIFICATO_IDENTITA",
+                                            "limite": "Progetto non attribuibile con fonte indipendente"}):
+                        raise ValueError("Fonte primaria senza identita")
+                    row_copy["osservazioni_primarie"] = {
+                        "stato": "NON_VERIFICATO_IDENTITA"}
+                else:
+                    # When invoked on an already read-time-normalized packet,
+                    # it carries the validated row instead of the raw producer.
+                    if attached != expected and attached != verified_primary.get(coin):
+                        raise ValueError("Fonte primaria scambiata tra progetti")
+                    row_copy["osservazioni_primarie"] = (
+                        verified_primary.get(coin) if row_copy["identita"].get("stato")
+                        == "IDENTITA_VERIFICATA_DA_CATALOGO" else
+                        {"stato": "NON_VERIFICATO_IDENTITA"})
             row_copy["politica_monetaria_primaria"] = monetary_reference(row_copy["identita"])
             row_copy["lettura_economica"] = decision_context(
                 row_copy["identita"], row_copy["fondamentali"], row_copy["evento"])
@@ -662,4 +698,6 @@ def at_read(source, positions, shortlist, now):
                            "titolo": item.get("titolo"),
                            "data": item.get("pubblicato_utc")})
     result["macro"] = macro(normalized, now)
+    if primary_read is not None:
+        result["macro"]["indicatori_primari"] = primary_read["indicatori_macro"]
     return result
