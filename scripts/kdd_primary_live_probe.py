@@ -57,6 +57,7 @@ def main():
                 "stato": row["stato"],
                 "emissione_primaria": emission.get("stato"),
                 "proiezione_mensile_primaria": source.get("stato"),
+                "motivo_proiezione": source.get("motivo"),
                 "mesi_previsti_campionati": len(source.get("eventi",[])),
                 "segnalazioni_issue": len(events)}
             if emission.get("stato") == "OSSERVATO":
