@@ -969,8 +969,10 @@ def prepara_dossier_aggiornamento(data, *, asset_pairs=None):
             'motivi_incompletezza':[]}
     try:
         import dossier_trade
-        dossier=dossier_trade.collect(source=data, primary_live=True,
-                                     **({'asset_pairs': asset_pairs} if asset_pairs is not None else {}))
+        with dossier_trade.primary_refresh_context():
+            dossier=dossier_trade.collect(
+                source=data,
+                **({'asset_pairs': asset_pairs} if asset_pairs is not None else {}))
         if dossier['kraken_istantanea_utc']!=data['rilevazione_utc']:
             raise ValueError("Dossier riferito ad altro snapshot")
         rows=dossier.get('candidati',[])
