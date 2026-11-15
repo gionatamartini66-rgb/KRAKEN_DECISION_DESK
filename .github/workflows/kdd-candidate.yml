@@ -87,3 +87,16 @@ jobs:
         run: python -B scripts/check_roadmap_contract.py --check-pr
       - name: Positive and adversarial guard tests
         run: python -B -m unittest -q scripts.test_roadmap_contract
+
+  primary-public-evidence:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Acquire and re-read real read-only official project and ECB evidence
+        run: python -B scripts/kdd_primary_live_probe.py
