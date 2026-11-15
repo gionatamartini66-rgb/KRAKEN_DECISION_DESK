@@ -574,7 +574,9 @@ def economic_evidence(source, wallet, four, candidates, now, *,
         now, verified_identifications, previous_primary,
         fetch_json=onchain._http,
         fetch_csv=lambda url: desk.request(url, timeout=12)[:400_000],
-        catalog=econ._CURATED)
+        catalog=econ._CURATED,
+        enabled=bool(isinstance(source.get("orari_fonti"), dict)
+                     and source["orari_fonti"].get("composizione_kdd_utc")))
     primary_by_id = {x["coingecko_id"]: x
                      for x in primary_evidence["progetti"]}
     for group in ("posizioni", "candidati"):
