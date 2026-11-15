@@ -92,7 +92,7 @@ def _catalog_source(identity):
 
 def _roster(items):
     found = {}
-    for group in ("posizioni", "candidati"):
+    for group in ("posizioni", "candidati", "richiesti"):
         for row in items.get(group, []):
             if not isinstance(row, dict):
                 continue
@@ -632,12 +632,12 @@ def _spot_status(now, items, asset_pairs, previous):
     origin="https://api.kraken.com/0/public/AssetPairs"
     old={}
     if isinstance(previous,dict):
-        for group in ("posizioni","candidati"):
+        for group in ("posizioni","candidati","richiesti"):
             for row in (previous.get("stati_coppie_kraken") or {}).get(group,[]):
                 if isinstance(row,dict):
                     old[(group,row.get("pair_key"),row.get("coppia"))]=row
     result={}
-    for group in ("posizioni","candidati"):
+    for group in ("posizioni","candidati","richiesti"):
         out=[]
         for i,row in enumerate(items.get(group,[])):
             ident=row.get("identita") or {}
@@ -673,9 +673,9 @@ def _spot_status_read(raw, items, now):
     if not isinstance(raw,dict):
         raise ValueError("Kraken public status not structured")
     result={}
-    for group in ("posizioni","candidati"):
+    for group in ("posizioni","candidati","richiesti"):
         expected=items.get(group,[])
-        rows=raw.get(group)
+        rows=raw.get(group,[] if not expected else None)
         if not isinstance(rows,list) or len(rows)!=len(expected):
             raise ValueError("Kraken pair roster mismatch")
         out=[]
