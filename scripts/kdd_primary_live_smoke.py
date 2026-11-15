@@ -51,21 +51,31 @@ def counted(url):
     seen.append(url)
     return fetch(url)
 
-raw=primary.collect(NOW,roster,None,counted)
-checked=primary.at_read(raw,roster,NOW)
-assert checked["schema"]==primary.SCHEMA
-assert checked["copertura"]["progetti"]==3
-print("PUBLIC_G2_SMOKE_UTC",NOW.isoformat(timespec="seconds"))
-print("source_requests",raw["richieste_pubbliche"],"URLs",json.dumps(seen))
-for record in checked["progetti"]:
-    print("project",record["progetto_id"],"state",record["stato"],
-          "documents",len(record["eventi"]),
-          "reason",record.get("errore"),
-          "attribution",record.get("repository_governance"))
-for record in checked["indicatori_macro"]:
-    print("macro",record["id"],"state",record["stato"],
-          "period",record.get("periodo"),"value",record.get("valore"),
-          "reason",record.get("motivo"),"url",record["fonte"])
-print("unlock_schedule",[(r["progetto_id"],r["stato"]) for r in checked["calendari"]])
-if checked["copertura"]["governance_osservati"]==0 and checked["copertura"]["indicatori_macro_osservati"]==0:
-    print("WARNING: NO LIVE PROVIDER EVIDENCE; do not declare sources operational",file=sys.stderr)
+raw=None
+for cycle in range(1,4):
+    moment=dt.datetime.now(dt.timezone.utc)
+    before=len(seen)
+    raw=primary.collect(moment,roster,raw,counted)
+    checked=primary.at_read(raw,roster,moment)
+    assert checked["schema"]==primary.SCHEMA
+    assert checked["copertura"]["progetti"]==3
+    assert raw["richieste_pubbliche"] <= raw["limite_richieste"]
+    assert raw["richieste_pubbliche"]==len(seen)-before
+    print("PUBLIC_G2_SMOKE_UTC",moment.isoformat(timespec="seconds"),"cycle",cycle)
+    print("source_requests",raw["richieste_pubbliche"],"URLs",json.dumps(seen[before:]))
+    for record in checked["progetti"]:
+        print("project",record["progetto_id"],"state",record["stato"],
+              "documents",len(record["eventi"]),
+              "reason",record.get("errore"),
+              "attribution",record.get("repository_governance"))
+    for record in checked["indicatori_macro"]:
+        print("macro",record["id"],"state",record["stato"],
+              "period",record.get("periodo"),"value",record.get("valore"),
+              "reason",record.get("motivo"),"url",record["fonte"])
+    print("history_supply",len(raw["storico_supply"]),
+          "history_events",len(raw["storico_eventi"]),
+          "next_project",raw["prossimo_progetto"],
+          "next_macro",raw["prossimo_indicatore"])
+    print("unlock_schedule",[(r["progetto_id"],r["stato"]) for r in checked["calendari"]])
+    if checked["copertura"]["governance_osservati"]==0 and checked["copertura"]["indicatori_macro_osservati"]==0:
+        print("WARNING: NO LIVE PROVIDER EVIDENCE THIS CYCLE",file=sys.stderr)
