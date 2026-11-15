@@ -84,6 +84,27 @@ class PrimaryFollowupTests(unittest.TestCase):
                     "quantita_token":100,"allocazione":"example"}]}).encode()
         raise AssertionError("source URL not registered: "+url)
 
+    def test_out_of_real_refresh_has_no_primary_api_and_no_false_rate_limit(self):
+        import dossier_trade as dossier
+        self.assertFalse(dossier._PRIMARY_REAL_REFRESH.get())
+        with dossier.primary_refresh_context():
+            self.assertTrue(dossier._PRIMARY_REAL_REFRESH.get())
+        self.assertFalse(dossier._PRIMARY_REAL_REFRESH.get())
+        items=self.items(tokens=("BTC","SOL","SUI"))
+        def forbidden(url):
+            raise AssertionError("Unscheduled URL: "+url)
+        def rpc_forbidden(url,payload):
+            raise AssertionError("Unscheduled JSON RPC")
+        result=sources.collect(T,items,{},forbidden,network_allowed=False,
+                skipped_reason="FUORI_REFRESH",rpc_fetch=rpc_forbidden,
+                collect_project_issues=True)
+        self.assertEqual(result["richieste_pubbliche"],0)
+        self.assertEqual(result["progetti"][0]["stato"],"NON_ACQUISITO_FUORI_REFRESH")
+        self.assertEqual(result["indicatori_macro"][0]["motivo"],"NON_ACQUISITO_FUORI_REFRESH")
+        self.assertEqual(result["segnalazioni_repo"][0]["stato"],"NON_ACQUISITO_FUORI_REFRESH")
+        self.assertEqual(result["politiche_emissioni"][1]["stato"],"NON_ACQUISITO_FUORI_REFRESH")
+        sources.at_read(result,items,T)
+
     def test_primary_labelled_issues_are_not_verified_network_upgrades(self):
         roster=self.items(tokens=("BTC","ETH","SOL"))
         first=sources.collect(T,roster,{},self.fetch,collect_project_issues=True)

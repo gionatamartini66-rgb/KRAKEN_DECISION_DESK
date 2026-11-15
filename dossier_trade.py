@@ -1,5 +1,21 @@
 """Dossier verificabile per ragionamento GPT in chat, senza API private né ordini."""
 import datetime as dt
+import contextlib
+import contextvars
+
+_PRIMARY_REAL_REFRESH=contextvars.ContextVar("kdd_primary_real_refresh",default=False)
+
+
+@contextlib.contextmanager
+def primary_refresh_context():
+    """Permit new external economic sources only during genuine KDD refresh."""
+    marker=_PRIMARY_REAL_REFRESH.set(True)
+    try:
+        yield
+    finally:
+        _PRIMARY_REAL_REFRESH.reset(marker)
+
+
 import json
 import math
 import time
@@ -582,7 +598,9 @@ def economic_evidence(source, wallet, four, candidates, now, *,
     monitoring = primary.collect(
         now, items, prior.get("monitor_fonti"),
         lambda url: desk.request(url, timeout=10),
-        network_allowed=not rate_limited, asset_pairs=asset_pairs,
+        network_allowed=not rate_limited and _PRIMARY_REAL_REFRESH.get(),
+        skipped_reason=("FUORI_REFRESH" if not _PRIMARY_REAL_REFRESH.get() else "RATE_LIMIT"),
+        asset_pairs=asset_pairs,
         rpc_fetch=onchain._http,collect_project_issues=True)
     btc = next((r for r in four_rows if isinstance(r, dict) and r.get("token") == "BTC"), {})
     return {"schema": econ.VERSION, "acquisito_utc": now.isoformat(timespec="seconds"),

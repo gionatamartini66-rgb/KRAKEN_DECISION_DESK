@@ -574,11 +574,13 @@ def _supply_samples(roster, old, now):
     return retained,changes[:30]
 
 
-def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=None, rpc_fetch=None, collect_project_issues=False):
+def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=None, rpc_fetch=None, collect_project_issues=False, skipped_reason="RATE_LIMIT"):
     """One shared, reusable, bounded producer for all current asset identities."""
     now = _utc(now)
     roster = _roster(items)
     old = _prior(previous, now)
+    paused=("NON_ACQUISITO_FUORI_REFRESH" if skipped_reason=="FUORI_REFRESH"
+            else "RINVIATO_RATE_LIMIT_HTTP_429")
     # A project removed from wallet/scanner has no active row; cache may
     # be retained for a later re-entry but cannot be assigned to a different ID.
     old_governance={x["progetto_id"]:x for x in old.get("progetti",[])
@@ -643,8 +645,10 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
                              eventi=previous_row.get("eventi",[])[:6],
                              acquisito_utc=previous_row["acquisito_utc"])
         if not network_allowed and entry["stato"]=="RINVIATO_BUDGET":
-            entry.update(stato="RINVIATO_RATE_LIMIT_HTTP_429",
-                         limite="HTTP 429 upstream: nessuna richiesta supplementare")
+            entry.update(stato=paused,
+                         limite=("Sorgenti non richieste fuori dal refresh KDD"
+                                 if paused=="NON_ACQUISITO_FUORI_REFRESH"
+                                 else "HTTP 429 upstream: nessuna richiesta supplementare"))
         projects.append(entry)
     # KDD-18: one official on-chain inflation governor read per cycle,
     # only for projects explicitly bound to a catalogued primary RPC.
@@ -693,7 +697,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
                 if t and dt.timedelta(0)<=now-t<=dt.timedelta(days=14):
                     row.update(former,stato="STORICO_NON_AGGIORNATO")
             if not network_allowed and row["stato"]=="RINVIATO_BUDGET":
-                row["stato"]="RINVIATO_RATE_LIMIT_HTTP_429"
+                row["stato"]=paused
         emissions.append(row)
     # KDD-20: labelled technical issues from the project's registered
     # repository. Distinct from GHSA advisories and documentation PRs.
@@ -731,7 +735,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
                     row.update(stato="STORICO",acquisito_utc=before["acquisito_utc"],
                                eventi=before.get("eventi",[])[:8])
             if not network_allowed and row["stato"]=="NON_RICHIESTO":
-                row["stato"]="RINVIATO_RATE_LIMIT_HTTP_429"
+                row["stato"]=paused
             elif row["stato"]=="NON_RICHIESTO":
                 row["stato"]="RINVIATO_BUDGET"
         issues.append(row)
@@ -770,7 +774,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
                     row.update(stato="STORICO",acquisito_utc=previous["acquisito_utc"],
                                avvisi=previous.get("avvisi",[])[:5])
             if not network_allowed and row["stato"]=="RINVIATO_BUDGET":
-                row["stato"]="RINVIATO_RATE_LIMIT_HTTP_429"
+                row["stato"]=paused
         advisories.append(row)
     # ECB source rotation is independent from project and wallet membership.
     series=MACRO_SERIES
@@ -785,7 +789,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
         raw,error=_fetch(fetch,url,json_data=False)
         current=_ecb_csv(raw,spec,now) if not error else None
     else:
-        error="RINVIATO_RATE_LIMIT_HTTP_429"
+        error=paused
         current=None
     if current is None:
         current={"id":spec[0],"serie":spec[1]+"."+spec[2],"fonte":url,
@@ -865,7 +869,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
                            if history.get("stato") in ("PROIEZIONE_PRIMARIA_NON_UNLOCK","PROIEZIONE_STORICA")
                            else "STORICO_DA_RICONFERMARE"))
             else:
-                row.update(stato="RINVIATO_RATE_LIMIT_HTTP_429" if not network_allowed
+                row.update(stato=paused if not network_allowed
                            else "RINVIATO_BUDGET")
         schedules.append(row)
     # Compare the attributable planned monthly figures, without calling them unlocks.
