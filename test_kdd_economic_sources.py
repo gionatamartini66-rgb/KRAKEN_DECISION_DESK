@@ -371,6 +371,19 @@ class PrimaryFollowupTests(unittest.TestCase):
         self.assertEqual(len([url for url in seen if url.startswith(sources.ECB)]),5)
         self.assertEqual(next(x for x in prev["indicatori_macro"]
                               if x["id"]=="EA_M3_GROWTH")["valore"],3.1)
+        # Monthly period freshness must be measured from *end* of period,
+        # not the first day (a false stale classification for M3 September).
+        september=dict(next(x for x in prev["indicatori_macro"]
+                             if x["id"]=="EA_M3_GROWTH"))
+        september["periodo"]="2026-09"
+        september["valore"]=3.1
+        september["stato"]="OSSERVATO"
+        revised=dict(prev,indicatori_macro=[
+            september if x["id"]=="EA_M3_GROWTH" else x
+            for x in prev["indicatori_macro"]])
+        validated=sources.at_read(revised,roster,T+dt.timedelta(hours=4))
+        self.assertEqual(next(x for x in validated["indicatori_macro"]
+                              if x["id"]=="EA_M3_GROWTH")["stato"],"OSSERVATO")
 
     def test_ecb_temporal_comparison_and_regime_history_are_not_false_consensus(self):
         roster=self.items(tokens=("BTC",))

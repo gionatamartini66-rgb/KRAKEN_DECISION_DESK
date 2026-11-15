@@ -7,6 +7,7 @@ No source here proves an unlock was sold, a proposal adopted, or a market move c
 from __future__ import annotations
 
 import csv
+import calendar
 import datetime as dt
 import io
 import json
@@ -254,7 +255,11 @@ def _ecb_csv(raw, series, now):
         period = row.get("TIME_PERIOD")
         value = row.get("OBS_VALUE")
         try:
-            day = dt.date.fromisoformat(period + "-01" if len(period) == 7 else period)
+            if len(period)==7:
+                year,month=map(int,period.split("-"))
+                day=dt.date(year,month,calendar.monthrange(year,month)[1])
+            else:
+                day=dt.date.fromisoformat(period)
             number = float(value)
         except (ValueError, TypeError):
             return None
@@ -963,9 +968,13 @@ def at_read(raw, items, now):
             raise ValueError("ECB series forged")
         new=dict(row)
         if row.get("valore") is not None:
-            day=_time(str(row.get("periodo"))+"-01T00:00:00+00:00"
-                      if len(str(row.get("periodo")))==7
-                      else str(row.get("periodo"))+"T00:00:00+00:00")
+            period=str(row.get("periodo"))
+            if len(period)==7 and re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])",period):
+                year,month=map(int,period.split("-"))
+                ending=dt.date(year,month,calendar.monthrange(year,month)[1])
+                day=_time(ending.isoformat()+"T00:00:00+00:00")
+            else:
+                day=_time(period+"T00:00:00+00:00")
             if (day is None or day>now+dt.timedelta(days=1)
                     or type(row["valore"]) not in (int,float) or not math.isfinite(row["valore"])):
                 raise ValueError("ECB observation invalid")
