@@ -197,6 +197,65 @@ class PrimaryFollowupTests(unittest.TestCase):
             b=sources.collect(T,self.items(tokens=("BTC",)),{},forged)
             self.assertEqual(b["calendari"][0]["stato"],"FONTE_NON_DISPONIBILE")
 
+    def test_sui_primary_monthly_forecast_is_not_unlock_and_detects_revisions(self):
+        sample=[
+            {"year":2026,"month":10,"circulatingSupplyValue":4100000000,
+             "circulatingSupplyPercentage":.41},
+            {"year":2026,"month":11,"circulatingSupplyValue":4139000000,
+             "circulatingSupplyPercentage":.4139},
+            {"year":2026,"month":12,"circulatingSupplyValue":4159000000,
+             "circulatingSupplyPercentage":.4159},
+            {"year":2027,"month":1,"circulatingSupplyValue":4200000000,
+             "circulatingSupplyPercentage":.42}]
+        roster=self.items(tokens=("SUI",))
+        seen=[]
+        def fetch(url):
+            seen.append(url)
+            if url==sources.SUI_CIRCULATION:
+                return json.dumps(sample).encode()
+            return self.fetch(url)
+        first=sources.collect(T,roster,{},fetch)
+        self.assertEqual(first["richieste_pubbliche"],2)
+        self.assertIn(sources.SUI_CIRCULATION,seen)
+        row=first["calendari"][0]
+        self.assertEqual(row["stato"],"PROIEZIONE_PRIMARIA_NON_UNLOCK")
+        self.assertEqual(row["mese_circolazione"],"2026-11")
+        self.assertEqual(row["circolante_mese_token"],4139000000)
+        self.assertEqual(row["stime_mensili"][0]["aumento_previsto_token"],20000000)
+        self.assertEqual(row["eventi"],[])
+        self.assertIsNone(row["pubblicato_utc"])
+        self.assertEqual(row["stato_vesting"],"NON_VERIFICATO")
+        self.assertEqual(row["stato_vendita"],"NON_ATTESTATA")
+        checked=sources.at_read(first,roster,T)
+        self.assertEqual(checked["calendari"][0]["stato"],"PROIEZIONE_PRIMARIA_NON_UNLOCK")
+        self.assertEqual(sources.at_read(first,roster,T+dt.timedelta(days=36))
+                         ["calendari"][0]["stato"],"PROIEZIONE_STORICA")
+        tampered=copy.deepcopy(first)
+        tampered["calendari"][0]["stime_mensili"][0]["data_sblocco_utc"]="2026-12-01T00:00:00Z"
+        with self.assertRaisesRegex(ValueError,"forged"):
+            sources.at_read(tampered,roster,T)
+        tampered=copy.deepcopy(first)
+        tampered["calendari"][0]["fonte"]="https://attacker.example/api"
+        with self.assertRaises(ValueError):
+            sources.at_read(tampered,roster,T)
+        changed=copy.deepcopy(sample)
+        changed[-1]["circulatingSupplyValue"]=4210000000
+        changed[-1]["circulatingSupplyPercentage"]=.421
+        def fetch_changed(url):
+            if url==sources.SUI_CIRCULATION:
+                return json.dumps(changed).encode()
+            return self.fetch(url)
+        second=sources.collect(T+dt.timedelta(hours=1),roster,first,fetch_changed)
+        self.assertEqual(len(second["revisioni_piani"]),1)
+        self.assertEqual(second["revisioni_piani"][0]["stato"],"REVISIONE_PIANO_PUBBLICATO")
+        # A primary API with inconsistent supply/cap may not create events.
+        broken=copy.deepcopy(sample)
+        broken[2]["circulatingSupplyPercentage"]=.9
+        bad=sources.collect(T,roster,{},lambda url:
+            json.dumps(broken).encode() if url==sources.SUI_CIRCULATION else self.fetch(url))
+        self.assertEqual(bad["calendari"][0]["stato"],"FONTE_NON_DISPONIBILE")
+        self.assertEqual(bad["calendari"][0]["eventi"],[])
+
     def test_existing_economic_reader_consumes_followup(self):
         items=self.items(tokens=("BTC",))
         a=sources.collect(T,items,{},self.fetch)

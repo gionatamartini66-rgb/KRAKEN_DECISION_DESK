@@ -18,7 +18,8 @@ NOW = dt.datetime.now(dt.timezone.utc)
 def fetch(url):
     if not (url.startswith("https://api.github.com/repos/")
             or url.startswith("https://data-api.ecb.europa.eu/service/data/")
-            or url.startswith("https://raw.githubusercontent.com/")):
+            or url.startswith("https://raw.githubusercontent.com/")
+            or url == primary.SUI_CIRCULATION):
         raise ValueError("URL outside verified public source allowlist")
     req = urllib.request.Request(url, headers={
         "User-Agent": "KDD-G2-public-source-smoke/1.0",
@@ -40,7 +41,7 @@ def identity(token):
 
 
 roster={"posizioni":[],"candidati":[]}
-for n,token in enumerate(("BTC","ETH","SOL")):
+for n,token in enumerate(("BTC","ETH","SOL","SUI")):
     ident=identity(token)
     assert ident["stato"]=="IDENTITA_VERIFICATA_DA_CATALOGO"
     roster["posizioni"].append({"indice":n,"token":token,"identita":ident,
@@ -58,7 +59,7 @@ for cycle in range(1,4):
     raw=primary.collect(moment,roster,raw,counted)
     checked=primary.at_read(raw,roster,moment)
     assert checked["schema"]==primary.SCHEMA
-    assert checked["copertura"]["progetti"]==3
+    assert checked["copertura"]["progetti"]==4
     assert raw["richieste_pubbliche"] <= raw["limite_richieste"]
     assert raw["richieste_pubbliche"]==len(seen)-before
     print("PUBLIC_G2_SMOKE_UTC",moment.isoformat(timespec="seconds"),"cycle",cycle)
@@ -77,5 +78,11 @@ for cycle in range(1,4):
           "next_project",raw["prossimo_progetto"],
           "next_macro",raw["prossimo_indicatore"])
     print("unlock_schedule",[(r["progetto_id"],r["stato"]) for r in checked["calendari"]])
+    sui=next(r for r in checked["calendari"] if r["progetto_id"]=="sui")
+    print("sui_official_monthly",sui["stato"],"source",sui.get("fonte"),
+          "reference_month",sui.get("mese_circolazione"),
+          "declared_circulation",sui.get("circolante_mese_token"),
+          "future_months",len(sui.get("stime_mensili",[])),
+          "unlock_verified",sui.get("stato_vesting"))
     if checked["copertura"]["governance_osservati"]==0 and checked["copertura"]["indicatori_macro_osservati"]==0:
         print("WARNING: NO LIVE PROVIDER EVIDENCE THIS CYCLE",file=sys.stderr)
