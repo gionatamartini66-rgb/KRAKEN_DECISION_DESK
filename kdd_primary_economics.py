@@ -419,6 +419,9 @@ def collect(now, identities, previous, *, fetch_json, fetch_csv, catalog, enable
 
 def at_read(raw, identities, now, *, catalog=None):
     """Fail closed on fabricated project attribution, future times and source drift."""
+    if catalog is None:
+        import kdd_economics
+        catalog = kdd_economics._CURATED
     if not isinstance(raw, dict) or raw.get("schema") != VERSION:
         raise ValueError("primary economic schema invalid")
     observed = timestamp(raw.get("acquisito_utc"))
