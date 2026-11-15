@@ -299,7 +299,7 @@ def finanziamento_150_book(source, portfolio, *, saldo_recente, kraken_client=No
 
 
 def economic_evidence(source, wallet, four, candidates, now, *,
-                      asset_pairs=None, previous=None):
+                      asset_pairs=None, previous=None, primary_live=False):
     """Patrimonio dinamico: catalogo Kraken reale, progetti curati o ricerca incrociata.
 
     The previous dossier is a dated, local public-evidence cache, never a
@@ -575,8 +575,7 @@ def economic_evidence(source, wallet, four, candidates, now, *,
         fetch_json=onchain._http,
         fetch_csv=lambda url: desk.request(url, timeout=12)[:400_000],
         catalog=econ._CURATED,
-        enabled=bool(isinstance(source.get("orari_fonti"), dict)
-                     and source["orari_fonti"].get("composizione_kdd_utc")))
+        enabled=primary_live)
     primary_by_id = {x["coingecko_id"]: x
                      for x in primary_evidence["progetti"]}
     for group in ("posizioni", "candidati"):
@@ -618,7 +617,7 @@ def economic_evidence(source, wallet, four, candidates, now, *,
             "richieste_effettuate": discovery_calls+cg_calls+release_calls,
             "limite": "Risoluzione pubblica incrociata, non prova chain/contract, unlock, acquisti o ordini"}
 
-def collect(source=None, *, asset_pairs=None):
+def collect(source=None, *, asset_pairs=None, primary_live=False):
     """Prepara il dossier sullo snapshot appena acquisito, senza iniziare un'analisi GPT."""
     now=desk.NOW()
     if source is None:
@@ -721,7 +720,8 @@ def collect(source=None, *, asset_pairs=None):
         dict(source, _verified_asset_pairs=asset_pairs), portafoglio,
         saldo_recente=qualita.get("saldo_recente_verificato", False))
     economic = economic_evidence(source, portafoglio, analisi_patrimonio, candidates, now,
-                                 asset_pairs=asset_pairs, previous=previous_economic)
+                                 asset_pairs=asset_pairs, previous=previous_economic,
+                                 primary_live=primary_live)
     # Global market data is obtained independently and may be unavailable.
     import kdd_economics as econ
     btc = next((r for r in (analisi_patrimonio.get("posizioni") or [])
