@@ -56,7 +56,13 @@
     "SUI": {
       "id": "sui",
       "name": "Sui",
-      "repository": "MystenLabs/sui"
+      "repository": "MystenLabs/sui",
+      "circulation_schedule_primary": {
+        "type": "MONTHLY_CIRCULATION_PROJECTION",
+        "url": "https://sui-circulation.suiexplorer.com/api/sui_circulation",
+        "max_supply_tokens": 10000000000,
+        "documentation": "https://www.sui.io/token-schedule"
+      }
     },
     "XRP": {
       "id": "ripple",
