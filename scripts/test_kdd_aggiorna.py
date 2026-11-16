@@ -52,6 +52,16 @@ class UpdateTests(unittest.TestCase):
                 ' def test_module_present(self):\n'
                 '  self.assertTrue(pathlib.Path("kdd_economics.py").is_file())\n'
             )
+            # Each mandatory core module must expose at least one test;
+            # unittest exit 5 for an empty fake module is a real STOP, not
+            # an acceptable placeholder in this packaging fixture.
+            for name in ('test_kdd_economic_sources.py',
+                         'test_kdd_futures_flow.py', 'test_kdd_network_defi.py'):
+                (directory / name).write_text(
+                    'import pathlib, unittest\n'
+                    'class PackageProbe(unittest.TestCase):\n'
+                    ' def test_source_staged(self):\n'
+                    '  self.assertTrue(pathlib.Path("decision_desk.py").is_file())\n')
             for name in kdd.PACKET_FILES:
                 origin = Path(__file__).resolve().parents[1] / name
                 # This updater fixture contains placeholder application modules;
@@ -509,7 +519,7 @@ class UpdateTests(unittest.TestCase):
                                        'postflight.*test_decision_desk.*150') as failure:
                 kdd.apply(self.root,self.live,commit_sha=self.sha,dry_run=False)
         self.assertEqual(n[0],2)
-        self.assertEqual((self.live/'serve.py').read_text(),'# file serve.py\\n')
+        self.assertEqual((self.live/'serve.py').read_text(),'# file serve.py\n')
         self.assertEqual((self.live/'README.md').read_text(),self.old_readme)
         self.assertIn('postflight',diagnostic.getvalue().lower())
 
@@ -519,8 +529,8 @@ class UpdateTests(unittest.TestCase):
         def failed(args, *, cwd, timeout=120):
             if 'test_decision_desk' in args:
                 return subprocess.CompletedProcess(
-                    args,1,'','FAIL: test_synthetic_error (test_decision_desk.DeskTests)\\n'
-                    'USER_PRIVATE_REPORT: SECRET_VALUE\\nRan 1 test\\nFAILED (failures=1)')
+                    args,1,'','FAIL: test_synthetic_error (test_decision_desk.DeskTests)\n'
+                    'USER_PRIVATE_REPORT: SECRET_VALUE\nRan 1 test\nFAILED (failures=1)')
             return subprocess.CompletedProcess(args,0,'','OK')
         with patch.object(kdd,'capability_preflight'), \
              patch.object(kdd,'command',side_effect=failed), \
