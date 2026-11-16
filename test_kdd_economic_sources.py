@@ -1222,6 +1222,10 @@ class PrimaryFollowupTests(unittest.TestCase):
                          {"BTC","SUI"})
         self.assertEqual(parse([one],{"sui":{"token":"SUI"},
                                       "fake-sui":{"token":"SUI"}}),[])
+        # A different named asset cannot inherit SUI events solely by ticker.
+        wrong_name=dict(one,name="Unrelated Network (SUI) Delisting")
+        self.assertEqual(parse([wrong_name],{"sui":{
+            "token":"SUI","progetto":"Sui"}}),[])
         ended=parse([dict(one,status="completed",updated_at=now.isoformat(),
                           resolved_at=now.isoformat())])
         self.assertEqual(ended[0]["rilevanza_temporale"],"CONCLUSO")
