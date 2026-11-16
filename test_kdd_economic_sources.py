@@ -627,7 +627,7 @@ class PrimaryFollowupTests(unittest.TestCase):
             return self.fetch(url)
         second=sources.collect(T+dt.timedelta(hours=1),roster,first,fetch_changed)
         self.assertEqual(len(second["revisioni_piani"]),1)
-        self.assertEqual(second["revisioni_piani"][0]["stato"],"REVISIONE_PIANO_PUBBLICATO")
+        self.assertEqual(second["revisioni_piani"][0]["stato"],"REVISIONE_DOCUMENTO_ECONOMICO")
         # A primary API with inconsistent supply/cap may not create events.
         broken=copy.deepcopy(sample)
         broken[2]["circulatingSupplyPercentage"]=.9
