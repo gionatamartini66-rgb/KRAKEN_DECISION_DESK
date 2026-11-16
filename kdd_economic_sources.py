@@ -511,9 +511,21 @@ def _kraken_market_announcements(payload, feed, roster, now):
         delisting_title=bool(re.search(r"\bdelist(?:ing|ed|ings)?\b",title,re.I))
         updates=row.get("incident_updates")
         updates=updates[:8] if isinstance(updates,list) else []
+        deadline_text=[]
         for update in updates:
             body=update.get("body") if isinstance(update,dict) else None
             if not isinstance(body,str) or len(body)>10000:continue
+            if delisting_title:
+                # Verbatim source deadlines, WITHOUT synthesizing a year/date or
+                # treating scheduled_until as the trading/withdrawal deadline.
+                for line in body.splitlines():
+                    line=line.strip(" -\t")
+                    if (len(line)<=200 and
+                            re.search(r"\\b(?:withdrawals?|deposits?|trading|liquidat)\\b",line,re.I)
+                            and re.search(r"\\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\s+\\d{1,2}\\b",line,re.I)
+                            and line not in deadline_text):
+                        deadline_text.append(line)
+                        if len(deadline_text)>=5:break
             # This is an asset list in a named official delisting notice, not a
             # heuristic match for every uppercase word in a status message.
             if delisting_title:
@@ -560,6 +572,7 @@ def _kraken_market_announcements(payload, feed, roster, now):
                    "fonte":"https://status.kraken.com/incidents/"+eid,
                    "riferimento_esatto":exact,
                    "orizzonte_statuspage_utc":_iso(horizon) if kind_event=="DELISTING_COMUNICATO" and horizon else None,
+                   "scadenze_testuali":deadline_text[:5] if kind_event=="DELISTING_COMUNICATO" else [],
                    "realizzazione":"NON_ATTESTATA",
                    "limite":("Avviso ufficiale di delisting: calendario Statuspage, non prova di "
                              "blocco sul conto, esecuzione delle misure o liquidazione"
@@ -606,6 +619,13 @@ def _kraken_market_read(raw, items, now):
                             and "("+token+")" not in reference)):
                     raise ValueError("Kraken official notice attributed to wrong asset")
                 copy=dict(event)
+                marker=event.get("conferma_ultimo_refresh")
+                if marker not in (None,"NON_RICONFERMATO"):
+                    raise ValueError("Kraken notice reconfirmation forged")
+                if marker=="NON_RICONFERMATO":
+                    t0=_time(event.get("acquisito_originale_utc"))
+                    if t0 is None or t0>t or t0>now:
+                        raise ValueError("Kraken notice historical clock")
                 if event.get("tipo")=="DELISTING_COMUNICATO":
                     if event.get("realizzazione","NON_ATTESTATA")!="NON_ATTESTATA":
                         raise ValueError("Kraken delisting execution not established")
@@ -1570,11 +1590,23 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
                     row.update(stato="FONTE_NON_DISPONIBILE",
                                motivo=error or "FONTE_NON_CONFORME")
             else:
+                before={e["id"]+":"+e["token"]:e for e in (former or {}).get("eventi",[])
+                        if isinstance(e,dict)}
+                # A truncated/rotating public Statuspage response can omit a
+                # previously observed, still-future notice. Preserve it as
+                # explicitly UNCONFIRMED historical data, never as newly fetched.
+                seen={(e["id"],e["token"]) for e in events}
+                for old_event in before.values():
+                    if (old_event.get("tipo")=="DELISTING_COMUNICATO"
+                            and _kraken_notice_temporal(old_event,now)=="FUTURO_PROGRAMMATO"
+                            and (old_event.get("id"),old_event.get("token")) not in seen
+                            and len(events)<20):
+                        historic=dict(old_event,conferma_ultimo_refresh="NON_RICONFERMATO",
+                                      acquisito_originale_utc=(former or {}).get("acquisito_utc"))
+                        events.append(historic)
                 row.update(stato="OSSERVATO" if events else "NESSUN_EVENTO_NEL_CAMPIONE",
                            eventi=events,acquisito_utc=_iso(now),
                            limite="Campione di comunicazioni ufficiali; assenza di asset nominati non prova assenza di eventi")
-                before={e["id"]+":"+e["token"]:e for e in (former or {}).get("eventi",[])
-                        if isinstance(e,dict)}
                 changes=[{"id":e["id"],"token":e["token"],
                           "prima":before[e["id"]+":"+e["token"]]["stato_pubblicato"],
                           "dopo":e["stato_pubblicato"]}
@@ -1735,6 +1767,7 @@ def decision_review(evidence, row, group):
         historical=notice["stato_alla_lettura"]!="OSSERVATO"
         for e in notice.get("eventi",[]):
             if e.get("token")!=token: continue
+            event_historical=historical or e.get("conferma_ultimo_refresh")=="NON_RICONFERMATO"
             temporal=e.get("rilevanza_temporale_alla_lettura",
                            _kraken_notice_temporal(e,_time(evidence.get("letto_utc")) or
                                                    _time(notice.get("acquisito_utc"))))
@@ -1752,10 +1785,10 @@ def decision_review(evidence, row, group):
                      "Kraken ha pubblicato un evento di servizio attribuito a questo asset")
             add("ANNUNCIO_UFFICIALE_KRAKEN",
                 ("Ultimo annuncio storico non riconfermato: "+wording
-                 if historical else wording),
+                 if event_historical else wording),
                 e.get("fonte"),e.get("aggiornato_fonte_utc"),
                 notice.get("acquisito_utc"),
-                ("STORICO_NON_RICONFERMATO" if historical else
+                ("STORICO_NON_RICONFERMATO" if event_historical else
                  "COMUNICAZIONE_CONCLUSA" if completed else "COMUNICAZIONE_UFFICIALE"),
                 e.get("limite"),{"titolo":e.get("titolo"),
                                "stato":e.get("stato_pubblicato"),
@@ -1763,7 +1796,9 @@ def decision_review(evidence, row, group):
                                "rilevanza_temporale":temporal,
                                "orizzonte_statuspage_utc":e.get("orizzonte_statuspage_utc"),
                                "creato_fonte_utc":e.get("creato_fonte_utc"),
-                               "realizzazione":e.get("realizzazione","NON_ATTESTATA")})
+                               "realizzazione":e.get("realizzazione","NON_ATTESTATA"),
+                               "scadenze_testuali":e.get("scadenze_testuali",[]),
+                               "acquisito_originale_utc":e.get("acquisito_originale_utc")})
     for f in evidence.get("flussi_finanziari") or []:
         if (not isinstance(f,dict) or f.get("stato_alla_lettura") not in (
                 "OSSERVATO","STORICO_NON_AGGIORNATO")):
