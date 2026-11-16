@@ -21,7 +21,8 @@ def fetch(url):
             or url.startswith("https://raw.githubusercontent.com/")
             or url == primary.SUI_CIRCULATION
             or url == primary.CFTC_BTC_TFF_URL
-            or url in [f[1] for f in primary.KRAKEN_STATUS_FEEDS]):
+            or url in [f[1] for f in primary.KRAKEN_STATUS_FEEDS]
+            or url in [f[1] for f in primary.FINANCIAL_FEEDS]):
         raise ValueError("URL outside verified public source allowlist")
     req = urllib.request.Request(url, headers={
         "User-Agent": "KDD-G2-public-source-smoke/1.0",
@@ -92,6 +93,10 @@ for cycle in range(1,len(primary.MACRO_SERIES)+1):
               "reason",record.get("motivo"),"url",record["fonte"])
     print("kraken_announcements",[(x["id"],x["stato"],len(x["eventi"]))
                                   for x in checked["comunicazioni_kraken"]])
+    print("financial",[(x["id"],x["stato"],
+                      (x.get("dati") or {}).get("valore"),
+                      (x.get("dati") or {}).get("periodo"),x.get("motivo"))
+                      for x in checked["flussi_finanziari"]])
     print("history_supply",len(raw["storico_supply"]),
           "history_events",len(raw["storico_eventi"]),
           "next_project",raw["prossimo_progetto"],

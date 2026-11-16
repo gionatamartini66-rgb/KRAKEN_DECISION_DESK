@@ -1434,10 +1434,11 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
                 "limite":"Documento aggiornato; non prova rilascio, circolazione o vendita"})
     # Two first-party Statuspage endpoints, one public GET per real refresh.
     # Do not invent a listing event from AssetPairs alone.
-    status_cursor=old.get("prossimo_kraken_status")
-    kix=next((i for i,f in enumerate(KRAKEN_STATUS_FEEDS)
+    cycle=KRAKEN_STATUS_FEEDS+FINANCIAL_FEEDS
+    status_cursor=old.get("prossima_fonte_esterna",old.get("prossimo_kraken_status"))
+    kix=next((i for i,f in enumerate(cycle)
               if f[0]==status_cursor),0)
-    selected_status=(KRAKEN_STATUS_FEEDS[kix]
+    selected_status=(cycle[kix]
                      if network_allowed and collect_kraken_status else None)
     old_status={x.get("id"):x for x in old.get("comunicazioni_kraken",[])
                 if isinstance(x,dict)}
@@ -1474,6 +1475,49 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
         elif not network_allowed:
             row["stato"]=paused
         market_notices.append(row)
+    # Reuse exactly the one extra GET: official market reports and ETF/stablecoin
+    # sources share a five-turn rotation, never a second data-feed scheduler.
+    old_finance={x.get("id"):x for x in old.get("flussi_finanziari",[])
+                 if isinstance(x,dict)}
+    financial=[]
+    for id,url,kind in FINANCIAL_FEEDS:
+        before=old_finance.get(id)
+        point={"id":id,"fonte":url,"categoria":kind,"stato":"RINVIATO_BUDGET",
+               "dati":None,"acquisito_utc":None,"limite":"Fonte non consultata nel ciclo"}
+        if selected_status and selected_status[0]==id:
+            used+=1
+            payload,error=_fetch(fetch,url,json_data=(id=="STABLECOIN_LLAMA"))
+            data=(None if error else _etf_farside(payload,id,now)
+                  if id.startswith("ETF_") else _stablecoin_llama(payload,now))
+            if data is None:
+                point.update(stato="FONTE_NON_DISPONIBILE",
+                             motivo=error or "FORMATO_NON_VERIFICATO")
+            else:
+                point.update(stato="OSSERVATO",dati=data,
+                             acquisito_utc=_iso(now),limite=data["limite"])
+                if (isinstance(before,dict) and isinstance(before.get("dati"),dict)
+                        and before.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO")
+                        and _time(before.get("acquisito_utc"))
+                        and before["dati"]!=data):
+                    point["confronto_precedente"]={
+                        "acquisito_utc":before["acquisito_utc"],
+                        "valore":before["dati"].get("valore"),
+                        "periodo":before["dati"].get("periodo")}
+                    if id.startswith("ETF_"):
+                        point["delta_osservazioni"]=round(
+                            data["valore"]-before["dati"]["valore"],4)
+                    else:
+                        old_map={x["chain"]:x["supply_stablecoin_usd"]
+                                 for x in before["dati"].get("top_chain",[])}
+                        point["confronto_catene"]=[{
+                            "chain":x["chain"],"delta_usd":round(
+                                x["supply_stablecoin_usd"]-old_map[x["chain"]],2)}
+                            for x in data["top_chain"] if x["chain"] in old_map]
+        elif isinstance(before,dict) and isinstance(before.get("dati"),dict):
+            point.update(before,stato="STORICO_NON_AGGIORNATO")
+        elif not network_allowed:
+            point["stato"]=paused
+        financial.append(point)
     history,changes=_supply_samples(roster,old,now)
     retained_events=sorted(event_history.values(),key=lambda r:(r["acquisito_utc"],r["progetto_id"],r["documento_id"]),reverse=True)[:MAX_SAMPLES]
     kraken_status=_spot_status(now,items,asset_pairs,old)
@@ -1484,7 +1528,9 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
             "politiche_emissioni":emissions,"prossima_emissione":emission_next,
             "indicatori_macro":macro,"calendari":schedules,
             "comunicazioni_kraken":market_notices,
-            "prossimo_kraken_status":KRAKEN_STATUS_FEEDS[(kix+(1 if selected_status else 0))%len(KRAKEN_STATUS_FEEDS)][0],
+            "prossimo_kraken_status":cycle[(kix+(1 if selected_status else 0))%len(cycle)][0],
+            "prossima_fonte_esterna":cycle[(kix+(1 if selected_status else 0))%len(cycle)][0],
+            "flussi_finanziari":financial,
             "revisioni_piani":changes_calendar,
             "storico_supply":history,"variazioni_supply":changes,
             "storico_eventi":retained_events,
@@ -1569,6 +1615,17 @@ def decision_review(evidence, row, group):
                     e.get("limite"),{"titolo":e.get("titolo"),
                                   "stato":e.get("stato_pubblicato"),
                                   "tipo":e.get("tipo")})
+    for f in evidence.get("flussi_finanziari") or []:
+        if not isinstance(f,dict) or f.get("stato_alla_lettura")!="OSSERVATO":
+            continue
+        if ((f.get("id")=="ETF_BTC_FARSIDE" and pid=="bitcoin") or
+                (f.get("id")=="ETF_ETH_FARSIDE" and pid=="ethereum")):
+            d=f["dati"]
+            add("FLUSSI_ETF_SPOT_AGGREGATI",
+                "L'aggregatore Farside riporta flussi ETF spot netti giornalieri, non sottoscrizioni di investitori identificati",
+                f.get("fonte"),d.get("periodo"),f.get("acquisito_utc"),
+                "DATO_AGGREGATO_NON_EMITTENTE",f.get("limite"),
+                {"netto_milioni_usd":d["valore"],"confronto":f.get("confronto_precedente")})
     schedule=by_project("calendari")
     for revision in evidence.get("revisioni_piani",[]):
         if isinstance(revision,dict) and revision.get("progetto_id")==pid:
@@ -1685,7 +1742,11 @@ def decision_review(evidence, row, group):
                      "categorie":point.get("classificazioni")})
     if not facts:
         return base
-    priority=(("ANNUNCIO_UFFICIALE_KRAKEN",
+    priority=(("FLUSSI_ETF_SPOT_AGGREGATI",
+               "Flussi ETF spot possono modificare la partecipazione aggregata al sottostante",
+               "Fonte aggregata, non emittente né identificazione di acquisti individuali",
+               "Confrontare nuovi flussi, eventuali revisioni e dati del sottostante"),
+              ("ANNUNCIO_UFFICIALE_KRAKEN",
                "Una comunicazione Kraken potrebbe modificare la disponibilità operativa dell'asset",
                "Una notifica non prova limitazione sul singolo account o effetto sul prezzo",
                "Rileggere la notifica e verificare l'attuale stato della coppia"),
@@ -2032,6 +2093,8 @@ def at_read(raw, items, now):
                           and row.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO")
                           else "SCADUTO")
         indicators.append(new)
+    financial_read=(_financial_read(raw["flussi_finanziari"],now)
+                    if "flussi_finanziari" in raw else None)
     market_read=(_kraken_market_read(raw["comunicazioni_kraken"],items,now)
                  if "comunicazioni_kraken" in raw else None)
     pairs_read=(_spot_status_read(raw["stati_coppie_kraken"],items,now)
@@ -2045,6 +2108,7 @@ def at_read(raw, items, now):
             segnalazioni_repo=read_issues if source_issues is not None else None,
             indicatori_macro=indicators,calendari=read_schedules,
             comunicazioni_kraken=market_read,
+            flussi_finanziari=financial_read,
             variazioni_supply=raw.get("variazioni_supply",[])[:30],
             copertura={"progetti":len(projects),"governance_osservati":sum(p["stato"]=="OSSERVATO" for p in read_projects),
                         "indicatori_macro_osservati":sum(m["stato"]=="OSSERVATO" for m in indicators),

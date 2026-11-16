@@ -589,6 +589,35 @@ def regime_participation(base, derivatives, primary, now, previous=None):
                 "famiglia":("FUTURES_CFTC_" if item["id"] in ("CFTC_BTC_TFF","CFTC_ETH_TFF") else "MACRO_ECB_") + item["id"],"fonte":item.get("fonte"),
                 "periodo":item.get("periodo"),"valore":item["valore"],"unita":item.get("unita"),
                 "limite":"Dato macro osservato; segno dell'impatto sul prezzo non dedotto"})
+    # Separate ETF cash-flow aggregates and per-chain stablecoin supply from
+    # the CFTC futures, ECB macro and spot data. Never count twice as independent
+    # evidence or turn a flow measurement into an automatic trade.
+    financial = primary.get("flussi_finanziari") if isinstance(primary,dict) else None
+    if isinstance(financial,list):
+        for rec in financial:
+            if not isinstance(rec,dict) or rec.get("stato")!="OSSERVATO":
+                continue
+            kind=rec.get("id")
+            data=rec.get("dati") or {}
+            if kind in ("ETF_BTC_FARSIDE","ETF_ETH_FARSIDE") and type(data.get("valore")) in (int,float):
+                out["famiglie_osservate"].append({
+                    "famiglia":"ETF_SPOT_AGGREGATO",
+                    "asset":"BTC" if kind=="ETF_BTC_FARSIDE" else "ETH",
+                    "fonte":rec["fonte"],"periodo":data.get("periodo"),
+                    "flusso_netto_milioni_usd":data["valore"],
+                    "limite":"Stessa famiglia di dati aggregati ETF: non acquisti istituzionali individuali"})
+                if kind=="ETF_BTC_FARSIDE" and out.get("stato") in ("RIALZISTA","RIBASSISTA"):
+                    contradictory=(data["valore"]<0 and out["stato"]=="RIALZISTA"
+                                   or data["valore"]>0 and out["stato"]=="RIBASSISTA")
+                    if contradictory:
+                        out["contrari"].append("Flusso netto ETF BTC aggregato divergente dal regime tecnico BTC")
+                        out["qualita"]="PARZIALE_CON_CONTRADDIZIONI"
+            if kind=="STABLECOIN_LLAMA" and isinstance(data.get("top_chain"),list):
+                out["famiglie_osservate"].append({
+                    "famiglia":"DISTRIBUZIONE_STABLECOIN_PER_CHAIN",
+                    "fonte":rec["fonte"],"acquisito_utc":rec.get("acquisito_utc"),
+                    "top_chain":data["top_chain"],
+                    "limite":"Supply per chain aggregata; non nuova liquidità acquistatrice o flusso ETF"})
     return out
 
 
