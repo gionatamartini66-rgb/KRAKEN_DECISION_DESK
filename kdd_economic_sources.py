@@ -1385,8 +1385,29 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
             if result:
                 row.update(result)
             else:
-                row.update(stato="FONTE_NON_DISPONIBILE",fonte=url,
-                           motivo=error or "SCHEDULE_NON_ATTESTATO")
+                # A failed recheck does not erase the last attributable plan.
+                # Retain it as historical, never as a newly confirmed unlock.
+                former=previous_schedules.get(project)
+                historical_states={
+                    "DOCUMENTO_PRIMARIO_CON_SCHEDULE":"STORICO_DA_RICONFERMARE",
+                    "STORICO_DA_RICONFERMARE":"STORICO_DA_RICONFERMARE",
+                    "PROIEZIONE_PRIMARIA_NON_UNLOCK":"PROIEZIONE_STORICA",
+                    "PROIEZIONE_STORICA":"PROIEZIONE_STORICA",
+                    "DOCUMENTO_PRIMARIO_REGOLA_VESTING":"REGOLA_VESTING_STORICA",
+                    "REGOLA_VESTING_STORICA":"REGOLA_VESTING_STORICA",
+                    "DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI":"MASSIMI_DATATI_STORICI",
+                    "MASSIMI_DATATI_STORICI":"MASSIMI_DATATI_STORICI"}
+                historical=historical_states.get(former.get("stato")) if isinstance(former,dict) else None
+                observed=_time(former.get("acquisito_utc")) if isinstance(former,dict) else None
+                if (historical and former.get("fonte")==url and observed
+                        and dt.timedelta(0)<=now-observed<=dt.timedelta(days=30)):
+                    row.update(former,stato=historical,
+                               ultimo_tentativo={"stato":"FONTE_NON_DISPONIBILE",
+                                   "acquisito_utc":_iso(now),
+                                   "motivo":error or "SCHEDULE_NON_ATTESTATO"})
+                else:
+                    row.update(stato="FONTE_NON_DISPONIBILE",fonte=url,
+                               motivo=error or "SCHEDULE_NON_ATTESTATO")
         elif descriptor:
             history=previous_schedules.get(project)
             if history and history.get("stato") in (
@@ -1455,8 +1476,18 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
             payload,error=_fetch(fetch,url)
             events=_kraken_market_announcements(payload,feed,roster,now) if not error else None
             if events is None:
-                row.update(stato="FONTE_NON_DISPONIBILE",
-                           motivo=error or "FONTE_NON_CONFORME")
+                old_time=_time(former.get("acquisito_utc")) if isinstance(former,dict) else None
+                if (old_time and former.get("fonte")==url
+                        and former.get("stato") in (
+                            "OSSERVATO","NESSUN_EVENTO_NEL_CAMPIONE","STORICO_NON_AGGIORNATO")
+                        and dt.timedelta(0)<=now-old_time<=dt.timedelta(days=30)):
+                    row.update(former,stato="STORICO_NON_AGGIORNATO",
+                               ultimo_tentativo={"stato":"FONTE_NON_DISPONIBILE",
+                                   "acquisito_utc":_iso(now),
+                                   "motivo":error or "FONTE_NON_CONFORME"})
+                else:
+                    row.update(stato="FONTE_NON_DISPONIBILE",
+                               motivo=error or "FONTE_NON_CONFORME")
             else:
                 row.update(stato="OSSERVATO" if events else "NESSUN_EVENTO_NEL_CAMPIONE",
                            eventi=events,acquisito_utc=_iso(now),
@@ -1491,8 +1522,20 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
             data=(None if error else _etf_farside(payload,id,now)
                   if id.startswith("ETF_") else _stablecoin_llama(payload,now))
             if data is None:
-                point.update(stato="FONTE_NON_DISPONIBILE",
-                             motivo=error or "FORMATO_NON_VERIFICATO")
+                # Distinguish source outage from an absent observation: retain
+                # the dated prior sample, without refreshing its evidential age.
+                old_time=_time(before.get("acquisito_utc")) if isinstance(before,dict) else None
+                if (old_time and before.get("fonte")==url and before.get("categoria")==kind
+                        and isinstance(before.get("dati"),dict)
+                        and before.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO")
+                        and dt.timedelta(0)<=now-old_time<=dt.timedelta(days=30)):
+                    point.update(before,stato="STORICO_NON_AGGIORNATO",
+                                 ultimo_tentativo={"stato":"FONTE_NON_DISPONIBILE",
+                                     "acquisito_utc":_iso(now),
+                                     "motivo":error or "FORMATO_NON_VERIFICATO"})
+                else:
+                    point.update(stato="FONTE_NON_DISPONIBILE",
+                                 motivo=error or "FORMATO_NON_VERIFICATO")
             else:
                 point.update(stato="OSSERVATO",dati=data,
                              acquisito_utc=_iso(now),limite=data["limite"])
