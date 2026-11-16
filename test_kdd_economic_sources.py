@@ -1212,6 +1212,14 @@ class PrimaryFollowupTests(unittest.TestCase):
                         ["scadenze_testuali"])
         self.assertTrue(any(x["tipo"]=="MANUTENZIONE_UFFICIALE"
                             for x in events if x["id"]==ordinary["id"]))
+        variant=dict(many,id="dddddddddddd",
+                     name="BTC, SUI Delisting",
+                     incident_updates=[{"body":
+                         "Kraken will begin a scheduled delisting cycle for "
+                         "the following assets: BTC, SUI. Key dates: "
+                         "December 15, 2026: Withdrawals will be disabled."}])
+        self.assertEqual({x["token"] for x in parse([variant])},
+                         {"BTC","SUI"})
         self.assertEqual(parse([one],{"sui":{"token":"SUI"},
                                       "fake-sui":{"token":"SUI"}}),[])
         ended=parse([dict(one,status="completed",updated_at=now.isoformat(),
