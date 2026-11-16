@@ -449,5 +449,89 @@ class UpdateTests(unittest.TestCase):
                 kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=True)
 
 
+    def test_rt67_bounded_core_modules_keep_every_test_and_same_timeout(self):
+        """Former 381-test monolith could consume the 150s cap cumulatively."""
+        import subprocess
+        expected=('test_decision_desk','test_kdd_candles','test_kdd_economics',
+                  'test_kdd_economic_sources','test_kdd_futures_flow',
+                  'test_kdd_network_defi')
+        observed=[]
+        def bounded(args, *, cwd, timeout=120):
+            selected=[part for part in args if part in expected]
+            if selected:
+                observed.append((selected,timeout))
+                if len(selected)>1:
+                    raise subprocess.TimeoutExpired(args,timeout)
+            return subprocess.CompletedProcess(args,0,'','OK')
+        with patch.object(kdd,'capability_preflight'), \
+             patch.object(kdd,'command',side_effect=bounded), \
+             contextlib.redirect_stdout(io.StringIO()):
+            kdd.isolated_test(self.root)
+        self.assertEqual([x[0] for x in observed],[[x] for x in expected])
+        self.assertEqual([x[1] for x in observed],[150]*len(expected))
+
+    def test_rt67_core_timeout_identifies_module_not_sensitive_output(self):
+        import subprocess
+        calls=[]
+        def forced_timeout(args, *, cwd, timeout=120):
+            calls.append(args)
+            if 'test_decision_desk' in args:
+                raise subprocess.TimeoutExpired(
+                    args,timeout,output=b'SECRET_PRIVATE_FIXTURE',
+                    stderr=b'PRIVATE_LOCAL_REPORT')
+            return subprocess.CompletedProcess(args,0,'','OK')
+        capture=io.StringIO()
+        with patch.object(kdd,'capability_preflight'), \
+             patch.object(kdd,'command',side_effect=forced_timeout), \
+             contextlib.redirect_stdout(capture):
+            with self.assertRaisesRegex(kdd.SafetyError,
+                                       'test_decision_desk.*150') as failure:
+                kdd.isolated_test(self.root)
+        combined=str(failure.exception)+capture.getvalue()
+        self.assertNotIn('SECRET_PRIVATE_FIXTURE',combined)
+        self.assertNotIn('PRIVATE_LOCAL_REPORT',combined)
+
+    def test_rt67_postflight_rollback_exposes_failed_control_not_private_trace(self):
+        home=Path(self.tmp.name)/'postflight-home'
+        home.mkdir()
+        n=[0]
+        def failing_postflight(stage):
+            n[0]+=1
+            if n[0]==2:
+                raise kdd.SafetyError('suite test_decision_desk: timeout dopo 150 s')
+        diagnostic=io.StringIO()
+        with patch.object(kdd.Path,'home',return_value=home), \
+             patch.object(kdd,'isolated_test',side_effect=failing_postflight), \
+             patch('builtins.input',return_value='APPLICA'), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(diagnostic):
+            with self.assertRaisesRegex(kdd.SafetyError,
+                                       'postflight.*test_decision_desk.*150') as failure:
+                kdd.apply(self.root,self.live,commit_sha=self.sha,dry_run=False)
+        self.assertEqual(n[0],2)
+        self.assertEqual((self.live/'serve.py').read_text(),'# file serve.py\\n')
+        self.assertEqual((self.live/'README.md').read_text(),self.old_readme)
+        self.assertIn('postflight',diagnostic.getvalue().lower())
+
+    def test_rt67_unit_failure_reports_only_safe_test_identifier(self):
+        import subprocess
+        output=io.StringIO()
+        def failed(args, *, cwd, timeout=120):
+            if 'test_decision_desk' in args:
+                return subprocess.CompletedProcess(
+                    args,1,'','FAIL: test_synthetic_error (test_decision_desk.DeskTests)\\n'
+                    'USER_PRIVATE_REPORT: SECRET_VALUE\\nRan 1 test\\nFAILED (failures=1)')
+            return subprocess.CompletedProcess(args,0,'','OK')
+        with patch.object(kdd,'capability_preflight'), \
+             patch.object(kdd,'command',side_effect=failed), \
+             contextlib.redirect_stdout(output):
+            with self.assertRaisesRegex(kdd.SafetyError,
+                                       'test_decision_desk.*test_synthetic_error') as failure:
+                kdd.isolated_test(self.root)
+        combined=output.getvalue()+str(failure.exception)
+        self.assertNotIn('SECRET_VALUE',combined)
+        self.assertNotIn('USER_PRIVATE_REPORT',combined)
+
+
 if __name__ == '__main__':
     unittest.main()
