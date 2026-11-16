@@ -605,6 +605,11 @@ def regime_participation(base, derivatives, primary, now, previous=None):
             if not acquired or not dt.timedelta(0)<=now-acquired<=allowed_age:
                 continue
             data=rec.get("dati") or {}
+            observed_period=stamp(str(data.get("periodo"))+"T00:00:00+00:00")
+            if kind.startswith("ETF_") and (not observed_period
+                    or now-observed_period>dt.timedelta(days=8)
+                    or observed_period>now+dt.timedelta(days=1)):
+                continue
             if kind in ("ETF_BTC_FARSIDE","ETF_ETH_FARSIDE") and type(data.get("valore")) in (int,float):
                 out["famiglie_osservate"].append({
                     "famiglia":"ETF_SPOT_AGGREGATO",

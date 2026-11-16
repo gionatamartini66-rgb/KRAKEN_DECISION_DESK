@@ -466,7 +466,8 @@ def _kraken_market_announcements(payload, feed, roster, now):
                 or not isinstance(title,str) or len(title)>160
                 or state not in ("investigating","identified","monitoring","resolved",
                                  "postmortem","scheduled","in_progress","verifying","completed")
-                or when is None or when>now+dt.timedelta(minutes=2)):
+                or when is None or when>now+dt.timedelta(minutes=2)
+                or now-when>dt.timedelta(days=30)):
             continue
         components=row.get("components") if isinstance(row.get("components"),list) else []
         names=[title]+[v["name"] for v in components[:40]
@@ -1604,14 +1605,19 @@ def decision_review(evidence, row, group):
                       "acquisito_utc":acquired,"stato_prova":proof,
                       "dettaglio":details,"limite":limit})
     for notice in evidence.get("comunicazioni_kraken") or []:
-        if not isinstance(notice,dict) or notice.get("stato_alla_lettura")!="OSSERVATO":
+        if (not isinstance(notice,dict) or notice.get("stato_alla_lettura")
+                not in ("OSSERVATO","STORICO_NON_AGGIORNATO")):
             continue
+        historical=notice["stato_alla_lettura"]!="OSSERVATO"
         for e in notice.get("eventi",[]):
             if e.get("token")==token:
                 add("ANNUNCIO_UFFICIALE_KRAKEN",
-                    "Kraken ha pubblicato un evento di servizio che nomina esattamente questo asset",
+                    ("Ultimo annuncio Kraken acquisito in precedenza, non riconfermato nel ciclo"
+                     if historical else
+                     "Kraken ha pubblicato un evento di servizio che nomina esattamente questo asset"),
                     e.get("fonte"),e.get("aggiornato_fonte_utc"),
-                    notice.get("acquisito_utc"),"COMUNICAZIONE_UFFICIALE",
+                    notice.get("acquisito_utc"),
+                    ("STORICO_NON_RICONFERMATO" if historical else "COMUNICAZIONE_UFFICIALE"),
                     e.get("limite"),{"titolo":e.get("titolo"),
                                   "stato":e.get("stato_pubblicato"),
                                   "tipo":e.get("tipo")})
@@ -1644,27 +1650,35 @@ def decision_review(evidence, row, group):
                 schedule.get("fonte"),event.get("evento_utc"),schedule.get("acquisito_utc"),
                 "PROGRAMMA_PRIMARIO",schedule.get("limite"),
                 {"allocazione":event.get("allocazione"),"quantita_token":event.get("quantita_token")})
-    if schedule.get("stato")=="DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI":
+    if schedule.get("stato") in ("DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI",
+                                  "MASSIMI_DATATI_STORICI"):
+        is_old=schedule["stato"]=="MASSIMI_DATATI_STORICI"
         for event in schedule.get("eventi",[])[:4]:
             add("UNLOCK_MASSIMO_DATATO_PRIMARIO",
                 "La documentazione ufficiale attesta una data e una quantità massima sbloccabile, non una vendita né una quantità effettiva",
                 schedule.get("fonte"),event["data_prevista"],schedule.get("acquisito_utc"),
-                "MASSIMO_PRIMARIO_PROGRAMMATO",schedule.get("limite"),
+                ("MASSIMO_PRIMARIO_STORICO" if is_old else "MASSIMO_PRIMARIO_PROGRAMMATO"),
+                schedule.get("limite"),
                 {"quantita_massima_token":event["quantita_massima_token"],
                  "allocazione":event["allocazione"],"ora_evento":event["ora_evento"]})
-    if schedule.get("stato")=="DOCUMENTO_PRIMARIO_REGOLA_VESTING":
+    if schedule.get("stato") in ("DOCUMENTO_PRIMARIO_REGOLA_VESTING",
+                                  "REGOLA_VESTING_STORICA"):
+        is_old=schedule["stato"]=="REGOLA_VESTING_STORICA"
         add("REGOLA_VESTING_MENSILE_PRIMARIA",
             "La Foundation documenta regole mensili e lineari di vesting, senza quantità o giorni esatti per i futuri unlock",
             schedule.get("fonte"),None,schedule.get("acquisito_utc"),
-            "REGOLA_PRIMARIA_NON_EVENTO_ESEGUITO",schedule.get("limite"),
+            ("REGOLA_STORICA_NON_RICONFERMATA" if is_old else
+             "REGOLA_PRIMARIA_NON_EVENTO_ESEGUITO"),schedule.get("limite"),
             {"periodi_mensili_derivati":schedule.get("periodi_mensili_derivati"),
              "regole":schedule.get("regole")})
     monthly=by_project("calendari")
-    if monthly.get("stato")=="PROIEZIONE_PRIMARIA_NON_UNLOCK":
+    if monthly.get("stato") in ("PROIEZIONE_PRIMARIA_NON_UNLOCK","PROIEZIONE_STORICA"):
+        is_old=monthly["stato"]=="PROIEZIONE_STORICA"
         add("PROIEZIONE_CIRCOLAZIONE",
             "La fonte ufficiale pubblica stime mensili di token circolanti, non singoli unlock",
             monthly.get("fonte"),monthly.get("mese_circolazione"),
-            monthly.get("acquisito_utc"),"PROIEZIONE_NON_REALIZZAZIONE",
+            monthly.get("acquisito_utc"),
+            ("PROIEZIONE_STORICA_NON_RICONFERMATA" if is_old else "PROIEZIONE_NON_REALIZZAZIONE"),
             monthly.get("limite"),
             {"circolante_mese_token":monthly.get("circolante_mese_token"),
              "mesi_futuri":len(monthly.get("stime_mensili",[]))})
