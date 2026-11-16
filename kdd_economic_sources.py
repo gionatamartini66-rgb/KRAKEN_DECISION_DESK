@@ -607,7 +607,7 @@ def _kraken_market_read(raw, items, now):
                     raise ValueError("Kraken official notice attributed to wrong asset")
                 copy=dict(event)
                 if event.get("tipo")=="DELISTING_COMUNICATO":
-                    if event.get("realizzazione")!="NON_ATTESTATA":
+                    if event.get("realizzazione","NON_ATTESTATA")!="NON_ATTESTATA":
                         raise ValueError("Kraken delisting execution not established")
                     if (event.get("orizzonte_statuspage_utc") is not None
                             and _kraken_notice_horizon(event) is None):
@@ -1734,17 +1734,36 @@ def decision_review(evidence, row, group):
             continue
         historical=notice["stato_alla_lettura"]!="OSSERVATO"
         for e in notice.get("eventi",[]):
-            if e.get("token")==token:
-                add("ANNUNCIO_UFFICIALE_KRAKEN",
-                    ("Ultimo annuncio Kraken acquisito in precedenza, non riconfermato nel ciclo"
-                     if historical else
-                     "Kraken ha pubblicato un evento di servizio che nomina esattamente questo asset"),
-                    e.get("fonte"),e.get("aggiornato_fonte_utc"),
-                    notice.get("acquisito_utc"),
-                    ("STORICO_NON_RICONFERMATO" if historical else "COMUNICAZIONE_UFFICIALE"),
-                    e.get("limite"),{"titolo":e.get("titolo"),
-                                  "stato":e.get("stato_pubblicato"),
-                                  "tipo":e.get("tipo")})
+            if e.get("token")!=token: continue
+            temporal=e.get("rilevanza_temporale_alla_lettura",
+                           _kraken_notice_temporal(e,_time(evidence.get("letto_utc")) or
+                                                   _time(notice.get("acquisito_utc"))))
+            completed=temporal=="CONCLUSO"
+            future=temporal=="FUTURO_PROGRAMMATO"
+            wording=("La Statuspage ha chiuso l'annuncio; non prova l'effettiva esecuzione sul conto"
+                     if completed else
+                     "Un delisting e programmato secondo il calendario pubblicato; esecuzione non attestata"
+                     if e.get("tipo")=="DELISTING_COMUNICATO" and future else
+                     "Il calendario del delisting e scaduto senza prova dell'esecuzione effettiva"
+                     if e.get("tipo")=="DELISTING_COMUNICATO" and
+                        temporal=="SCADENZA_SUPERATA_ESECUZIONE_NON_ATTESTATA" else
+                     "Kraken ha pubblicato un avviso senza scadenza operativa verificabile"
+                     if e.get("tipo")=="DELISTING_COMUNICATO" else
+                     "Kraken ha pubblicato un evento di servizio attribuito a questo asset")
+            add("ANNUNCIO_UFFICIALE_KRAKEN",
+                ("Ultimo annuncio storico non riconfermato: "+wording
+                 if historical else wording),
+                e.get("fonte"),e.get("aggiornato_fonte_utc"),
+                notice.get("acquisito_utc"),
+                ("STORICO_NON_RICONFERMATO" if historical else
+                 "COMUNICAZIONE_CONCLUSA" if completed else "COMUNICAZIONE_UFFICIALE"),
+                e.get("limite"),{"titolo":e.get("titolo"),
+                               "stato":e.get("stato_pubblicato"),
+                               "tipo":e.get("tipo"),
+                               "rilevanza_temporale":temporal,
+                               "orizzonte_statuspage_utc":e.get("orizzonte_statuspage_utc"),
+                               "creato_fonte_utc":e.get("creato_fonte_utc"),
+                               "realizzazione":e.get("realizzazione","NON_ATTESTATA")})
     for f in evidence.get("flussi_finanziari") or []:
         if (not isinstance(f,dict) or f.get("stato_alla_lettura") not in (
                 "OSSERVATO","STORICO_NON_AGGIORNATO")):
@@ -1952,11 +1971,37 @@ def decision_review(evidence, row, group):
                "Un merge documentale non prova adozione sulla rete né effetto economico",
                "Accertare eventuale approvazione, attivazione e dati successivi"))
     present={f["tipo"] for f in facts}
-    selected=next(((a,b,c) for kind,a,b,c in priority if kind in present),None)
-    # A plain 'online' pair is weaker than a published security/supply fact.
     pair=next((f for f in facts if f["tipo"]=="STATO_COPPIA_KRAKEN"),None)
-    if pair and pair["dettaglio"]["status"]=="online":
-        selected=next(((a,b,c) for kind,a,b,c in priority[1:] if kind in present),selected)
+    pair_status=(pair.get("dettaglio") or {}).get("status") if pair else None
+    pair_transition=(pair.get("dettaglio") or {}).get("cambiamento") if pair else None
+    plain_online=pair_status=="online" and not pair_transition
+    active_notice=any(f["tipo"]=="ANNUNCIO_UFFICIALE_KRAKEN"
+                      and (f.get("dettaglio") or {}).get("rilevanza_temporale")
+                      not in ("CONCLUSO","SCADENZA_SUPERATA_ESECUZIONE_NON_ATTESTATA")
+                      for f in facts)
+    # Exclude a routine online pair or closed notice from the principal
+    # economic hypothesis. Their observations remain in facts and alternatives.
+    eligible=present.copy()
+    if plain_online: eligible.discard("STATO_COPPIA_KRAKEN")
+    if not active_notice: eligible.discard("ANNUNCIO_UFFICIALE_KRAKEN")
+    selected=next(((a,b,c) for kind,a,b,c in priority if kind in eligible),None)
+    if pair and pair_status!="online":
+        selected=("Una restrizione della coppia Kraken e osservata e puo condizionare "
+                  "l'operativita prevista",
+                  "Lo stato della coppia non prova un blocco del conto o effetto sul prezzo",
+                  "Rileggere AssetPairs e verificare le condizioni effettive del conto")
+    elif pair_transition and pair_status=="online":
+        selected=("La transizione osservata della coppia verso online puo modificare "
+                  "la disponibilita operativa",
+                  "Il ritorno allo status online non prova completa accessibilita sul conto",
+                  "Confrontare il nuovo stato della coppia con l'account e la cronologia")
+    if selected is None:
+        selected=("La coppia risulta online nel campione; non emergono altre prove "
+                  "primarie attuali" if plain_online else
+                  "L'annuncio storico non prova restrizioni future ancora valide",
+                  "Lo status pubblico o la conclusione dell'avviso non prova l'accessibilita "
+                  "del singolo conto",
+                  "Ricontrollare lo stato Kraken e acquisire prove economiche pertinenti")
     # Do not let the first chronological row in a family conceal important
     # coexisting advisories, issues or governance proposals. Record missing
     # cardinality so a capped summary explicitly directs GPT to the source.
@@ -1982,10 +2027,20 @@ def decision_review(evidence, row, group):
         in_full=sum(f["tipo"]==kind for f in facts)
         if total>in_full:
             hidden[kind]=hidden.get(kind,0)+total-in_full
-    other=[{"tipo":kind,"ipotesi_non_attestata":hyp,
-            "controipotesi":counter,"condizione_di_riesame":recheck}
-           for kind,hyp,counter,recheck in priority
-           if kind in present][:8]
+    other=[]
+    for kind,hyp,counter,recheck in priority:
+        if kind not in present:continue
+        if kind=="STATO_COPPIA_KRAKEN" and plain_online:
+            hyp="Lo status online e un'osservazione ordinaria della coppia"
+            counter="Online non prova accessibilita del conto o direzione del prezzo"
+            recheck="Rileggere AssetPairs alla prossima valutazione"
+        if kind=="ANNUNCIO_UFFICIALE_KRAKEN" and not active_notice:
+            hyp="Un annuncio storico o concluso rimane documentato"
+            counter="L'annuncio non dimostra una restrizione futura ancora valida"
+            recheck="Rileggere le scadenze originarie e lo stato Kraken"
+        other.append({"tipo":kind,"ipotesi_non_attestata":hyp,
+                      "controipotesi":counter,"condizione_di_riesame":recheck})
+    other=other[:8]
     condition=(selected[2]+("; RIVEDERE le altre evidenze nel monitor originale: "
                +str(hidden) if hidden else ""))
     return dict(base,stato="COPERTURA_PRIMARIA_PARZIALE",
