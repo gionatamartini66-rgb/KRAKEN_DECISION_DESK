@@ -521,8 +521,8 @@ def _kraken_market_announcements(payload, feed, roster, now):
                 for line in body.splitlines():
                     line=line.strip(" -\t")
                     if (len(line)<=200 and
-                            re.search(r"\\b(?:withdrawals?|deposits?|trading|liquidat)\\b",line,re.I)
-                            and re.search(r"\\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\s+\\d{1,2}\\b",line,re.I)
+                            re.search(r"\b(?:withdrawals?|deposits?|trading|liquidat)\b",line,re.I)
+                            and re.search(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}\b",line,re.I)
                             and line not in deadline_text):
                         deadline_text.append(line)
                         if len(deadline_text)>=5:break
@@ -1602,7 +1602,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
                             and (old_event.get("id"),old_event.get("token")) not in seen
                             and len(events)<20):
                         historic=dict(old_event,conferma_ultimo_refresh="NON_RICONFERMATO",
-                                      acquisito_originale_utc=(former or {}).get("acquisito_utc"))
+                                      acquisito_originale_utc=(old_event.get("acquisito_originale_utc") or (former or {}).get("acquisito_utc")))
                         events.append(historic)
                 row.update(stato="OSSERVATO" if events else "NESSUN_EVENTO_NEL_CAMPIONE",
                            eventi=events,acquisito_utc=_iso(now),
