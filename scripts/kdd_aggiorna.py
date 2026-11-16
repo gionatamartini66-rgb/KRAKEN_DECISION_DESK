@@ -75,6 +75,9 @@ def command(args: list[str], *, cwd: Path, timeout: int = 120) -> subprocess.Com
 
 
 CORE_PREFLIGHT_TIMEOUT = 150
+# Direct Samsung preflight: 150.1s STOP; isolated PASS in 146.3s.
+# Headroom is specific to this module; other preflight tests stay at 150s.
+DECISION_DESK_PREFLIGHT_TIMEOUT = 210
 POSTFLIGHT_MAX_TIMEOUT = 300
 
 
@@ -375,8 +378,12 @@ def isolated_test(staging: Path, *, phase: str = 'preflight',
     )
     measurements: dict[str, float] = {}
     for module in core_modules:
-        limit = (CORE_PREFLIGHT_TIMEOUT if phase == 'preflight'
-                 else postflight_budget(reference_times.get(module)))
+        if phase == 'preflight':
+            limit = (DECISION_DESK_PREFLIGHT_TIMEOUT
+                     if module == 'test_decision_desk'
+                     else CORE_PREFLIGHT_TIMEOUT)
+        else:
+            limit = postflight_budget(reference_times.get(module))
         measurements[module] = checked(
             [sys.executable, '-m', 'unittest', '-q', module],
             label='suite ' + module, timeout=limit)
