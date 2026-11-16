@@ -442,11 +442,38 @@ def _financial_read(raw,now):
         out.append(current)
     return out
 
-def _kraken_market_announcements(payload, feed, roster, now):
-    """Kraken-published incidents and scheduled changes: exact asset mentions.
+def _kraken_notice_horizon(event):
+    """The Statuspage scheduled_until is an attributable window, NOT execution.
 
-    A statuspage announcement documents the service statement, not proof
-    that a given account was blocked, a listing executed, or price affected.
+    Only bounded, internally chronological source metadata is accepted. It is
+    deliberately not renamed to a withdrawal cutoff or liquidation timestamp.
+    """
+    if not isinstance(event,dict): return None
+    created=_time(event.get("creato_fonte_utc"))
+    end=_time(event.get("orizzonte_statuspage_utc"))
+    if (not created or not end or end<created
+            or end-created>dt.timedelta(days=370)):
+        return None
+    return end
+
+
+def _kraken_notice_temporal(event,now):
+    """Recalculate a dated announcement when read, not only at collection."""
+    if event.get("stato_pubblicato") in ("resolved","completed","postmortem"):
+        return "CONCLUSO"
+    until=_kraken_notice_horizon(event)
+    if until:
+        return ("FUTURO_PROGRAMMATO" if until>=now
+                else "SCADENZA_SUPERATA_ESECUZIONE_NON_ATTESTATA")
+    return "DATA_OPERATIVA_NON_ATTESTATA"
+
+
+def _kraken_market_announcements(payload, feed, roster, now):
+    """Official Statuspage event: exact Kraken asset + attributable timeline.
+
+    Delisting lists and single-asset titles use explicitly delisting wording.
+    A ticker found elsewhere in explanatory prose is not a delisting target.
+    An announced window is not proof of an executed restriction or liquidation.
     """
     kind,url,key=feed
     if (not isinstance(payload,dict) or
@@ -454,57 +481,96 @@ def _kraken_market_announcements(payload, feed, roster, now):
             payload["page"].get("id")!="lfz25gyhcpjf" or
             not isinstance(payload.get(key),list) or len(payload[key])>100):
         return None
-    tokens={record["token"] for record in roster.values()
-            if isinstance(record.get("token"),str)
-            and re.fullmatch(r"[A-Z0-9]{2,20}",record["token"])}
+    ownership={}
+    for project,record in roster.items():
+        token=record.get("token") if isinstance(record,dict) else None
+        if isinstance(token,str) and re.fullmatch(r"[A-Z0-9]{2,20}",token):
+            ownership.setdefault(token,set()).add(project)
+    tokens={token for token,ids in ownership.items() if len(ids)==1}
     events=[]
     for row in payload[key][:50]:
-        if not isinstance(row,dict):continue
+        if not isinstance(row,dict): continue
         eid,title,state=row.get("id"),row.get("name"),row.get("status")
         when=_time(row.get("updated_at"))
+        created=_time(row.get("created_at"))
         if (not isinstance(eid,str) or not re.fullmatch(r"[a-z0-9]{12,24}",eid)
                 or not isinstance(title,str) or len(title)>160
                 or state not in ("investigating","identified","monitoring","resolved",
                                  "postmortem","scheduled","in_progress","verifying","completed")
-                or when is None or when>now+dt.timedelta(minutes=2)
-                or now-when>dt.timedelta(days=30)):
+                or when is None or when>now+dt.timedelta(minutes=2)):
+            continue
+        if created and (created>when or created>now+dt.timedelta(minutes=2)):
             continue
         components=row.get("components") if isinstance(row.get("components"),list) else []
         names=[title]+[v["name"] for v in components[:40]
-                      if isinstance(v,dict) and isinstance(v.get("name"),str)]
-        mentioned={x for name in names
-                   for x in re.findall(r"\(([A-Z0-9]{2,20})\)",name)
-                   if x in tokens}
-        # Multi-asset official delisting notices state a comma-separated
-        # list; never interpret an unrelated uppercase word as a token.
+                       if isinstance(v,dict) and isinstance(v.get("name"),str)]
+        mentioned={x for name in names for x in
+                   re.findall(r"\(([A-Z0-9]{2,20})\)",name) if x in tokens}
         delisted=set()
         list_text=""
-        if "delist" in title.lower():
-            updates=row.get("incident_updates") or []
-            for update in updates[:8]:
-                body=update.get("body","") if isinstance(update,dict) else ""
-                if not isinstance(body,str):continue
-                found=re.search(r"following assets are being delisted:\s*([A-Z0-9,\s]+?)(?:\.\s|Key dates:|\n)",body,re.I)
-                if found:
-                    list_text=found.group(1)[:800].strip()
-                    delisted=set(re.findall(r"\b[A-Z0-9]{2,20}\b",list_text)) & tokens
-                    break
+        delisting_title=bool(re.search(r"\bdelist(?:ing|ed|ings)?\b",title,re.I))
+        updates=row.get("incident_updates")
+        updates=updates[:8] if isinstance(updates,list) else []
+        for update in updates:
+            body=update.get("body") if isinstance(update,dict) else None
+            if not isinstance(body,str) or len(body)>10000:continue
+            # This is an asset list in a named official delisting notice, not a
+            # heuristic match for every uppercase word in a status message.
+            if delisting_title:
+                match=re.search(
+                    r"\bthe following assets are being delisted:\s*"
+                    r"([A-Z0-9,\s]+?)(?:\.(?:\s|$)|Key dates:|$)",
+                    body,re.I)
+                if match:
+                    candidate=match.group(1).strip()
+                    bits=[s.strip().upper() for s in re.split(
+                        r",|\band\b",candidate,flags=re.I) if s.strip()]
+                    if bits and all(re.fullmatch(r"[A-Z0-9]{1,20}",s) for s in bits):
+                        delisted.update(set(bits)&tokens)
+                        list_text=candidate[:800]
+            # Title identifies a single asset by name + ticker, and body
+            # confirms that this exact ticker is the subject of a delisting.
+            single=re.fullmatch(
+                r"[^()]{2,90}\(([A-Z0-9]{2,20})\)\s+Delisting",title,re.I)
+            if (single and single.group(1) in tokens
+                    and re.search(r"\bdelist(?:ing|ed)?\b",body,re.I)
+                    and re.search(r"\bfor\s+"+re.escape(single.group(1))+r"\b",body,re.I)):
+                delisted.add(single.group(1))
+        # Record only source-dated end of the published window. Statuspage can
+        # describe several different operational cutoffs inside that window.
+        raw_end=_time(row.get("scheduled_until"))
+        horizon=(raw_end if created and raw_end and created<=raw_end
+                 and raw_end-created<=dt.timedelta(days=370) else None)
+        eligible_old=(delisted and horizon and horizon>=now
+                      and state not in ("completed","resolved","postmortem"))
+        if now-when>dt.timedelta(days=30) and not eligible_old:
+            continue
         for token in sorted(mentioned|delisted):
-            exact=list_text if token in delisted else next(
-                (v for v in names if "("+token+")" in v),None)
+            exact=(list_text if token in delisted and list_text else
+                   title if token in delisted else next(
+                       (v for v in names if "("+token+")" in v),None))
             if not isinstance(exact,str):continue
-            events.append({"token":token,"id":eid,"tipo":(
-                "DELISTING_COMUNICATO" if token in delisted else
-                "MANUTENZIONE_UFFICIALE" if kind=="MANUTENZIONI" else
-                "INCIDENTE_UFFICIALE"),
-                "titolo":title,"stato_pubblicato":state,
-                "aggiornato_fonte_utc":_iso(when),
-                "fonte":"https://status.kraken.com/incidents/"+eid,
-                "riferimento_esatto":exact,
-                "limite":"Annuncio Kraken; nessuna verifica di esecuzione sul conto, delisting effettivo o causalità"})
-            if len(events)==20: break
-        if len(events)==20: break
+            kind_event=("DELISTING_COMUNICATO" if token in delisted else
+                        "MANUTENZIONE_UFFICIALE" if kind=="MANUTENZIONI" else
+                        "INCIDENTE_UFFICIALE")
+            event={"token":token,"id":eid,"tipo":kind_event,"titolo":title,
+                   "stato_pubblicato":state,
+                   "aggiornato_fonte_utc":_iso(when),
+                   "creato_fonte_utc":_iso(created) if created else None,
+                   "fonte":"https://status.kraken.com/incidents/"+eid,
+                   "riferimento_esatto":exact,
+                   "orizzonte_statuspage_utc":_iso(horizon) if kind_event=="DELISTING_COMUNICATO" and horizon else None,
+                   "realizzazione":"NON_ATTESTATA",
+                   "limite":("Avviso ufficiale di delisting: calendario Statuspage, non prova di "
+                             "blocco sul conto, esecuzione delle misure o liquidazione"
+                             if kind_event=="DELISTING_COMUNICATO" else
+                             "Annuncio Kraken; nessuna verifica di esecuzione sul conto, delisting effettivo o causalita")}
+            event["rilevanza_temporale"]=_kraken_notice_temporal(event,now)
+            events.append(event)
+            if len(events)==20:break
+        if len(events)==20:break
     return events
+
 
 
 def _kraken_market_read(raw, items, now):
