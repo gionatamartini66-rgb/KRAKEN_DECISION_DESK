@@ -20,7 +20,8 @@ def fetch(url):
             or url.startswith("https://data-api.ecb.europa.eu/service/data/")
             or url.startswith("https://raw.githubusercontent.com/")
             or url == primary.SUI_CIRCULATION
-            or url == primary.CFTC_BTC_TFF_URL):
+            or url == primary.CFTC_BTC_TFF_URL
+            or url in [f[1] for f in primary.KRAKEN_STATUS_FEEDS]):
         raise ValueError("URL outside verified public source allowlist")
     req = urllib.request.Request(url, headers={
         "User-Agent": "KDD-G2-public-source-smoke/1.0",
@@ -71,7 +72,8 @@ raw=None
 for cycle in range(1,len(primary.MACRO_SERIES)+1):
     moment=dt.datetime.now(dt.timezone.utc)
     before=len(seen)
-    raw=primary.collect(moment,roster,raw,counted,rpc_fetch=rpc_fetch,collect_project_issues=True)
+    raw=primary.collect(moment,roster,raw,counted,rpc_fetch=rpc_fetch,
+                        collect_project_issues=True,collect_kraken_status=True)
     checked=primary.at_read(raw,roster,moment)
     assert checked["schema"]==primary.SCHEMA
     assert checked["copertura"]["progetti"]==6
@@ -88,6 +90,8 @@ for cycle in range(1,len(primary.MACRO_SERIES)+1):
         print("macro",record["id"],"state",record["stato"],
               "period",record.get("periodo"),"value",record.get("valore"),
               "reason",record.get("motivo"),"url",record["fonte"])
+    print("kraken_announcements",[(x["id"],x["stato"],len(x["eventi"]))
+                                  for x in checked["comunicazioni_kraken"]])
     print("history_supply",len(raw["storico_supply"]),
           "history_events",len(raw["storico_eventi"]),
           "next_project",raw["prossimo_progetto"],

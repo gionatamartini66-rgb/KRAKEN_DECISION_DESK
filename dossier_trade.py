@@ -670,7 +670,8 @@ def economic_evidence(source, wallet, four, candidates, now, *,
         network_allowed=not rate_limited and _PRIMARY_REAL_REFRESH.get(),
         skipped_reason=("FUORI_REFRESH" if not _PRIMARY_REAL_REFRESH.get() else "RATE_LIMIT"),
         asset_pairs=asset_pairs,
-        rpc_fetch=onchain._http,collect_project_issues=True)
+        rpc_fetch=onchain._http,collect_project_issues=True,
+        collect_kraken_status=_PRIMARY_REAL_REFRESH.get())
     btc = next((r for r in four_rows if isinstance(r, dict) and r.get("token") == "BTC"), {})
     return {"schema": econ.VERSION, "acquisito_utc": now.isoformat(timespec="seconds"),
             "posizioni": items["posizioni"], "candidati": items["candidati"],

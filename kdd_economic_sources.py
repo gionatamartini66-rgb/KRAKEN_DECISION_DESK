@@ -28,6 +28,11 @@ KRAKEN_PAIR_STATES = frozenset((
     "online", "cancel_only", "post_only", "limit_only", "reduce_only",
     "maintenance"))
 MAX_EMISSION_CALLS = 1
+MAX_STATUS_CALLS = 1
+KRAKEN_STATUS_FEEDS = (
+    ("INCIDENTI","https://status.kraken.com/api/v2/incidents.json","incidents"),
+    ("MANUTENZIONI","https://status.kraken.com/api/v2/scheduled-maintenances.json","scheduled_maintenances"),
+)
 MAX_SAMPLES = 96
 ECON_SCHEDULE_SCHEMA = "kdd-official-token-schedule-v001"
 SUI_CIRCULATION = "https://sui-circulation.suiexplorer.com/api/sui_circulation"
@@ -320,6 +325,110 @@ def _series_url(series):
     if flow=="CFTC" and key in ("BTC_CME_133741","ETH_CME_146021"):
         return CFTC_BTC_TFF_URL
     return ECB + flow + "/" + key + "?format=csvdata&lastNObservations=2"
+
+
+
+def _kraken_market_announcements(payload, feed, roster, now):
+    """Kraken-published incidents and scheduled changes: exact asset mentions.
+
+    A statuspage announcement documents the service statement, not proof
+    that a given account was blocked, a listing executed, or price affected.
+    """
+    kind,url,key=feed
+    if (not isinstance(payload,dict) or
+            not isinstance(payload.get("page"),dict) or
+            payload["page"].get("id")!="lfz25gyhcpjf" or
+            not isinstance(payload.get(key),list) or len(payload[key])>100):
+        return None
+    tokens={record["token"] for record in roster.values()
+            if isinstance(record.get("token"),str)
+            and re.fullmatch(r"[A-Z0-9]{2,20}",record["token"])}
+    events=[]
+    for row in payload[key][:50]:
+        if not isinstance(row,dict):continue
+        eid,title,state=row.get("id"),row.get("name"),row.get("status")
+        when=_time(row.get("updated_at"))
+        if (not isinstance(eid,str) or not re.fullmatch(r"[a-z0-9]{12,24}",eid)
+                or not isinstance(title,str) or len(title)>160
+                or state not in ("investigating","identified","monitoring","resolved",
+                                 "postmortem","scheduled","in_progress","verifying","completed")
+                or when is None or when>now+dt.timedelta(minutes=2)):
+            continue
+        components=row.get("components") if isinstance(row.get("components"),list) else []
+        names=[title]+[v["name"] for v in components[:40]
+                      if isinstance(v,dict) and isinstance(v.get("name"),str)]
+        mentioned={x for name in names
+                   for x in re.findall(r"\(([A-Z0-9]{2,20})\)",name)
+                   if x in tokens}
+        # Multi-asset official delisting notices state a comma-separated
+        # list; never interpret an unrelated uppercase word as a token.
+        delisted=set()
+        list_text=""
+        if "delist" in title.lower():
+            updates=row.get("incident_updates") or []
+            for update in updates[:8]:
+                body=update.get("body","") if isinstance(update,dict) else ""
+                if not isinstance(body,str):continue
+                found=re.search(r"following assets are being delisted:\s*([A-Z0-9,\s]+?)(?:\.\s|Key dates:|\n)",body,re.I)
+                if found:
+                    list_text=found.group(1)[:800].strip()
+                    delisted=set(re.findall(r"\b[A-Z0-9]{2,20}\b",list_text)) & tokens
+                    break
+        for token in sorted(mentioned|delisted):
+            exact=list_text if token in delisted else next(
+                (v for v in names if "("+token+")" in v),None)
+            if not isinstance(exact,str):continue
+            events.append({"token":token,"id":eid,"tipo":(
+                "DELISTING_COMUNICATO" if token in delisted else
+                "MANUTENZIONE_UFFICIALE" if kind=="MANUTENZIONI" else
+                "INCIDENTE_UFFICIALE"),
+                "titolo":title,"stato_pubblicato":state,
+                "aggiornato_fonte_utc":_iso(when),
+                "fonte":"https://status.kraken.com/incidents/"+eid,
+                "riferimento_esatto":exact,
+                "limite":"Annuncio Kraken; nessuna verifica di esecuzione sul conto, delisting effettivo o causalità"})
+            if len(events)==20: break
+        if len(events)==20: break
+    return events
+
+
+def _kraken_market_read(raw, items, now):
+    if not isinstance(raw,list) or len(raw)!=len(KRAKEN_STATUS_FEEDS):
+        raise ValueError("Kraken status feeds missing")
+    tokens={r.get("token") for group in ("posizioni","candidati","richiesti")
+            for r in items.get(group,[]) if isinstance(r,dict)}
+    result=[]
+    for record, (kind,url,key) in zip(raw,KRAKEN_STATUS_FEEDS):
+        if (not isinstance(record,dict) or record.get("id")!=kind
+                or record.get("fonte")!=url):
+            raise ValueError("Kraken announcement feed provenance")
+        row=dict(record)
+        if row.get("stato") in ("OSSERVATO","NESSUN_EVENTO_NEL_CAMPIONE","STORICO_NON_AGGIORNATO"):
+            t=_time(row.get("acquisito_utc"))
+            entries=row.get("eventi")
+            if t is None or t>now+dt.timedelta(minutes=2) or not isinstance(entries,list) or len(entries)>20:
+                raise ValueError("Kraken announcement observation")
+            for event in entries:
+                token=event.get("token")
+                eid=event.get("id")
+                reference=event.get("riferimento_esatto")
+                if (token not in tokens or not isinstance(token,str)
+                        or not isinstance(reference,str)
+                        or not re.fullmatch(r"[a-z0-9]{12,24}",str(eid))
+                        or event.get("fonte")!="https://status.kraken.com/incidents/"+eid
+                        or event.get("tipo") not in ("DELISTING_COMUNICATO","MANUTENZIONE_UFFICIALE","INCIDENTE_UFFICIALE")
+                        or not _time(event.get("aggiornato_fonte_utc"))
+                        or (event.get("tipo")=="DELISTING_COMUNICATO"
+                            and token not in re.findall(r"\b[A-Z0-9]{2,20}\b",reference))
+                        or (event.get("tipo")!="DELISTING_COMUNICATO"
+                            and "("+token+")" not in reference)):
+                    raise ValueError("Kraken official notice attributed to wrong asset")
+            row["stato_alla_lettura"]=(
+                "SCADUTO" if now-t>dt.timedelta(days=7) else
+                "STORICO_NON_AGGIORNATO" if row["stato"]=="STORICO_NON_AGGIORNATO"
+                else row["stato"])
+        result.append(row)
+    return result
 
 
 def _ecb_csv(raw, series, now):
@@ -868,7 +977,7 @@ def _supply_samples(roster, old, now):
     return retained,changes[:30]
 
 
-def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=None, rpc_fetch=None, collect_project_issues=False, skipped_reason="RATE_LIMIT"):
+def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=None, rpc_fetch=None, collect_project_issues=False, collect_kraken_status=False, skipped_reason="RATE_LIMIT"):
     """One shared, reusable, bounded producer for all current asset identities."""
     now = _utc(now)
     roster = _roster(items)
@@ -1209,6 +1318,48 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
                 "acquisizione_precedente_utc":former["acquisito_utc"],
                 "acquisizione_corrente_utc":row["acquisito_utc"],
                 "limite":"Documento aggiornato; non prova rilascio, circolazione o vendita"})
+    # Two first-party Statuspage endpoints, one public GET per real refresh.
+    # Do not invent a listing event from AssetPairs alone.
+    status_cursor=old.get("prossimo_kraken_status")
+    kix=next((i for i,f in enumerate(KRAKEN_STATUS_FEEDS)
+              if f[0]==status_cursor),0)
+    selected_status=(KRAKEN_STATUS_FEEDS[kix]
+                     if network_allowed and collect_kraken_status else None)
+    old_status={x.get("id"):x for x in old.get("comunicazioni_kraken",[])
+                if isinstance(x,dict)}
+    market_notices=[]
+    for feed in KRAKEN_STATUS_FEEDS:
+        kind,url,_=feed
+        former=old_status.get(kind)
+        row={"id":kind,"fonte":url,"stato":"RINVIATO_BUDGET",
+             "eventi":[],"acquisito_utc":None,
+             "limite":"Non consultato in questo ciclo"}
+        if selected_status and selected_status[0]==kind:
+            used+=1
+            payload,error=_fetch(fetch,url)
+            events=_kraken_market_announcements(payload,feed,roster,now) if not error else None
+            if events is None:
+                row.update(stato="FONTE_NON_DISPONIBILE",
+                           motivo=error or "FONTE_NON_CONFORME")
+            else:
+                row.update(stato="OSSERVATO" if events else "NESSUN_EVENTO_NEL_CAMPIONE",
+                           eventi=events,acquisito_utc=_iso(now),
+                           limite="Campione di comunicazioni ufficiali; assenza di asset nominati non prova assenza di eventi")
+                before={e["id"]+":"+e["token"]:e for e in (former or {}).get("eventi",[])
+                        if isinstance(e,dict)}
+                changes=[{"id":e["id"],"token":e["token"],
+                          "prima":before[e["id"]+":"+e["token"]]["stato_pubblicato"],
+                          "dopo":e["stato_pubblicato"]}
+                         for e in events
+                         if e["id"]+":"+e["token"] in before
+                         and before[e["id"]+":"+e["token"]].get("stato_pubblicato")!=e["stato_pubblicato"]]
+                row["cambiamenti"]=changes
+        elif former and former.get("stato") in (
+                "OSSERVATO","NESSUN_EVENTO_NEL_CAMPIONE","STORICO_NON_AGGIORNATO"):
+            row.update(former,stato="STORICO_NON_AGGIORNATO")
+        elif not network_allowed:
+            row["stato"]=paused
+        market_notices.append(row)
     history,changes=_supply_samples(roster,old,now)
     retained_events=sorted(event_history.values(),key=lambda r:(r["acquisito_utc"],r["progetto_id"],r["documento_id"]),reverse=True)[:MAX_SAMPLES]
     kraken_status=_spot_status(now,items,asset_pairs,old)
@@ -1218,13 +1369,15 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
             "segnalazioni_repo":issues,"prossima_issue":next_issue,
             "politiche_emissioni":emissions,"prossima_emissione":emission_next,
             "indicatori_macro":macro,"calendari":schedules,
+            "comunicazioni_kraken":market_notices,
+            "prossimo_kraken_status":KRAKEN_STATUS_FEEDS[(kix+(1 if selected_status else 0))%len(KRAKEN_STATUS_FEEDS)][0],
             "revisioni_piani":changes_calendar,
             "storico_supply":history,"variazioni_supply":changes,
             "storico_eventi":retained_events,
             "prossimo_progetto":next_project,
             "prossimo_indicatore":series[(pick+(1 if network_allowed else 0))%len(series)][0],
             "prossimo_schedule":sch_next,
-            "richieste_pubbliche":used,"limite_richieste":MAX_GOVERNANCE_CALLS+MAX_MACRO_CALLS+MAX_SCHEDULE_CALLS+MAX_SECURITY_CALLS+MAX_EMISSION_CALLS+MAX_ISSUE_CALLS,
+            "richieste_pubbliche":used,"limite_richieste":MAX_GOVERNANCE_CALLS+MAX_MACRO_CALLS+MAX_SCHEDULE_CALLS+MAX_SECURITY_CALLS+MAX_EMISSION_CALLS+MAX_ISSUE_CALLS+MAX_STATUS_CALLS,
             "limite":"Campioni pubblici: proposal != approvazione; unlock != circolazione != vendita; nessuna direzione di mercato inferita"}
 
 
@@ -1290,6 +1443,18 @@ def decision_review(evidence, row, group):
                       "pubblicato_o_periodo_utc":observed,
                       "acquisito_utc":acquired,"stato_prova":proof,
                       "dettaglio":details,"limite":limit})
+    for notice in evidence.get("comunicazioni_kraken") or []:
+        if not isinstance(notice,dict) or notice.get("stato_alla_lettura")!="OSSERVATO":
+            continue
+        for e in notice.get("eventi",[]):
+            if e.get("token")==token:
+                add("ANNUNCIO_UFFICIALE_KRAKEN",
+                    "Kraken ha pubblicato un evento di servizio che nomina esattamente questo asset",
+                    e.get("fonte"),e.get("aggiornato_fonte_utc"),
+                    notice.get("acquisito_utc"),"COMUNICAZIONE_UFFICIALE",
+                    e.get("limite"),{"titolo":e.get("titolo"),
+                                  "stato":e.get("stato_pubblicato"),
+                                  "tipo":e.get("tipo")})
     schedule=by_project("calendari")
     for revision in evidence.get("revisioni_piani",[]):
         if isinstance(revision,dict) and revision.get("progetto_id")==pid:
@@ -1406,7 +1571,11 @@ def decision_review(evidence, row, group):
                      "categorie":point.get("classificazioni")})
     if not facts:
         return base
-    priority=(("STATO_COPPIA_KRAKEN", "Una restrizione della coppia potrebbe impedire l'operatività prevista",
+    priority=(("ANNUNCIO_UFFICIALE_KRAKEN",
+               "Una comunicazione Kraken potrebbe modificare la disponibilità operativa dell'asset",
+               "Una notifica non prova limitazione sul singolo account o effetto sul prezzo",
+               "Rileggere la notifica e verificare l'attuale stato della coppia"),
+              ("STATO_COPPIA_KRAKEN", "Una restrizione della coppia potrebbe impedire l'operatività prevista",
                "Lo stato pubblico non attesta operatività o sospensione del singolo account",
                "Ricontrollare AssetPairs e mercato/account prima di considerare operazioni"),
               ("REVISIONE_TOKENOMICS_PRIMARIA",
@@ -1521,7 +1690,7 @@ def at_read(raw, items, now):
         raise ValueError("Primary economics identity mismatch")
     if [r.get("progetto_id") for r in schedules if isinstance(r,dict)] != list(roster):
         raise ValueError("Primary schedule identity mismatch")
-    if type(raw.get("richieste_pubbliche")) is not int or not 0<=raw["richieste_pubbliche"]<=7:
+    if type(raw.get("richieste_pubbliche")) is not int or not 0<=raw["richieste_pubbliche"]<=8:
         raise ValueError("Primary economics budget")
     retained=raw.get("storico_eventi",[])
     if not isinstance(retained,list) or len(retained)>MAX_SAMPLES:
@@ -1749,6 +1918,8 @@ def at_read(raw, items, now):
                           and row.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO")
                           else "SCADUTO")
         indicators.append(new)
+    market_read=(_kraken_market_read(raw["comunicazioni_kraken"],items,now)
+                 if "comunicazioni_kraken" in raw else None)
     pairs_read=(_spot_status_read(raw["stati_coppie_kraken"],items,now)
                 if "stati_coppie_kraken" in raw else None)
     # Keep original, independently validated source budget and history: this
@@ -1759,6 +1930,7 @@ def at_read(raw, items, now):
             politiche_emissioni=verified_emissions if source_emissions is not None else None,
             segnalazioni_repo=read_issues if source_issues is not None else None,
             indicatori_macro=indicators,calendari=read_schedules,
+            comunicazioni_kraken=market_read,
             variazioni_supply=raw.get("variazioni_supply",[])[:30],
             copertura={"progetti":len(projects),"governance_osservati":sum(p["stato"]=="OSSERVATO" for p in read_projects),
                         "indicatori_macro_osservati":sum(m["stato"]=="OSSERVATO" for m in indicators),
