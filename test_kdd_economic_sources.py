@@ -465,6 +465,79 @@ class PrimaryFollowupTests(unittest.TestCase):
                          "SENZA_CALENDARIO_PRIMARIO")
         self.assertEqual(sources.at_read(b,replaced,T+dt.timedelta(hours=1))["copertura"]["progetti"],2)
 
+    def test_failed_rechecks_keep_prior_evidence_historical_not_current(self):
+        """One source outage must not erase the last documented sample or refresh its clock."""
+        item=self.items(tokens=("ARB","BTC"))
+        mdx=("all investor and team tokens are subject to 4 year lockups, "
+             "with the first unlocks happening one year after the "
+             "[token generation event (3/16/2023)](https://arbiscan.io/tx/example) "
+             "and then monthly unlocks for the remaining three years. "
+             "The Arbitrum Foundation's allocation is subject to a lockup "
+             "that began on 4/17/2023 and linearly unlocks over the course "
+             "of four years.")
+        incident={"page":{"id":"lfz25gyhcpjf"},"incidents":[{
+            "id":"abcdefghijklmnop","name":"Network maintenance (BTC)",
+            "status":"resolved","updated_at":"2026-11-14T10:00:00+00:00"}]}
+        etf=("<table><tr><td>13 Nov 2026</td><td>0</td><td>0</td>"
+             "<td>0</td><td>0</td><td>(10.4)</td></tr></table>")
+        incident_url=sources.KRAKEN_STATUS_FEEDS[0][1]
+        etf_url=sources.FINANCIAL_FEEDS[0][1]
+        def good(url):
+            if url==sources.ARB_VESTING_URL:return mdx.encode()
+            if url==incident_url:return json.dumps(incident).encode()
+            if url==etf_url:return etf.encode()
+            return self.fetch(url)
+        def failed(url):
+            if url in (sources.ARB_VESTING_URL,incident_url,etf_url):
+                return b"source temporarily unavailable"
+            return good(url)
+        first=sources.collect(T,item,{},good,collect_kraken_status=True)
+        original=next(s for s in first["calendari"] if s["progetto_id"]=="arbitrum")
+        self.assertEqual(original["stato"],"DOCUMENTO_PRIMARIO_REGOLA_VESTING")
+        self.assertEqual(first["comunicazioni_kraken"][0]["stato"],"OSSERVATO")
+        redo=copy.deepcopy(first)
+        redo["prossima_fonte_esterna"]="INCIDENTI"
+        second=sources.collect(T+dt.timedelta(hours=1),item,redo,failed,
+                               collect_kraken_status=True)
+        schedule=next(s for s in second["calendari"] if s["progetto_id"]=="arbitrum")
+        notice=second["comunicazioni_kraken"][0]
+        self.assertEqual(schedule["stato"],"REGOLA_VESTING_STORICA")
+        self.assertEqual(schedule["acquisito_utc"],original["acquisito_utc"])
+        self.assertEqual(schedule["ultimo_tentativo"]["stato"],"FONTE_NON_DISPONIBILE")
+        self.assertEqual(notice["stato"],"STORICO_NON_AGGIORNATO")
+        self.assertEqual(notice["acquisito_utc"],first["comunicazioni_kraken"][0]["acquisito_utc"])
+        self.assertEqual(notice["ultimo_tentativo"]["stato"],"FONTE_NON_DISPONIBILE")
+        checked=sources.at_read(second,item,T+dt.timedelta(hours=1))
+        review=sources.decision_review(checked,item["posizioni"][0],"posizioni")
+        vesting=next(x for x in review["fatti"] if x["tipo"]=="REGOLA_VESTING_MENSILE_PRIMARIA")
+        self.assertEqual(vesting["stato_prova"],"REGOLA_STORICA_NON_RICONFERMATA")
+        self.assertTrue(any(x["stato_prova"]=="STORICO_NON_RICONFERMATO"
+                            for x in sources.decision_review(
+                                checked,item["posizioni"][1],"posizioni")["fatti"]))
+        chosen=copy.deepcopy(first)
+        chosen["prossima_fonte_esterna"]="ETF_BTC_FARSIDE"
+        finance_first=sources.collect(T+dt.timedelta(hours=2),item,chosen,good,
+                                      collect_kraken_status=True)
+        old=finance_first["flussi_finanziari"][0]
+        self.assertEqual(old["stato"],"OSSERVATO")
+        again=copy.deepcopy(finance_first)
+        again["prossima_fonte_esterna"]="ETF_BTC_FARSIDE"
+        finance_later=sources.collect(T+dt.timedelta(hours=3),item,again,failed,
+                                      collect_kraken_status=True)
+        history=finance_later["flussi_finanziari"][0]
+        self.assertEqual(history["stato"],"STORICO_NON_AGGIORNATO")
+        self.assertEqual(history["acquisito_utc"],old["acquisito_utc"])
+        self.assertEqual(history["dati"]["valore"],-10.4)
+        self.assertEqual(history["ultimo_tentativo"]["stato"],"FONTE_NON_DISPONIBILE")
+        checked_finance=sources.at_read(finance_later,item,T+dt.timedelta(hours=3))
+        self.assertEqual(checked_finance["flussi_finanziari"][0]["stato_alla_lettura"],
+                         "STORICO_NON_AGGIORNATO")
+        stale=sources.at_read(finance_later,item,T+dt.timedelta(days=10))
+        self.assertEqual(stale["flussi_finanziari"][0]["stato_alla_lettura"],"SCADUTO")
+        self.assertFalse(any(x["tipo"]=="FLUSSI_ETF_SPOT_AGGREGATI"
+                             for x in sources.decision_review(
+                                 stale,item["posizioni"][1],"posizioni")["fatti"]))
+
     def test_arb_real_project_primary_mdx_rule_and_missing_exact_unlocks(self):
         raw=(
             "all investor and team tokens are subject to 4 year lockups, "
