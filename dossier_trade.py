@@ -414,7 +414,8 @@ def economic_evidence(source, wallet, four, candidates, now, *,
     # The request token is not sufficient proof of a Kraken market identity.
     accepted=set()
     for record in (requested if isinstance(requested,list) else [])[:3]:
-        if not isinstance(record,dict) or record.get("origine")!="CLI_ESPLICITO_LOCALE":
+        if not isinstance(record,dict) or record.get("origine") not in (
+                "CLI_ESPLICITO_LOCALE","UI_ESPLICITA_LOCALE"):
             continue
         token,valid=desk.wallet_symbol(record.get("token"))
         since=econ.stamp(record.get("richiesto_utc"))
@@ -440,7 +441,7 @@ def economic_evidence(source, wallet, four, candidates, now, *,
         items["richiesti"].append({
             "indice":len(items["richiesti"]),"token":token,"coppia_analisi":pair,
             "richiesto_utc":record["richiesto_utc"],
-            "origine":"CLI_ESPLICITO_LOCALE","identita":identity})
+            "origine":record["origine"],"identita":identity})
 
     # One unresolved unique token per cycle, deterministic rotation. Limit
     # discovery to 1 search + up to 8 market checks (9 total). If more

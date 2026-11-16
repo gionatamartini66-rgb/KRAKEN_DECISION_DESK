@@ -105,6 +105,30 @@ class DeskTests(unittest.TestCase):
         self.assertNotIn('Dati rilevati da meno di 30 minuti.', page)
         self.assertNotIn("method='post'",page)
 
+
+    def test_public_asset_local_web_form_uses_same_existing_refresh_server(self):
+        """No new service; a UI request becomes a source-bearing, distinct row."""
+        import serve
+        from types import SimpleNamespace
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(serve.desk,"DIR",Path(d)):
+                page=serve.with_controls("<html><h2>1 · Decisioni e posizioni</h2></html>")
+                self.assertIn("action='/richiedi-asset'",page)
+                self.assertIn("action='/aggiorna'",page)
+                self.assertIn("name='asset'",page)
+                self.assertNotIn("richiedi-asset",serve.job_snapshot().get("stato",""))
+                serve.desk.request_public_asset(SimpleNamespace(
+                    token="STRK",canale="WEB_LOCALE"))
+                config=serve.desk.load("config.json",{})
+                self.assertEqual(config["analisi_asset_richiesti"][0]["origine"],
+                                 "UI_ESPLICITA_LOCALE")
+                rendered=serve.asset_request_panel()
+                self.assertIn("STRK",rendered)
+                self.assertIn("nessun ordine",rendered.lower())
+
     def test_local_refresh_only_in_server_page(self):
         page="<html><h2>1 · Decisioni e posizioni</h2></html>"
         served=serve.with_controls(page)

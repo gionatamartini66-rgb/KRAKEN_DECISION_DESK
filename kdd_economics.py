@@ -663,8 +663,8 @@ def at_read(source, positions, shortlist, now, *, requested=None):
                 when=stamp(row.get("richiesto_utc"))
                 if (not when or when>acquired+dt.timedelta(minutes=2)
                         or row.get("richiesto_utc")!=target.get("richiesto_utc")
-                        or row.get("origine")!="CLI_ESPLICITO_LOCALE"
-                        or target.get("origine")!="CLI_ESPLICITO_LOCALE"):
+                        or row.get("origine") not in ("CLI_ESPLICITO_LOCALE","UI_ESPLICITA_LOCALE")
+                        or row.get("origine")!=target.get("origine")):
                     raise ValueError("Origine o data asset richiesto non verificabile")
             identity = row.get("identita")
             if not isinstance(identity, dict) or identity.get("token") != row["token"]:

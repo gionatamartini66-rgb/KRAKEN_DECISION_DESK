@@ -1473,8 +1473,12 @@ def request_public_asset(args):
         if isinstance(record,dict) and record.get("token")!=token:
             current.append(record)
     current=current[-2:]
+    canale=getattr(args,"canale","CLI")
+    if canale not in ("CLI","WEB_LOCALE"):
+        raise ValueError("Canale richiesta non valido")
     current.append({"token":token,"richiesto_utc":NOW().isoformat(timespec="seconds"),
-                    "origine":"CLI_ESPLICITO_LOCALE"})
+                    "origine":("UI_ESPLICITA_LOCALE" if canale=="WEB_LOCALE"
+                               else "CLI_ESPLICITO_LOCALE")})
     conf["analisi_asset_richiesti"]=current
     save("config.json",conf)
     print("Richiesta pubblica registrata:",token,
