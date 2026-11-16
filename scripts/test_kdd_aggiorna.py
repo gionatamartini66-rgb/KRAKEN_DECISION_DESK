@@ -143,7 +143,7 @@ class UpdateTests(unittest.TestCase):
         synthetic.write_bytes(evidence)
         first = kdd.isolated_test
         seen = {'calls': 0}
-        def fail_second(stage):
+        def fail_second(stage, **kwargs):
             seen['calls'] += 1
             if seen['calls'] == 2:
                 raise kdd.SafetyError('test successivo KO')
@@ -195,7 +195,7 @@ class UpdateTests(unittest.TestCase):
                 home.mkdir()
                 real=kdd.isolated_test
                 calls=0
-                def fail_post(stage):
+                def fail_post(stage, **kwargs):
                     nonlocal calls
                     calls+=1
                     if calls==2:
@@ -239,7 +239,7 @@ class UpdateTests(unittest.TestCase):
                 else:
                     (self.live / name).write_bytes(old)
                 seen = []
-                def inspect_stage(stage):
+                def inspect_stage(stage, **kwargs):
                     self.assertEqual((stage / name).read_bytes(), source)
                     spec = importlib.util.spec_from_file_location(
                         'kdd_capital_flow_deploy_probe', stage / name)
@@ -287,7 +287,7 @@ class UpdateTests(unittest.TestCase):
                                              else 'capital-rollback-new')
                 home.mkdir()
                 attempts = [0]
-                def fail_postflight(stage):
+                def fail_postflight(stage, **kwargs):
                     attempts[0] += 1
                     if attempts[0] == 2:
                         self.assertEqual((stage / name).read_bytes(), source)
@@ -316,7 +316,7 @@ class UpdateTests(unittest.TestCase):
         (self.root / name).write_text(payload)
         (self.live / name).unlink()
         observed = []
-        def inspect_stage(stage):
+        def inspect_stage(stage, **kwargs):
             self.assertEqual((stage / name).read_text(), payload)
             observed.append(stage)
         with patch.object(kdd, 'isolated_test', side_effect=inspect_stage), \
@@ -377,7 +377,7 @@ class UpdateTests(unittest.TestCase):
         home.mkdir()
         original=kdd.isolated_test
         count=0
-        def fail_post(stage):
+        def fail_post(stage, **kwargs):
             nonlocal count
             count+=1
             if count==2:
@@ -439,7 +439,7 @@ class UpdateTests(unittest.TestCase):
             self.assertFalse((self.root / name).exists())
         seen = []
 
-        def observe(stage):
+        def observe(stage, **kwargs):
             for name, body in sensitive.items():
                 self.assertEqual((stage / name).read_text(), body)
                 seen.append(name)
@@ -478,7 +478,7 @@ class UpdateTests(unittest.TestCase):
              contextlib.redirect_stdout(io.StringIO()):
             kdd.isolated_test(self.root)
         self.assertEqual([x[0] for x in observed],[[x] for x in expected])
-        self.assertEqual([x[1] for x in observed],[150]*len(expected))
+        self.assertEqual([x[1] for x in observed],[210]+[150]*(len(expected)-1))
 
     def test_rt67_core_timeout_identifies_module_not_sensitive_output(self):
         import subprocess
@@ -495,7 +495,7 @@ class UpdateTests(unittest.TestCase):
              patch.object(kdd,'command',side_effect=forced_timeout), \
              contextlib.redirect_stdout(capture):
             with self.assertRaisesRegex(kdd.SafetyError,
-                                       'test_decision_desk.*150') as failure:
+                                       'test_decision_desk.*210') as failure:
                 kdd.isolated_test(self.root)
         combined=str(failure.exception)+capture.getvalue()
         self.assertNotIn('SECRET_PRIVATE_FIXTURE',combined)
@@ -505,7 +505,7 @@ class UpdateTests(unittest.TestCase):
         home=Path(self.tmp.name)/'postflight-home'
         home.mkdir()
         n=[0]
-        def failing_postflight(stage):
+        def failing_postflight(stage, **kwargs):
             n[0]+=1
             if n[0]==2:
                 raise kdd.SafetyError('suite test_decision_desk: timeout dopo 150 s')
@@ -587,6 +587,216 @@ class UpdateTests(unittest.TestCase):
             (self.live / 'scripts/kdd_wallet_packet_g0.py').read_text(
                 encoding='utf-8').startswith('RT68_IMPORT_PROBE'))
         self.assertTrue(list((home / '.local/share/kdd-deploy-backups').glob('*')))
+
+
+    def test_rt69_preflight_measured_budget_supports_slow_good_test_and_same_suites(self):
+        """138s preflight -> slow 180s postflight must PASS, without relaxing checks."""
+        import subprocess
+        clock = {'seconds': 0.0}
+        modules = ('test_decision_desk', 'test_kdd_candles', 'test_kdd_economics',
+                   'test_kdd_economic_sources', 'test_kdd_futures_flow',
+                   'test_kdd_network_defi')
+        observed = []
+        def synthetic_command(args, *, cwd, timeout=120):
+            module = next((m for m in modules if m in args), None)
+            phase = 'preflight' if cwd == self.root else 'postflight'
+            elapsed = (138 if phase == 'preflight' else 180) if module == 'test_decision_desk' else 1
+            observed.append((phase, tuple(args), timeout, elapsed))
+            clock['seconds'] += elapsed
+            if elapsed >= timeout:
+                raise subprocess.TimeoutExpired(args, timeout,
+                                                stderr='DO_NOT_PRINT_PRIVATE_VALUES')
+            return subprocess.CompletedProcess(args, 0, '', 'OK')
+        capture = io.StringIO()
+        with patch.object(kdd, 'capability_preflight'), \
+             patch.object(kdd, 'monotonic', side_effect=lambda: clock['seconds'], create=True), \
+             patch.object(kdd, 'command', side_effect=synthetic_command), \
+             contextlib.redirect_stdout(capture):
+            measurements = kdd.isolated_test(self.root, phase='preflight')
+            kdd.isolated_test(self.live, phase='postflight',
+                              reference_times=measurements)
+        before = [x for x in observed if x[0] == 'preflight']
+        after = [x for x in observed if x[0] == 'postflight']
+        self.assertEqual([x[1] for x in before], [x[1] for x in after])
+        self.assertEqual(len(before), 12, 'six core + five packet + R5 mandatory checks')
+        self.assertEqual(measurements['test_decision_desk'], 138)
+        self.assertEqual(before[0][2], 210)
+        self.assertGreater(after[0][2], 180)
+        self.assertLessEqual(after[0][2], 300)
+        self.assertTrue(all(x[2] == 120 for x in after[6:]))
+        self.assertIn('138', capture.getvalue())
+        self.assertIn('180', capture.getvalue())
+        self.assertNotIn('DO_NOT_PRINT_PRIVATE_VALUES', capture.getvalue())
+
+    def test_rt69_preflight_reference_bounds_postflight_and_invalid_measure_stops(self):
+        self.assertEqual(kdd.postflight_budget(1), 150)
+        self.assertEqual(kdd.postflight_budget(138), 296)
+        self.assertEqual(kdd.postflight_budget(149), 300)
+        with self.assertRaisesRegex(kdd.SafetyError, 'misura'):
+            kdd.postflight_budget(None)
+
+    def test_rt69_hung_test_and_genuine_failure_still_stop_without_private_output(self):
+        import subprocess
+        capture = io.StringIO()
+        def hung(args, *, cwd, timeout=120):
+            if 'test_decision_desk' in args:
+                self.assertLessEqual(timeout, 300)
+                raise subprocess.TimeoutExpired(args, timeout,
+                                                stderr='PRIVATE_KDD_BALANCE',
+                                                output='PRIVATE_KDD_REPORT')
+            return subprocess.CompletedProcess(args, 0, '', '')
+        with patch.object(kdd, 'capability_preflight'), \
+             patch.object(kdd, 'command', side_effect=hung), \
+             contextlib.redirect_stdout(capture):
+            with self.assertRaisesRegex(kdd.SafetyError, 'test_decision_desk.*timeout'):
+                kdd.isolated_test(self.live, phase='postflight',
+                                  reference_times={'test_decision_desk': 138})
+        self.assertNotIn('PRIVATE_KDD_', capture.getvalue())
+        def failed(args, *, cwd, timeout=120):
+            if 'test_decision_desk' in args:
+                return subprocess.CompletedProcess(
+                    args, 1, '', 'FAIL: test_real_failure (test_decision_desk.DeskTests)\n'
+                                 'PRIVATE_KDD_BALANCE: 123456\n')
+            return subprocess.CompletedProcess(args, 0, '', '')
+        with patch.object(kdd, 'capability_preflight'), \
+             patch.object(kdd, 'command', side_effect=failed), \
+             contextlib.redirect_stdout(capture):
+            with self.assertRaisesRegex(kdd.SafetyError,
+                                       'test_decision_desk.*test_real_failure'):
+                kdd.isolated_test(self.live, phase='postflight',
+                                  reference_times={'test_decision_desk': 138})
+        self.assertNotIn('PRIVATE_KDD_BALANCE', capture.getvalue())
+
+    def test_rt69_apply_reuses_measured_preflight_in_real_postflight_path(self):
+        home = Path(self.tmp.name) / 'rt69-home'
+        home.mkdir()
+        observed = []
+        timings = {'test_decision_desk': 138.0}
+        def observe(stage, **kwargs):
+            observed.append((stage, kwargs))
+            return timings
+        with patch.object(kdd.Path, 'home', return_value=home), \
+             patch.object(kdd, 'isolated_test', side_effect=observe), \
+             patch.object(kdd, 'service_alive', return_value=False), \
+             patch('builtins.input', return_value='APPLICA'), \
+             contextlib.redirect_stdout(io.StringIO()):
+            kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=False)
+        self.assertEqual(len(observed), 2)
+        self.assertNotEqual(observed[0][0], self.live)
+        self.assertEqual(observed[1][0], self.live)
+        self.assertEqual(observed[1][1]['phase'], 'postflight')
+        self.assertEqual(observed[1][1]['reference_times'], timings)
+
+    def test_rt69_lock_blocks_second_process_and_releases_after_exit(self):
+        import os
+        import subprocess
+        import sys
+        home = Path(self.tmp.name) / 'rt69-lock-home'
+        home.mkdir()
+        source = Path(__file__).parent / 'kdd_aggiorna.py'
+        child = (
+            'import importlib.util,sys\n'
+            'spec=importlib.util.spec_from_file_location("rt69_child",sys.argv[1])\n'
+            'k=importlib.util.module_from_spec(spec); spec.loader.exec_module(k)\n'
+            'try:\n'
+            ' with k.updater_lock(): pass\n'
+            'except k.SafetyError: sys.exit(7)\n'
+        )
+        env = os.environ.copy()
+        env['HOME'] = str(home)
+        def probe():
+            return subprocess.run([sys.executable, '-B', '-c', child, str(source)],
+                                  env=env, cwd=self.root, capture_output=True,
+                                  text=True, timeout=15)
+        with patch.object(kdd.Path, 'home', return_value=home):
+            with kdd.updater_lock():
+                contender = probe()
+                self.assertEqual(contender.returncode, 7)
+            after = probe()
+            self.assertEqual(after.returncode, 0, after.stderr[-300:])
+
+    def test_rt69_main_holds_exclusive_lock_across_check_and_apply(self):
+        from argparse import Namespace
+        home = Path(self.tmp.name) / 'rt69-main-home'
+        home.mkdir()
+        calls = []
+        def guarded_apply(root, live, *, commit_sha, dry_run):
+            calls.append(dry_run)
+            with self.assertRaisesRegex(kdd.SafetyError, 'aggiornatore'):
+                with kdd.updater_lock():
+                    pass
+        for check in (True, False):
+            with patch.object(kdd.Path, 'home', return_value=home), \
+                 patch.object(kdd.argparse.ArgumentParser, 'parse_args',
+                              return_value=Namespace(check=check, apply=not check)), \
+                 patch.object(kdd, 'verified_clone', return_value=self.sha), \
+                 patch.object(kdd, 'apply', side_effect=guarded_apply):
+                self.assertEqual(kdd.main(), 0)
+        self.assertEqual(calls, [True, False])
+
+
+    def test_rt69_samsung_slow_decision_preflight_gets_210s_only_for_that_module(self):
+        """Samsung evidence: 150.1s STOP, isolated PASS 146.3s, bounded 210s."""
+        import subprocess
+        clock = {'time': 0.0}
+        core = ('test_decision_desk', 'test_kdd_candles',
+                'test_kdd_economics', 'test_kdd_economic_sources',
+                'test_kdd_futures_flow', 'test_kdd_network_defi')
+        calls = []
+        def synthetic_run(args, *, cwd, timeout=120):
+            module = next((m for m in core if m in args), None)
+            # A deliberately slow but successful test, not an actual sleep.
+            duration = 175.0 if module == 'test_decision_desk' else 0.1
+            calls.append((module, timeout))
+            clock['time'] += min(duration, timeout)
+            if duration > timeout:
+                raise subprocess.TimeoutExpired(args, timeout,
+                                                stderr='PRIVATE_KDD_BALANCE')
+            return subprocess.CompletedProcess(args, 0, '', '')
+        out = io.StringIO()
+        with patch.object(kdd, 'capability_preflight'), \
+             patch.object(kdd, 'monotonic',
+                          side_effect=lambda: clock['time']), \
+             patch.object(kdd, 'command', side_effect=synthetic_run), \
+             contextlib.redirect_stdout(out):
+            durations = kdd.isolated_test(self.root, phase='preflight')
+        self.assertEqual([m for m, _ in calls[:6]], list(core))
+        self.assertEqual([t for _, t in calls[:6]], [210] + [150] * 5)
+        self.assertEqual([t for _, t in calls[6:]], [120] * 6)
+        self.assertEqual(durations['test_decision_desk'], 175.0)
+        self.assertEqual(kdd.postflight_budget(durations['test_decision_desk']), 300)
+        self.assertNotIn('PRIVATE_KDD_BALANCE', out.getvalue())
+
+    def test_rt69_samsung_preflight_hung_and_failed_still_stop_with_210s_cap(self):
+        """An extended preflight must not suppress timeout or failing assertions."""
+        import subprocess
+        seen = []
+        for mode in ('hung', 'failed'):
+            seen.clear()
+            def emulate(args, *, cwd, timeout=120):
+                if 'test_decision_desk' in args:
+                    seen.append(timeout)
+                    if mode == 'hung':
+                        raise subprocess.TimeoutExpired(
+                            args, timeout, output=b'PRIVATE_KDD_BALANCE',
+                            stderr=b'PRIVATE_KDD_PATH')
+                    return subprocess.CompletedProcess(
+                        args, 1, '',
+                        'FAIL: test_real_failure (test_decision_desk.Case)\n'
+                        'PRIVATE_KDD_BALANCE=999999')
+                return subprocess.CompletedProcess(args, 0, '', '')
+            output = io.StringIO()
+            with patch.object(kdd, 'capability_preflight'), \
+                 patch.object(kdd, 'command', side_effect=emulate), \
+                 contextlib.redirect_stdout(output):
+                with self.assertRaisesRegex(
+                    kdd.SafetyError,
+                    'test_decision_desk.*' +
+                    ('timeout' if mode == 'hung' else 'test_real_failure')
+                ):
+                    kdd.isolated_test(self.root, phase='preflight')
+            self.assertEqual(seen, [210])
+            self.assertNotIn('PRIVATE_KDD_', output.getvalue())
 
 
 if __name__ == '__main__':

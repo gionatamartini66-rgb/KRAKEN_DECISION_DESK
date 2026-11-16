@@ -8,16 +8,21 @@ atomiche, riesegue i test e ripristina i sorgenti in caso di fallimento.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import datetime as dt
+import fcntl
 import hashlib
+import math
 import os
 from pathlib import Path
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
+from time import monotonic
 
 REPOSITORY = 'gionatamartini66-rgb/KRAKEN_DECISION_DESK'
 PY_FILES = (
@@ -67,6 +72,66 @@ def command(args: list[str], *, cwd: Path, timeout: int = 120) -> subprocess.Com
                                           str((cwd / 'scripts').resolve())))
     return subprocess.run(args, cwd=cwd, text=True, capture_output=True,
                           timeout=timeout, check=False, env=env)
+
+
+CORE_PREFLIGHT_TIMEOUT = 150
+# Direct Samsung preflight: 150.1s STOP; isolated PASS in 146.3s.
+# Headroom is specific to this module; other preflight tests stay at 150s.
+DECISION_DESK_PREFLIGHT_TIMEOUT = 210
+POSTFLIGHT_MAX_TIMEOUT = 300
+
+
+def postflight_budget(preflight_seconds: float) -> int:
+    """Bounded time budget derived from the same module's observed preflight.
+
+    The baseline 150 seconds is unchanged. Up to twice the observed runtime
+    plus 20s for post-install process-start/load variation, capped at 300s.
+    A stuck test still times out; missing/invalid timings fail closed.
+    """
+    if (isinstance(preflight_seconds, bool)
+            or not isinstance(preflight_seconds, (float, int))
+            or not math.isfinite(preflight_seconds)
+            or preflight_seconds <= 0):
+        raise SafetyError('misura temporale preflight mancante o non valida')
+    return min(POSTFLIGHT_MAX_TIMEOUT,
+               max(CORE_PREFLIGHT_TIMEOUT, math.ceil(2 * preflight_seconds + 20)))
+
+
+@contextmanager
+def updater_lock():
+    """Single updater across clones, --check and --apply; kernel releases on exit.
+
+    Reuse the private KDD state location already checked by capability_preflight.
+    The one private lock file carries no portfolio or credentials.
+    """
+    home = Path.home()
+    state = home / '.local' / 'state' / 'kraken-decision-desk'
+    for part in (home / '.local', home / '.local' / 'state', state):
+        if part.is_symlink():
+            raise SafetyError('aggiornatore: directory stato symlink')
+        part.mkdir(mode=0o700, exist_ok=True)
+        info = part.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise SafetyError('aggiornatore: directory stato non regolare')
+        if part == state and info.st_mode & 0o077:
+            raise SafetyError('aggiornatore: directory stato non privata')
+    fd = os.open(state / '.kdd-aggiorna.lock',
+                 os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o077):
+            raise SafetyError('aggiornatore: file lock non regolare o non privato')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SafetyError('aggiornatore gia in esecuzione: STOP concorrenza') from None
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def verified_clone(root: Path) -> str:
@@ -260,30 +325,40 @@ def capability_preflight() -> None:
         raise SafetyError('preflight filesystem Android/Termux FALLITO') from exc
 
 
-def isolated_test(staging: Path) -> None:
-    """Same regression coverage before/after install, with bounded module time.
+def isolated_test(staging: Path, *, phase: str = 'preflight',
+                  reference_times: dict[str, float] | None = None) -> dict[str, float]:
+    """Run every mandatory suite, record timings, and keep postflight bounded.
 
-    A timeout of 150 s belongs to each named module, not the accumulated
-    runtime of a growing 381-test monolith. All original suites still execute.
-    Never emit captured traceback/assertion bodies from private local data.
+    Both flights use identical test commands. The postflight core timeout is
+    derived only from the corresponding successful preflight module duration.
+    It cannot run indefinitely and no failure is treated as a slow PASS.
     """
+    if phase not in ('preflight', 'postflight'):
+        raise SafetyError('fase di verifica non riconosciuta')
+    if phase == 'postflight' and not isinstance(reference_times, dict):
+        raise SafetyError('misure preflight non disponibili per postflight')
     try:
         capability_preflight()
     except SafetyError as exc:
         raise SafetyError('capability_preflight: ' + str(exc)) from None
 
-    def checked(args: list[str], *, label: str, timeout: int = 120) -> None:
+    def checked(args: list[str], *, label: str, timeout: int = 120) -> float:
+        started = monotonic()
         try:
             proc = command(args, cwd=staging, timeout=timeout)
         except subprocess.TimeoutExpired:
-            # TimeoutExpired.stdout/stderr may contain private fixture values.
+            elapsed = monotonic() - started
+            print(f'{phase} {label}: {elapsed:.1f}s / limite {timeout}s (TIMEOUT)')
+            # TimeoutExpired.stdout/stderr can contain local private fixtures.
             raise SafetyError(f'{label}: timeout dopo {timeout} s') from None
         except OSError as exc:
             raise SafetyError(f'{label}: avvio impossibile ({type(exc).__name__}, '
                               f'errno={exc.errno})') from None
+        elapsed = monotonic() - started
+        print(f'{phase} {label}: {elapsed:.1f}s / limite {timeout}s')
         if proc.returncode:
-            # Only known unittest method identifiers, never assertion bodies,
-            # local paths, timestamps, credentials or private report content.
+            # Only approved unittest identifiers, never assertion bodies,
+            # filesystem paths or private portfolio contents.
             matches = []
             for line in proc.stderr.splitlines():
                 m = re.fullmatch(
@@ -294,20 +369,24 @@ def isolated_test(staging: Path) -> None:
             suffix = ('test ' + ', '.join(dict.fromkeys(matches[:3]))
                       if matches else f'codice_uscita={proc.returncode}')
             raise SafetyError(f'{label}: {suffix}')
-        # A test runner can return success without any assertion output; do
-        # not forward its stdout/stderr from a private runtime.
-        return None
+        return elapsed
 
-    # Executed once each in the same order at preflight and postflight.
-    # The timeout threshold is unchanged; only its scope is corrected.
     core_modules = (
         'test_decision_desk', 'test_kdd_candles', 'test_kdd_economics',
         'test_kdd_economic_sources', 'test_kdd_futures_flow',
         'test_kdd_network_defi',
     )
+    measurements: dict[str, float] = {}
     for module in core_modules:
-        checked([sys.executable, '-m', 'unittest', '-q', module],
-                label='suite '+module, timeout=150)
+        if phase == 'preflight':
+            limit = (DECISION_DESK_PREFLIGHT_TIMEOUT
+                     if module == 'test_decision_desk'
+                     else CORE_PREFLIGHT_TIMEOUT)
+        else:
+            limit = postflight_budget(reference_times.get(module))
+        measurements[module] = checked(
+            [sys.executable, '-m', 'unittest', '-q', module],
+            label='suite ' + module, timeout=limit)
     print('Test KDD: OK (tutti i sei moduli obbligatori)')
 
     packet_test = staging / 'scripts' / 'test_kdd_wallet_packet_g0.py'
@@ -316,7 +395,6 @@ def isolated_test(staging: Path) -> None:
             or not (staging / 'scripts/test_kdd_funding_book_g2.py').is_file()):
         raise SafetyError('test del pacchetto, 4TF o book mancanti nello staging')
     if packet_test.exists():
-        # The legacy packet fixture imports kdd_wallet_packet_g0 from scripts/.
         for pattern in ('test_kdd_wallet_packet_g0.py',
                         'test_kdd_portfolio_4tf.py',
                         'test_kdd_android_transaction_g2.py',
@@ -324,13 +402,15 @@ def isolated_test(staging: Path) -> None:
                         'test_kdd_drive_exchange.py'):
             checked([sys.executable, '-B', '-m', 'unittest', 'discover',
                      '-s', 'scripts', '-p', pattern, '-q'],
-                    label='regressione '+pattern)
-        # Keep the historical unchanged R5 properties and explicit Android map.
+                    label='regressione ' + pattern)
         checked([sys.executable, '-B', '-c',
                  "import sys; sys.path.insert(0, 'scripts'); "
                  "from scripts.kdd_android_regressions import main; main()"],
                 label='invarianti R5 mappati')
         print('Test pacchetto GPT / Android + R5 mappati: OK')
+    return measurements
+
+
 
 def service_alive() -> bool:
     try:
@@ -402,7 +482,7 @@ def apply(root: Path, live: Path, *, commit_sha: str, dry_run: bool) -> None:
                                        commit_sha, changed)
         (staging / README).write_text(source_readme, encoding='utf-8')
         print('Verifica preventiva isolata (programma live intatto)...')
-        isolated_test(staging)
+        reference_times = isolated_test(staging)
         if dry_run:
             print('PRECHECK OK — nessuna modifica al programma. Rieseguire con --apply.')
             return
@@ -455,7 +535,7 @@ def apply(root: Path, live: Path, *, commit_sha: str, dry_run: bool) -> None:
                 raise SafetyError('impronta sorgenti postflight discordante')
             print('Verifica dopo la sostituzione...')
             phase = 'test postflight'
-            isolated_test(live)
+            isolated_test(live, phase='postflight', reference_times=reference_times)
             phase = 'integrita dopo test postflight'
             if fingerprint(live) != fingerprint(staging):
                 raise SafetyError('impronta sorgenti postflight discordante dopo i test')
@@ -496,8 +576,11 @@ def main() -> int:
     root = Path(__file__).resolve().parents[1]
     live = Path.home() / 'kraken-decision-desk' / 'KRAKEN_DECISION_DESK_V001'
     try:
-        commit_sha = verified_clone(root)
-        apply(root, live, commit_sha=commit_sha, dry_run=args.check)
+        # The same Termux HOME lock is held across tests, install and rollback.
+        # A second check/apply cannot race the first; abnormal exit releases it.
+        with updater_lock():
+            commit_sha = verified_clone(root)
+            apply(root, live, commit_sha=commit_sha, dry_run=args.check)
     except (SafetyError, OSError, subprocess.TimeoutExpired) as exc:
         print('STOP SICUREZZA:', exc, file=sys.stderr)
         return 2
