@@ -1174,5 +1174,202 @@ class PrimaryFollowupTests(unittest.TestCase):
                          "SENZA_FONTE_PRIMARIA_ASSOCIATA")
 
 
+    def test_rt_eco_01_real_statuspage_shapes_and_ambiguous_identity(self):
+        # Real notice *format*, invented BTC/SUI asset participation.
+        now=T
+        published=(now-dt.timedelta(days=45)).isoformat()
+        horizon=(now+dt.timedelta(days=55)).isoformat()
+        one={"id":"bbbbbbbbbbbb","name":"Sui (SUI) Delisting",
+             "status":"scheduled","created_at":published,"updated_at":published,
+             "scheduled_until":horizon,"incident_updates":[{
+                "body":"Kraken will begin a scheduled delisting cycle for SUI. "
+                       "Key dates: December 15, 2026: Withdrawals will be disabled."}],
+             "components":[]}
+        many={"id":"cccccccccccc",
+              "name":"Notice of scheduled asset delistings - August 2026",
+              "status":"scheduled","created_at":published,"updated_at":published,
+              "scheduled_until":horizon,"components":[],
+              "incident_updates":[{"body":
+                  "The following assets are being delisted: BTC, SUI.\n"
+                  "Key dates: December 15, 2026: Withdrawals will be disabled."}]}
+        ordinary={"id":"aaaaaaaaaaaa",
+                  "name":"Bitcoin (BTC) Funding Maintenance","status":"completed",
+                  "created_at":published,"updated_at":now.isoformat(),
+                  "resolved_at":now.isoformat(),"components":[]}
+        feed=sources.KRAKEN_STATUS_FEEDS[1]
+        def parse(rows, roster=None):
+            return sources._kraken_market_announcements(
+                {"page":{"id":"lfz25gyhcpjf"},"scheduled_maintenances":rows},
+                feed,roster or {"sui":{"token":"SUI"},"bitcoin":{"token":"BTC"}},now)
+        events=parse([one,many,ordinary])
+        self.assertEqual({x["token"] for x in events if x["id"]==many["id"]},
+                         {"SUI","BTC"})
+        # A component name is not part of the explicit delisting list.
+        related=dict(many,components=[{"name":"Dogecoin (DOGE) Funding"}])
+        self.assertEqual({e["token"] for e in parse(
+            [related],{"sui":{"token":"SUI"},"bitcoin":{"token":"BTC"},
+                       "dogecoin":{"token":"DOGE"}})},{"SUI","BTC"})
+        self.assertTrue(all(x["tipo"]=="DELISTING_COMUNICATO"
+                            for x in events if x["id"] in (one["id"],many["id"])))
+        self.assertEqual(next(x for x in events if x["id"]==one["id"])
+                         ["orizzonte_statuspage_utc"],horizon)
+        self.assertTrue(next(x for x in events if x["id"]==one["id"])
+                        ["scadenze_testuali"])
+        self.assertTrue(any(x["tipo"]=="MANUTENZIONE_UFFICIALE"
+                            for x in events if x["id"]==ordinary["id"]))
+        variant=dict(many,id="dddddddddddd",
+                     name="BTC, SUI Delisting",
+                     incident_updates=[{"body":
+                         "Kraken will begin a scheduled delisting cycle for "
+                         "the following assets: BTC, SUI. Key dates: "
+                         "December 15, 2026: Withdrawals will be disabled."}])
+        self.assertEqual({x["token"] for x in parse([variant])},
+                         {"BTC","SUI"})
+        self.assertEqual(parse([one],{"sui":{"token":"SUI"},
+                                      "fake-sui":{"token":"SUI"}}),[])
+        # A different named asset cannot inherit SUI events solely by ticker.
+        wrong_name=dict(one,name="Unrelated Network (SUI) Delisting")
+        self.assertEqual(parse([wrong_name],{"sui":{
+            "token":"SUI","progetto":"Sui"}}),[])
+        ended=parse([dict(one,status="completed",updated_at=now.isoformat(),
+                          resolved_at=now.isoformat())])
+        self.assertEqual(ended[0]["rilevanza_temporale"],"CONCLUSO")
+        self.assertEqual(ended[0]["realizzazione"],"NON_ATTESTATA")
+
+    def test_rt_eco_01_future_notice_source_outage_keeps_old_provenance(self):
+        t0=T-dt.timedelta(days=10)
+        published=t0-dt.timedelta(days=40)
+        horizon=T+dt.timedelta(days=45)
+        feed=sources.KRAKEN_STATUS_FEEDS[1]
+        source={"id":"bbbbbbbbbbbb","name":"Sui (SUI) Delisting",
+                "status":"scheduled","created_at":published.isoformat(),
+                "updated_at":published.isoformat(),
+                "scheduled_until":horizon.isoformat(),"components":[],
+                "incident_updates":[{"body":
+                    "Scheduled delisting cycle for SUI. Key dates: "
+                    "December 15, 2026: Withdrawals will be disabled."}]}
+        items=self.items(tokens=("SUI",))
+        event=sources._kraken_market_announcements(
+            {"page":{"id":"lfz25gyhcpjf"},"scheduled_maintenances":[source]},
+            feed,{"sui":{"token":"SUI"}},t0)
+        self.assertEqual(len(event),1)
+        old={"schema":sources.SCHEMA,"acquisito_utc":t0.isoformat(),
+             "prossima_fonte_esterna":"MANUTENZIONI",
+             "comunicazioni_kraken":[
+                 {"id":"INCIDENTI","fonte":sources.KRAKEN_STATUS_FEEDS[0][1],
+                  "stato":"NESSUN_EVENTO_NEL_CAMPIONE",
+                  "eventi":[],"acquisito_utc":t0.isoformat()},
+                 {"id":"MANUTENZIONI","fonte":feed[1],
+                  "stato":"OSSERVATO","eventi":event,
+                  "acquisito_utc":t0.isoformat()}]}
+        def unavailable(url):
+            if url==feed[1]:raise OSError("unavailable")
+            return self.fetch(url)
+        observed=sources.collect(T,items,old,unavailable,collect_kraken_status=True)
+        read=sources.at_read(observed,items,T)
+        old_notice=read["comunicazioni_kraken"][1]
+        self.assertEqual(old_notice["stato_alla_lettura"],"STORICO_NON_AGGIORNATO")
+        self.assertEqual(old_notice["acquisito_utc"],t0.isoformat())
+        self.assertEqual(old_notice["eventi"][0]["aggiornato_fonte_utc"],
+                         published.isoformat())
+        facts=sources.decision_review(read,items["posizioni"][0],"posizioni")["fatti"]
+        self.assertTrue(any(f["tipo"]=="ANNUNCIO_UFFICIALE_KRAKEN"
+                            and f["stato_prova"]=="STORICO_NON_RICONFERMATO"
+                            for f in facts))
+
+    def test_rt_eco_02_online_neutral_vs_tokenomics_etf_and_restriction(self):
+        def review(token,status,other=None,changed=None):
+            row=self.row(token)
+            pair={"indice":0,"token":token,"pair_key":token+"EUR",
+                  "coppia":token+"/EUR","status_kraken":status,
+                  "fonte":"https://api.kraken.com/0/public/AssetPairs",
+                  "stato_alla_lettura":"OSSERVATO",
+                  "acquisito_utc":T.isoformat(),"cambiamento":changed}
+            evidence={"letto_utc":T.isoformat(),
+                      "stati_coppie_kraken":{"posizioni":[pair]}}
+            evidence.update(other or {})
+            return sources.decision_review(evidence,row,"posizioni")
+        sui={"calendari":[{"progetto_id":"sui",
+              "stato":"PROIEZIONE_PRIMARIA_NON_UNLOCK",
+              "fonte":sources.SUI_CIRCULATION,"acquisito_utc":T.isoformat(),
+              "mese_circolazione":"2026-11","circolante_mese_token":4e9,
+              "stime_mensili":[{"mese":"2026-12"}]}]}
+        r=review("SUI","online",sui)
+        self.assertTrue(any(f["tipo"]=="PROIEZIONE_CIRCOLAZIONE" for f in r["fatti"]))
+        self.assertIn("circolazione",r["ipotesi_non_attestata"].lower())
+        self.assertNotIn("restrizione",r["ipotesi_non_attestata"].lower())
+        finance={"flussi_finanziari":[{"id":"ETF_BTC_FARSIDE",
+                 "stato_alla_lettura":"OSSERVATO",
+                 "fonte":sources.FINANCIAL_FEEDS[0][1],
+                 "acquisito_utc":T.isoformat(),
+                 "dati":{"periodo":"2026-11-13","valore":-17.0}}]}
+        b=review("BTC","online",finance)
+        self.assertIn("ETF",b["ipotesi_non_attestata"])
+        for state in ("cancel_only","maintenance"):
+            res=review("SUI",state,sui)
+            self.assertIn("restrizione",res["ipotesi_non_attestata"].lower())
+            self.assertEqual(len(res["ipotesi_concorrenti"]),2)
+        self.assertNotIn("restrizione",
+                         review("SUI","online")["ipotesi_non_attestata"].lower())
+        restore=review("SUI","online",changed={"prima":"maintenance","dopo":"online"})
+        self.assertIn("transizione",restore["ipotesi_non_attestata"].lower())
+        stale={"calendari":[dict(sui["calendari"][0],stato="PROIEZIONE_STORICA",
+                                 acquisito_utc=(T-dt.timedelta(days=45)).isoformat())]}
+        self.assertNotIn("restrizione",
+                         review("SUI","online",stale)["ipotesi_non_attestata"].lower())
+
+
+    def test_rt_eco_01_truncated_statuspage_does_not_renew_old_notice(self):
+        """A fetched but truncated feed must not erase a confirmed future plan."""
+        earlier=T-dt.timedelta(days=10)
+        created=earlier-dt.timedelta(days=45)
+        future=T+dt.timedelta(days=60)
+        feed=sources.KRAKEN_STATUS_FEEDS[1]
+        payload={"page":{"id":"lfz25gyhcpjf"},"scheduled_maintenances":[{
+            "id":"bbbbbbbbbbbb","name":"Sui (SUI) Delisting","status":"scheduled",
+            "created_at":created.isoformat(),"updated_at":created.isoformat(),
+            "scheduled_until":future.isoformat(),"components":[],
+            "incident_updates":[{"body":
+                "A scheduled delisting cycle for SUI. Key dates: "
+                "December 15, 2026: Withdrawals will be disabled."}]
+        }]}
+        events=sources._kraken_market_announcements(payload,feed,
+                                                    {"sui":{"token":"SUI"}},earlier)
+        self.assertEqual(len(events),1)
+        items=self.items(tokens=("SUI",))
+        old={"schema":sources.SCHEMA,"acquisito_utc":earlier.isoformat(),
+             "prossima_fonte_esterna":"MANUTENZIONI",
+             "comunicazioni_kraken":[
+               {"id":"INCIDENTI","fonte":sources.KRAKEN_STATUS_FEEDS[0][1],
+                "stato":"NESSUN_EVENTO_NEL_CAMPIONE","eventi":[],
+                "acquisito_utc":earlier.isoformat()},
+               {"id":"MANUTENZIONI","fonte":feed[1],"stato":"OSSERVATO",
+                "eventi":events,"acquisito_utc":earlier.isoformat()}]}
+        def fresh_but_truncated(url):
+            if url==feed[1]:
+                return json.dumps({"page":{"id":"lfz25gyhcpjf"},
+                    "scheduled_maintenances":[]}).encode()
+            return self.fetch(url)
+        fresh=sources.collect(T,items,old,fresh_but_truncated,
+                              collect_kraken_status=True)
+        reading=sources.at_read(fresh,items,T)
+        rec=reading["comunicazioni_kraken"][1]
+        self.assertEqual(rec["stato_alla_lettura"],"OSSERVATO")
+        self.assertEqual(rec["eventi"][0]["conferma_ultimo_refresh"],
+                         "NON_RICONFERMATO")
+        self.assertEqual(rec["eventi"][0]["acquisito_originale_utc"],
+                         earlier.isoformat())
+        review=sources.decision_review(reading,items["posizioni"][0],"posizioni")
+        self.assertTrue(any(x["stato_prova"]=="STORICO_NON_RICONFERMATO"
+                            for x in review["fatti"]
+                            if x["tipo"]=="ANNUNCIO_UFFICIALE_KRAKEN"))
+        # Repeated refresh cannot launder the old source time as new evidence.
+        fresh["prossima_fonte_esterna"]="MANUTENZIONI"
+        again=sources.collect(T+dt.timedelta(hours=1),items,fresh,
+                              fresh_but_truncated,collect_kraken_status=True)
+        self.assertEqual(again["comunicazioni_kraken"][1]["eventi"][0]
+                         ["acquisito_originale_utc"],earlier.isoformat())
+
+
 if __name__=="__main__":
     unittest.main()
