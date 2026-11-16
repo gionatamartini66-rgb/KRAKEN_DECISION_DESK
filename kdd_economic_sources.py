@@ -53,6 +53,7 @@ MACRO_SERIES = (
     ("ECB_MAIN_REFI_RATE", "FM", "D.U2.EUR.4F.KR.MRR_FR.LEV", "percentuale annua", 8),
     ("EA_M3_GROWTH", "BSI", "M.U2.Y.V.M30.X.I.U2.2300.Z01.A", "variazione percentuale a/a", 65),
     ("CFTC_BTC_TFF", "CFTC", "BTC_CME_133741", "contratti futures CME Bitcoin (5 BTC/contratto)", 21),
+    ("CFTC_ETH_TFF", "CFTC", "ETH_CME_146021", "contratti futures CME Ether (50 Index Points)", 21),
 )
 ISSUE_LABELS = {"governance","security","tokenomics","protocol","upgrade",
                 "migration","breaking-change","deprecation"}
@@ -61,6 +62,14 @@ ECB = "https://data-api.ecb.europa.eu/service/data/"
 CFTC_BTC_TFF_URL = "https://www.cftc.gov/dea/newcot/FinFutWk.txt"
 CFTC_BTC_CONTRACT = "BITCOIN - CHICAGO MERCANTILE EXCHANGE"
 CFTC_BTC_MARKET_CODE = "133741"
+CFTC_ETH_CONTRACT = "ETHER CASH SETTLED - CHICAGO MERCANTILE EXCHANGE"
+CFTC_ETH_MARKET_CODE = "146021"
+CFTC_KNOWN = {
+    "CFTC_BTC_TFF": (CFTC_BTC_CONTRACT, CFTC_BTC_MARKET_CODE,
+                     "(5 Bitcoins)", "5 BTC", "BTC_CME_133741"),
+    "CFTC_ETH_TFF": (CFTC_ETH_CONTRACT, CFTC_ETH_MARKET_CODE,
+                     "(50 Index Points)", "50 Index Points", "ETH_CME_146021")
+}
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 PATH = re.compile(r"[A-Za-z0-9_.\-/]+\Z")
 SHA_OR_REF = re.compile(r"[A-Za-z0-9_.-]{1,80}\Z")
@@ -308,7 +317,7 @@ def _governance(payload, repo, acquired):
 
 def _series_url(series):
     _, flow, key, _, _ = series
-    if flow=="CFTC" and key=="BTC_CME_133741":
+    if flow=="CFTC" and key in ("BTC_CME_133741","ETH_CME_146021"):
         return CFTC_BTC_TFF_URL
     return ECB + flow + "/" + key + "?format=csvdata&lastNObservations=2"
 
@@ -356,8 +365,10 @@ def _cftc_btc_tff(raw, spec, now):
     CFTC trader classes are reportable FUTURES contracts, never identifiable
     firms, ETF creations, on-chain transfers or spot institutional cash flow.
     """
-    if spec[0]!="CFTC_BTC_TFF" or not isinstance(raw,str) or len(raw)>950000:
+    config=CFTC_KNOWN.get(spec[0])
+    if config is None or not isinstance(raw,str) or len(raw)>950000:
         return None
+    contract, code, multiplier, display, series_id=config
     try:
         rows=list(csv.reader(io.StringIO(raw)))
     except (ValueError,csv.Error):
@@ -366,10 +377,10 @@ def _cftc_btc_tff(raw, spec, now):
         return None
     # The live CFTC TFF flat-file rows contain 87 CSV fields (not >90).
     # Validate BOTH leading ID and trailing contract multiplier / report type.
-    target=[r for r in rows if 80<=len(r)<=100 and r[0].strip()==CFTC_BTC_CONTRACT
-            and r[3].strip()==CFTC_BTC_MARKET_CODE
-            and r[5].strip()=="00" and r[-6].strip()=="(5 Bitcoins)"
-            and r[-5].strip()==CFTC_BTC_MARKET_CODE
+    target=[r for r in rows if 80<=len(r)<=100 and r[0].strip()==contract
+            and r[3].strip()==code
+            and r[5].strip()=="00" and r[-6].strip()==multiplier
+            and r[-5].strip()==code
             and r[-1].strip()=="FutOnly"]
     if len(target)!=1:
         return None
@@ -394,10 +405,10 @@ def _cftc_btc_tff(raw, spec, now):
             return None
     except (ValueError,IndexError,TypeError):
         return None
-    return {"id":spec[0],"serie":"CFTC.BTC_CME_133741",
-            "fonte":CFTC_BTC_TFF_URL,"mercato":CFTC_BTC_CONTRACT,
-            "codice_contratto":CFTC_BTC_MARKET_CODE,
-            "contratto_nominale":"5 BTC",
+    return {"id":spec[0],"serie":"CFTC."+series_id,
+            "fonte":CFTC_BTC_TFF_URL,"mercato":contract,
+            "codice_contratto":code,
+            "contratto_nominale":display,
             "periodo":date.isoformat(),"valore":interest,
             "classificazioni":vals,"unita":spec[3],
             "acquisito_utc":_iso(now),
@@ -408,11 +419,14 @@ def _cftc_btc_tff(raw, spec, now):
 
 
 def _cftc_read_valid(row):
-    if row.get("id")!="CFTC_BTC_TFF" or row.get("fonte")!=CFTC_BTC_TFF_URL:
+    config=CFTC_KNOWN.get(row.get("id"))
+    if config is None or row.get("fonte")!=CFTC_BTC_TFF_URL:
         return False
-    if (row.get("mercato")!=CFTC_BTC_CONTRACT
-            or row.get("codice_contratto")!=CFTC_BTC_MARKET_CODE
-            or row.get("contratto_nominale")!="5 BTC"
+    contract,code,_,display,series_id=config
+    if (row.get("serie")!="CFTC."+series_id
+            or row.get("mercato")!=contract
+            or row.get("codice_contratto")!=code
+            or row.get("contratto_nominale")!=display
             or row.get("stato_pubblicazione")!="DATA_RAPPORTO_NON_DATA_PUBBLICAZIONE"
             or row.get("pubblicato_utc") is not None):
         return False
@@ -1062,7 +1076,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
         used+=1
         raw,error=_fetch(fetch,url,json_data=False)
         current=(_cftc_btc_tff(raw,spec,now)
-                 if spec[0]=="CFTC_BTC_TFF" else _ecb_csv(raw,spec,now)) if not error else None
+                 if spec[0] in CFTC_KNOWN else _ecb_csv(raw,spec,now)) if not error else None
     else:
         error=paused
         current=None
@@ -1340,15 +1354,19 @@ def decision_review(evidence, row, group):
                 issues.get("acquisito_utc"),"SEGNALAZIONE_NON_CONFERMA",
                 event.get("limite"),{"titolo":event.get("titolo"),
                                       "categorie":event.get("categorie")})
-    if pid=="bitcoin":
+    observed_contract=({"bitcoin":"CFTC_BTC_TFF","ethereum":"CFTC_ETH_TFF"}
+                       .get(pid))
+    if observed_contract is not None:
         for point in evidence.get("indicatori_macro",[]):
-            if (isinstance(point,dict) and point.get("id")=="CFTC_BTC_TFF"
+            if (isinstance(point,dict) and point.get("id")==observed_contract
                     and point.get("stato")=="OSSERVATO"):
-                add("POSIZIONI_FUTURES_CFTC_BTC",
-                    "Posizioni futures BTC CME dichiarate alla CFTC: classificazioni, non acquisti spot",
+                coin="BTC" if pid=="bitcoin" else "ETH"
+                add("POSIZIONI_FUTURES_CFTC_"+coin,
+                    "Posizioni futures "+coin+" CME dichiarate alla CFTC: classificazioni, non acquisti spot",
                     point.get("fonte"),point.get("periodo"),point.get("acquisito_utc"),
                     "RILEVAZIONE_REGOLAMENTARE_RITARDATA",point.get("limite"),
                     {"open_interest_contratti":point.get("valore"),
+                     "contratto":point.get("contratto_nominale"),
                      "categorie":point.get("classificazioni")})
     if not facts:
         return base
@@ -1363,6 +1381,10 @@ def decision_review(evidence, row, group):
                "I periodi mensili documentati potrebbero influire sulla supply futura",
                "Mancano giorno esatto, quantità della tranche, circolazione e vendita",
                "Rileggere la regola pubblicata e verificare eventuali eventi effettivi prima di stimare l'impatto"),
+              ("POSIZIONI_FUTURES_CFTC_ETH",
+               "Cambiamenti nel posizionamento futures possono modificare il quadro della partecipazione",
+               "Le posizioni riportate non identificano acquisti spot, singoli soggetti o causalità",
+               "Confrontare prossime rilevazioni CFTC, volumi spot e dati indipendenti"),
               ("POSIZIONI_FUTURES_CFTC_BTC",
                "Cambiamenti nel posizionamento futures possono modificare il quadro della partecipazione",
                "Le posizioni riportate non identificano acquisti spot, singoli soggetti o causalità",
@@ -1639,7 +1661,7 @@ def at_read(raw, items, now):
             raise ValueError("ECB series forged")
         new=dict(row)
         if row.get("valore") is not None:
-            if row["id"]=="CFTC_BTC_TFF" and not _cftc_read_valid(row):
+            if row["id"] in CFTC_KNOWN and not _cftc_read_valid(row):
                 raise ValueError("CFTC futures report source or classification forged")
             period=str(row.get("periodo"))
             if len(period)==7 and re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])",period):

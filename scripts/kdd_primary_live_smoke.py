@@ -68,7 +68,7 @@ def counted(url):
     return fetch(url)
 
 raw=None
-for cycle in range(1,8):
+for cycle in range(1,len(primary.MACRO_SERIES)+1):
     moment=dt.datetime.now(dt.timezone.utc)
     before=len(seen)
     raw=primary.collect(moment,roster,raw,counted,rpc_fetch=rpc_fetch,collect_project_issues=True)
@@ -112,14 +112,15 @@ for cycle in range(1,8):
           "future_months",len(sui.get("stime_mensili",[])),
           "unlock_verified",sui.get("stato_vesting"))
     if cycle==len(primary.MACRO_SERIES):
-        cftc=next(x for x in checked["indicatori_macro"] if x["id"]=="CFTC_BTC_TFF")
-        assert cftc["stato"] in ("OSSERVATO","SCADUTO"), (
-            "CFTC official 5-BTC futures data not parsed in live test: "
-            +str(cftc.get("motivo")))
-        assert cftc["classificazioni"]["asset_manager"]["saldo_long_meno_short"] == (
-            cftc["classificazioni"]["asset_manager"]["long_contratti"] -
-            cftc["classificazioni"]["asset_manager"]["short_contratti"])
-        print("CFTC_BTC_FUTURES_PRIMARY_CONFIRMED",cftc["periodo"],
-              cftc["valore"],cftc["classificazioni"])
+        for cid in ("CFTC_BTC_TFF","CFTC_ETH_TFF"):
+            cftc=next(x for x in checked["indicatori_macro"] if x["id"]==cid)
+            assert cftc["stato"] in ("OSSERVATO","SCADUTO","STORICO_NON_AGGIORNATO"), (
+                "CFTC official futures data not parsed in live test: "+cid
+                +str(cftc.get("motivo")))
+            assert cftc["classificazioni"]["asset_manager"]["saldo_long_meno_short"] == (
+                cftc["classificazioni"]["asset_manager"]["long_contratti"] -
+                cftc["classificazioni"]["asset_manager"]["short_contratti"])
+            print("CFTC_FUTURES_PRIMARY_CONFIRMED",cid,cftc["periodo"],
+                  cftc["valore"],cftc["classificazioni"])
     if checked["copertura"]["governance_osservati"]==0 and checked["copertura"]["indicatori_macro_osservati"]==0:
         print("WARNING: NO LIVE PROVIDER EVIDENCE THIS CYCLE",file=sys.stderr)

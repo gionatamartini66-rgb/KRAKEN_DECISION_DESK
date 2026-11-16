@@ -763,6 +763,34 @@ class PrimaryFollowupTests(unittest.TestCase):
                                     spec,T)
         self.assertIsNone(older)
 
+
+    def test_cftc_real_ether_50_index_points_not_micro_contract(self):
+        import io,csv
+        eth=next(s for s in sources.MACRO_SERIES if s[0]=="CFTC_ETH_TFF")
+        self.assertEqual(sources._series_url(eth),sources.CFTC_BTC_TFF_URL)
+        row=[sources.CFTC_ETH_CONTRACT,"261103","2026-11-03",
+             "146021","CME ","00","146 ","22869","15831","8425",
+             "226","1018","2843","567","3599","7298",
+             "882","109","2020","25","22257","22286",
+             "612","583"]
+        row+=["0"]*(87-24-6)+[
+              "(50 Index Points)","146021","CME ","146 ","F85","FutOnly"]
+        self.assertEqual(len(row),87)
+        out=io.StringIO();csv.writer(out).writerow(row)
+        p=sources._cftc_btc_tff(out.getvalue(),eth,T)
+        self.assertIsNotNone(p)
+        self.assertEqual(p["valore"],22869)
+        self.assertEqual(p["classificazioni"]["asset_manager"]["saldo_long_meno_short"],-1825)
+        self.assertTrue(sources._cftc_read_valid(p))
+        modified=copy.deepcopy(p);modified["codice_contratto"]="146022"
+        self.assertFalse(sources._cftc_read_valid(modified))
+        row[-6]="(0.1 Index Points)"
+        out=io.StringIO();csv.writer(out).writerow(row)
+        self.assertIsNone(sources._cftc_btc_tff(out.getvalue(),eth,T))
+        row[-6]="(50 Index Points)";row[3]="146022"
+        out=io.StringIO();csv.writer(out).writerow(row)
+        self.assertIsNone(sources._cftc_btc_tff(out.getvalue(),eth,T))
+
     def test_ecb_primary_rotation_includes_refinancing_and_m3_without_double_fetch(self):
         roster=self.items(tokens=("BTC",))
         prev={}

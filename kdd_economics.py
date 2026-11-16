@@ -583,10 +583,10 @@ def regime_participation(base, derivatives, primary, now, previous=None):
         for item in rows:
             if not isinstance(item, dict) or item.get("stato") != "OSSERVATO":
                 continue
-            if item.get("id") not in ("USD_EUR","EA_HICP","CFTC_BTC_TFF") or not finite(item.get("valore")):
+            if item.get("id") not in ("USD_EUR","EA_HICP","CFTC_BTC_TFF","CFTC_ETH_TFF") or not finite(item.get("valore")):
                 continue
             out["famiglie_osservate"].append({
-                "famiglia":("FUTURES_CFTC_" if item["id"]=="CFTC_BTC_TFF" else "MACRO_ECB_") + item["id"],"fonte":item.get("fonte"),
+                "famiglia":("FUTURES_CFTC_" if item["id"] in ("CFTC_BTC_TFF","CFTC_ETH_TFF") else "MACRO_ECB_") + item["id"],"fonte":item.get("fonte"),
                 "periodo":item.get("periodo"),"valore":item["valore"],"unita":item.get("unita"),
                 "limite":"Dato macro osservato; segno dell'impatto sul prezzo non dedotto"})
     return out
