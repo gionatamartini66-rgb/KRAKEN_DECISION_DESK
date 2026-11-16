@@ -611,6 +611,11 @@ def _strk_primary_schedule(raw, project_id, descriptor, now):
             "data_pubblicazione":"NON_ESPOSTA_DALLA_FONTE_MDX",
             "tipo":"SCADENZE_MENSILI_CON_MASSIMI",
             "unita":"TOKEN","eventi":events,
+            "regole_ufficiali":[
+              {"da":"2024-04-15","fino":"2025-03-15","giorno_mese":15,
+               "quantita_massima_mensile_token":64000000},
+              {"da":"2025-04-15","fino":"2027-03-15","giorno_mese":15,
+               "quantita_massima_mensile_token":127000000}],
             "stato_sblocco_effettivo":"NON_ATTESTATO",
             "stato_vendita":"NON_ATTESTATA",
             "limite":"Max fino a 127 milioni STRK il 15 del mese, non quantità effettiva; ora non pubblicata, emissioni staking/altre allocazioni escluse"}
@@ -641,6 +646,7 @@ def _strk_schedule_valid(row, descriptor):
         "and going through March 15, 2027, for a total of 30.48% (3.048 billion tokens).")
     expected=_strk_primary_schedule(source,"starknet",descriptor,acquired)
     return bool(expected and row.get("eventi")==expected["eventi"]
+                and row.get("regole_ufficiali")==expected["regole_ufficiali"]
                 and row.get("limite")==expected["limite"])
 
 
@@ -1175,19 +1181,34 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
                 row.update(stato=paused if not network_allowed
                            else "RINVIATO_BUDGET")
         schedules.append(row)
-    # Compare the attributable planned monthly figures, without calling them unlocks.
+    # Compare the published parameters, not a rolling display window.
     changes_calendar=[]
     for row in schedules:
         former=previous_schedules.get(row["progetto_id"])
-        if (former and row.get("stato") in ("PROIEZIONE_PRIMARIA_NON_UNLOCK","DOCUMENTO_PRIMARIO_CON_SCHEDULE")
-                and former.get("fonte")==row.get("fonte")
-                and (former.get("stime_mensili")!=row.get("stime_mensili")
-                     or former.get("eventi")!=row.get("eventi"))):
+        state=row.get("stato")
+        if (not isinstance(former,dict) or state not in (
+                "PROIEZIONE_PRIMARIA_NON_UNLOCK","DOCUMENTO_PRIMARIO_CON_SCHEDULE",
+                "DOCUMENTO_PRIMARIO_REGOLA_VESTING",
+                "DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI")
+                or former.get("fonte")!=row.get("fonte")
+                or not _time(former.get("acquisito_utc"))
+                or former.get("stato") not in (
+                    state,"PROIEZIONE_STORICA","STORICO_DA_RICONFERMARE",
+                    "REGOLA_VESTING_STORICA","MASSIMI_DATATI_STORICI")):
+            continue
+        key=("stime_mensili" if state=="PROIEZIONE_PRIMARIA_NON_UNLOCK" else
+             "regole" if state=="DOCUMENTO_PRIMARIO_REGOLA_VESTING" else
+             "regole_ufficiali" if state=="DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI"
+             else "eventi")
+        before,after=former.get(key),row.get(key)
+        if before!=after:
             changes_calendar.append({"progetto_id":row["progetto_id"],
-                "fonte":row.get("fonte"),"stato":"REVISIONE_PIANO_PUBBLICATO",
-                "acquisizione_precedente_utc":former.get("acquisito_utc"),
-                "acquisizione_corrente_utc":row.get("acquisito_utc"),
-                "limite":"Revisione del documento, non prova sblocco o vendita"})
+                "fonte":row["fonte"],"stato":"REVISIONE_DOCUMENTO_ECONOMICO",
+                "tipo_documento":state,"campo_variato":key,
+                "valore_precedente":before,"valore_corrente":after,
+                "acquisizione_precedente_utc":former["acquisito_utc"],
+                "acquisizione_corrente_utc":row["acquisito_utc"],
+                "limite":"Documento aggiornato; non prova rilascio, circolazione o vendita"})
     history,changes=_supply_samples(roster,old,now)
     retained_events=sorted(event_history.values(),key=lambda r:(r["acquisito_utc"],r["progetto_id"],r["documento_id"]),reverse=True)[:MAX_SAMPLES]
     kraken_status=_spot_status(now,items,asset_pairs,old)
@@ -1270,6 +1291,14 @@ def decision_review(evidence, row, group):
                       "acquisito_utc":acquired,"stato_prova":proof,
                       "dettaglio":details,"limite":limit})
     schedule=by_project("calendari")
+    for revision in evidence.get("revisioni_piani",[]):
+        if isinstance(revision,dict) and revision.get("progetto_id")==pid:
+            add("REVISIONE_TOKENOMICS_PRIMARIA",
+                "La documentazione economica ufficiale è cambiata tra due acquisizioni",
+                revision.get("fonte"),revision.get("acquisizione_corrente_utc"),
+                revision.get("acquisizione_corrente_utc"),"CONFRONTO_DOCUMENTALE",
+                revision.get("limite"),{"campo_variato":revision.get("campo_variato"),
+                   "acquisizione_precedente_utc":revision.get("acquisizione_precedente_utc")})
     if schedule.get("stato")=="DOCUMENTO_PRIMARIO_CON_SCHEDULE":
         for event in schedule.get("eventi",[])[:4]:
             if not isinstance(event,dict): continue
@@ -1329,6 +1358,13 @@ def decision_review(evidence, row, group):
                 event.get("limite"),{"titolo":event.get("titolo"),"stato":event.get("stato")})
     emission=by_project("politiche_emissioni")
     if emission.get("stato_alla_lettura")=="OSSERVATO":
+        if isinstance(emission.get("confronto"),dict):
+            add("VARIAZIONE_POLICY_EMISSIONE",
+                "I parametri ufficiali di emissione differiscono dall'acquisizione precedente",
+                emission.get("fonte"),None,emission.get("acquisito_utc"),
+                "CONFRONTO_RPC",emission["confronto"].get("limite"),
+                {"campi_variati":emission["confronto"].get("cambiati"),
+                 "acquisizione_precedente_utc":emission["confronto"].get("precedente_utc")})
         add("PARAMETRI_EMISSIONE",
             "Il progetto espone parametri di emissione correnti, non un calendario vesting",
             emission.get("fonte"),None,emission.get("acquisito_utc"),
@@ -1373,6 +1409,10 @@ def decision_review(evidence, row, group):
     priority=(("STATO_COPPIA_KRAKEN", "Una restrizione della coppia potrebbe impedire l'operatività prevista",
                "Lo stato pubblico non attesta operatività o sospensione del singolo account",
                "Ricontrollare AssetPairs e mercato/account prima di considerare operazioni"),
+              ("REVISIONE_TOKENOMICS_PRIMARIA",
+               "Una revisione documentale potrebbe cambiare il rischio di emissione o diluizione",
+               "Non prova emissione effettiva, trasferimenti o vendite",
+               "Rileggere la nuova fonte e verificare le quantità effettive"),
               ("UNLOCK_MASSIMO_DATATO_PRIMARIO",
                "Il massimo sbloccabile dichiarato può modificare l'offerta trasferibile",
                "Una quantità massima non è una quantità effettiva trasferita, circolante o venduta",
@@ -1401,6 +1441,10 @@ def decision_review(evidence, row, group):
                "Un cambiamento della circolazione prevista potrebbe influire sulla futura diluizione",
                "La proiezione può variare e non dimostra unlock, vendita né impatto sul prezzo",
                "Confrontare una nuova versione del piano con dati circolanti osservati"),
+              ("VARIAZIONE_POLICY_EMISSIONE",
+               "Una variazione ufficiale dei parametri può modificare l'offerta futura",
+               "Non equivale a nuovi token già emessi o venduti",
+               "Verificare successiva rilevazione RPC, supply ed esecuzione"),
               ("PARAMETRI_EMISSIONE",
                "Modifiche alla politica di emissione potrebbero alterare la supply futura",
                "I parametri RPC non misurano i token venduti né dimostrano effetto sul prezzo",
@@ -1652,6 +1696,22 @@ def at_read(raw, items, now):
                           if row["stato"]=="DOCUMENTO_PRIMARIO_CON_SCHEDULE"
                           and now-t<=dt.timedelta(days=90) else "STORICO_DA_RICONFERMARE")
         read_schedules.append(new)
+    for revision in raw.get("revisioni_piani",[]):
+        if not isinstance(revision,dict):
+            raise ValueError("Primary plan revision malformed")
+        pid=revision.get("progetto_id")
+        matching=next((r for r in read_schedules if r["progetto_id"]==pid),None)
+        field=revision.get("campo_variato")
+        if (not matching or revision.get("fonte")!=matching.get("fonte")
+                or revision.get("tipo_documento") not in (
+                    "PROIEZIONE_PRIMARIA_NON_UNLOCK","DOCUMENTO_PRIMARIO_CON_SCHEDULE",
+                    "DOCUMENTO_PRIMARIO_REGOLA_VESTING","DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI")
+                or field not in ("stime_mensili","eventi","regole","regole_ufficiali")
+                or revision.get("valore_corrente")!=matching.get(field)
+                or revision.get("valore_precedente")==revision.get("valore_corrente")
+                or revision.get("acquisizione_corrente_utc")!=matching.get("acquisito_utc")
+                or not _time(revision.get("acquisizione_precedente_utc"))):
+            raise ValueError("Primary plan revision provenance")
     indicators=[]
     for row in raw.get("indicatori_macro",[]):
         if not isinstance(row,dict):
