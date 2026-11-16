@@ -735,5 +735,69 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(calls, [True, False])
 
 
+    def test_rt69_samsung_slow_decision_preflight_gets_210s_only_for_that_module(self):
+        """Samsung evidence: 150.1s STOP, isolated PASS 146.3s, bounded 210s."""
+        import subprocess
+        clock = {'time': 0.0}
+        core = ('test_decision_desk', 'test_kdd_candles',
+                'test_kdd_economics', 'test_kdd_economic_sources',
+                'test_kdd_futures_flow', 'test_kdd_network_defi')
+        calls = []
+        def synthetic_run(args, *, cwd, timeout=120):
+            module = next((m for m in core if m in args), None)
+            # A deliberately slow but successful test, not an actual sleep.
+            duration = 175.0 if module == 'test_decision_desk' else 0.1
+            calls.append((module, timeout))
+            clock['time'] += min(duration, timeout)
+            if duration > timeout:
+                raise subprocess.TimeoutExpired(args, timeout,
+                                                stderr='PRIVATE_KDD_BALANCE')
+            return subprocess.CompletedProcess(args, 0, '', '')
+        out = io.StringIO()
+        with patch.object(kdd, 'capability_preflight'), \
+             patch.object(kdd, 'monotonic',
+                          side_effect=lambda: clock['time']), \
+             patch.object(kdd, 'command', side_effect=synthetic_run), \
+             contextlib.redirect_stdout(out):
+            durations = kdd.isolated_test(self.root, phase='preflight')
+        self.assertEqual([m for m, _ in calls[:6]], list(core))
+        self.assertEqual([t for _, t in calls[:6]], [210] + [150] * 5)
+        self.assertEqual([t for _, t in calls[6:]], [120] * 6)
+        self.assertEqual(durations['test_decision_desk'], 175.0)
+        self.assertEqual(kdd.postflight_budget(durations['test_decision_desk']), 300)
+        self.assertNotIn('PRIVATE_KDD_BALANCE', out.getvalue())
+
+    def test_rt69_samsung_preflight_hung_and_failed_still_stop_with_210s_cap(self):
+        """An extended preflight must not suppress timeout or failing assertions."""
+        import subprocess
+        seen = []
+        for mode in ('hung', 'failed'):
+            seen.clear()
+            def emulate(args, *, cwd, timeout=120):
+                if 'test_decision_desk' in args:
+                    seen.append(timeout)
+                    if mode == 'hung':
+                        raise subprocess.TimeoutExpired(
+                            args, timeout, output=b'PRIVATE_KDD_BALANCE',
+                            stderr=b'PRIVATE_KDD_PATH')
+                    return subprocess.CompletedProcess(
+                        args, 1, '',
+                        'FAIL: test_real_failure (test_decision_desk.Case)\n'
+                        'PRIVATE_KDD_BALANCE=999999')
+                return subprocess.CompletedProcess(args, 0, '', '')
+            output = io.StringIO()
+            with patch.object(kdd, 'capability_preflight'), \
+                 patch.object(kdd, 'command', side_effect=emulate), \
+                 contextlib.redirect_stdout(output):
+                with self.assertRaisesRegex(
+                    kdd.SafetyError,
+                    'test_decision_desk.*' +
+                    ('timeout' if mode == 'hung' else 'test_real_failure')
+                ):
+                    kdd.isolated_test(self.root, phase='preflight')
+            self.assertEqual(seen, [210])
+            self.assertNotIn('PRIVATE_KDD_', output.getvalue())
+
+
 if __name__ == '__main__':
     unittest.main()
