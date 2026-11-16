@@ -385,6 +385,12 @@ class WalletPacketG0Tests(unittest.TestCase):
         forged["packet_sha256"]=bridge.digest(forged["packet"])
         with self.assertRaisesRegex(bridge.BridgeError,"altra coppia"):
             bridge.read_context(forged,now=T)
+        cross_market=json.loads(json.dumps(bundle))
+        cross_market["packet"]["opportunita_esterne_scanner"][0][
+            "analisi_candidato_4tf"]["timeframe"]["1D"]["pair_key"]="ETHUSD"
+        cross_market["packet_sha256"]=bridge.digest(cross_market["packet"])
+        with self.assertRaisesRegex(bridge.BridgeError,"pair_key"):
+            bridge.read_context(cross_market,now=T)
 
     def test_requested_pepe_third_group_packet_bridge_does_not_invent_scanner_position(self):
         import kdd_economics as econ

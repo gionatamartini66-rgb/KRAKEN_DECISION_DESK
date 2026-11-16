@@ -684,6 +684,13 @@ def scanner_candidates_at_read(rows, *, snapshot, moment, multifonte=None):
             raise BridgeError("Scanner 4TF non strutturato")
         if tech.get("coppia") not in (None,pair):
             raise BridgeError("Scanner 4TF: coppia incongruente")
+        # Prevent a same-symbol but different Kraken REST pair from being
+        # labelled with this shortlist member's chart/EMA evidence.
+        origin_key=origin.get("pair_key")
+        tech_key=tech.get("pair_key")
+        if (origin_key is not None and tech_key is not None
+                and origin_key!=tech_key):
+            raise BridgeError("Scanner 4TF: pair_key diversa dalla preselezione")
         observed={}
         for label,seconds in durations.items():
             frame=(tech.get("timeframe") or {}).get(label) or {}
@@ -692,6 +699,9 @@ def scanner_candidates_at_read(rows, *, snapshot, moment, multifonte=None):
             state=frame.get("stato","NON_DISPONIBILE")
             if state=="AGGIORNATO" and frame.get("coppia")!=pair:
                 raise BridgeError("Scanner OHLC da altra coppia")
+            if state=="AGGIORNATO" and tech_key is not None and (
+                    frame.get("pair_key")!=tech_key):
+                raise BridgeError("Scanner OHLC con pair_key da altro mercato")
             source_close=frame.get("chiusura_utc")
             if source_close:
                 closed=instant(source_close)

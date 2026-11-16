@@ -1767,6 +1767,8 @@ class DeskTests(unittest.TestCase):
         self.assertEqual(info["universo_esaminato_almeno_una_volta"],96)
         self.assertEqual(info["copertura_progressiva_pct"],100)
         self.assertGreater(len(set(requested[24:])) ,24)
+        self.assertFalse(set(requested[:24]) & set(requested[24:48]),
+                         "Un revisited market displaced a never-scanned market")
         # Previously invisible markets reached the real OHLC callback, not a
         # claimed ticker-only "coverage".
         self.assertEqual(len(set(requested)),96)
@@ -4278,6 +4280,56 @@ class DossierPatrimonialeG2Tests(unittest.TestCase):
                 stored_dossier=d.load("dossier_multifonte.json")
                 stored_status=d.load("dossier_stato.json")
                 return stored_dossier,stored_status,report,page
+
+    def test_kdd07_selected_scanner_carries_real_4tf_into_dossier(self):
+        """Real producer on closed synthetic OHLC, isolated snapshot and wallet."""
+        import dossier_trade as mod
+        import unittest.mock as mock
+        import tempfile
+        t=self.now
+        pairs={"ICNTEUR":{"wsname":"ICNT/EUR","status":"online",
+                           "altname":"ICNTEUR"},
+               "XXBTZEUR":{"wsname":"XBT/EUR","status":"online",
+                           "altname":"XXBTZEUR"}}
+        def fetch(endpoint,**kw):
+            if endpoint=="AssetPairs":return pairs
+            if endpoint=="OHLC":
+                seconds=kw["interval"]*60
+                latest=int(t.timestamp())//seconds*seconds
+                start=latest-80*seconds
+                bars=[]
+                for i in range(80):
+                    close=100+i/100
+                    bars.append([start+i*seconds,close,close+.3,close-.2,
+                                 close,close,10+i%3,1])
+                # A deliberately invalid open-bar close must never reach EMA.
+                bars.append([latest,101,900,1,850,850,900,1])
+                return {kw["pair"]:bars,"last":0}
+            raise AssertionError("No real network call: "+endpoint)
+        with tempfile.TemporaryDirectory() as folder:
+            path=pathlib.Path(folder)
+            (path/"portafoglio.json").write_text(json.dumps({
+                "posizioni":[{"token":"BTC","quantita":"1.0"}]}))
+            with mock.patch.object(d,"DIR",path),                 mock.patch.object(d,"NOW",return_value=t),                 mock.patch.object(d,"kraken",side_effect=fetch),                 mock.patch.object(mod,"recupera_4h",return_value={}),                 mock.patch.object(mod,"global_context",return_value={}),                 mock.patch.object(mod,"derivatives_context",return_value={"open-interest":{},"cvd":{}}),                 mock.patch.object(mod,"token_fundamentals",return_value={"stato":"NON_DISPONIBILE"}),                 mock.patch.object(mod.flusso_spot,"fetch",return_value={"stato":"NON_DISPONIBILE"}),                 mock.patch.object(mod.time,"sleep"),                 mock.patch.object(d.piano_gpt,"load",return_value=None):
+                dossier=mod.collect(source=self.source,asset_pairs=pairs)
+            self.assertEqual(len(dossier["candidati"]),1)
+            candidate=dossier["candidati"][0]
+            self.assertEqual(candidate["token"],"ICNT")
+            self.assertEqual(candidate["tecnica_4tf"]["stato"],"COMPLETO")
+            self.assertEqual(dossier["approfondimento_candidati_4tf"]["completi"],1)
+            self.assertEqual(dossier["approfondimento_candidati_4tf"]["richieste_ohlc"],4)
+            self.assertEqual(candidate["figure_candlestick"]["stato"],"AGGIORNATO")
+            for label in ("15m","1H","4H","1D"):
+                frame=candidate["tecnica_4tf"]["timeframe"][label]
+                self.assertEqual(frame["stato"],"AGGIORNATO")
+                self.assertEqual(frame["pair_key"],"ICNTEUR")
+                self.assertLess(frame["close"],110)
+                self.assertIn("ema20",frame)
+                self.assertIn("figure_candlestick",frame)
+            self.assertEqual(len(dossier["patrimonio_4tf"]["posizioni"]),1)
+            self.assertEqual(dossier["patrimonio_4tf"]["posizioni"][0]["token"],"BTC")
+            self.assertNotEqual(dossier["patrimonio_4tf"]["posizioni"][0]["token"],
+                                candidate["token"])
 
     def test_g2_red_original_counterexample_three_saved_files(self):
         dossier,status,report,page=self.exercise(

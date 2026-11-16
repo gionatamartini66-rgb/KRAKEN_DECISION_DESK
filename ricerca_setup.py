@@ -114,17 +114,26 @@ def sample(markets, scanner, size=MAX_SCREEN, *, previous=None):
         group.sort(key=priority)
     chosen=[]
     count_tier={t:0 for t in LIQUIDITY_TIERS}
-    while len(chosen)<size and any(groups.values()):
-        before=len(chosen)
-        for b in BUCKETS:
-            for t in LIQUIDITY_TIERS:
+    # First use all available never-scanned markets across EVERY stratum.
+    # Otherwise a rare bucket with one frequently observed asset consumes a
+    # request each refresh while other buckets still contain unseen markets.
+    # Only when new identities are exhausted for the chosen per-cycle budget
+    # may the scanner revisit older rows, least recently visited first.
+    for allow_repeat in (False,True):
+        while len(chosen)<size and any(groups.values()):
+            before=len(chosen)
+            for b in BUCKETS:
+                for t in LIQUIDITY_TIERS:
+                    if len(chosen)>=size:break
+                    if t=='esplorativa' and count_tier[t]>=6:continue
+                    group=groups[(b,t)]
+                    if not group:continue
+                    if not allow_repeat and priority(group[0])[0]>=0:
+                        continue
+                    chosen.append(group.pop(0))
+                    count_tier[t]+=1
                 if len(chosen)>=size:break
-                if t=='esplorativa' and count_tier[t]>=6:continue
-                group=groups[(b,t)]
-                if group:
-                    chosen.append(group.pop(0));count_tier[t]+=1
-            if len(chosen)>=size:break
-        if len(chosen)==before:break
+            if len(chosen)==before:break
     return chosen
 
 
