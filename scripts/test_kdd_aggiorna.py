@@ -589,5 +589,151 @@ class UpdateTests(unittest.TestCase):
         self.assertTrue(list((home / '.local/share/kdd-deploy-backups').glob('*')))
 
 
+    def test_rt69_preflight_measured_budget_supports_slow_good_test_and_same_suites(self):
+        """138s preflight -> slow 180s postflight must PASS, without relaxing checks."""
+        import subprocess
+        clock = {'seconds': 0.0}
+        modules = ('test_decision_desk', 'test_kdd_candles', 'test_kdd_economics',
+                   'test_kdd_economic_sources', 'test_kdd_futures_flow',
+                   'test_kdd_network_defi')
+        observed = []
+        def synthetic_command(args, *, cwd, timeout=120):
+            module = next((m for m in modules if m in args), None)
+            phase = 'preflight' if cwd == self.root else 'postflight'
+            elapsed = (138 if phase == 'preflight' else 180) if module == 'test_decision_desk' else 1
+            observed.append((phase, tuple(args), timeout, elapsed))
+            clock['seconds'] += elapsed
+            if elapsed >= timeout:
+                raise subprocess.TimeoutExpired(args, timeout,
+                                                stderr='DO_NOT_PRINT_PRIVATE_VALUES')
+            return subprocess.CompletedProcess(args, 0, '', 'OK')
+        capture = io.StringIO()
+        with patch.object(kdd, 'capability_preflight'), \
+             patch.object(kdd, 'monotonic', side_effect=lambda: clock['seconds'], create=True), \
+             patch.object(kdd, 'command', side_effect=synthetic_command), \
+             contextlib.redirect_stdout(capture):
+            measurements = kdd.isolated_test(self.root, phase='preflight')
+            kdd.isolated_test(self.live, phase='postflight',
+                              reference_times=measurements)
+        before = [x for x in observed if x[0] == 'preflight']
+        after = [x for x in observed if x[0] == 'postflight']
+        self.assertEqual([x[1] for x in before], [x[1] for x in after])
+        self.assertEqual(len(before), 12, 'six core + five packet + R5 mandatory checks')
+        self.assertEqual(measurements['test_decision_desk'], 138)
+        self.assertEqual(before[0][2], 150)
+        self.assertGreater(after[0][2], 180)
+        self.assertLessEqual(after[0][2], 300)
+        self.assertTrue(all(x[2] == 120 for x in after[6:]))
+        self.assertIn('138', capture.getvalue())
+        self.assertIn('180', capture.getvalue())
+        self.assertNotIn('DO_NOT_PRINT_PRIVATE_VALUES', capture.getvalue())
+
+    def test_rt69_preflight_reference_bounds_postflight_and_invalid_measure_stops(self):
+        self.assertEqual(kdd.postflight_budget(1), 150)
+        self.assertEqual(kdd.postflight_budget(138), 296)
+        self.assertEqual(kdd.postflight_budget(149), 300)
+        with self.assertRaisesRegex(kdd.SafetyError, 'misura'):
+            kdd.postflight_budget(None)
+
+    def test_rt69_hung_test_and_genuine_failure_still_stop_without_private_output(self):
+        import subprocess
+        capture = io.StringIO()
+        def hung(args, *, cwd, timeout=120):
+            if 'test_decision_desk' in args:
+                self.assertLessEqual(timeout, 300)
+                raise subprocess.TimeoutExpired(args, timeout,
+                                                stderr='PRIVATE_KDD_BALANCE',
+                                                output='PRIVATE_KDD_REPORT')
+            return subprocess.CompletedProcess(args, 0, '', '')
+        with patch.object(kdd, 'capability_preflight'), \
+             patch.object(kdd, 'command', side_effect=hung), \
+             contextlib.redirect_stdout(capture):
+            with self.assertRaisesRegex(kdd.SafetyError, 'test_decision_desk.*timeout'):
+                kdd.isolated_test(self.live, phase='postflight',
+                                  reference_times={'test_decision_desk': 138})
+        self.assertNotIn('PRIVATE_KDD_', capture.getvalue())
+        def failed(args, *, cwd, timeout=120):
+            if 'test_decision_desk' in args:
+                return subprocess.CompletedProcess(
+                    args, 1, '', 'FAIL: test_real_failure (test_decision_desk.DeskTests)\n'
+                                 'PRIVATE_KDD_BALANCE: 123456\n')
+            return subprocess.CompletedProcess(args, 0, '', '')
+        with patch.object(kdd, 'capability_preflight'), \
+             patch.object(kdd, 'command', side_effect=failed), \
+             contextlib.redirect_stdout(capture):
+            with self.assertRaisesRegex(kdd.SafetyError,
+                                       'test_decision_desk.*test_real_failure'):
+                kdd.isolated_test(self.live, phase='postflight',
+                                  reference_times={'test_decision_desk': 138})
+        self.assertNotIn('PRIVATE_KDD_BALANCE', capture.getvalue())
+
+    def test_rt69_apply_reuses_measured_preflight_in_real_postflight_path(self):
+        home = Path(self.tmp.name) / 'rt69-home'
+        home.mkdir()
+        observed = []
+        timings = {'test_decision_desk': 138.0}
+        def observe(stage, **kwargs):
+            observed.append((stage, kwargs))
+            return timings
+        with patch.object(kdd.Path, 'home', return_value=home), \
+             patch.object(kdd, 'isolated_test', side_effect=observe), \
+             patch.object(kdd, 'service_alive', return_value=False), \
+             patch('builtins.input', return_value='APPLICA'), \
+             contextlib.redirect_stdout(io.StringIO()):
+            kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=False)
+        self.assertEqual(len(observed), 2)
+        self.assertNotEqual(observed[0][0], self.live)
+        self.assertEqual(observed[1][0], self.live)
+        self.assertEqual(observed[1][1]['phase'], 'postflight')
+        self.assertEqual(observed[1][1]['reference_times'], timings)
+
+    def test_rt69_lock_blocks_second_process_and_releases_after_exit(self):
+        import os
+        import subprocess
+        import sys
+        home = Path(self.tmp.name) / 'rt69-lock-home'
+        home.mkdir()
+        source = Path(__file__).parent / 'kdd_aggiorna.py'
+        child = (
+            'import importlib.util,sys\n'
+            'spec=importlib.util.spec_from_file_location("rt69_child",sys.argv[1])\n'
+            'k=importlib.util.module_from_spec(spec); spec.loader.exec_module(k)\n'
+            'try:\n'
+            ' with k.updater_lock(): pass\n'
+            'except k.SafetyError: sys.exit(7)\n'
+        )
+        env = os.environ.copy()
+        env['HOME'] = str(home)
+        def probe():
+            return subprocess.run([sys.executable, '-B', '-c', child, str(source)],
+                                  env=env, cwd=self.root, capture_output=True,
+                                  text=True, timeout=15)
+        with patch.object(kdd.Path, 'home', return_value=home):
+            with kdd.updater_lock():
+                contender = probe()
+                self.assertEqual(contender.returncode, 7)
+            after = probe()
+            self.assertEqual(after.returncode, 0, after.stderr[-300:])
+
+    def test_rt69_main_holds_exclusive_lock_across_check_and_apply(self):
+        from argparse import Namespace
+        home = Path(self.tmp.name) / 'rt69-main-home'
+        home.mkdir()
+        calls = []
+        def guarded_apply(root, live, *, commit_sha, dry_run):
+            calls.append(dry_run)
+            with self.assertRaisesRegex(kdd.SafetyError, 'aggiornatore'):
+                with kdd.updater_lock():
+                    pass
+        for check in (True, False):
+            with patch.object(kdd.Path, 'home', return_value=home), \
+                 patch.object(kdd.argparse.ArgumentParser, 'parse_args',
+                              return_value=Namespace(check=check, apply=not check)), \
+                 patch.object(kdd, 'verified_clone', return_value=self.sha), \
+                 patch.object(kdd, 'apply', side_effect=guarded_apply):
+                self.assertEqual(kdd.main(), 0)
+        self.assertEqual(calls, [True, False])
+
+
 if __name__ == '__main__':
     unittest.main()
