@@ -1674,8 +1674,11 @@ def decision_review(evidence, row, group):
             add("FLUSSI_ETF_SPOT_AGGREGATI",
                 "L'aggregatore Farside riporta flussi ETF spot netti giornalieri, non sottoscrizioni di investitori identificati",
                 f.get("fonte"),d.get("periodo"),f.get("acquisito_utc"),
-                "DATO_AGGREGATO_NON_EMITTENTE",f.get("limite"),
-                {"netto_milioni_usd":d["valore"],"confronto":f.get("confronto_precedente")})
+                ("AGGREGATO_STORICO_NON_RICONFERMATO"
+                 if f["stato_alla_lettura"]=="STORICO_NON_AGGIORNATO"
+                 else "DATO_AGGREGATO_NON_EMITTENTE"),f.get("limite"),
+                {"netto_milioni_usd":d["valore"],"confronto":f.get("confronto_precedente"),
+                 "ultimo_tentativo":f.get("ultimo_tentativo")})
     schedule=by_project("calendari")
     for revision in evidence.get("revisioni_piani",[]):
         if isinstance(revision,dict) and revision.get("progetto_id")==pid:
