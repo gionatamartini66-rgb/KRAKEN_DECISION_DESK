@@ -1204,6 +1204,11 @@ class PrimaryFollowupTests(unittest.TestCase):
         events=parse([one,many,ordinary])
         self.assertEqual({x["token"] for x in events if x["id"]==many["id"]},
                          {"SUI","BTC"})
+        # A component name is not part of the explicit delisting list.
+        related=dict(many,components=[{"name":"Dogecoin (DOGE) Funding"}])
+        self.assertEqual({e["token"] for e in parse(
+            [related],{"sui":{"token":"SUI"},"bitcoin":{"token":"BTC"},
+                       "dogecoin":{"token":"DOGE"}})},{"SUI","BTC"})
         self.assertTrue(all(x["tipo"]=="DELISTING_COMUNICATO"
                             for x in events if x["id"] in (one["id"],many["id"])))
         self.assertEqual(next(x for x in events if x["id"]==one["id"])
