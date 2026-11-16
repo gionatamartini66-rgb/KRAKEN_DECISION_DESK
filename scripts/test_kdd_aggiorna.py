@@ -495,7 +495,7 @@ class UpdateTests(unittest.TestCase):
              patch.object(kdd,'command',side_effect=forced_timeout), \
              contextlib.redirect_stdout(capture):
             with self.assertRaisesRegex(kdd.SafetyError,
-                                       'test_decision_desk.*150') as failure:
+                                       'test_decision_desk.*210') as failure:
                 kdd.isolated_test(self.root)
         combined=str(failure.exception)+capture.getvalue()
         self.assertNotIn('SECRET_PRIVATE_FIXTURE',combined)
