@@ -58,8 +58,15 @@ class SafetyError(RuntimeError):
 
 
 def command(args: list[str], *, cwd: Path, timeout: int = 120) -> subprocess.CompletedProcess:
+    # Separate unittest processes need both import roots, in staging AND live.
+    # Do not rely on PYTHONPATH set by Termux, CI or an interactive shell.
+    env = None
+    if args and args[0] == sys.executable:
+        env = os.environ.copy()
+        env['PYTHONPATH'] = os.pathsep.join((str(cwd.resolve()),
+                                          str((cwd / 'scripts').resolve())))
     return subprocess.run(args, cwd=cwd, text=True, capture_output=True,
-                          timeout=timeout, check=False)
+                          timeout=timeout, check=False, env=env)
 
 
 def verified_clone(root: Path) -> str:
@@ -254,55 +261,76 @@ def capability_preflight() -> None:
 
 
 def isolated_test(staging: Path) -> None:
-    capability_preflight()
-    # Non serve rete. I test usano fixture sintetiche e file privati SOLO locali.
-    proc = command([sys.executable, '-m', 'unittest', '-q', 'test_decision_desk', 'test_kdd_candles', 'test_kdd_economics', 'test_kdd_economic_sources', 'test_kdd_futures_flow', 'test_kdd_network_defi'],
-                   cwd=staging, timeout=150)
-    if proc.stdout.strip():
-        print(proc.stdout[-1700:])
-    if proc.stderr.strip():
-        # Evita di riversare in chat migliaia di caratteri HTML e possibili
-        # valori locali contenuti negli assertion errors.
-        diagnostic = [
-            line for line in proc.stderr.splitlines()
-            if line.startswith(('FAIL: ', 'ERROR: ', 'Ran ', 'FAILED ', 'OK'))
-        ]
-        print('\n'.join(diagnostic) if diagnostic else proc.stderr[-400:])
-    if proc.returncode:
-        raise SafetyError('test KDD falliti: codice originale NON modificato')
-    print('Test KDD: OK')
-    # The wallet packet is now part of the deployed application and must be
-    # tested in precisely the same preflight/postflight transaction.
+    """Same regression coverage before/after install, with bounded module time.
+
+    A timeout of 150 s belongs to each named module, not the accumulated
+    runtime of a growing 381-test monolith. All original suites still execute.
+    Never emit captured traceback/assertion bodies from private local data.
+    """
+    try:
+        capability_preflight()
+    except SafetyError as exc:
+        raise SafetyError('capability_preflight: ' + str(exc)) from None
+
+    def checked(args: list[str], *, label: str, timeout: int = 120) -> None:
+        try:
+            proc = command(args, cwd=staging, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # TimeoutExpired.stdout/stderr may contain private fixture values.
+            raise SafetyError(f'{label}: timeout dopo {timeout} s') from None
+        except OSError as exc:
+            raise SafetyError(f'{label}: avvio impossibile ({type(exc).__name__}, '
+                              f'errno={exc.errno})') from None
+        if proc.returncode:
+            # Only known unittest method identifiers, never assertion bodies,
+            # local paths, timestamps, credentials or private report content.
+            matches = []
+            for line in proc.stderr.splitlines():
+                m = re.fullmatch(
+                    r'(?:FAIL|ERROR): (test_[A-Za-z0-9_]{1,120}) '
+                    r'\(([A-Za-z0-9_.]{1,140})\)', line.strip())
+                if m:
+                    matches.append(m.group(1))
+            suffix = ('test ' + ', '.join(dict.fromkeys(matches[:3]))
+                      if matches else f'codice_uscita={proc.returncode}')
+            raise SafetyError(f'{label}: {suffix}')
+        # A test runner can return success without any assertion output; do
+        # not forward its stdout/stderr from a private runtime.
+        return None
+
+    # Executed once each in the same order at preflight and postflight.
+    # The timeout threshold is unchanged; only its scope is corrected.
+    core_modules = (
+        'test_decision_desk', 'test_kdd_candles', 'test_kdd_economics',
+        'test_kdd_economic_sources', 'test_kdd_futures_flow',
+        'test_kdd_network_defi',
+    )
+    for module in core_modules:
+        checked([sys.executable, '-m', 'unittest', '-q', module],
+                label='suite '+module, timeout=150)
+    print('Test KDD: OK (tutti i sei moduli obbligatori)')
+
     packet_test = staging / 'scripts' / 'test_kdd_wallet_packet_g0.py'
     if (not packet_test.is_file()
             or not (staging / 'scripts/test_kdd_portfolio_4tf.py').is_file()
             or not (staging / 'scripts/test_kdd_funding_book_g2.py').is_file()):
         raise SafetyError('test del pacchetto, 4TF o book mancanti nello staging')
     if packet_test.exists():
-        # The legacy packet fixture intentionally imports kdd_wallet_packet_g0
-        # as a top-level module. unittest discovery with -s scripts supplies
-        # that same import root (unlike scripts.test_kdd_wallet_packet_g0).
+        # The legacy packet fixture imports kdd_wallet_packet_g0 from scripts/.
         for pattern in ('test_kdd_wallet_packet_g0.py',
                         'test_kdd_portfolio_4tf.py',
                         'test_kdd_android_transaction_g2.py',
                         'test_kdd_funding_book_g2.py',
                         'test_kdd_drive_exchange.py'):
-            proc = command([sys.executable, '-B', '-m', 'unittest', 'discover',
-                            '-s', 'scripts', '-p', pattern, '-q'], cwd=staging)
-            if proc.returncode:
-                raise SafetyError('regressioni packet+Android synthetic non superate: '
-                                  + pattern)
-        # Termux needs both the project root and scripts/ import roots.
-        # -c retains cwd on sys.path; the explicit insertion also supports
-        # the legacy top-level kdd_wallet_packet_g0 imports in R5 fixtures.
-        retained = command([sys.executable, '-B', '-c',
-                            "import sys; sys.path.insert(0, 'scripts'); "
-                            "from scripts.kdd_android_regressions import main; main()"],
-                           cwd=staging)
-        if retained.returncode:
-            raise SafetyError('invarianti R5 ancora pertinenti FALLITI')
+            checked([sys.executable, '-B', '-m', 'unittest', 'discover',
+                     '-s', 'scripts', '-p', pattern, '-q'],
+                    label='regressione '+pattern)
+        # Keep the historical unchanged R5 properties and explicit Android map.
+        checked([sys.executable, '-B', '-c',
+                 "import sys; sys.path.insert(0, 'scripts'); "
+                 "from scripts.kdd_android_regressions import main; main()"],
+                label='invarianti R5 mappati')
         print('Test pacchetto GPT / Android + R5 mappati: OK')
-
 
 def service_alive() -> bool:
     try:
@@ -405,6 +433,7 @@ def apply(root: Path, live: Path, *, commit_sha: str, dry_run: bool) -> None:
                 shutil.copy2(old, dest)
         # Apply + postflight. Solo i file in allowlist possono essere sostituiti.
         touched: list[str] = []
+        phase = 'sostituzione sorgenti'
         try:
             for name in changed:
                 dest = live / name
@@ -420,12 +449,22 @@ def apply(root: Path, live: Path, *, commit_sha: str, dry_run: bool) -> None:
                 touched.append(name)
             write_atomic(live / README, source_readme.encode('utf-8'), 0o600)
             touched.append(README)
-            print('Verifica dopo la sostituzione...')
-            isolated_test(live)
+            # A source mismatch must stop before repeating the full suite.
+            phase = 'integrita dei file installati'
             if fingerprint(live) != fingerprint(staging):
                 raise SafetyError('impronta sorgenti postflight discordante')
+            print('Verifica dopo la sostituzione...')
+            phase = 'test postflight'
+            isolated_test(live)
+            phase = 'integrita dopo test postflight'
+            if fingerprint(live) != fingerprint(staging):
+                raise SafetyError('impronta sorgenti postflight discordante dopo i test')
         except BaseException as e:
-            print('ERRORE NEL DEPLOY: ripristino i file originali...', file=sys.stderr)
+            # Never print exception string for untrusted OSError/TimeoutExpired,
+            # which may embed private filesystem paths or captured test data.
+            reason = str(e) if isinstance(e, SafetyError) else type(e).__name__
+            print(f'ERRORE NEL DEPLOY [{phase}]: {reason}. '
+                  'Ripristino i file originali...', file=sys.stderr)
             restore_errors = []
             for name in reversed(touched):
                 try:
@@ -435,11 +474,13 @@ def apply(root: Path, live: Path, *, commit_sha: str, dry_run: bool) -> None:
                     else:
                         write_atomic(live / name, previous, 0o600)
                 except OSError as exc:
-                    restore_errors.append(f'{name}: {exc}')
+                    restore_errors.append(
+                        f'{name}: {type(exc).__name__} errno={exc.errno}')
             if restore_errors:
                 raise SafetyError('RIPRISTINO INCOMPLETO, non avviare KDD: '
-                                  + '; '.join(restore_errors)) from e
-            raise SafetyError('test/aggiornamento fallito, rollback sorgenti eseguito') from e
+                                  + '; '.join(restore_errors)) from None
+            raise SafetyError(f'postflight ({phase}): {reason}; '
+                              'rollback sorgenti eseguito') from None
         print('AGGIORNAMENTO KDD COMPLETATO. Backup locale:', backup)
         if service_alive():
             print('IMPORTANTE: server Chrome in esecuzione; la nuova versione '

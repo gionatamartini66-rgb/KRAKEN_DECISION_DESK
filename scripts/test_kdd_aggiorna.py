@@ -52,6 +52,16 @@ class UpdateTests(unittest.TestCase):
                 ' def test_module_present(self):\n'
                 '  self.assertTrue(pathlib.Path("kdd_economics.py").is_file())\n'
             )
+            # Each mandatory core module must expose at least one test;
+            # unittest exit 5 for an empty fake module is a real STOP, not
+            # an acceptable placeholder in this packaging fixture.
+            for name in ('test_kdd_economic_sources.py',
+                         'test_kdd_futures_flow.py', 'test_kdd_network_defi.py'):
+                (directory / name).write_text(
+                    'import pathlib, unittest\n'
+                    'class PackageProbe(unittest.TestCase):\n'
+                    ' def test_source_staged(self):\n'
+                    '  self.assertTrue(pathlib.Path("decision_desk.py").is_file())\n')
             for name in kdd.PACKET_FILES:
                 origin = Path(__file__).resolve().parents[1] / name
                 # This updater fixture contains placeholder application modules;
@@ -447,6 +457,136 @@ class UpdateTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(kdd.SafetyError, 'fixture locale symlink'):
                 kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=True)
+
+
+    def test_rt67_bounded_core_modules_keep_every_test_and_same_timeout(self):
+        """Former 381-test monolith could consume the 150s cap cumulatively."""
+        import subprocess
+        expected=('test_decision_desk','test_kdd_candles','test_kdd_economics',
+                  'test_kdd_economic_sources','test_kdd_futures_flow',
+                  'test_kdd_network_defi')
+        observed=[]
+        def bounded(args, *, cwd, timeout=120):
+            selected=[part for part in args if part in expected]
+            if selected:
+                observed.append((selected,timeout))
+                if len(selected)>1:
+                    raise subprocess.TimeoutExpired(args,timeout)
+            return subprocess.CompletedProcess(args,0,'','OK')
+        with patch.object(kdd,'capability_preflight'), \
+             patch.object(kdd,'command',side_effect=bounded), \
+             contextlib.redirect_stdout(io.StringIO()):
+            kdd.isolated_test(self.root)
+        self.assertEqual([x[0] for x in observed],[[x] for x in expected])
+        self.assertEqual([x[1] for x in observed],[150]*len(expected))
+
+    def test_rt67_core_timeout_identifies_module_not_sensitive_output(self):
+        import subprocess
+        calls=[]
+        def forced_timeout(args, *, cwd, timeout=120):
+            calls.append(args)
+            if 'test_decision_desk' in args:
+                raise subprocess.TimeoutExpired(
+                    args,timeout,output=b'SECRET_PRIVATE_FIXTURE',
+                    stderr=b'PRIVATE_LOCAL_REPORT')
+            return subprocess.CompletedProcess(args,0,'','OK')
+        capture=io.StringIO()
+        with patch.object(kdd,'capability_preflight'), \
+             patch.object(kdd,'command',side_effect=forced_timeout), \
+             contextlib.redirect_stdout(capture):
+            with self.assertRaisesRegex(kdd.SafetyError,
+                                       'test_decision_desk.*150') as failure:
+                kdd.isolated_test(self.root)
+        combined=str(failure.exception)+capture.getvalue()
+        self.assertNotIn('SECRET_PRIVATE_FIXTURE',combined)
+        self.assertNotIn('PRIVATE_LOCAL_REPORT',combined)
+
+    def test_rt67_postflight_rollback_exposes_failed_control_not_private_trace(self):
+        home=Path(self.tmp.name)/'postflight-home'
+        home.mkdir()
+        n=[0]
+        def failing_postflight(stage):
+            n[0]+=1
+            if n[0]==2:
+                raise kdd.SafetyError('suite test_decision_desk: timeout dopo 150 s')
+        diagnostic=io.StringIO()
+        with patch.object(kdd.Path,'home',return_value=home), \
+             patch.object(kdd,'isolated_test',side_effect=failing_postflight), \
+             patch('builtins.input',return_value='APPLICA'), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(diagnostic):
+            with self.assertRaisesRegex(kdd.SafetyError,
+                                       'postflight.*test_decision_desk.*150') as failure:
+                kdd.apply(self.root,self.live,commit_sha=self.sha,dry_run=False)
+        self.assertEqual(n[0],2)
+        self.assertEqual((self.live/'serve.py').read_text(),'# file serve.py\n')
+        self.assertEqual((self.live/'README.md').read_text(),self.old_readme)
+        self.assertIn('postflight',diagnostic.getvalue().lower())
+
+    def test_rt67_unit_failure_reports_only_safe_test_identifier(self):
+        import subprocess
+        output=io.StringIO()
+        def failed(args, *, cwd, timeout=120):
+            if 'test_decision_desk' in args:
+                return subprocess.CompletedProcess(
+                    args,1,'','FAIL: test_synthetic_error (test_decision_desk.DeskTests)\n'
+                    'USER_PRIVATE_REPORT: SECRET_VALUE\nRan 1 test\nFAILED (failures=1)')
+            return subprocess.CompletedProcess(args,0,'','OK')
+        with patch.object(kdd,'capability_preflight'), \
+             patch.object(kdd,'command',side_effect=failed), \
+             contextlib.redirect_stdout(output):
+            with self.assertRaisesRegex(kdd.SafetyError,
+                                       'test_decision_desk.*test_synthetic_error') as failure:
+                kdd.isolated_test(self.root)
+        combined=output.getvalue()+str(failure.exception)
+        self.assertNotIn('SECRET_VALUE',combined)
+        self.assertNotIn('USER_PRIVATE_REPORT',combined)
+
+
+    def test_rt68_core_imports_root_and_scripts_in_check_preflight_postflight(self):
+        """Actual child interpreters, no manual PYTHONPATH and no live data.
+
+        A separate unittest process running test_kdd_network_defi needs the
+        project root AND scripts/ as import roots. The old runner lacks the
+        second root and must fail before the updater is repaired.
+        """
+        import os
+        test_module = (
+            'import pathlib, unittest\n'
+            'import decision_desk\n'
+            'import kdd_wallet_packet_g0\n'
+            'class NetworkImportProbe(unittest.TestCase):\n'
+            ' def test_both_import_roots(self):\n'
+            '  self.assertEqual(pathlib.Path(decision_desk.__file__).resolve().parent,'
+            'pathlib.Path.cwd().resolve())\n'
+            '  self.assertEqual(pathlib.Path(kdd_wallet_packet_g0.__file__).resolve().parent,'
+            '(pathlib.Path.cwd() / "scripts").resolve())\n'
+        )
+        (self.root / 'test_kdd_network_defi.py').write_text(
+            test_module, encoding='utf-8')
+        (self.root / 'scripts/kdd_wallet_packet_g0.py').write_text(
+            'RT68_IMPORT_PROBE = True\n', encoding='utf-8')
+        old_live_script = (self.live / 'scripts/kdd_wallet_packet_g0.py').read_bytes()
+        home = Path(self.tmp.name) / 'rt68-fakehome'
+        home.mkdir()
+        out = io.StringIO()
+        with patch.dict(os.environ, {'PYTHONPATH': ''}), \
+             patch.object(kdd, 'capability_preflight'), \
+             patch.object(kdd.Path, 'home', return_value=home), \
+             patch('builtins.input', return_value='APPLICA'), \
+             contextlib.redirect_stdout(out):
+            kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=True)
+            self.assertEqual(
+                (self.live / 'scripts/kdd_wallet_packet_g0.py').read_bytes(),
+                old_live_script)
+            kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=False)
+        self.assertEqual(out.getvalue().count('Test KDD: OK'), 3,
+                         'check, preflight and postflight must all execute the core suites')
+        self.assertIn('PRECHECK OK', out.getvalue())
+        self.assertTrue(
+            (self.live / 'scripts/kdd_wallet_packet_g0.py').read_text(
+                encoding='utf-8').startswith('RT68_IMPORT_PROBE'))
+        self.assertTrue(list((home / '.local/share/kdd-deploy-backups').glob('*')))
 
 
 if __name__ == '__main__':
