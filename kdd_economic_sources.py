@@ -545,10 +545,22 @@ def _kraken_market_announcements(payload, feed, roster, now):
             # confirms that this exact ticker is the subject of a delisting.
             single=re.fullmatch(
                 r"[^()]{2,90}\(([A-Z0-9]{2,20})\)\s+Delisting",title,re.I)
-            if (single and single.group(1) in tokens
-                    and re.search(r"\bdelist(?:ing|ed)?\b",body,re.I)
-                    and re.search(r"\bfor\s+"+re.escape(single.group(1))+r"\b",body,re.I)):
-                delisted.add(single.group(1))
+            if single and single.group(1) in tokens:
+                code=single.group(1)
+                project=next(iter(ownership[code]))
+                known_name=roster[project].get("progetto")
+                displayed=title.split("(",1)[0].strip().casefold()
+                official_name=known_name.strip().casefold() if isinstance(known_name,str) else ""
+                # Never rely on ticker alone when the known project name
+                # conflicts with the specific named Statuspage asset.
+                name_matches=(not official_name or displayed==official_name or
+                              (len(displayed)>=3 and official_name.startswith(displayed+" ")) or
+                              (len(official_name)>=3 and displayed.startswith(official_name+" ")))
+                if not name_matches:
+                    mentioned.discard(code)
+                elif (re.search(r"\bdelist(?:ing|ed)?\b",body,re.I)
+                      and re.search(r"\bfor\s+"+re.escape(code)+r"\b",body,re.I)):
+                    delisted.add(code)
         # Record only source-dated end of the published window. Statuspage can
         # describe several different operational cutoffs inside that window.
         raw_end=_time(row.get("scheduled_until"))
