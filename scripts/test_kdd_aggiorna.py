@@ -543,5 +543,51 @@ class UpdateTests(unittest.TestCase):
         self.assertNotIn('USER_PRIVATE_REPORT',combined)
 
 
+    def test_rt68_core_imports_root_and_scripts_in_check_preflight_postflight(self):
+        """Actual child interpreters, no manual PYTHONPATH and no live data.
+
+        A separate unittest process running test_kdd_network_defi needs the
+        project root AND scripts/ as import roots. The old runner lacks the
+        second root and must fail before the updater is repaired.
+        """
+        import os
+        test_module = (
+            'import pathlib, unittest\n'
+            'import decision_desk\n'
+            'import kdd_wallet_packet_g0\n'
+            'class NetworkImportProbe(unittest.TestCase):\n'
+            ' def test_both_import_roots(self):\n'
+            '  self.assertEqual(pathlib.Path(decision_desk.__file__).resolve().parent,'
+            'pathlib.Path.cwd().resolve())\n'
+            '  self.assertEqual(pathlib.Path(kdd_wallet_packet_g0.__file__).resolve().parent,'
+            '(pathlib.Path.cwd() / "scripts").resolve())\n'
+        )
+        (self.root / 'test_kdd_network_defi.py').write_text(
+            test_module, encoding='utf-8')
+        (self.root / 'scripts/kdd_wallet_packet_g0.py').write_text(
+            'RT68_IMPORT_PROBE = True\n', encoding='utf-8')
+        old_live_script = (self.live / 'scripts/kdd_wallet_packet_g0.py').read_bytes()
+        home = Path(self.tmp.name) / 'rt68-fakehome'
+        home.mkdir()
+        out = io.StringIO()
+        with patch.dict(os.environ, {'PYTHONPATH': ''}), \
+             patch.object(kdd, 'capability_preflight'), \
+             patch.object(kdd.Path, 'home', return_value=home), \
+             patch('builtins.input', return_value='APPLICA'), \
+             contextlib.redirect_stdout(out):
+            kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=True)
+            self.assertEqual(
+                (self.live / 'scripts/kdd_wallet_packet_g0.py').read_bytes(),
+                old_live_script)
+            kdd.apply(self.root, self.live, commit_sha=self.sha, dry_run=False)
+        self.assertEqual(out.getvalue().count('Test KDD: OK'), 3,
+                         'check, preflight and postflight must all execute the core suites')
+        self.assertIn('PRECHECK OK', out.getvalue())
+        self.assertTrue(
+            (self.live / 'scripts/kdd_wallet_packet_g0.py').read_text(
+                encoding='utf-8').startswith('RT68_IMPORT_PROBE'))
+        self.assertTrue(list((home / '.local/share/kdd-deploy-backups').glob('*')))
+
+
 if __name__ == '__main__':
     unittest.main()
