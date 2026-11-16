@@ -532,6 +532,12 @@ class PrimaryFollowupTests(unittest.TestCase):
         checked_finance=sources.at_read(finance_later,item,T+dt.timedelta(hours=3))
         self.assertEqual(checked_finance["flussi_finanziari"][0]["stato_alla_lettura"],
                          "STORICO_NON_AGGIORNATO")
+        review_finance=sources.decision_review(checked_finance,item["posizioni"][1],"posizioni")
+        historical_etf=next(f for f in review_finance["fatti"]
+                            if f["tipo"]=="FLUSSI_ETF_SPOT_AGGREGATI")
+        self.assertEqual(historical_etf["stato_prova"],"AGGREGATO_STORICO_NON_RICONFERMATO")
+        self.assertEqual(historical_etf["dettaglio"]["ultimo_tentativo"]["stato"],
+                         "FONTE_NON_DISPONIBILE")
         stale=sources.at_read(finance_later,item,T+dt.timedelta(days=10))
         self.assertEqual(stale["flussi_finanziari"][0]["stato_alla_lettura"],"SCADUTO")
         self.assertFalse(any(x["tipo"]=="FLUSSI_ETF_SPOT_AGGREGATI"
