@@ -1208,6 +1208,8 @@ class PrimaryFollowupTests(unittest.TestCase):
                             for x in events if x["id"] in (one["id"],many["id"])))
         self.assertEqual(next(x for x in events if x["id"]==one["id"])
                          ["orizzonte_statuspage_utc"],horizon)
+        self.assertTrue(next(x for x in events if x["id"]==one["id"])
+                        ["scadenze_testuali"])
         self.assertTrue(any(x["tipo"]=="MANUTENZIONE_UFFICIALE"
                             for x in events if x["id"]==ordinary["id"]))
         self.assertEqual(parse([one],{"sui":{"token":"SUI"},
@@ -1298,6 +1300,58 @@ class PrimaryFollowupTests(unittest.TestCase):
                                  acquisito_utc=(T-dt.timedelta(days=45)).isoformat())]}
         self.assertNotIn("restrizione",
                          review("SUI","online",stale)["ipotesi_non_attestata"].lower())
+
+
+    def test_rt_eco_01_truncated_statuspage_does_not_renew_old_notice(self):
+        """A fetched but truncated feed must not erase a confirmed future plan."""
+        earlier=T-dt.timedelta(days=10)
+        created=earlier-dt.timedelta(days=45)
+        future=T+dt.timedelta(days=60)
+        feed=sources.KRAKEN_STATUS_FEEDS[1]
+        payload={"page":{"id":"lfz25gyhcpjf"},"scheduled_maintenances":[{
+            "id":"bbbbbbbbbbbb","name":"Sui (SUI) Delisting","status":"scheduled",
+            "created_at":created.isoformat(),"updated_at":created.isoformat(),
+            "scheduled_until":future.isoformat(),"components":[],
+            "incident_updates":[{"body":
+                "A scheduled delisting cycle for SUI. Key dates: "
+                "December 15, 2026: Withdrawals will be disabled."}]
+        }]}
+        events=sources._kraken_market_announcements(payload,feed,
+                                                    {"sui":{"token":"SUI"}},earlier)
+        self.assertEqual(len(events),1)
+        items=self.items(tokens=("SUI",))
+        old={"schema":sources.SCHEMA,"acquisito_utc":earlier.isoformat(),
+             "prossima_fonte_esterna":"MANUTENZIONI",
+             "comunicazioni_kraken":[
+               {"id":"INCIDENTI","fonte":sources.KRAKEN_STATUS_FEEDS[0][1],
+                "stato":"NESSUN_EVENTO_NEL_CAMPIONE","eventi":[],
+                "acquisito_utc":earlier.isoformat()},
+               {"id":"MANUTENZIONI","fonte":feed[1],"stato":"OSSERVATO",
+                "eventi":events,"acquisito_utc":earlier.isoformat()}]}
+        def fresh_but_truncated(url):
+            if url==feed[1]:
+                return json.dumps({"page":{"id":"lfz25gyhcpjf"},
+                    "scheduled_maintenances":[]}).encode()
+            return self.fetch(url)
+        fresh=sources.collect(T,items,old,fresh_but_truncated,
+                              collect_kraken_status=True)
+        reading=sources.at_read(fresh,items,T)
+        rec=reading["comunicazioni_kraken"][1]
+        self.assertEqual(rec["stato_alla_lettura"],"OSSERVATO")
+        self.assertEqual(rec["eventi"][0]["conferma_ultimo_refresh"],
+                         "NON_RICONFERMATO")
+        self.assertEqual(rec["eventi"][0]["acquisito_originale_utc"],
+                         earlier.isoformat())
+        review=sources.decision_review(reading,items["posizioni"][0],"posizioni")
+        self.assertTrue(any(x["stato_prova"]=="STORICO_NON_RICONFERMATO"
+                            for x in review["fatti"]
+                            if x["tipo"]=="ANNUNCIO_UFFICIALE_KRAKEN"))
+        # Repeated refresh cannot launder the old source time as new evidence.
+        fresh["prossima_fonte_esterna"]="MANUTENZIONI"
+        again=sources.collect(T+dt.timedelta(hours=1),items,fresh,
+                              fresh_but_truncated,collect_kraken_status=True)
+        self.assertEqual(again["comunicazioni_kraken"][1]["eventi"][0]
+                         ["acquisito_originale_utc"],earlier.isoformat())
 
 
 if __name__=="__main__":
