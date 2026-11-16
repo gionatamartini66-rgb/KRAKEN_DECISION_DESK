@@ -62,7 +62,16 @@ def assemble(pairs, tickers, min_vol=500000, max_spread=0.8):
     """Ritorna token→riga osservata e tassi. Somma solo coppie spot distinte."""
     rates = eur_per_quote(pairs, tickers)
     groups = defaultdict(list)
+    # Do not pick an arbitrary REST key if two AssetPairs entries claim the
+    # same display market. This ambiguity is reported by the audit function.
+    owners=defaultdict(list)
+    for key,meta in pairs.items():
+        if isinstance(meta,dict) and meta.get('status')=='online':
+            owners[meta.get('wsname')].append(key)
+    ambiguous={name for name,keys in owners.items() if len(keys)>1}
     for key, meta in pairs.items():
+        if not isinstance(meta,dict) or meta.get('wsname') in ambiguous:
+            continue
         if meta.get("status") != "online" or ".d" in key.lower():
             continue
         name = meta.get("wsname", "")
@@ -126,3 +135,45 @@ def assemble(pairs, tickers, min_vol=500000, max_spread=0.8):
         ]
         result[token] = x
     return result, rates
+
+
+def coverage(pairs, tickers, markets):
+    """Whole public AssetPairs/Ticker census, no private trading eligibility.
+
+    Counts are not OHLC analyzed. Explanations reconcile why catalogued
+    pairs did not become a valid single-token search row.
+    """
+    numbers={'assetpairs_totale':len(pairs),'coppie_online':0,
+             'coppie_spot_quote_consentite':0,'coppie_ticker_presenti':0,
+             'coppie_ticker_valide':0,'token_mercati_convertiti':len(markets),
+             'coppie_convertite':sum(x['n_coppie'] for x in markets.values())}
+    excluded={}
+    names=defaultdict(list)
+    for key,meta in pairs.items():
+        if not isinstance(meta,dict) or meta.get('status')!='online':
+            excluded['NON_ONLINE']=excluded.get('NON_ONLINE',0)+1;continue
+        numbers['coppie_online']+=1
+        wsname=meta.get('wsname')
+        if not isinstance(wsname,str) or wsname.count('/')!=1 or '.d' in key.lower():
+            excluded['IDENTITA_O_MERCATO_NON_SPOT']=excluded.get('IDENTITA_O_MERCATO_NON_SPOT',0)+1;continue
+        base,quote=wsname.split('/')
+        names[wsname].append(key)
+        base=ALIASES.get(base.upper(),base.upper())
+        if quote not in QUOTES or base in EXCLUDE_BASE or base==quote:
+            excluded['QUOTE_O_ASSET_ESCLUSO']=excluded.get('QUOTE_O_ASSET_ESCLUSO',0)+1;continue
+        numbers['coppie_spot_quote_consentite']+=1
+        row=tickers.get(key)
+        if not isinstance(row,dict):
+            excluded['TICKER_ASSENTE']=excluded.get('TICKER_ASSENTE',0)+1;continue
+        numbers['coppie_ticker_presenti']+=1
+        bid=num((row.get('b') or [0])[0])
+        ask=num((row.get('a') or [0])[0])
+        close=num((row.get('c') or [0])[0])
+        opening=num(row.get('o'))
+        if not min(bid,ask,close,opening) or ask<bid:
+            excluded['TICKER_INCOERENTE']=excluded.get('TICKER_INCOERENTE',0)+1;continue
+        numbers['coppie_ticker_valide']+=1
+    numbers['coppie_identita_ambigua']=sum(len(keys) for keys in names.values() if len(keys)>1)
+    numbers['motivi_esclusione_catalogo']=excluded
+    numbers['limite']='Censimento ticker pubblico Kraken; la negoziabilita sul conto e i limiti SEE per ogni asset non sono attestati'
+    return numbers

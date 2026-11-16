@@ -642,6 +642,151 @@ def capital_market_context(network, wallet_rows, spot_readings):
     return out
 
 
+def scanner_candidates_at_read(rows, *, snapshot, moment, multifonte=None):
+    """Keep scanner evidence attributable and recalculate freshness for GPT.
+
+    A SHA of the packet protects byte consistency, not truth of public data.
+    Numeric prices and 4TF levels are not current if either OHLC or the market
+    snapshot is old. Never replace the user's holdings with shortlisted assets.
+    """
+    if not isinstance(rows,list) or len(rows)>4:
+        raise BridgeError("Scanner candidate count exceeds KDD-07 bounds")
+    market_recent=wallet.source_status(snapshot,moment)["stato"]=="RECENTE"
+    durations={"15m":900,"1H":3600,"4H":14400,"1D":86400}
+    out=[]
+    ids=set()
+    complementary=(multifonte.get("candidati")
+                   if isinstance(multifonte,dict) else None)
+    complementary=complementary if isinstance(complementary,list) else []
+    for item in rows:
+        if not isinstance(item,dict):
+            raise BridgeError("Scanner candidate non strutturato")
+        token=item.get("token")
+        pair=item.get("coppia_analisi")
+        if (not isinstance(token,str) or not wallet.SYMBOL.fullmatch(token)
+                or not isinstance(pair,str) or pair.count("/")!=1):
+            raise BridgeError("Scanner candidate senza identita")
+        pbase,quote=pair.split("/")
+        if (wallet.canonical_wallet_alias(pbase)!=wallet.canonical_wallet_alias(token)
+                or quote not in ("EUR","USD","USDC")):
+            raise BridgeError("Scanner candidate con coppia diversa")
+        if token in ids:
+            raise BridgeError("Scanner candidate duplicato")
+        ids.add(token)
+        origin=item.get("origine_scanner") or {}
+        if not isinstance(origin,dict):
+            raise BridgeError("Provenienza scanner non strutturata")
+        sample=origin.get("osservato_utc")
+        if sample is not None and instant(sample)>moment+dt.timedelta(minutes=2):
+            raise BridgeError("Origine scanner con data futura")
+        tech=item.get("analisi_candidato_4tf") or {}
+        if not isinstance(tech,dict):
+            raise BridgeError("Scanner 4TF non strutturato")
+        if tech.get("coppia") not in (None,pair):
+            raise BridgeError("Scanner 4TF: coppia incongruente")
+        observed={}
+        for label,seconds in durations.items():
+            frame=(tech.get("timeframe") or {}).get(label) or {}
+            if not isinstance(frame,dict):
+                raise BridgeError("Scanner timeframe non strutturato")
+            state=frame.get("stato","NON_DISPONIBILE")
+            if state=="AGGIORNATO" and frame.get("coppia")!=pair:
+                raise BridgeError("Scanner OHLC da altra coppia")
+            source_close=frame.get("chiusura_utc")
+            if source_close:
+                closed=instant(source_close)
+                if closed>moment+dt.timedelta(minutes=2):
+                    raise BridgeError("Scanner OHLC chiusura futura")
+                age=(moment-closed).total_seconds()
+                fresh=(market_recent and state=="AGGIORNATO" and -120<=age<=seconds+120)
+            else:
+                fresh=False
+            # Old OHLC is retained as labelled history, never a current EMA.
+            observed[label]={"stato":"AGGIORNATO" if fresh else
+                              "SCADUTO" if state in ("AGGIORNATO","SCADUTO") else
+                              state,
+                              "chiusura_utc":source_close,
+                              "fonte":frame.get("fonte"),
+                              "orientamento":frame.get("orientamento") if fresh else None,
+                              "ema20":frame.get("ema20") if fresh else None,
+                              "ema50":frame.get("ema50") if fresh else None,
+                              "pivot_giornaliero":frame.get("pivot_giornaliero") if fresh else None,
+                              "livelli_strutturali":frame.get("livelli_strutturali") if fresh else None,
+                              "figure":frame.get("figure",[]) if fresh else [],
+                              "motivo":frame.get("motivo")}
+        all_fresh=all(x["stato"]=="AGGIORNATO" for x in observed.values())
+        # Reuse already integrated costs and primary/Trades context; never
+        # ascribe a candidate's financial evidence to a different pair.
+        partner=next((r for r in complementary if isinstance(r,dict) and
+                      r.get("token")==token and r.get("coppia")==pair),None)
+        partner=partner if isinstance(partner,dict) else {}
+        costs=partner.get("simulazioni_costi") or {}
+        costs=costs if isinstance(costs,dict) else {}
+        costs_current=(market_recent and costs.get("stato")=="IPOTESI_RECENTE")
+        spot=partner.get("flusso_spot") or {}
+        spot=spot if isinstance(spot,dict) else {}
+        flow_current=market_recent and spot.get("stato")=="DISPONIBILE"
+        obsflow=spot.get("osservato_utc")
+        if obsflow:
+            age=(moment-instant(obsflow)).total_seconds()
+            flow_current=flow_current and -120<=age<=3600
+        else:flow_current=False
+        fundamentals=partner.get("fondamentali") or {}
+        fundamentals=fundamentals if isinstance(fundamentals,dict) else {}
+        fund_current=market_recent and fundamentals.get("stato")=="DISPONIBILE"
+        fund_time=fundamentals.get("osservato_utc")
+        if fund_time:
+            age=(moment-instant(fund_time)).total_seconds()
+            fund_current=fund_current and -120<=age<=3600
+        else:fund_current=False
+        complementary_at_read={
+            "costi_roundtrip":{
+                "stato":"IPOTESI_RECENTE" if costs_current else
+                        "NON_ACQUISITO" if not costs else "SCADUTO_O_NON_VERIFICATO",
+                "righe":costs.get("righe",[]) if costs_current else [],
+                "limite":"Fee ipotetiche e book campionato, nessuna esecuzione"},
+            "flusso_spot":{
+                "stato":"DISPONIBILE" if flow_current else
+                        "NON_ACQUISITO" if not spot else "SCADUTO_O_INCOMPLETO",
+                "delta_4h":spot.get("delta_4h") if flow_current else None,
+                "delta_15m_mobile":spot.get("delta_15m_mobile") if flow_current else None,
+                "limite":"Trades pubblici della singola coppia, non CVD storico"},
+            "fondamentali":{
+                "stato":"DISPONIBILE" if fund_current else
+                        "NON_ACQUISITO" if not fundamentals else "SCADUTO_O_NON_VERIFICATO",
+                "id_coingecko":fundamentals.get("id_coingecko") if fund_current else None,
+                "capitalizzazione_usd":fundamentals.get("capitalizzazione_usd") if fund_current else None,
+                "offerta_circolante":fundamentals.get("offerta_circolante") if fund_current else None}}
+        out.append({
+            "token":token,"coppia_analisi":pair,
+            "categoria":item.get("categoria"),"motivazione":item.get("motivazione"),
+            "origine_scanner":origin,
+            "copertura_scanner":item.get("copertura_scanner"),
+            "segnali_contrari":origin.get("segnali_contrari",[]),
+            "invalidazione":origin.get("invalidazione"),
+            "evidenze_complementari":complementary_at_read,
+            "quattro_tf":{"stato":"COMPLETO" if all_fresh else "PARZIALE",
+                          "timeframe":observed,
+                          "confronto_figure":(tech.get("confronto_figure") if all_fresh else None),
+                          "limite":"Stato ricalcolato alla lettura; nessun segnale operativo"},
+            "mercato":{"stato":"RECENTE" if market_recent else "SCADUTO",
+                       "fonte":"Kraken Spot Ticker/Depth campionato",
+                       "volume_coppia_eur_stimato":(
+                           (item.get("mercato_spot_kraken") or {}).get("volume_coppia_eur_stimato")
+                           if market_recent else None),
+                       "spread_book_pct":(
+                           (item.get("mercato_spot_kraken") or {}).get("spread_book_pct")
+                           if market_recent else None),
+                       "profondita_bid10_eur":(
+                           (item.get("mercato_spot_kraken") or {}).get("profondita_bid10_eur")
+                           if market_recent else None),
+                       "profondita_ask10_eur":(
+                           (item.get("mercato_spot_kraken") or {}).get("profondita_ask10_eur")
+                           if market_recent else None)},
+            "nessun_ordine":True})
+    return out
+
+
 def read_context(bundle, *, now=None, expected_sha256=None):
     """GPT read-time contract: recalculate age/status and coverage, never authorise action."""
     moment = checked_now(now)
@@ -890,12 +1035,16 @@ def read_context(bundle, *, now=None, expected_sha256=None):
             economics=economic_read)
     except (ValueError, TypeError, KeyError, OverflowError) as exc:
         raise BridgeError("Evidenze on-chain/DeFi non verificabili") from exc
+    scanner_read=scanner_candidates_at_read(
+        pkt.get("opportunita_esterne_scanner") or [],snapshot=snap,moment=moment,
+        multifonte=multifonte)
     return {"schema": "kdd_gpt_read_context_v001", "snapshot_id": digest(pkt),
             "snapshot_utc": pkt["rilevazione_kdd_utc"],
             "letto_utc": moment.isoformat(timespec="seconds"),
             "mercato": market_status, "saldo": bal_status,
             "n_posizioni": len(rows), "quattro_tf_aggiornati": complete,
             "copertura": observations,
+            "candidati_scanner_alla_lettura":scanner_read,
             "evidenze_economiche_alla_lettura": economic_read,
             "flusso_futures_alla_lettura": futures_at_read,
             "rete_defi_alla_lettura": network_at_read,

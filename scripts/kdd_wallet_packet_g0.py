@@ -560,12 +560,16 @@ def brief_positions(portfolio: dict, report: dict, snapshot: dict, dossier: dict
     return selected
 
 
-def public_shortlist(snapshot: dict) -> list[dict]:
+def public_shortlist(snapshot: dict, dossier: dict | None = None) -> list[dict]:
     out = []
     src = snapshot.get("schede_v02")
     if not isinstance(src, list):
         return out
-    for x in src[:4]:
+    aligned=(isinstance(dossier,dict) and
+             dossier.get("kraken_istantanea_utc")==snapshot.get("rilevazione_utc"))
+    dossier_rows=(dossier.get("candidati") if aligned else None)
+    dossier_rows=dossier_rows if isinstance(dossier_rows,list) else []
+    for index,x in enumerate(src[:4]):
         if not isinstance(x, dict):
             continue
         token = x.get("token")
@@ -578,12 +582,72 @@ def public_shortlist(snapshot: dict) -> list[dict]:
         book=x.get("book")
         if isinstance(book,dict):
             market["spread_book_pct"]=_analytic_value(book.get("spread_book_pct"))
+            market["profondita_bid10_eur"]=_analytic_value(book.get("profondita_bid10_eur"))
+            market["profondita_ask10_eur"]=_analytic_value(book.get("profondita_ask10_eur"))
             market["book_stato"]="CAMPIONE" if market["spread_book_pct"] is not None else "NON_DISPONIBILE"
+            market["book_limite"]="Profondita primi 10 livelli solo della coppia, non esecuzione garantita"
         vol=_analytic_value(x.get("volume_coppia_eur_stimato"))
         if vol is not None:
             market.update(stato="VOLUME_SPOT_CAMPIONE",volume_coppia_eur_stimato=vol)
         market["limite"]="Book della singola coppia se presente, non flusso on-chain o liquidita globale"
+        doc=(dossier_rows[index] if index<len(dossier_rows)
+             and isinstance(dossier_rows[index],dict) else None)
+        same=(isinstance(doc,dict) and doc.get("token")==token
+              and doc.get("coppia_analisi")==x.get("coppia_analisi"))
+        technique=doc.get("tecnica_4tf") if same else None
+        if not isinstance(technique,dict) or technique.get("token")!=token or (
+                technique.get("coppia")!=x.get("coppia_analisi")):
+            technique=None
+        frames={}
+        if technique:
+            for label in ("15m","1H","4H","1D"):
+                frame=(technique.get("timeframe") or {}).get(label)
+                frame=frame if isinstance(frame,dict) else {}
+                found=frame.get("figure_candlestick")
+                figures=found.get("figure") if isinstance(found,dict) else []
+                frames[label]={
+                    "stato":frame.get("stato","NON_DISPONIBILE"),
+                    "coppia":frame.get("coppia"),
+                    "pair_key":frame.get("pair_key"),
+                    "chiusura_utc":frame.get("chiusura_utc"),
+                    "rilevazione_utc":frame.get("rilevazione_utc"),
+                    "orientamento":frame.get("orientamento"),
+                    "close":_analytic_value(frame.get("close")),
+                    "ema20":_analytic_value(frame.get("ema20")),
+                    "ema50":_analytic_value(frame.get("ema50")),
+                    "supporto_vicino":_analytic_value(frame.get("supporto_vicino")),
+                    "resistenza_vicina":_analytic_value(frame.get("resistenza_vicina")),
+                    "volume_vs_media20":_analytic_value(frame.get("volume_vs_media20")),
+                    "pivot_giornaliero":frame.get("pivot_giornaliero"),
+                    "livelli_strutturali":frame.get("livelli_strutturali"),
+                    "figure":[{"figura":f.get("figura"),"stato":f.get("stato"),
+                               "conflitti":f.get("contraddizioni",f.get("segnali_contrari",[]))}
+                              for f in figures[:8] if isinstance(f,dict)],
+                    "motivo":frame.get("motivo"),
+                    "fonte":frame.get("fonte")}
+        original=x.get("origine_scanner")
+        original=original if isinstance(original,dict) else {}
+        report=x.get("copertura_scanner")
+        report=report if isinstance(report,dict) else {}
+        origin_summary={k:original.get(k) for k in
+                        ("fonte","osservato_utc","ciclo","pair_key",
+                         "regime_osservato","invalidazione","segnali_contrari",
+                         "qualita_dati","limite")}
+        coverage_summary={k:report.get(k) for k in
+                          ("mercati_osservati_ticker","universo_ammissibile",
+                           "campionati","analizzati","ammissibili_non_campionati",
+                           "universo_esaminato_almeno_una_volta",
+                           "universo_mai_esaminato","copertura_progressiva_pct")}
         out.append({"token": token,
+                    "origine_scanner":origin_summary,
+                    "copertura_scanner":coverage_summary,
+                    "analisi_candidato_4tf":{
+                        "stato":technique.get("stato","PARZIALE") if technique else "NON_DISPONIBILE",
+                        "coppia":x.get("coppia_analisi"),
+                        "pair_key":technique.get("pair_key") if technique else None,
+                        "timeframe":frames,
+                        "confronto_figure":technique.get("confronto_figure_4tf") if technique else None,
+                        "limite":"Quadro storico 4TF; freschezza da ricalcolare nel bridge"},
                     "mercato_spot_kraken":market,
                     "categoria": str(x.get("categoria") or "")[:100],
                     "esito_kdd": str(x.get("esito") or "")[:100],
@@ -1224,8 +1288,8 @@ def build(root: Path, now: dt.datetime | None = None) -> dict:
                            "stato_totale": report.get("stato_totale", "NON_VERIFICATO"),
                            "n_posizioni": len(positions)},
             "scenario_mercato_kdd": str(report.get("mercato", "NON_DETERMINATO"))[:300],
-            "opportunita_esterne_scanner": public_shortlist(snapshot),
-            "evidenze_multifonte": analytic_evidence(snapshot, dossier, positions, public_shortlist(snapshot), now),
+            "opportunita_esterne_scanner": public_shortlist(snapshot, dossier),
+            "evidenze_multifonte": analytic_evidence(snapshot, dossier, positions, public_shortlist(snapshot, dossier), now),
             "nessun_ordine": True,
             "richiesta_gpt": "Valuta prima TUTTE le posizioni possedute; per ognuna mantenere/incrementare/alleggerire/uscire/ruotare e alternative, con dati e limiti. Solo poi confronta opportunita esterne. Non inventare prezzi, notizie, commissioni, performance o esecuzioni; ricerca fonti attuali indipendenti e proponi opzioni all'autore, mai ordini automatici.",
             "limiti": ["Prototipo G0 locale: nessun trasferimento a Drive o chat senza consenso dell'autore.",

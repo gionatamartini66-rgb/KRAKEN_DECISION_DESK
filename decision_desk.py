@@ -1227,13 +1227,17 @@ def refresh():
     # fino a quattro approfondimenti 15m/book, privilegiando setup osservati.
     import ricerca_setup as explorer
     ora_candele=NOW().timestamp()
+    prior_snapshot=load('ultima_rilevazione.json',{})
+    prior_search=(prior_snapshot.get('ricerca_setup')
+                  if isinstance(prior_snapshot,dict) else None)
     shortlist,ricerca,ore_cache=explorer.scan(
-        markets_multi,conf.get('scanner',{}),kraken,ora_candele)
+        markets_multi,conf.get('scanner',{}),kraken,ora_candele,
+        previous=prior_search)
+    ricerca['catalogo_kraken']=multi.coverage(pairs,tickers,markets_multi)
     ricerca['riferimento_candele_utc']=dt.datetime.fromtimestamp(
         ora_candele,dt.timezone.utc).isoformat(timespec='seconds')
     if not shortlist:
-        shortlist=tactical.choose(markets_multi,conf.get('scanner',{}),max_items=3)
-        ricerca['ripiego']='Nessuna selezione 1h utilizzabile: vecchio campione 8–20% di confronto'
+        ricerca['ripiego']='NESSUNO: movimento percentuale positivo da solo non costituisce un setup verificato'
     schede = []
     depth_by_pair = {}  # sola memoria del refresh, non persistito
     # Il confronto BTC va fatto con lo STESSO quote del token (USD vs USD, ecc.).
@@ -1273,8 +1277,23 @@ def refresh():
                 error = f"Kraken / metriche ({type(exc).__name__})"
         card=tactical.evaluate(row, item['categoria'], metrics, book,error=error,
                                config=conf.get('scanner',{}))
-        card['perche_selezionato']=item.get('perche','Ripiego per confronto; non setup')
+        card['perche_selezionato']=item.get('perche','Solo controllo senza setup')
         card['preselezione']=item.get('preselezione')
+        card['origine_scanner']={
+            'fonte':'Kraken Spot pubblico OHLC 1h + AssetPairs/Ticker',
+            'ciclo':ricerca['ciclo'], 'osservato_utc':item.get('osservato_utc'),
+            'pair_key':item.get('pair_key'),
+            'regime_osservato':item.get('regime_osservato'),
+            'invalidazione':item.get('invalidazione'),
+            'segnali_contrari':item.get('segnali_contrari',[]),
+            'qualita_dati':item.get('qualita_dati'),
+            'limite':'Preselezione descrittiva; un cambio percentuale non determina ordine o previsione'}
+        card['copertura_scanner']={
+            k:ricerca.get(k) for k in (
+                'mercati_osservati_ticker','universo_ammissibile',
+                'campionati','analizzati','ammissibili_non_campionati',
+                'universo_esaminato_almeno_una_volta','universo_mai_esaminato',
+                'copertura_progressiva_pct')}
         if item['categoria']=='nessun setup confermato':
             card['esito']='NESSUN SETUP INDIVIDUATO'
             card['sintesi']='Solo caso di confronto: non è emerso un ingresso spot da proporre.'

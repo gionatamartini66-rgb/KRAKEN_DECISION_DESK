@@ -1732,6 +1732,168 @@ class DeskTests(unittest.TestCase):
         self.assertEqual([x['token'] for x in chosen],['BRK','COMP','START'])
         self.assertTrue(all(x['perche'] in ('A','B','C') for x in chosen))
 
+    def test_kdd07_rotation_96_markets_measures_progressive_coverage(self):
+        import ricerca_setup as rs
+        import unittest.mock as mock
+        t0=1800000000
+        bars=[[t0+i*3600,100,101,99,100,100,10,1] for i in range(33)]
+        markets={}
+        for i in range(96):
+            token="SIM"+str(i)
+            vol=(180_000,650_000,2_000_000)[i%3]
+            markets[token]={"token":token,"pair":token+"/USD",
+               "pair_key":token+"USD","quote":"USD",
+               "var_oggi_utc_pct":(-4,0.2,4,12,28)[i%5],
+               "volume_24h_eur_stimato":vol,"prezzo_eur":2,
+               "spread_pct":0.15}
+        previous=None
+        requested=[]
+        for _ in range(10):
+            calls=[]
+            def fetch(endpoint,**kw):
+                calls.append(kw["pair"])
+                return {kw["pair"]:bars}
+            with mock.patch.object(rs.time,"sleep"):
+                chosen,info,_=rs.scan(markets,{},fetch,t0+33*3600+100,
+                                     previous=previous)
+            self.assertEqual(info["mercati_osservati_ticker"],96)
+            self.assertEqual(info["universo_ammissibile"],96)
+            self.assertEqual(info["campionati"],24)
+            self.assertEqual(len(calls),24)
+            self.assertTrue(all(x["origine"]=="SCANNER_KRAKEN_1H" for x in chosen))
+            requested.extend(calls)
+            previous=info
+        self.assertEqual(info["universo_mai_esaminato"],0)
+        self.assertEqual(info["universo_esaminato_almeno_una_volta"],96)
+        self.assertEqual(info["copertura_progressiva_pct"],100)
+        self.assertGreater(len(set(requested[24:])) ,24)
+        # Previously invisible markets reached the real OHLC callback, not a
+        # claimed ticker-only "coverage".
+        self.assertEqual(len(set(requested)),96)
+        self.assertEqual(info["budget_ohlc_1h"],24)
+        invalid=dict(markets)
+        invalid["XMR"] = dict(markets["SIM0"],token="XMR",pair_key="XMREUR")
+        invalid["BAD"] = dict(markets["SIM0"],token="BAD",spread_pct=2)
+        with mock.patch.object(rs.time,"sleep"):
+            _,measure,_=rs.scan(invalid,{},lambda endpoint,**kw:{kw["pair"]:bars},
+                                t0+33*3600+100,previous=info)
+        self.assertEqual(measure["esclusioni_per_motivo"]["RESTRIZIONE_SEE_DOCUMENTATA"],1)
+        self.assertEqual(measure["esclusioni_per_motivo"]["SPREAD_OLTRE_FILTRO"],1)
+
+    def test_kdd07_bull_bear_lateral_transition_ohlc_not_daily_percentage(self):
+        import ricerca_setup as rs
+        t0=1800000000
+        def series(prices,volumes=None,widen=False):
+            result=[]
+            for i,price in enumerate(prices):
+                high=price+(8 if widen and 17<=i<25 else 1)
+                low=price-(8 if widen and 17<=i<25 else .5)
+                result.append([t0+i*3600,price,high,low,price,price,
+                               volumes[i] if volumes else 10,1])
+            return result
+        bullish=series([100]*32+[104],[10]*32+[80])
+        bearish=series([120-.8*i for i in range(33)],
+                       [10]*29+[25]*4)
+        sideways=[]
+        for i in range(33):
+            hi,lo=(108,92) if 17<=i<25 else (101,99) if i>=25 else (110,90)
+            sideways.append([t0+i*3600,100,hi,lo,100,100,10,1])
+        transition=series([120-.75*i for i in range(29)]+
+                          [98.25,99.5,100.5,101.5],
+                          [10]*29+[20]*4)
+        expected={"bull":("tentativo di ripartenza","RIALZISTA"),
+                  "bear":("pressione ribassista","RIBASSISTA"),
+                  "side":("consolidamento","LATERALE"),
+                  "trans":("transizione in recupero","TRANSIZIONE")}
+        observations={}
+        for key,raw in (("bull",bullish),("bear",bearish),
+                        ("side",sideways),("trans",transition)):
+            obs=rs.geometry(raw,t0+33*3600+100)
+            self.assertEqual((obs["categoria"],obs["regime_osservato"]),expected[key])
+            self.assertTrue(obs["invalidazione"])
+            observations[key]=obs
+        scored=[]
+        for key,raw in observations.items():
+            scored.append({"token":key,"pair_key":key+"USD",
+                           "volume_24h_eur_stimato":1_000_000,
+                           "spread_pct":.1})
+        result=rs.select(scored,observations)
+        self.assertEqual(len(result),4)
+        self.assertEqual({x["categoria"] for x in result},
+                         {x["categoria"] for x in observations.values()})
+        self.assertTrue(all(x["segnali_contrari"] is not None for x in result))
+        # The market snapshot can show a +28% ticker while every CLOSED 1h
+        # candle is flat. That is never a bullish setup.
+        false=rs.geometry(series([100]*33),t0+33*3600+100)
+        self.assertEqual(false["categoria"],"nessun setup confermato")
+        self.assertNotEqual(false["regime_osservato"],"RIALZISTA")
+        gaps=series([100]*33)
+        gaps[17][0]+=30
+        self.assertEqual(rs.geometry(gaps,t0+33*3600+100)["stato"],
+                         "DATI_INSUFFICIENTI")
+
+    def test_kdd07_candidate_reuses_real_four_tf_engine_and_exact_identity(self):
+        import patrimonio_4tf as p4
+        import unittest.mock as mock
+        now=dt.datetime(2026,11,16,21,3,tzinfo=dt.timezone.utc)
+        catalog={"SOLEUR":{"wsname":"SOL/EUR","status":"online",
+                            "altname":"SOLEUR"}}
+        cand=[{"token":"SOL","coppia_analisi":"SOL/EUR",
+               "kraken_pair_key":"SOLEUR"}]
+        def raw(minutes):
+            sec=minutes*60; current=int(now.timestamp())//sec*sec
+            start=current-80*sec
+            rows=[]
+            for i in range(80):
+                close=100+.03*i
+                rows.append([start+i*sec,close,close+.15,close-.12,
+                             close,close,10+i%3,1])
+            rows.append([current,100,999,1,999,999,90000,1])
+            return rows
+        calls=[]
+        def good(endpoint,**kw):
+            self.assertEqual(endpoint,"OHLC")
+            self.assertEqual(kw["pair"],"SOLEUR")
+            calls.append(kw["interval"])
+            return {"SOLEUR":raw(kw["interval"]),"last":0}
+        with mock.patch.object(p4.time,"sleep"):
+            out=p4.collect_candidates(cand,asset_pairs=catalog,fetch=good,
+                                      now=now,pause=lambda secs:None)
+        self.assertEqual(calls,[15,60,240,1440])
+        entry=out["candidati"][0]
+        self.assertEqual(entry["stato"],"COMPLETO")
+        self.assertEqual(out["richieste_ohlc"],4)
+        self.assertEqual(entry["timeframe_attuali"],4)
+        for key in ("15m","1H","4H","1D"):
+            f=entry["timeframe"][key]
+            self.assertEqual(f["stato"],"AGGIORNATO")
+            self.assertEqual(f["pair_key"],"SOLEUR")
+            self.assertEqual(f["coppia"],"SOL/EUR")
+            self.assertLess(f["close"],105)
+            self.assertEqual(len(f["serie_ohlcv_chiuse"]),80)
+            self.assertIn("figure_candlestick",f)
+            self.assertIn("pivot_giornaliero",f)
+            self.assertIn("livelli_strutturali",f)
+        def wrong(endpoint,**kw):
+            return {"ETHEUR" if kw["interval"]==60 else "SOLEUR":
+                    raw(kw["interval"]),"last":0}
+        partial=p4.collect_candidates(cand,asset_pairs=catalog,fetch=wrong,
+                                      now=now,pause=lambda secs:None)
+        self.assertEqual(partial["candidati"][0]["stato"],"PARZIALE")
+        self.assertEqual(partial["candidati"][0]["timeframe"]["1H"]["stato"],
+                         "NON_DISPONIBILE")
+        limited=p4.collect_candidates(cand,asset_pairs=catalog,fetch=good,
+                                      now=now,pause=lambda secs:None,
+                                      max_queries=2)
+        self.assertEqual(limited["candidati"][0]["timeframe"]["1D"]["stato"],
+                         "RINVIATO_BUDGET")
+        collision={"A":{"wsname":"SOL/EUR","status":"online"},
+                   "B":{"wsname":"SOL/EUR","status":"online"}}
+        unclear=p4.collect_candidates(cand,asset_pairs=collision,fetch=good,
+                                      now=now,pause=lambda secs:None)
+        self.assertEqual(unclear["candidati"][0]["stato"],
+                         "CATALOGO_NON_DISPONIBILE")
+
     def test_no_trade_plan_preserved_without_fake_prices_or_api(self):
         import piano_gpt as pg
         import verifica_piani as vp
