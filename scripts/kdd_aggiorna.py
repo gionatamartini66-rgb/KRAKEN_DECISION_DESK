@@ -58,8 +58,15 @@ class SafetyError(RuntimeError):
 
 
 def command(args: list[str], *, cwd: Path, timeout: int = 120) -> subprocess.CompletedProcess:
+    # Separate unittest processes need both import roots, in staging AND live.
+    # Do not rely on PYTHONPATH set by Termux, CI or an interactive shell.
+    env = None
+    if args and args[0] == sys.executable:
+        env = os.environ.copy()
+        env['PYTHONPATH'] = os.pathsep.join((str(cwd.resolve()),
+                                          str((cwd / 'scripts').resolve())))
     return subprocess.run(args, cwd=cwd, text=True, capture_output=True,
-                          timeout=timeout, check=False)
+                          timeout=timeout, check=False, env=env)
 
 
 def verified_clone(root: Path) -> str:
