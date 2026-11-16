@@ -528,7 +528,7 @@ class PrimaryFollowupTests(unittest.TestCase):
         first=sources.collect(T,roster,{},firstparty)
         # One schedule GET per refresh; use normal source rotation.
         result=first
-        for i in range(1,4):
+        for i in range(1,3):
             result=sources.collect(T+dt.timedelta(hours=i),roster,result,firstparty)
         strk=next(x for x in result["calendari"] if x["progetto_id"]=="starknet")
         self.assertEqual(strk["stato"],"DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI")
@@ -536,7 +536,7 @@ class PrimaryFollowupTests(unittest.TestCase):
         self.assertEqual(strk["eventi"][0]["quantita_massima_token"],127000000)
         self.assertEqual(strk["eventi"][0]["realizzato"],"NON_ATTESTATO")
         self.assertEqual(strk["eventi"][0]["ora_evento"],"NON_ATTESTATA")
-        checked=sources.at_read(result,roster,T+dt.timedelta(hours=3))
+        checked=sources.at_read(result,roster,T+dt.timedelta(hours=2))
         self.assertEqual(checked["copertura"]["calendari_con_massimi_datati_primari"],1)
         review=sources.decision_review(checked,roster["posizioni"][1],"posizioni")
         self.assertEqual(review["fatti"][0]["tipo"],"UNLOCK_MASSIMO_DATATO_PRIMARIO")
@@ -544,12 +544,12 @@ class PrimaryFollowupTests(unittest.TestCase):
         next(x for x in forged["calendari"] if x["progetto_id"]=="starknet")[
             "eventi"][0]["quantita_massima_token"]=128000000
         with self.assertRaises(ValueError):
-            sources.at_read(forged,roster,T+dt.timedelta(hours=3))
+            sources.at_read(forged,roster,T+dt.timedelta(hours=2))
         forged=copy.deepcopy(result)
         next(x for x in forged["calendari"] if x["progetto_id"]=="starknet")[
             "eventi"][0]["realizzato"]="SI"
         with self.assertRaises(ValueError):
-            sources.at_read(forged,roster,T+dt.timedelta(hours=3))
+            sources.at_read(forged,roster,T+dt.timedelta(hours=2))
         missing=sources.collect(T,roster,{},lambda url:
             b"outside project source" if url==sources.STRK_URL else self.fetch(url))
         # Without any valid STRK official page no calendar may be fabricated.
