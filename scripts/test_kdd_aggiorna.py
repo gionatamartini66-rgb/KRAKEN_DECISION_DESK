@@ -143,7 +143,7 @@ class UpdateTests(unittest.TestCase):
         synthetic.write_bytes(evidence)
         first = kdd.isolated_test
         seen = {'calls': 0}
-        def fail_second(stage):
+        def fail_second(stage, **kwargs):
             seen['calls'] += 1
             if seen['calls'] == 2:
                 raise kdd.SafetyError('test successivo KO')
@@ -195,7 +195,7 @@ class UpdateTests(unittest.TestCase):
                 home.mkdir()
                 real=kdd.isolated_test
                 calls=0
-                def fail_post(stage):
+                def fail_post(stage, **kwargs):
                     nonlocal calls
                     calls+=1
                     if calls==2:
@@ -239,7 +239,7 @@ class UpdateTests(unittest.TestCase):
                 else:
                     (self.live / name).write_bytes(old)
                 seen = []
-                def inspect_stage(stage):
+                def inspect_stage(stage, **kwargs):
                     self.assertEqual((stage / name).read_bytes(), source)
                     spec = importlib.util.spec_from_file_location(
                         'kdd_capital_flow_deploy_probe', stage / name)
@@ -287,7 +287,7 @@ class UpdateTests(unittest.TestCase):
                                              else 'capital-rollback-new')
                 home.mkdir()
                 attempts = [0]
-                def fail_postflight(stage):
+                def fail_postflight(stage, **kwargs):
                     attempts[0] += 1
                     if attempts[0] == 2:
                         self.assertEqual((stage / name).read_bytes(), source)
@@ -316,7 +316,7 @@ class UpdateTests(unittest.TestCase):
         (self.root / name).write_text(payload)
         (self.live / name).unlink()
         observed = []
-        def inspect_stage(stage):
+        def inspect_stage(stage, **kwargs):
             self.assertEqual((stage / name).read_text(), payload)
             observed.append(stage)
         with patch.object(kdd, 'isolated_test', side_effect=inspect_stage), \
@@ -377,7 +377,7 @@ class UpdateTests(unittest.TestCase):
         home.mkdir()
         original=kdd.isolated_test
         count=0
-        def fail_post(stage):
+        def fail_post(stage, **kwargs):
             nonlocal count
             count+=1
             if count==2:
@@ -439,7 +439,7 @@ class UpdateTests(unittest.TestCase):
             self.assertFalse((self.root / name).exists())
         seen = []
 
-        def observe(stage):
+        def observe(stage, **kwargs):
             for name, body in sensitive.items():
                 self.assertEqual((stage / name).read_text(), body)
                 seen.append(name)
@@ -505,7 +505,7 @@ class UpdateTests(unittest.TestCase):
         home=Path(self.tmp.name)/'postflight-home'
         home.mkdir()
         n=[0]
-        def failing_postflight(stage):
+        def failing_postflight(stage, **kwargs):
             n[0]+=1
             if n[0]==2:
                 raise kdd.SafetyError('suite test_decision_desk: timeout dopo 150 s')
