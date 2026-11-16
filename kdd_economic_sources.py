@@ -1650,10 +1650,16 @@ def decision_review(evidence, row, group):
                 schedule.get("fonte"),event.get("evento_utc"),schedule.get("acquisito_utc"),
                 "PROGRAMMA_PRIMARIO",schedule.get("limite"),
                 {"allocazione":event.get("allocazione"),"quantita_token":event.get("quantita_token")})
+    def source_history_recent(row):
+        observed=_time(row.get("acquisito_utc"))
+        read_time=_time(evidence.get("letto_utc"))
+        return bool(observed and read_time and
+                    dt.timedelta(0)<=read_time-observed<=dt.timedelta(days=30))
     if schedule.get("stato") in ("DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI",
                                   "MASSIMI_DATATI_STORICI"):
         is_old=schedule["stato"]=="MASSIMI_DATATI_STORICI"
-        for event in schedule.get("eventi",[])[:4]:
+        for event in (schedule.get("eventi",[])[:4]
+                      if not is_old or source_history_recent(schedule) else []):
             add("UNLOCK_MASSIMO_DATATO_PRIMARIO",
                 "La documentazione ufficiale attesta una data e una quantità massima sbloccabile, non una vendita né una quantità effettiva",
                 schedule.get("fonte"),event["data_prevista"],schedule.get("acquisito_utc"),
@@ -1664,7 +1670,8 @@ def decision_review(evidence, row, group):
     if schedule.get("stato") in ("DOCUMENTO_PRIMARIO_REGOLA_VESTING",
                                   "REGOLA_VESTING_STORICA"):
         is_old=schedule["stato"]=="REGOLA_VESTING_STORICA"
-        add("REGOLA_VESTING_MENSILE_PRIMARIA",
+        if not is_old or source_history_recent(schedule):
+            add("REGOLA_VESTING_MENSILE_PRIMARIA",
             "La Foundation documenta regole mensili e lineari di vesting, senza quantità o giorni esatti per i futuri unlock",
             schedule.get("fonte"),None,schedule.get("acquisito_utc"),
             ("REGOLA_STORICA_NON_RICONFERMATA" if is_old else
@@ -1674,7 +1681,8 @@ def decision_review(evidence, row, group):
     monthly=by_project("calendari")
     if monthly.get("stato") in ("PROIEZIONE_PRIMARIA_NON_UNLOCK","PROIEZIONE_STORICA"):
         is_old=monthly["stato"]=="PROIEZIONE_STORICA"
-        add("PROIEZIONE_CIRCOLAZIONE",
+        if not is_old or source_history_recent(monthly):
+            add("PROIEZIONE_CIRCOLAZIONE",
             "La fonte ufficiale pubblica stime mensili di token circolanti, non singoli unlock",
             monthly.get("fonte"),monthly.get("mese_circolazione"),
             monthly.get("acquisito_utc"),
