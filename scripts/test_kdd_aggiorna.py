@@ -478,7 +478,7 @@ class UpdateTests(unittest.TestCase):
              contextlib.redirect_stdout(io.StringIO()):
             kdd.isolated_test(self.root)
         self.assertEqual([x[0] for x in observed],[[x] for x in expected])
-        self.assertEqual([x[1] for x in observed],[150]*len(expected))
+        self.assertEqual([x[1] for x in observed],[210]+[150]*(len(expected)-1))
 
     def test_rt67_core_timeout_identifies_module_not_sensitive_output(self):
         import subprocess
@@ -620,7 +620,7 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual([x[1] for x in before], [x[1] for x in after])
         self.assertEqual(len(before), 12, 'six core + five packet + R5 mandatory checks')
         self.assertEqual(measurements['test_decision_desk'], 138)
-        self.assertEqual(before[0][2], 150)
+        self.assertEqual(before[0][2], 210)
         self.assertGreater(after[0][2], 180)
         self.assertLessEqual(after[0][2], 300)
         self.assertTrue(all(x[2] == 120 for x in after[6:]))
