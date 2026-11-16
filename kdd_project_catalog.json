@@ -31,12 +31,26 @@
     "BTC": {
       "id": "bitcoin",
       "name": "Bitcoin",
-      "repository": "bitcoin/bitcoin"
+      "repository": "bitcoin/bitcoin",
+      "governance_repository": "bitcoin/bips"
     },
     "SOL": {
       "id": "solana",
       "name": "Solana",
-      "repository": "anza-xyz/agave"
+      "repository": "anza-xyz/agave",
+      "governance_repository": "solana-foundation/solana-improvement-documents",
+      "emission_primary": "SOLANA_RPC_GOVERNOR"
+    },
+    "ARB": {
+      "id": "arbitrum",
+      "name": "Arbitrum",
+      "official_schedule": {
+        "format": "arbitrum-primary-vesting-mdx-v001",
+        "repository": "ArbitrumFoundation/docs",
+        "ref": "main",
+        "path": "content/docs/airdrop-eligibility-distribution.mdx",
+        "homepage": "https://docs.arbitrum.foundation/airdrop-eligibility-distribution"
+      }
     },
     "ADA": {
       "id": "cardano",
@@ -45,15 +59,35 @@
     },
     "ETH": {
       "id": "ethereum",
-      "name": "Ethereum"
+      "name": "Ethereum",
+      "governance_repository": "ethereum/EIPs",
+      "security_repository": "ethereum/go-ethereum",
+      "repository": "ethereum/go-ethereum"
     },
     "NEAR": {
       "id": "near",
       "name": "NEAR Protocol"
     },
+    "STRK": {
+      "id": "starknet",
+      "name": "Starknet",
+      "official_schedule": {
+        "format": "starknet-primary-unlock-mdx-v001",
+        "repository": "starknet-io/starknet-docs",
+        "ref": "main",
+        "path": "learn/protocol/strk.mdx",
+        "homepage": "https://docs.starknet.io/learn/protocol/strk"
+      }
+    },
     "SUI": {
       "id": "sui",
-      "name": "Sui"
+      "name": "Sui",
+      "official_schedule": {
+        "format": "official-monthly-circulation-v001",
+        "url": "https://sui-circulation.suiexplorer.com/api/sui_circulation",
+        "homepage": "https://www.sui.io/token-schedule",
+        "max_supply_token": 10000000000
+      }
     },
     "XRP": {
       "id": "ripple",

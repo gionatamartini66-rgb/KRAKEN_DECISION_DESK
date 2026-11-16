@@ -23,7 +23,7 @@ jobs:
       - name: Core KDD regressions
         run: python -B -m unittest -q test_decision_desk
       - name: Private packet, market age and portfolio 4TF synthetic tests
-        run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_wallet_packet_g0 scripts.test_kdd_market_freshness scripts.test_kdd_portfolio_4tf scripts.test_kdd_android_transaction_g2 test_kdd_economics test_kdd_futures_flow test_kdd_network_defi
+        run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_wallet_packet_g0 scripts.test_kdd_market_freshness scripts.test_kdd_portfolio_4tf scripts.test_kdd_android_transaction_g2 test_kdd_economics test_kdd_economic_sources test_kdd_futures_flow test_kdd_network_defi
       - name: Drive UI handoff through the genuine bridge (no remote API)
         run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_drive_exchange
       - name: Unchanged R5 invariant tests against Android candidate (mapped, no skips)
@@ -32,6 +32,8 @@ jobs:
         run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_funding_book_g2
       - name: Existing safe updater tests
         run: python -B scripts/test_kdd_aggiorna.py
+      - name: Authentic public primary-source smoke (never private wallet)
+        run: PYTHONPATH=. python -B -u scripts/kdd_primary_live_smoke.py
 
   r5-historical-reference:
     runs-on: ubuntu-latest

@@ -1,5 +1,21 @@
 """Dossier verificabile per ragionamento GPT in chat, senza API private né ordini."""
 import datetime as dt
+import contextlib
+import contextvars
+
+_PRIMARY_REAL_REFRESH=contextvars.ContextVar("kdd_primary_real_refresh",default=False)
+
+
+@contextlib.contextmanager
+def primary_refresh_context():
+    """Permit new external economic sources only during genuine KDD refresh."""
+    marker=_PRIMARY_REAL_REFRESH.set(True)
+    try:
+        yield
+    finally:
+        _PRIMARY_REAL_REFRESH.reset(marker)
+
+
 import json
 import math
 import time
@@ -299,7 +315,7 @@ def finanziamento_150_book(source, portfolio, *, saldo_recente, kraken_client=No
 
 
 def economic_evidence(source, wallet, four, candidates, now, *,
-                      asset_pairs=None, previous=None):
+                      asset_pairs=None, previous=None, requested=None):
     """Patrimonio dinamico: catalogo Kraken reale, progetti curati o ricerca incrociata.
 
     The previous dossier is a dated, local public-evidence cache, never a
@@ -339,11 +355,46 @@ def economic_evidence(source, wallet, four, candidates, now, *,
     wallet_rows = wallet_rows if isinstance(wallet_rows, list) else []
     four_rows = four.get("posizioni") if isinstance(four, dict) else None
     four_rows = four_rows if isinstance(four_rows, list) else []
-    items = {"posizioni": [], "candidati": []}
+    def _prior_pair_for_public_status(index, token):
+        """Recover only a *pair reference*, never an old project verification.
+
+        The live AssetPairs REST key and wsname must still match. The standard
+        online-only spot catalogue remains unchanged, so a restricted pair
+        cannot regain eligibility for trading or priced 4TF inference.
+        """
+        if not allowed_history or not isinstance(asset_pairs,dict):
+            return None
+        prior_positions=prior.get("posizioni")
+        if not isinstance(prior_positions,list) or index>=len(prior_positions):
+            return None
+        previous_row=prior_positions[index]
+        if (not isinstance(previous_row,dict) or previous_row.get("indice")!=index
+                or previous_row.get("token")!=token):
+            return None
+        identity=previous_row.get("identita")
+        if not isinstance(identity,dict) or identity.get("stato")!="IDENTITA_VERIFICATA_DA_CATALOGO":
+            return None
+        key,pair=identity.get("pair_key"),identity.get("coppia")
+        if not isinstance(key,str) or not isinstance(pair,str) or pair.count("/")!=1:
+            return None
+        base,quote=pair.split("/")
+        if (econ.canonical_token(base)!=econ.canonical_token(token)
+                or quote not in ("EUR","USD","USDC")):
+            return None
+        current=asset_pairs.get(key)
+        if not isinstance(current,dict) or current.get("wsname")!=pair:
+            return None
+        return (pair,key)
+
+    items = {"posizioni": [], "candidati": [], "richiesti": []}
     for index, row in enumerate(wallet_rows):
         tf = four_rows[index] if index < len(four_rows) and isinstance(four_rows[index], dict) else {}
         token, valid = desk.wallet_symbol(row.get("token") if isinstance(row, dict) else None)
         pair, key = tf.get("coppia"), tf.get("pair_key")
+        if valid and (not isinstance(pair,str) or not isinstance(key,str)):
+            old_pair=_prior_pair_for_public_status(index,token)
+            if old_pair is not None:
+                pair,key=old_pair
         identity = econ.identify(token, pair, key,
                                  catalog=catalog if valid and tf.get("token") == token else {},
                                  discovered=previous_dynamic.get((token, pair)))
@@ -358,11 +409,45 @@ def economic_evidence(source, wallet, four, candidates, now, *,
         items["candidati"].append({"indice": index, "token": token,
                                    "coppia_analisi": pair, "identita": identity})
 
+    # Third public-only universe. It exists only following an explicit local
+    # CLI author request; it is neither a wallet holding nor a scanner tip.
+    # The request token is not sufficient proof of a Kraken market identity.
+    accepted=set()
+    for record in (requested if isinstance(requested,list) else [])[:3]:
+        if not isinstance(record,dict) or record.get("origine") not in (
+                "CLI_ESPLICITO_LOCALE","UI_ESPLICITA_LOCALE"):
+            continue
+        token,valid=desk.wallet_symbol(record.get("token"))
+        since=econ.stamp(record.get("richiesto_utc"))
+        if (not valid or not since
+                or not dt.timedelta(0)<=now-since<=dt.timedelta(days=7)
+                or token in accepted):
+            continue
+        accepted.add(token)
+        match=sorted(
+            ((("EUR","USD","USDC").index(meta["quote"]),key,meta)
+             for key,meta in catalog.items()
+             if isinstance(meta,dict)
+             and econ.canonical_token(meta.get("base"))==econ.canonical_token(token)
+             and meta.get("quote") in ("EUR","USD","USDC")),
+            key=lambda a:(a[0],a[1]))
+        if match:
+            _,key,meta=match[0]
+            pair=meta["pair"]
+        else:
+            pair,key=None,None
+        identity=econ.identify(token,pair,key,catalog=catalog,
+                               discovered=previous_dynamic.get((token,pair)))
+        items["richiesti"].append({
+            "indice":len(items["richiesti"]),"token":token,"coppia_analisi":pair,
+            "richiesto_utc":record["richiesto_utc"],
+            "origine":record["origine"],"identita":identity})
+
     # One unresolved unique token per cycle, deterministic rotation. Limit
     # discovery to 1 search + up to 8 market checks (9 total). If more
     # candidates appear, leave identity unresolved; never pick the first hit.
     unresolved = {}
-    for group in ("posizioni", "candidati"):
+    for group in ("posizioni", "candidati", "richiesti"):
         for row in items[group]:
             identity = row["identita"]
             token = row["token"]
@@ -445,7 +530,7 @@ def economic_evidence(source, wallet, four, candidates, now, *,
             # only the proved pair gets this resolution.
             resolved["pair"] = pair
             previous_dynamic[chosen] = resolved
-        for group in ("posizioni", "candidati"):
+        for group in ("posizioni", "candidati", "richiesti"):
             for row in items[group]:
                 if (row["token"], row["identita"].get("coppia")) != chosen:
                     continue
@@ -464,7 +549,7 @@ def economic_evidence(source, wallet, four, candidates, now, *,
     previous_cache = {}
     if allowed_history:
         old_rows = list(prior.get("cache_fondamentali", [])[:100])
-        for group in ("posizioni", "candidati"):
+        for group in ("posizioni", "candidati", "richiesti"):
             old_rows.extend(r for r in prior.get(group, []) if isinstance(r, dict))
         for old in old_rows:
             if not isinstance(old, dict):
@@ -520,7 +605,7 @@ def economic_evidence(source, wallet, four, candidates, now, *,
         except (ValueError, OSError, RuntimeError, KeyError, TypeError):
             release_cache[project_repo] = None
 
-    for group in ("posizioni", "candidati"):
+    for group in ("posizioni", "candidati", "richiesti"):
         for row in items[group]:
             identity = row["identita"]
             cg = identity.get("coingecko_id")
@@ -566,7 +651,7 @@ def economic_evidence(source, wallet, four, candidates, now, *,
     # Bounded PUBLIC-only persistence: identity and source cache, no balances,
     # wallet quantities, T0 or private account data.
     public_cache = dict(previous_cache)
-    for group in ("posizioni", "candidati"):
+    for group in ("posizioni", "candidati", "richiesti"):
         for row in items[group]:
             identity, data = row["identita"], row["fondamentali"]
             if data.get("stato") == "VERIFICATO":
@@ -576,10 +661,23 @@ def economic_evidence(source, wallet, four, candidates, now, *,
                                      "network_metadata": row.get("network_metadata")}
     dynamic_cache = [{"token": token, "coppia": pair, "risoluzione": record}
                      for (token, pair), record in sorted(previous_dynamic.items())][:100]
+    # The primary-source follow-up belongs to the same economic dossier and
+    # uses the same verified identity roster, prior public cache and refresh.
+    import kdd_economic_sources as primary
+    monitoring = primary.collect(
+        now, items, prior.get("monitor_fonti"),
+        lambda url: desk.request(url, timeout=10),
+        network_allowed=not rate_limited and _PRIMARY_REAL_REFRESH.get(),
+        skipped_reason=("FUORI_REFRESH" if not _PRIMARY_REAL_REFRESH.get() else "RATE_LIMIT"),
+        asset_pairs=asset_pairs,
+        rpc_fetch=onchain._http,collect_project_issues=True,
+        collect_kraken_status=_PRIMARY_REAL_REFRESH.get())
     btc = next((r for r in four_rows if isinstance(r, dict) and r.get("token") == "BTC"), {})
     return {"schema": econ.VERSION, "acquisito_utc": now.isoformat(timespec="seconds"),
             "posizioni": items["posizioni"], "candidati": items["candidati"],
+            "richiesti": items["richiesti"],
             "macro": econ.macro(source.get("feed"), now),
+            "monitor_fonti": monitoring,
             "regime": econ.regime(btc, (source.get("coingecko_global") or {}), now),
             "fonti_economiche": econ.sources_matrix(),
             "identita_dinamiche": dynamic_cache,
@@ -694,13 +792,20 @@ def collect(source=None, *, asset_pairs=None):
     finanziamento_book = finanziamento_150_book(
         dict(source, _verified_asset_pairs=asset_pairs), portafoglio,
         saldo_recente=qualita.get("saldo_recente_verificato", False))
+    config=desk.load("config.json",{})
+    requested=(config.get("analisi_asset_richiesti") if isinstance(config,dict) else None)
     economic = economic_evidence(source, portafoglio, analisi_patrimonio, candidates, now,
-                                 asset_pairs=asset_pairs, previous=previous_economic)
+                                 asset_pairs=asset_pairs, previous=previous_economic,
+                                 requested=requested)
     # Global market data is obtained independently and may be unavailable.
     import kdd_economics as econ
     btc = next((r for r in (analisi_patrimonio.get("posizioni") or [])
                 if r.get("token") == "BTC"), {})
-    economic["regime"] = econ.regime(btc, external.get("coingecko_global"), now)
+    economic["regime"] = econ.regime_participation(
+        econ.regime(btc, external.get("coingecko_global"), now),
+        derivatives, economic.get("monitor_fonti"), now,
+        previous=(previous_economic or {}).get("regime")
+                 if isinstance(previous_economic,dict) else None)
     # One additional public-only evidence family. No private balances, amounts,
     # addresses or the on-chain prototypes #9-14 ever enter these requests.
     # Manual/legacy dossier creation without a real refresh has no new-source
@@ -725,6 +830,10 @@ def collect(source=None, *, asset_pairs=None):
         "regime":{"trend_eur":source.get("trends",{}),"btc_spot_eur":source.get("markets",{}).get("BTC")},
         "candidati":candidates,"grafici_4h":quattro_ore,
         "evidenze_economiche":economic,
+        "asset_richiesti_espliciti":[{
+            "token":r["token"],"coppia_analisi":r["coppia_analisi"],
+            "richiesto_utc":r["richiesto_utc"],"origine":r["origine"]}
+            for r in economic.get("richiesti",[])],
         "evidenze_rete_defi": network_defi,
         "patrimonio_4tf":analisi_patrimonio,
         "finanziamento_150_book_pubblico":finanziamento_book,

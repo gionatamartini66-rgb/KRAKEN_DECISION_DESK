@@ -191,6 +191,146 @@ class WalletPacketG0Tests(unittest.TestCase):
         with self.assertRaisesRegex(bridge.BridgeError,"economica"):
             bridge.read_context(bundle,now=T)
 
+    def test_primary_per_asset_facts_survive_real_packet_and_bridge_double_read(self):
+        """Public-shaped synthetic source: dossier -> actual packet -> bridge.
+        Timestamps, wallet and providers are invented. No real positions used.
+        """
+        import kdd_economics as econ
+        import kdd_economic_sources as primary
+        import kdd_bridge_g2 as bridge
+        self._analytic_fixture()
+        held=[x["token"] for x in self.portfolio["posizioni"]]
+        cat={token+"EUR":{"pair_key":token+"EUR","pair":token+"/EUR",
+              "base":token,"quote":"EUR"} for token in held if token in econ.PROJECTS}
+        rows=[]
+        for i,token in enumerate(held):
+            ident=econ.identify(token,token+"/EUR",token+"EUR",catalog=cat)
+            rows.append({"indice":i,"token":token,"identita":ident,
+                         "fondamentali":econ.fundamentals(ident,None,T,T),
+                         "evento":econ.release_event(ident,None,T,T)})
+        solident=econ.identify("SOL","SOL/USD","SOLUSD",catalog={
+            "SOLUSD":{"pair_key":"SOLUSD","pair":"SOL/USD",
+                      "base":"SOL","quote":"USD"}})
+        candidate={"indice":0,"token":"SOL","coppia_analisi":"SOL/USD",
+                   "identita":solident,
+                   "fondamentali":econ.fundamentals(solident,None,T,T),
+                   "evento":econ.release_event(solident,None,T,T)}
+        def fake_public(url):
+            if "/pulls?" in url or "/issues?" in url:
+                return b"[]"
+            if "/security-advisories?" in url:
+                repo=url.split("/repos/")[1].split("/security-advisories?")[0]
+                return json.dumps([{"ghsa_id":"GHSA-abcd-efgh-ijkl",
+                    "html_url":"https://github.com/"+repo+"/security/advisories/GHSA-abcd-efgh-ijkl",
+                    "state":"published","summary":"Public test advisory",
+                    "published_at":"2026-10-21T08:00:00+00:00","withdrawn_at":None}]).encode()
+            if "/EXR/" in url:
+                return ("KEY,TIME_PERIOD,OBS_VALUE\n"
+                        "EXR.D.USD.EUR.SP00.A,2026-10-24,1.08\n").encode()
+            raise AssertionError("Unlisted source "+url)
+        pair_data={token+"EUR":{"wsname":token+"/EUR","status":"online"}
+                   for token in ("ADA","ETH")}
+        pair_data["SOLUSD"]={"wsname":"SOL/USD","status":"online"}
+        monitoring=primary.collect(T,{"posizioni":rows,"candidati":[candidate]},
+                  {},fake_public,asset_pairs=pair_data,
+                  rpc_fetch=lambda url,data:{"result":{"initial":.08,"taper":.15,
+                            "terminal":.015,"foundation":0.0,"foundationTerm":0.0}},
+                  collect_project_issues=True)
+        self.dossier["evidenze_economiche"]={
+            "schema":econ.VERSION,"acquisito_utc":T.isoformat(),
+            "posizioni":rows,"candidati":[candidate],
+            "macro":econ.macro([],T),
+            "fonti_economiche":econ.sources_matrix(),
+            "regime":{"stato":"INDETERMINATO","qualita":"INSUFFICIENTE"},
+            "monitor_fonti":monitoring}
+        self.dump()
+        packet=self.pack()
+        e=packet["evidenze_multifonte"]["economia"]
+        self.assertEqual(len(e["posizioni"]),3)
+        self.assertEqual(len(e["candidati"]),1)
+        review=e["candidati"][0]["valutazione_fonti_primarie"]
+        self.assertEqual(review["progetto_id"],"solana")
+        self.assertEqual(review["stato"],"COPERTURA_PRIMARIA_PARZIALE")
+        self.assertTrue(any(f["tipo"]=="PARAMETRI_EMISSIONE" for f in review["fatti"]))
+        self.assertEqual(e["posizioni"][2]["valutazione_fonti_primarie"]["stato"],
+                         "IDENTITA_NON_VERIFICATA")
+        bundle={"schema":bridge.SCHEMA_BUNDLE,"packet":packet,
+            "packet_sha256":bridge.digest(packet),"preparato_utc":T.isoformat(),
+            "provenienza":"KDD_LOCALE_DICHIARATA_NON_AUTENTICATA",
+            "trasporto":"MANUALE_NON_ESEGUITO"}
+        reread=bridge.read_context(bundle,now=T)
+        actual=reread["evidenze_economiche_alla_lettura"]
+        self.assertEqual(actual["candidati"][0]["valutazione_fonti_primarie"],review)
+        self.assertEqual(len(actual["posizioni"]),3)
+        fake=json.loads(json.dumps(bundle))
+        forged=fake["packet"]["evidenze_multifonte"]["economia"]["candidati"][0]
+        forged["valutazione_fonti_primarie"]["ipotesi_non_attestata"]="VENDERE SUBITO"
+        fake["packet_sha256"]=bridge.digest(fake["packet"])
+        with self.assertRaisesRegex(bridge.BridgeError,"economica"):
+            bridge.read_context(fake,now=T)
+
+    def test_requested_pepe_third_group_packet_bridge_does_not_invent_scanner_position(self):
+        import kdd_economics as econ
+        import kdd_economic_sources as primary
+        import kdd_bridge_g2 as bridge
+        self._analytic_fixture()
+        rows=[]
+        for i,entry in enumerate(self.portfolio["posizioni"]):
+            token=entry["token"]
+            ident=econ.identify(token,None,None)
+            rows.append({"indice":i,"token":token,"identita":ident,
+                        "fondamentali":econ.fundamentals(ident,None,T,T),
+                        "evento":econ.release_event(ident,None,T,T)})
+        sol=econ.identify("SOL","SOL/USD","SOLUSD",catalog={
+            "SOLUSD":{"pair_key":"SOLUSD","pair":"SOL/USD",
+                      "base":"SOL","quote":"USD"}})
+        candidate={"indice":0,"token":"SOL","coppia_analisi":"SOL/USD",
+                   "identita":sol,"fondamentali":econ.fundamentals(sol,None,T,T),
+                   "evento":econ.release_event(sol,None,T,T)}
+        pep=econ.identify("PEPE","PEPE/EUR","PEPEEUR",catalog={
+            "PEPEEUR":{"pair_key":"PEPEEUR","pair":"PEPE/EUR",
+                       "base":"PEPE","quote":"EUR"}})
+        requested={"indice":0,"token":"PEPE","coppia_analisi":"PEPE/EUR",
+                    "richiesto_utc":T.isoformat(),"origine":"CLI_ESPLICITO_LOCALE",
+                    "identita":pep,"fondamentali":econ.fundamentals(pep,None,T,T),
+                    "evento":econ.release_event(pep,None,T,T)}
+        reqmeta={"token":"PEPE","coppia_analisi":"PEPE/EUR",
+                 "richiesto_utc":T.isoformat(),"origine":"CLI_ESPLICITO_LOCALE"}
+        monitoring=primary.collect(T,{"posizioni":rows,
+                      "candidati":[candidate],"richiesti":[requested]},
+                      {},lambda url:b"[]",network_allowed=False,
+                      asset_pairs={"PEPEEUR":{"wsname":"PEPE/EUR","status":"online"}})
+        self.dossier["asset_richiesti_espliciti"]=[reqmeta]
+        self.dossier["evidenze_economiche"]={
+            "schema":econ.VERSION,"acquisito_utc":T.isoformat(),
+            "posizioni":rows,"candidati":[candidate],"richiesti":[requested],
+            "monitor_fonti":monitoring,"macro":econ.macro([],T),
+            "fonti_economiche":econ.sources_matrix(),
+            "regime":{"stato":"INDETERMINATO","qualita":"INSUFFICIENTE"}}
+        self.dump()
+        packet=self.pack()
+        self.assertEqual(packet["patrimonio"]["n_posizioni"],3)
+        self.assertEqual(len(packet["opportunita_esterne_scanner"]),1)
+        ev=packet["evidenze_multifonte"]
+        self.assertEqual(len(ev["economia"]["richiesti"]),1)
+        self.assertEqual(ev["asset_richiesti_espliciti"],[reqmeta])
+        read=bridge.read_context({"schema":bridge.SCHEMA_BUNDLE,
+            "packet":packet,"packet_sha256":bridge.digest(packet),
+            "preparato_utc":T.isoformat(),
+            "provenienza":"KDD_LOCALE_DICHIARATA_NON_AUTENTICATA",
+            "trasporto":"MANUALE_NON_ESEGUITO"},now=T)
+        self.assertEqual(read["evidenze_economiche_alla_lettura"]
+                         ["richiesti"][0]["token"],"PEPE")
+        self.assertEqual(len(read["evidenze_economiche_alla_lettura"]["posizioni"]),3)
+        forged=json.loads(json.dumps(packet))
+        forged["evidenze_multifonte"]["asset_richiesti_espliciti"][0]["token"]="BTC"
+        with self.assertRaisesRegex(bridge.BridgeError,"economica"):
+            bridge.read_context({"schema":bridge.SCHEMA_BUNDLE,
+                "packet":forged,"packet_sha256":bridge.digest(forged),
+                "preparato_utc":T.isoformat(),
+                "provenienza":"KDD_LOCALE_DICHIARATA_NON_AUTENTICATA",
+                "trasporto":"MANUALE_NON_ESEGUITO"},now=T)
+
     def test_issue43_economic_source_tamper_stops_packet(self):
         import kdd_economics as econ
         self._analytic_fixture()

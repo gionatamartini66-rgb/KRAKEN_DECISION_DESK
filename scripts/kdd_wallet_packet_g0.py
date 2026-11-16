@@ -811,11 +811,16 @@ def analytic_evidence(snapshot, dossier, positions, shortlist, now):
                      "pubblicato_originale": item.get("data", "")[:90] if isinstance(item.get("data"), str) else None,
                      "stato_orario": "NON_VERIFICATO", "copertura": "Solo titoli RSS campionati",
                      "limite": "Non prova causalita macro o impatto su asset."})
+    requests=dossier.get("asset_richiesti_espliciti",[])
+    if (not isinstance(requests,list) or len(requests)>3
+            or any(not isinstance(row,dict) for row in requests)):
+        raise PacketError("Richieste economiche esplicite non strutturate")
     economic = dossier.get("evidenze_economiche")
     if economic is not None:
         import kdd_economics
         try:
-            economic = kdd_economics.at_read(economic, positions, shortlist, now)
+            economic = kdd_economics.at_read(
+                economic, positions, shortlist, now, requested=requests)
         except (ValueError, TypeError, KeyError, OverflowError) as exc:
             raise PacketError("Evidenza economica non attribuibile") from exc
     import kdd_network_defi
@@ -832,6 +837,7 @@ def analytic_evidence(snapshot, dossier, positions, shortlist, now):
                 "token_con_dati": sum(1 for x in bn_rows if isinstance(x, dict) and x.get("status") == "OK"),
                 "limite": "Il pacchetto espone solo token posseduti o candidati; quote non equivalenti."},
             "titoli_contesto": feed, "economia": economic,
+            "asset_richiesti_espliciti":requests,
             "rete_defi": network_defi,
             "benchmark_binance": benchmark,
             "candidati": candidates, "derivati_btc": futures, "contesto": context,

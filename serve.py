@@ -2,6 +2,7 @@
 """Cruscotto Kraken locale: HTTP soltanto 127.0.0.1, dati pubblici, nessun ordine."""
 import datetime as dt
 import hmac
+from types import SimpleNamespace
 import html
 import json
 import math
@@ -17,6 +18,7 @@ import grafico_4h
 HOST, PORT = "127.0.0.1", 8765
 TOKEN = secrets.token_urlsafe(28)
 REFRESH_LOCK = threading.Lock()
+REQUEST_LOCK = threading.Lock()
 STATE_LOCK = threading.Lock()
 JOB_STATE = {"stato": "mai_avviato", "avvio_utc": None,
              "fine_utc": None, "durata_secondi": 0,
@@ -712,6 +714,36 @@ def decision_home():
                   historical_proposals + "</details></section>")
     return "".join(blocks) + "</section>"
 
+
+def asset_request_panel():
+    """Same localhost control surface as refresh, no second daemon or scanner."""
+    records=desk.load("config.json",{})
+    requested=records.get("analisi_asset_richiesti",[]) if isinstance(records,dict) else []
+    recent=[]
+    for item in requested if isinstance(requested,list) else []:
+        if not isinstance(item,dict) or item.get("origine") not in (
+                "CLI_ESPLICITO_LOCALE","UI_ESPLICITA_LOCALE"):
+            continue
+        token=item.get("token")
+        if not isinstance(token,str) or not re.fullmatch(r"[A-Z0-9]{2,20}",token):
+            continue
+        recent.append(html.escape(token,quote=True))
+    summary=("Richiesti: "+", ".join(recent[-3:])+
+             " · analisi al prossimo aggiornamento, non acquisti."
+             if recent else "Nessuna richiesta manuale aggiuntiva registrata.")
+    return (
+      "<form method='post' action='/richiedi-asset' id='kdd-asset-form'>"
+      f"<input type='hidden' name='token' value='{html.escape(TOKEN, quote=True)}'>"
+      "<label for='kdd-nuovo-asset'>Esamina un asset fuori dal wallet e dallo scanner:</label> "
+      "<input id='kdd-nuovo-asset' name='asset' maxlength='20' minlength='2' "
+      "pattern='[A-Za-z0-9]{2,20}' placeholder='es. STRK' autocomplete='off' required> "
+      "<button type='submit'>Registra richiesta pubblica</button></form>"
+      "<p>"+summary+"</p>"
+      "<p>Il KDD verificherà la coppia Kraken e l'identità durante «Aggiorna dati ora». "
+      "Il simbolo da solo non prova il progetto. Nessun ordine.</p>"
+    )
+
+
 def with_controls(page: str, result: str = "") -> str:
     """Aggiornamento senza bloccare Chrome; quando pronto aggiorna da solo la pagina."""
     running = job_snapshot()["stato"] == "in_corso"
@@ -722,6 +754,10 @@ def with_controls(page: str, result: str = "") -> str:
         "occupato": "Un aggiornamento è già in corso: attendi, non occorre ripremere.",
     }
     message = labels.get(result, "Aggiornamento in corso: attendi..." if running else "")
+    if result=="asset-registrato":
+        message = "Richiesta asset registrata; premi «Aggiorna dati ora» per cercarne le fonti."
+    elif result=="asset-occupato":
+        message = "Registrazione in corso; riprova dalla stessa pagina."
     handoff = job_snapshot()
     if not running and handoff["stato"] == "riuscito":
         if handoff["handoff_stato"] == "pronto_per_foldersync":
@@ -739,6 +775,7 @@ def with_controls(page: str, result: str = "") -> str:
         "</form><p><a style='font-weight:700;color:#8aceff' href='/mercati/spot'>"
         "🌐 Seleziona coppia Kraken Spot · grafici 15m / 1H / 4H / 1D</a></p>"
         "<p><a href='/gpt'>📄 Proposte GPT nel KDD</a></p>"
+        + asset_request_panel() +
         "<p>Server solo su questo Samsung · prezzi pubblici · nessun ordine.</p>"
         f"<p id='kdd-refresh-status' role='status'>{html.escape(message)}</p>"
         "</section>"
@@ -1480,7 +1517,7 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, OSError) as exc:
                 self.send_body(422, str(exc)[:180], "text/plain; charset=utf-8")
             return
-        if path != "/aggiorna":
+        if path not in ("/aggiorna","/richiedi-asset"):
             self.send_error(404)
             return
         # Chrome Traduttore può inviare Origin:null: restano obbligatori Host e token.
@@ -1496,13 +1533,34 @@ class Handler(BaseHTTPRequestHandler):
         if not hmac.compare_digest(received, TOKEN):
             self.send_error(403, "Verifica richiesta non riuscita")
             return
-        try:
-            started = start_refresh()
-        except Exception:
-            self.send_error(503, "Impossibile avviare aggiornamento")
-            return
+        if path=="/richiedi-asset":
+            candidates=params.get("asset",[])
+            if len(candidates)!=1 or not re.fullmatch(r"[A-Za-z0-9]{2,20}",candidates[0]):
+                self.send_error(400,"Simbolo asset non valido")
+                return
+            if not REQUEST_LOCK.acquire(blocking=False):
+                self.send_response(303)
+                self.send_header("Location","/?esito=asset-occupato")
+                self.end_headers()
+                return
+            try:
+                desk.request_public_asset(SimpleNamespace(token=candidates[0],
+                                                         canale="WEB_LOCALE"))
+            except (ValueError,OSError,TypeError):
+                self.send_error(422,"Impossibile registrare la richiesta")
+                return
+            finally:
+                REQUEST_LOCK.release()
+            status="asset-registrato"
+        else:
+            try:
+                started = start_refresh()
+            except Exception:
+                self.send_error(503, "Impossibile avviare aggiornamento")
+                return
+            status="avviato" if started else "occupato"
         self.send_response(303)
-        self.send_header("Location", "/?esito=" + ("avviato" if started else "occupato"))
+        self.send_header("Location", "/?esito=" + status)
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
 

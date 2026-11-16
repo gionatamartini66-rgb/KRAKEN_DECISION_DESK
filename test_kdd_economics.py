@@ -300,6 +300,60 @@ class EconomicEvidenceTests(unittest.TestCase):
         self.assertTrue(all(row["stato"]=="NON_VALUTABILE"
                             for row in read["macro"]["scenari_condizionali"]))
 
+
+    def test_regime_financial_families_provenance_contradiction_and_expiry(self):
+        now=T
+        base={"stato":"RIALZISTA","qualita":"PARZIALE",
+              "favorevoli":["BTC technical trend"],"contrari":[],
+              "mancanti":[],"famiglie_osservate":[{"famiglia":"TREND_BTC"}]}
+        financial=[
+          {"id":"ETF_BTC_FARSIDE","stato":"OSSERVATO",
+           "fonte":"https://farside.co.uk/btc/",
+           "acquisito_utc":now.isoformat(),
+           "dati":{"tipo":"FLUSSO_ETF_SPOT_NETTO_AGGREGATO",
+                   "periodo":(now-dt.timedelta(days=1)).date().isoformat(),
+                   "valore":-185.4}},
+          {"id":"ETF_ETH_FARSIDE","stato":"OSSERVATO",
+           "fonte":"https://farside.co.uk/eth/",
+           "acquisito_utc":now.isoformat(),
+           "dati":{"periodo":(now-dt.timedelta(days=1)).date().isoformat(),
+                   "valore":2.3}},
+          {"id":"STABLECOIN_LLAMA","stato":"OSSERVATO",
+           "fonte":"https://stablecoins.llama.fi/stablecoinchains",
+           "acquisito_utc":now.isoformat(),
+           "dati":{"top_chain":[{"chain":"Ethereum","supply_stablecoin_usd":100e9},
+                                {"chain":"Solana","supply_stablecoin_usd":10e9}]}}]
+        raw={"flussi_finanziari":financial,"indicatori_macro":[]}
+        current=e.regime_participation(base,{},raw,now)
+        self.assertEqual(current["stato"],"RIALZISTA")
+        self.assertEqual(current["qualita"],"PARZIALE_CON_CONTRADDIZIONI")
+        self.assertEqual(len([r for r in current["famiglie_osservate"]
+                    if r["famiglia"]=="ETF_SPOT_AGGREGATO"]),2)
+        self.assertEqual(len([r for r in current["famiglie_osservate"]
+                    if r["famiglia"]=="DISTRIBUZIONE_STABLECOIN_PER_CHAIN"]),1)
+        self.assertEqual(current["favorevoli"],["BTC technical trend"])
+        self.assertFalse(any(w in str(current).upper()
+                    for w in ("BUY NOW","SELL NOW","ORDER EXECUTED")))
+        after=e.regime_participation(base,{},raw,now+dt.timedelta(days=9),
+                                     previous=current)
+        self.assertFalse(any(r["famiglia"] in ("ETF_SPOT_AGGREGATO",
+                                             "DISTRIBUZIONE_STABLECOIN_PER_CHAIN")
+                    for r in after["famiglie_osservate"]))
+        self.assertEqual(after["qualita"],"PARZIALE")
+        stale=copy.deepcopy(raw)
+        stale["flussi_finanziari"][0]["dati"]["periodo"]=(
+            now-dt.timedelta(days=30)).date().isoformat()
+        observed=e.regime_participation(base,{},stale,now)
+        self.assertFalse(any(r["famiglia"]=="ETF_SPOT_AGGREGATO"
+                    and r.get("asset")=="BTC" for r in observed["famiglie_osservate"]))
+        self.assertEqual(observed["qualita"],"PARZIALE")
+        historic=copy.deepcopy(raw)
+        historic["flussi_finanziari"][0]["stato"]="STORICO_NON_AGGIORNATO"
+        retained=e.regime_participation(base,{},historic,now+dt.timedelta(hours=2))
+        self.assertTrue(any(r["famiglia"]=="ETF_SPOT_AGGREGATO"
+                    and r.get("asset")=="BTC" and r["freschezza"]=="STORICO_NON_AGGIORNATO"
+                    for r in retained["famiglie_osservate"]))
+
     def test_g2_multifactor_regime_conflicts_and_observation_families(self):
         frames={label:{"stato":"AGGIORNATO","figure_candlestick":{
             "stato":"AGGIORNATO","trend_precedente":"SALITA"}}

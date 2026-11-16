@@ -87,7 +87,7 @@ _SOURCE_MATRIX = (
      "CONSULTABILE_DA_GPT_NON_ACQUISITO", "https://farside.co.uk/bitcoin-etf-flow-all-data/",
      "Flussi netti giornalieri degli ETF spot BTC", "Non distingue investitori istituzionali e retail"),
     ("cftc_cme", "CFTC Commitments of Traders / CME", "FONTE_PRIMARIA",
-     "CONSULTABILE_DA_GPT_NON_ACQUISITO", "https://www.cftc.gov/MarketReports/CommitmentsofTraders/index.htm",
+     "INTEGRATO_CAMPIONE_BTC_FUTURES", "https://www.cftc.gov/MarketReports/CommitmentsofTraders/index.htm",
      "Posizionamento settimanale futures regolamentati", "Dati ritardati, non il complesso del mercato crypto"),
     ("sec_13f", "SEC Form 13F", "FONTE_PRIMARIA",
      "CONSULTABILE_DA_GPT_NON_ACQUISITO", "https://www.sec.gov/rules-regulations/staff-guidance/division-investment-management-frequently-asked-questions/frequently-asked-questions-about-form-13f",
@@ -510,6 +510,129 @@ def regime(btc_four, global_row, now):
     return out
 
 
+
+def regime_participation(base, derivatives, primary, now, previous=None):
+    """KDD-22: independently dated futures participation and ECB facts.
+
+    OI is leverage exposure, not institutional capital. CVD of one Kraken
+    contract may contradict the broader context, not predict an asset trade.
+    No source here constitutes two independent confirmation signals.
+    """
+    out = dict(base)
+    out["famiglie_osservate"] = list(base.get("famiglie_osservate") or [])
+    out["mancanti"] = list(base.get("mancanti") or [])
+    out["contrari"] = list(base.get("contrari") or [])
+    out["favorevoli"] = list(base.get("favorevoli") or [])
+    out["acquisito_utc"]=now.isoformat(timespec="seconds")
+    prior=previous if isinstance(previous,dict) else {}
+    old_history=prior.get("storico_regimi")
+    old_history=old_history if isinstance(old_history,list) else []
+    chronology=[]
+    for point in old_history[-8:]+([prior] if prior else []):
+        if not isinstance(point,dict):
+            continue
+        when=stamp(point.get("acquisito_utc"))
+        state=point.get("stato")
+        if (when and dt.timedelta(0)<=now-when<=dt.timedelta(days=7)
+                and state in ("RIALZISTA","RIBASSISTA","LATERALE","TRANSIZIONE","INDETERMINATO")
+                and (not chronology or chronology[-1]["acquisito_utc"]!=when.isoformat(timespec="seconds"))):
+            chronology.append({"acquisito_utc":when.isoformat(timespec="seconds"),
+                               "stato":state,"qualita":str(point.get("qualita") or "NON_NOTA")[:70]})
+    out["storico_regimi"]=chronology[-8:]
+    if chronology:
+        out["confronto_precedente"]={
+            "stato_precedente":chronology[-1]["stato"],
+            "acquisito_precedente_utc":chronology[-1]["acquisito_utc"],
+            "nota":"Un cambiamento di classificazione è una revisione del modello, non un evento di mercato"}
+    out["ipotesi"] = "Partecipazione futures e condizioni macro potrebbero modificare la robustezza del regime"
+    out["controipotesi"] = "CVD e OI di un singolo future non rappresentano il mercato crypto né i flussi Spot"
+    out["condizione_di_riesame"] = "Rilevare nuovamente chiusure 4H/1D, attività aggregata e flussi futures con orari coerenti"
+    frame = derivatives if isinstance(derivatives, dict) else {}
+    oi = frame.get("open-interest") if isinstance(frame.get("open-interest"), dict) else {}
+    cvd = frame.get("cvd") if isinstance(frame.get("cvd"), dict) else {}
+    oi_time = stamp(oi.get("ultimo_punto_utc"))
+    cvd_time = stamp(cvd.get("ultimo_punto_utc"))
+    def finite(value):
+        return (type(value) in (int,float) and math.isfinite(value))
+    valid = (oi_time is not None and cvd_time is not None
+             and dt.timedelta(0) <= now - oi_time <= dt.timedelta(hours=4)
+             and dt.timedelta(0) <= now - cvd_time <= dt.timedelta(hours=4)
+             and abs((oi_time-cvd_time).total_seconds()) <= 3600
+             and oi.get("ultimo_punto_provvisorio") is False
+             and cvd.get("ultimo_punto_provvisorio") is False
+             and all(finite(v) for v in (oi.get("ultimo_close"),oi.get("close_4h_fa"),
+                   cvd.get("ultimo_cvd"),cvd.get("cvd_4h_fa")))
+             and oi["ultimo_close"] > 0 and oi["close_4h_fa"] > 0)
+    if valid:
+        oi_change = round(100*(oi["ultimo_close"]/oi["close_4h_fa"]-1),4)
+        cvd_delta = cvd["ultimo_cvd"]-cvd["cvd_4h_fa"]
+        out["famiglie_osservate"].append({
+            "famiglia":"DERIVATI_BTC_KRAKEN", "fonte":"https://futures.kraken.com/api/charts/v1/analytics/PF_XBTUSD/",
+            "strumento":"PF_XBTUSD","osservato_utc":max(oi_time,cvd_time).isoformat(timespec="seconds"),
+            "var_oi_4h_pct":oi_change,"cvd_delta_4h":cvd_delta,
+            "limite":"Singolo contratto; OI non identifica la direzione, CVD non equivale a flussi spot istituzionali"})
+        out["mancanti"] = [s for s in out["mancanti"] if "Derivati con copertura" not in s]
+        if (out.get("stato") in ("RIALZISTA","RIBASSISTA") and cvd_delta != 0
+                and ((cvd_delta>0) != (out["stato"]=="RIALZISTA"))):
+            out["contrari"].append("CVD 4H di PF_XBTUSD divergente dalla classificazione del mercato aggregato")
+            out["qualita"]="PARZIALE_CON_CONTRADDIZIONI"
+    else:
+        out["mancanti"].append("OI e CVD Kraken PF_XBTUSD chiusi, recenti e concordanti temporalmente")
+    rows = primary.get("indicatori_macro") if isinstance(primary, dict) else None
+    if isinstance(rows, list):
+        for item in rows:
+            if not isinstance(item, dict) or item.get("stato") != "OSSERVATO":
+                continue
+            if item.get("id") not in ("USD_EUR","EA_HICP","CFTC_BTC_TFF","CFTC_ETH_TFF") or not finite(item.get("valore")):
+                continue
+            out["famiglie_osservate"].append({
+                "famiglia":("FUTURES_CFTC_" if item["id"] in ("CFTC_BTC_TFF","CFTC_ETH_TFF") else "MACRO_ECB_") + item["id"],"fonte":item.get("fonte"),
+                "periodo":item.get("periodo"),"valore":item["valore"],"unita":item.get("unita"),
+                "limite":"Dato macro osservato; segno dell'impatto sul prezzo non dedotto"})
+    # Separate ETF cash-flow aggregates and per-chain stablecoin supply from
+    # the CFTC futures, ECB macro and spot data. Never count twice as independent
+    # evidence or turn a flow measurement into an automatic trade.
+    financial = primary.get("flussi_finanziari") if isinstance(primary,dict) else None
+    if isinstance(financial,list):
+        for rec in financial:
+            if (not isinstance(rec,dict)
+                    or rec.get("stato") not in ("OSSERVATO","STORICO_NON_AGGIORNATO")):
+                continue
+            acquired=stamp(rec.get("acquisito_utc"))
+            kind=rec.get("id")
+            allowed_age=(dt.timedelta(days=4) if kind.startswith("ETF_")
+                         else dt.timedelta(days=2))
+            if not acquired or not dt.timedelta(0)<=now-acquired<=allowed_age:
+                continue
+            data=rec.get("dati") or {}
+            observed_period=stamp(str(data.get("periodo"))+"T00:00:00+00:00")
+            if kind.startswith("ETF_") and (not observed_period
+                    or now-observed_period>dt.timedelta(days=8)
+                    or observed_period>now+dt.timedelta(days=1)):
+                continue
+            if kind in ("ETF_BTC_FARSIDE","ETF_ETH_FARSIDE") and type(data.get("valore")) in (int,float):
+                out["famiglie_osservate"].append({
+                    "famiglia":"ETF_SPOT_AGGREGATO",
+                    "asset":"BTC" if kind=="ETF_BTC_FARSIDE" else "ETH",
+                    "fonte":rec["fonte"],"freschezza":rec["stato"],
+                    "acquisito_utc":rec.get("acquisito_utc"),"periodo":data.get("periodo"),
+                    "flusso_netto_milioni_usd":data["valore"],
+                    "limite":"Stessa famiglia di dati aggregati ETF: non acquisti istituzionali individuali"})
+                if kind=="ETF_BTC_FARSIDE" and out.get("stato") in ("RIALZISTA","RIBASSISTA"):
+                    contradictory=(data["valore"]<0 and out["stato"]=="RIALZISTA"
+                                   or data["valore"]>0 and out["stato"]=="RIBASSISTA")
+                    if contradictory:
+                        out["contrari"].append("Flusso netto ETF BTC aggregato divergente dal regime tecnico BTC")
+                        out["qualita"]="PARZIALE_CON_CONTRADDIZIONI"
+            if kind=="STABLECOIN_LLAMA" and isinstance(data.get("top_chain"),list):
+                out["famiglie_osservate"].append({
+                    "famiglia":"DISTRIBUZIONE_STABLECOIN_PER_CHAIN",
+                    "fonte":rec["fonte"],"acquisito_utc":rec.get("acquisito_utc"),
+                    "freschezza":rec["stato"],"top_chain":data["top_chain"],
+                    "limite":"Supply per chain aggregata; non nuova liquidità acquistatrice o flusso ETF"})
+    return out
+
+
 def decision_context(identity, fundamental, event):
     """A falsifiable review question, never a buy/sell classification."""
     if identity.get("stato") != "IDENTITA_VERIFICATA_DA_CATALOGO":
@@ -542,7 +665,7 @@ def decision_context(identity, fundamental, event):
                                  "per release verificare adozione/rete e non solo annuncio"}
 
 
-def at_read(source, positions, shortlist, now):
+def at_read(source, positions, shortlist, now, *, requested=None):
     """Validate attribution and recalculate economic age, without source fetches."""
     if not isinstance(source, dict) or source.get("schema") != VERSION:
         raise ValueError("Schema evidenza economica")
@@ -551,9 +674,15 @@ def at_read(source, positions, shortlist, now):
         raise ValueError("Tempo evidenza economica")
     original_positions = source.get("posizioni")
     original_candidates = source.get("candidati")
-    if not isinstance(original_positions, list) or not isinstance(original_candidates, list):
+    original_requested = source.get("richiesti",[])
+    expected_requested = requested if requested is not None else []
+    if (not isinstance(original_positions,list) or not isinstance(original_candidates,list)
+            or not isinstance(original_requested,list) or not isinstance(expected_requested,list)
+            or len(original_requested)>3 or len(expected_requested)>3):
         raise ValueError("Copertura economica")
-    if len(original_positions) != len(positions) or len(original_candidates) != len(shortlist):
+    if (len(original_positions)!=len(positions)
+            or len(original_candidates)!=len(shortlist)
+            or len(original_requested)!=len(expected_requested)):
         raise ValueError("Cardinalita economica")
     matrix = source.get("fonti_economiche")
     if matrix is not None and matrix != sources_matrix():
@@ -561,15 +690,23 @@ def at_read(source, positions, shortlist, now):
     result = {"schema": VERSION, "acquisito_utc": source["acquisito_utc"],
               "letto_utc": now.isoformat(timespec="seconds"),
               "fonti_economiche": matrix if matrix is not None else [],
-              "posizioni": [], "candidati": []}
+              "posizioni": [], "candidati": [], "richiesti": []}
     for name, source_rows, expected in (
             ("posizioni", original_positions, positions),
-            ("candidati", original_candidates, shortlist)):
+            ("candidati", original_candidates, shortlist),
+            ("richiesti", original_requested, expected_requested)):
         for i, (row, target) in enumerate(zip(source_rows, expected)):
             if not isinstance(row, dict) or row.get("indice") != i or row.get("token") != target.get("token"):
                 raise ValueError("Identita economica discordante")
-            if name == "candidati" and row.get("coppia_analisi") != target.get("coppia_analisi"):
-                raise ValueError("Coppia candidato discordante")
+            if name in ("candidati","richiesti") and row.get("coppia_analisi") != target.get("coppia_analisi"):
+                raise ValueError("Coppia candidato o richiesto discordante")
+            if name == "richiesti":
+                when=stamp(row.get("richiesto_utc"))
+                if (not when or when>acquired+dt.timedelta(minutes=2)
+                        or row.get("richiesto_utc")!=target.get("richiesto_utc")
+                        or row.get("origine") not in ("CLI_ESPLICITO_LOCALE","UI_ESPLICITA_LOCALE")
+                        or row.get("origine")!=target.get("origine")):
+                    raise ValueError("Origine o data asset richiesto non verificabile")
             identity = row.get("identita")
             if not isinstance(identity, dict) or identity.get("token") != row["token"]:
                 raise ValueError("Identita economica non valida")
@@ -592,9 +729,15 @@ def at_read(source, positions, shortlist, now):
                         or not identity["pair_key"]
                         or identity.get("asset_base_kraken", pair.split("/")[0] if pair_ok else None)
                            != (pair.split("/")[0] if pair_ok else None)
-                        or (name == "candidati" and pair != target.get("coppia_analisi"))):
+                        or (name in ("candidati","richiesti")
+                            and pair != target.get("coppia_analisi"))):
                     raise ValueError("Identita CoinGecko non attribuibile")
             row_copy = dict(row)
+            if name=="richiesti":
+                requested_at=stamp(row["richiesto_utc"])
+                row_copy["stato_richiesta"]=(
+                    "RICHIESTA_ATTIVA" if dt.timedelta(0)<=now-requested_at<=dt.timedelta(days=7)
+                    else "RICHIESTA_SCADUTA_DA_RINNOVARE")
             if identity.get("metodo") == "KRAKEN_COINGECKO_MARKET":
                 verified = stamp(identity["prova_mercato"].get("verificato_utc"))
                 if not verified or now-verified > dt.timedelta(days=7):
@@ -636,6 +779,9 @@ def at_read(source, positions, shortlist, now):
         "posizioni_totali": len(result["posizioni"]),
         "posizioni_verificate_alla_lettura": sum(
             r["fondamentali"].get("stato") == "VERIFICATO" for r in result["posizioni"]),
+        "richiesti_espliciti_totali":len(result["richiesti"]),
+        "richiesti_identificati":sum(r["identita"].get("stato")=="IDENTITA_VERIFICATA_DA_CATALOGO"
+                                    for r in result["richiesti"]),
         "candidati_totali": len(result["candidati"]),
         "candidati_verificati_alla_lettura": sum(
             r["fondamentali"].get("stato") == "VERIFICATO" for r in result["candidati"]),
@@ -644,6 +790,29 @@ def at_read(source, positions, shortlist, now):
     if not isinstance(regime_data, dict):
         raise ValueError("Regime economico mancante")
     result["regime"] = dict(regime_data)
+    # The bridge must not launder a forged regime history into verified
+    # evidence, including when called on an already-normalized packet.
+    if "storico_regimi" in regime_data:
+        history=regime_data["storico_regimi"]
+        if not isinstance(history,list) or len(history)>8:
+            raise ValueError("Historical regime structure invalid")
+        last=None
+        for point in history:
+            if not isinstance(point,dict):
+                raise ValueError("Historical regime row invalid")
+            when=stamp(point.get("acquisito_utc"))
+            if (not when or when>acquired+dt.timedelta(minutes=2)
+                    or (last is not None and when<=last)
+                    or point.get("stato") not in ("RIALZISTA","RIBASSISTA","LATERALE",
+                                                "TRANSIZIONE","INDETERMINATO")):
+                raise ValueError("Historical regime timestamp or classification forged")
+            last=when
+        previous=regime_data.get("confronto_precedente")
+        if previous is not None and (
+                not history or not isinstance(previous,dict)
+                or previous.get("stato_precedente")!=history[-1]["stato"]
+                or previous.get("acquisito_precedente_utc")!=history[-1]["acquisito_utc"]):
+            raise ValueError("Historical regime comparison forged")
     if now-acquired > dt.timedelta(hours=2):
         result["regime"].update(stato="INDETERMINATO", qualita="SCADUTO",
                                 limite="Regime storico; ricalcolo necessario")
@@ -662,4 +831,21 @@ def at_read(source, positions, shortlist, now):
                            "titolo": item.get("titolo"),
                            "data": item.get("pubblicato_utc")})
     result["macro"] = macro(normalized, now)
+    if "monitor_fonti" in source:
+        import kdd_economic_sources as primary
+        # Verify all original source attributions, then derive independent
+        # decision-review questions for EVERY holding and shortlist entry.
+        # Do not carry the old read-time view into the next GPT read.
+        verified = primary.at_read(source["monitor_fonti"], source, now)
+        result["monitor_fonti"] = verified
+        previous_read = stamp(source.get("letto_utc"))
+        same_read = bool(previous_read and
+                         abs((now-previous_read).total_seconds()) <= 1)
+        for group in ("posizioni","candidati","richiesti"):
+            for original, item in zip(source.get(group,[]),result[group]):
+                derived = primary.decision_review(verified,item,group)
+                old = original.get("valutazione_fonti_primarie")
+                if same_read and old is not None and old != derived:
+                    raise ValueError("Lettura primaria per asset alterata")
+                item["valutazione_fonti_primarie"] = derived
     return result

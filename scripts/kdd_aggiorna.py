@@ -23,13 +23,13 @@ REPOSITORY = 'gionatamartini66-rgb/KRAKEN_DECISION_DESK'
 PY_FILES = (
     'analisi_v02.py', 'binance_reference.py', 'costi_spot.py',
     'decision_desk.py', 'dossier_trade.py', 'flusso_spot.py',
-    'grafico_4h.py', 'kdd_candles.py', 'kdd_capital_flow.py', 'kdd_economics.py', 'kdd_futures_flow.py',
+    'grafico_4h.py', 'kdd_candles.py', 'kdd_capital_flow.py', 'kdd_economic_sources.py', 'kdd_economics.py', 'kdd_futures_flow.py',
     'kdd_network_defi.py', 'test_kdd_network_defi.py',
     'kdd_saldi.py', 'kraken_readonly.py',
     'patrimonio_4tf.py',
     'mercati_spot.py', 'piano_gpt.py', 'ricerca_setup.py',
     'serve.py', 'studio_delta.py', 'test_decision_desk.py',
-    'test_kdd_candles.py', 'test_kdd_economics.py', 'test_kdd_futures_flow.py',
+    'test_kdd_candles.py', 'test_kdd_economic_sources.py', 'test_kdd_economics.py', 'test_kdd_futures_flow.py',
     'verifica_piani.py',
 )
 PACKET_FILES = (
@@ -256,7 +256,7 @@ def capability_preflight() -> None:
 def isolated_test(staging: Path) -> None:
     capability_preflight()
     # Non serve rete. I test usano fixture sintetiche e file privati SOLO locali.
-    proc = command([sys.executable, '-m', 'unittest', '-q', 'test_decision_desk', 'test_kdd_candles', 'test_kdd_economics', 'test_kdd_futures_flow', 'test_kdd_network_defi'],
+    proc = command([sys.executable, '-m', 'unittest', '-q', 'test_decision_desk', 'test_kdd_candles', 'test_kdd_economics', 'test_kdd_economic_sources', 'test_kdd_futures_flow', 'test_kdd_network_defi'],
                    cwd=staging, timeout=150)
     if proc.stdout.strip():
         print(proc.stdout[-1700:])
