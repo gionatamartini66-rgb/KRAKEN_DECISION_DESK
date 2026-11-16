@@ -570,7 +570,10 @@ def _kraken_market_announcements(payload, feed, roster, now):
                       and state not in ("completed","resolved","postmortem"))
         if now-when>dt.timedelta(days=30) and not eligible_old:
             continue
-        for token in sorted(mentioned|delisted):
+        # Delisting notices require an explicitly listed/named asset.
+        # An unrelated funding component cannot inherit an asset delisting.
+        if delisting_title and not delisted:continue
+        for token in sorted(delisted if delisting_title else mentioned):
             exact=(list_text if token in delisted and list_text else
                    title if token in delisted else next(
                        (v for v in names if "("+token+")" in v),None))
