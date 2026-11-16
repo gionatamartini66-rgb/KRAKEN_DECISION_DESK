@@ -13,6 +13,7 @@ import io
 import json
 import math
 import re
+from html.parser import HTMLParser
 from urllib.parse import quote
 
 SCHEMA = "kdd-primary-economic-followup-v001"
@@ -29,6 +30,11 @@ KRAKEN_PAIR_STATES = frozenset((
     "maintenance"))
 MAX_EMISSION_CALLS = 1
 MAX_STATUS_CALLS = 1
+FINANCIAL_FEEDS = (
+    ("ETF_BTC_FARSIDE","https://farside.co.uk/btc/","ETF_AGGREGATO"),
+    ("ETF_ETH_FARSIDE","https://farside.co.uk/eth/","ETF_AGGREGATO"),
+    ("STABLECOIN_LLAMA","https://stablecoins.llama.fi/stablecoinchains","SUPPLY_STABLECOIN_AGGREGATO"),
+)
 KRAKEN_STATUS_FEEDS = (
     ("INCIDENTI","https://status.kraken.com/api/v2/incidents.json","incidents"),
     ("MANUTENZIONI","https://status.kraken.com/api/v2/scheduled-maintenances.json","scheduled_maintenances"),
@@ -327,6 +333,114 @@ def _series_url(series):
     return ECB + flow + "/" + key + "?format=csvdata&lastNObservations=2"
 
 
+
+
+class _FlowTable(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.rows=[];self.row=None;self.cell=None
+    def handle_starttag(self,tag,attrs):
+        if tag=="tr":self.row=[]
+        elif tag in ("td","th") and self.row is not None:self.cell=[]
+    def handle_data(self,value):
+        if self.cell is not None:self.cell.append(value)
+    def handle_endtag(self,tag):
+        if tag in ("td","th") and self.cell is not None:
+            self.row.append(" ".join("".join(self.cell).split()))
+            self.cell=None
+        elif tag=="tr" and self.row is not None:
+            if len(self.row)>1:self.rows.append(self.row)
+            self.row=None
+
+def _etf_farside(raw,feed,now):
+    if not isinstance(raw,str) or len(raw)>950000:
+        return None
+    h=_FlowTable()
+    try:h.feed(raw)
+    except (ValueError,TypeError):return None
+    days=[]
+    for cells in h.rows:
+        if len(cells)<6:continue
+        try:date=dt.datetime.strptime(cells[0],"%d %b %Y").date()
+        except ValueError:continue
+        if date>now.date()+dt.timedelta(days=1):continue
+        value=cells[-1].strip().replace(",","").replace("−","-")
+        if re.fullmatch(r"\([0-9]+(?:\.[0-9]+)?\)",value):
+            value="-"+value[1:-1]
+        if not re.fullmatch(r"-?[0-9]{1,8}(?:\.[0-9]+)?",value):continue
+        number=float(value)
+        if math.isfinite(number):days.append((date,number))
+    if not days:return None
+    period,value=max(days,key=lambda x:x[0])
+    return {"periodo":period.isoformat(),"valore":value,"unita":"milioni USD",
+            "tipo":"FLUSSO_ETF_SPOT_NETTO_AGGREGATO",
+            "limite":"Farside è aggregatore, non emittente; valori rivedibili; non identifica investitori e non prova causalità"}
+
+def _stablecoin_llama(data,now):
+    if not isinstance(data,list) or not 2<=len(data)<=1000:return None
+    rows=[]
+    for r in data:
+        if not isinstance(r,dict):continue
+        chain=r.get("name")
+        amounts=r.get("totalCirculatingUSD")
+        if not isinstance(amounts,dict):amounts=r.get("totalCirculating")
+        value=amounts.get("peggedUSD") if isinstance(amounts,dict) else None
+        if (not isinstance(chain,str) or not re.fullmatch(r"[A-Za-z0-9 _()./-]{2,60}",chain)
+                or type(value) not in (int,float) or not math.isfinite(value)
+                or not 0<=value<=1e13):continue
+        rows.append({"chain":chain,"supply_stablecoin_usd":round(value,2)})
+    if len(rows)<2:return None
+    rows.sort(key=lambda x:x["supply_stablecoin_usd"],reverse=True)
+    return {"periodo":now.date().isoformat(),"top_chain":rows[:8],
+            "chain_osservate":len(rows),"tipo":"SUPPLY_STABLECOIN_PER_CHAIN_AGGREGATO",
+            "limite":"DeFiLlama aggrega stablecoin per chain: acquisizione non è data di pubblicazione; ponti non provano nuova liquidità netta"}
+
+def _financial_read(raw,now):
+    if not isinstance(raw,list) or len(raw)!=len(FINANCIAL_FEEDS):
+        raise ValueError("Financial context source list")
+    out=[]
+    for row,(id,url,kind) in zip(raw,FINANCIAL_FEEDS):
+        if (not isinstance(row,dict) or row.get("id")!=id
+                or row.get("fonte")!=url or row.get("categoria")!=kind):
+            raise ValueError("Financial source attribution")
+        current=dict(row)
+        if row.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO"):
+            when=_time(row.get("acquisito_utc"))
+            data=row.get("dati")
+            if not when or when>now+dt.timedelta(minutes=2) or not isinstance(data,dict):
+                raise ValueError("Financial observation clock")
+            if id.startswith("ETF_"):
+                date=_time(str(data.get("periodo"))+"T00:00:00+00:00")
+                value=data.get("valore")
+                if (not date or date>now+dt.timedelta(days=1)
+                        or type(value) not in (int,float) or not math.isfinite(value)
+                        or abs(value)>1e8 or data.get("tipo")!="FLUSSO_ETF_SPOT_NETTO_AGGREGATO"):
+                    raise ValueError("ETF aggregator observation")
+                fresh=now-when<=dt.timedelta(days=4) and now-date<=dt.timedelta(days=8)
+            else:
+                top=data.get("top_chain")
+                if (data.get("tipo")!="SUPPLY_STABLECOIN_PER_CHAIN_AGGREGATO"
+                        or not isinstance(top,list) or not 2<=len(top)<=8
+                        or any(not isinstance(x,dict) or not isinstance(x.get("chain"),str)
+                               or type(x.get("supply_stablecoin_usd")) not in (int,float)
+                               or not math.isfinite(x["supply_stablecoin_usd"])
+                               or x["supply_stablecoin_usd"]<0 for x in top)):
+                    raise ValueError("Stablecoin chain observation")
+                fresh=now-when<=dt.timedelta(days=2)
+            before=row.get("confronto_precedente")
+            if before is not None:
+                if not isinstance(before,dict) or not _time(before.get("acquisito_utc")):
+                    raise ValueError("Financial source temporal comparison")
+                if id.startswith("ETF_"):
+                    oldval=before.get("valore")
+                    if (type(oldval) not in (int,float)
+                            or row.get("delta_osservazioni")!=round(data["valore"]-oldval,4)):
+                        raise ValueError("ETF comparison forged")
+            current["stato_alla_lettura"]=(
+                "SCADUTO" if not fresh else
+                "STORICO_NON_AGGIORNATO" if row["stato"]=="STORICO_NON_AGGIORNATO" else "OSSERVATO")
+        out.append(current)
+    return out
 
 def _kraken_market_announcements(payload, feed, roster, now):
     """Kraken-published incidents and scheduled changes: exact asset mentions.
