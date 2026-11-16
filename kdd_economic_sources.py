@@ -589,6 +589,7 @@ def _kraken_market_read(raw, items, now):
             entries=row.get("eventi")
             if t is None or t>now+dt.timedelta(minutes=2) or not isinstance(entries,list) or len(entries)>20:
                 raise ValueError("Kraken announcement observation")
+            validated=[]
             for event in entries:
                 token=event.get("token")
                 eid=event.get("id")
@@ -604,9 +605,23 @@ def _kraken_market_read(raw, items, now):
                         or (event.get("tipo")!="DELISTING_COMUNICATO"
                             and "("+token+")" not in reference)):
                     raise ValueError("Kraken official notice attributed to wrong asset")
+                copy=dict(event)
+                if event.get("tipo")=="DELISTING_COMUNICATO":
+                    if event.get("realizzazione")!="NON_ATTESTATA":
+                        raise ValueError("Kraken delisting execution not established")
+                    if (event.get("orizzonte_statuspage_utc") is not None
+                            and _kraken_notice_horizon(event) is None):
+                        raise ValueError("Kraken delisting timeline not attributable")
+                    copy["rilevanza_temporale_alla_lettura"]=_kraken_notice_temporal(event,now)
+                validated.append(copy)
+            row["eventi"]=validated
+            ongoing=any(e.get("tipo")=="DELISTING_COMUNICATO"
+                        and e.get("rilevanza_temporale_alla_lettura")=="FUTURO_PROGRAMMATO"
+                        for e in validated)
+            aged=now-t>dt.timedelta(days=7)
             row["stato_alla_lettura"]=(
-                "SCADUTO" if now-t>dt.timedelta(days=7) else
-                "STORICO_NON_AGGIORNATO" if row["stato"]=="STORICO_NON_AGGIORNATO"
+                "SCADUTO" if aged and not ongoing else
+                "STORICO_NON_AGGIORNATO" if aged or row["stato"]=="STORICO_NON_AGGIORNATO"
                 else row["stato"])
         result.append(row)
     return result
