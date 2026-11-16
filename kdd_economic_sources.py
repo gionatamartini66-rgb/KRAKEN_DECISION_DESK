@@ -521,7 +521,7 @@ def _kraken_market_announcements(payload, feed, roster, now):
                 for line in body.splitlines():
                     line=line.strip(" -\t")
                     if (len(line)<=200 and
-                            re.search(r"\b(?:withdrawals?|deposits?|trading|liquidat)\b",line,re.I)
+                            re.search(r"\b(?:withdrawals?|deposits?|trading|liquidat\w*)\b",line,re.I)
                             and re.search(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}\b",line,re.I)
                             and line not in deadline_text):
                         deadline_text.append(line)
@@ -530,8 +530,9 @@ def _kraken_market_announcements(payload, feed, roster, now):
             # heuristic match for every uppercase word in a status message.
             if delisting_title:
                 match=re.search(
-                    r"\bthe following assets are being delisted:\s*"
-                    r"([A-Z0-9,\s]+?)(?:\.(?:\s|$)|Key dates:|$)",
+                    r"\b(?:the following assets are being delisted|"
+                    r"(?:a scheduled )?delisting cycle for the following assets)"
+                    r":\s*([A-Z0-9,\s]+?)(?:\.(?:\s|$)|Key dates:|$)",
                     body,re.I)
                 if match:
                     candidate=match.group(1).strip()
