@@ -236,6 +236,25 @@ class WalletPacketG0Tests(unittest.TestCase):
                   rpc_fetch=lambda url,data:{"result":{"initial":.08,"taper":.15,
                             "terminal":.015,"foundation":0.0,"foundationTerm":0.0}},
                   collect_project_issues=True)
+        # RT-ECO-01: Statuspage-shaped official notice, with a SYNTHETIC
+        # ETH delisting. No claim that Kraken ever delisted ETH.
+        mock_status={"page":{"id":"lfz25gyhcpjf"},"scheduled_maintenances":[{
+            "id":"bbbbbbbbbbbb","name":"Ethereum (ETH) Delisting",
+            "status":"scheduled",
+            "created_at":(T-dt.timedelta(days=45)).isoformat(),
+            "updated_at":(T-dt.timedelta(days=45)).isoformat(),
+            "scheduled_until":(T+dt.timedelta(days=55)).isoformat(),
+            "components":[],"incident_updates":[{
+                "body":"Kraken will begin a scheduled delisting cycle for ETH.\n"
+                       "Key dates: November 15, 2026: Withdrawals will be disabled."}]
+        }]}
+        notices=primary._kraken_market_announcements(
+            mock_status,primary.KRAKEN_STATUS_FEEDS[1],
+            {"ethereum":{"token":"ETH"}},T)
+        self.assertEqual(len(notices),1)
+        self.assertEqual(notices[0]["tipo"],"DELISTING_COMUNICATO")
+        monitoring["comunicazioni_kraken"][1].update(
+            stato="OSSERVATO",eventi=notices,acquisito_utc=T.isoformat())
         self.dossier["evidenze_economiche"]={
             "schema":econ.VERSION,"acquisito_utc":T.isoformat(),
             "posizioni":rows,"candidati":[candidate],
@@ -262,6 +281,23 @@ class WalletPacketG0Tests(unittest.TestCase):
         actual=reread["evidenze_economiche_alla_lettura"]
         self.assertEqual(actual["candidati"][0]["valutazione_fonti_primarie"],review)
         self.assertEqual(len(actual["posizioni"]),3)
+        # Real producer -> packet -> bridge read rederives the original
+        # future notice, never claiming personal-account execution or a sale.
+        eth_review=next(r["valutazione_fonti_primarie"]
+                        for r in actual["posizioni"] if r["token"]=="ETH")
+        notice_facts=[x for x in eth_review["fatti"]
+                      if x["tipo"]=="ANNUNCIO_UFFICIALE_KRAKEN"]
+        self.assertEqual(len(notice_facts),1)
+        self.assertEqual(notice_facts[0]["stato_prova"],"COMUNICAZIONE_UFFICIALE")
+        self.assertEqual(notice_facts[0]["dettaglio"]["rilevanza_temporale"],
+                         "FUTURO_PROGRAMMATO")
+        self.assertEqual(notice_facts[0]["dettaglio"]["realizzazione"],
+                         "NON_ATTESTATA")
+        self.assertEqual(notice_facts[0]["dettaglio"]["orizzonte_statuspage_utc"],
+                         (T+dt.timedelta(days=55)).isoformat())
+        reread=bridge.read_context(bundle,now=T)
+        self.assertEqual(reread["evidenze_economiche_alla_lettura"]["posizioni"][1]
+                         ["valutazione_fonti_primarie"],eth_review)
         fake=json.loads(json.dumps(bundle))
         forged=fake["packet"]["evidenze_multifonte"]["economia"]["candidati"][0]
         forged["valutazione_fonti_primarie"]["ipotesi_non_attestata"]="VENDERE SUBITO"
