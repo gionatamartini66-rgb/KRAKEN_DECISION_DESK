@@ -35,6 +35,11 @@ SUI_SCHEDULE_HOME = "https://www.sui.io/token-schedule"
 SOLANA_RPC = "https://api.mainnet.solana.com"
 SOLANA_GOVERNOR_DOC = "https://solana.com/docs/rpc/http/getinflationgovernor"
 MONTHLY_FORMAT = "official-monthly-circulation-v001"
+STRK_UNLOCK_FORMAT = "starknet-primary-unlock-mdx-v001"
+STRK_REPO = "starknet-io/starknet-docs"
+STRK_PATH = "learn/protocol/strk.mdx"
+STRK_URL = "https://raw.githubusercontent.com/starknet-io/starknet-docs/main/learn/protocol/strk.mdx"
+STRK_HOME = "https://docs.starknet.io/learn/protocol/strk"
 ARB_VESTING_FORMAT = "arbitrum-primary-vesting-mdx-v001"
 ARB_VESTING_REPO = "ArbitrumFoundation/docs"
 ARB_VESTING_PATH = "content/docs/airdrop-eligibility-distribution.mdx"
@@ -226,6 +231,10 @@ def _schedule_descriptor(descriptor):
     raw = descriptor.get("official_schedule") if isinstance(descriptor, dict) else None
     if not isinstance(raw, dict):
         return None
+    if (raw.get("format") == STRK_UNLOCK_FORMAT
+            and raw.get("repository")==STRK_REPO and raw.get("path")==STRK_PATH
+            and raw.get("ref")=="main" and raw.get("homepage")==STRK_HOME):
+        return dict(raw)
     if (raw.get("format") == ARB_VESTING_FORMAT
             and raw.get("repository")==ARB_VESTING_REPO
             and raw.get("path")==ARB_VESTING_PATH
@@ -546,6 +555,79 @@ def _arb_vesting_valid(row, descriptor):
         "arbitrum",descriptor,t)
     return bool(expected and all(row.get(k)==expected[k] for k in (
         "beneficiari","regole","periodi_mensili_derivati")))
+
+
+
+def _strk_primary_schedule(raw, project_id, descriptor, now):
+    """Official Starknet developer docs publish *upper bounds*, not sales.
+
+    Source explicitly states the 15th and 127 million/month up to Mar 2027;
+    never represent scheduled maximum as tokens actually circulated/transferred.
+    """
+    if (project_id!="starknet" or not isinstance(raw,str) or len(raw)>150000
+            or descriptor.get("format")!=STRK_UNLOCK_FORMAT):
+        return None
+    s=re.sub(r"\s+"," ",raw).lower()
+    first=(r"up to 0\.64% \(64 million tokens\) have been unlocked"
+           r".*?on the 15th of each month.*?april 15, 2024"
+           r".*?march 15, 2025.*?7\.68% \(768 million tokens\)")
+    second=(r"up to 1\.27% \(127 million tokens\) have been and will be unlocked"
+            r".*?on the 15th of each month.*?april 15, 2025"
+            r".*?march 15, 2027.*?30\.48% \(3\.048 billion tokens\)")
+    if (not re.search(first,s) or not re.search(second,s)
+            or "investors and early contributors" not in s):
+        return None
+    events=[]
+    for n in range(8):
+        q=now.year*12+now.month-1+n
+        y,m=divmod(q,12)
+        day=dt.date(y,m+1,15)
+        if day<now.date() or not dt.date(2024,4,15)<=day<=dt.date(2027,3,15):
+            continue
+        cap=64_000_000 if day<=dt.date(2025,3,15) else 127_000_000
+        events.append({"tipo":"UNLOCK_MASSIMO_PUBBLICATO",
+                       "data_prevista":day.isoformat(),
+                       "ora_evento":"NON_ATTESTATA",
+                       "quantita_massima_token":cap,
+                       "allocazione":"INVESTITORI_E_PRIMI_CONTRIBUTORI",
+                       "realizzato":"NON_ATTESTATO","vendita":"NON_ATTESTATA"})
+    return {"progetto_id":project_id,"stato":"DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI",
+            "fonte":STRK_URL,"fonte_documentale":STRK_HOME,
+            "acquisito_utc":_iso(now),"pubblicato_utc":None,
+            "data_pubblicazione":"NON_ESPOSTA_DALLA_FONTE_MDX",
+            "tipo":"SCADENZE_MENSILI_CON_MASSIMI",
+            "unita":"TOKEN","eventi":events,
+            "stato_sblocco_effettivo":"NON_ATTESTATO",
+            "stato_vendita":"NON_ATTESTATA",
+            "limite":"Max fino a 127 milioni STRK il 15 del mese, non quantità effettiva; ora non pubblicata, emissioni staking/altre allocazioni escluse"}
+
+
+def _strk_schedule_valid(row, descriptor):
+    if (not descriptor or descriptor.get("format")!=STRK_UNLOCK_FORMAT
+            or row.get("progetto_id")!="starknet"
+            or row.get("fonte")!=STRK_URL or row.get("fonte_documentale")!=STRK_HOME
+            or row.get("pubblicato_utc") is not None
+            or row.get("data_pubblicazione")!="NON_ESPOSTA_DALLA_FONTE_MDX"
+            or row.get("tipo")!="SCADENZE_MENSILI_CON_MASSIMI"
+            or row.get("unita")!="TOKEN"
+            or row.get("stato_sblocco_effettivo")!="NON_ATTESTATO"
+            or row.get("stato_vendita")!="NON_ATTESTATA"):
+        return False
+    acquired=_time(row.get("acquisito_utc"))
+    if acquired is None:
+        return False
+    source=(
+        "To align long-term incentives of the Investors and Early Contributors "
+        "all tokens allocated to Investors and Early Contributors is subject to the lock-up schedule. "
+        "- Up to 0.64% (64 million tokens) have been unlocked on the 15th of each month, "
+        "starting April 15, 2024, and going through March 15, 2025, "
+        "for a total of 7.68% (768 million tokens). "
+        "- Up to 1.27% (127 million tokens) have been and will be unlocked "
+        "on the 15th of each month, starting April 15, 2025, "
+        "and going through March 15, 2027, for a total of 30.48% (3.048 billion tokens).")
+    expected=_strk_primary_schedule(source,"starknet",descriptor,acquired)
+    return bool(expected and row.get("eventi")==expected["eventi"]
+                and row.get("limite")==expected["limite"])
 
 
 def _official_monthly(raw, project_id, descriptor, now):
@@ -1043,6 +1125,10 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
                 url=descriptor["url"]
                 raw,error=_fetch(fetch,url)
                 result=_official_monthly(raw,project,descriptor,now) if not error else None
+            elif descriptor.get("format")==STRK_UNLOCK_FORMAT:
+                url=STRK_URL
+                raw,error=_fetch(fetch,url,json_data=False)
+                result=_strk_primary_schedule(raw,project,descriptor,now) if not error else None
             elif descriptor.get("format")==ARB_VESTING_FORMAT:
                 url=ARB_VESTING_URL
                 raw,error=_fetch(fetch,url,json_data=False)
@@ -1062,11 +1148,14 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
             if history and history.get("stato") in (
                     "DOCUMENTO_PRIMARIO_CON_SCHEDULE","STORICO_DA_RICONFERMARE",
                     "PROIEZIONE_PRIMARIA_NON_UNLOCK","PROIEZIONE_STORICA",
-                    "DOCUMENTO_PRIMARIO_REGOLA_VESTING","REGOLA_VESTING_STORICA"):
+                    "DOCUMENTO_PRIMARIO_REGOLA_VESTING","REGOLA_VESTING_STORICA",
+                    "DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI","MASSIMI_DATATI_STORICI"):
                 row.update(history,stato=("PROIEZIONE_STORICA"
                            if history.get("stato") in ("PROIEZIONE_PRIMARIA_NON_UNLOCK","PROIEZIONE_STORICA")
                            else "REGOLA_VESTING_STORICA"
                            if history.get("stato") in ("DOCUMENTO_PRIMARIO_REGOLA_VESTING","REGOLA_VESTING_STORICA")
+                           else "MASSIMI_DATATI_STORICI"
+                           if history.get("stato") in ("DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI","MASSIMI_DATATI_STORICI")
                            else "STORICO_DA_RICONFERMARE"))
             else:
                 row.update(stato=paused if not network_allowed
@@ -1175,6 +1264,14 @@ def decision_review(evidence, row, group):
                 schedule.get("fonte"),event.get("evento_utc"),schedule.get("acquisito_utc"),
                 "PROGRAMMA_PRIMARIO",schedule.get("limite"),
                 {"allocazione":event.get("allocazione"),"quantita_token":event.get("quantita_token")})
+    if schedule.get("stato")=="DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI":
+        for event in schedule.get("eventi",[])[:4]:
+            add("UNLOCK_MASSIMO_DATATO_PRIMARIO",
+                "La documentazione ufficiale attesta una data e una quantità massima sbloccabile, non una vendita né una quantità effettiva",
+                schedule.get("fonte"),event["data_prevista"],schedule.get("acquisito_utc"),
+                "MASSIMO_PRIMARIO_PROGRAMMATO",schedule.get("limite"),
+                {"quantita_massima_token":event["quantita_massima_token"],
+                 "allocazione":event["allocazione"],"ora_evento":event["ora_evento"]})
     if schedule.get("stato")=="DOCUMENTO_PRIMARIO_REGOLA_VESTING":
         add("REGOLA_VESTING_MENSILE_PRIMARIA",
             "La Foundation documenta regole mensili e lineari di vesting, senza quantità o giorni esatti per i futuri unlock",
@@ -1258,6 +1355,10 @@ def decision_review(evidence, row, group):
     priority=(("STATO_COPPIA_KRAKEN", "Una restrizione della coppia potrebbe impedire l'operatività prevista",
                "Lo stato pubblico non attesta operatività o sospensione del singolo account",
                "Ricontrollare AssetPairs e mercato/account prima di considerare operazioni"),
+              ("UNLOCK_MASSIMO_DATATO_PRIMARIO",
+               "Il massimo sbloccabile dichiarato può modificare l'offerta trasferibile",
+               "Una quantità massima non è una quantità effettiva trasferita, circolante o venduta",
+               "Rileggere il calendario ufficiale e confrontarlo con supply e trasferimenti effettivi"),
               ("REGOLA_VESTING_MENSILE_PRIMARIA",
                "I periodi mensili documentati potrebbero influire sulla supply futura",
                "Mancano giorno esatto, quantità della tranche, circolazione e vendita",
@@ -1486,6 +1587,14 @@ def at_read(raw, items, now):
         p=row["progetto_id"]
         expected=_schedule_descriptor(roster[p]["source"])
         new=dict(row)
+        if row.get("stato") in ("DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI","MASSIMI_DATATI_STORICI"):
+            if not _strk_schedule_valid(row,expected):
+                raise ValueError("Starknet official upper-bound vesting forged")
+            t=_time(row.get("acquisito_utc"))
+            new["stato"]=("DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI"
+                          if row["stato"]=="DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI"
+                          and t and dt.timedelta(0)<=now-t<=dt.timedelta(days=30)
+                          else "MASSIMI_DATATI_STORICI")
         if row.get("stato") in ("DOCUMENTO_PRIMARIO_REGOLA_VESTING","REGOLA_VESTING_STORICA"):
             if not _arb_vesting_valid(row,expected):
                 raise ValueError("Primary vesting rule is not attributable to foundation MDX")
@@ -1573,6 +1682,7 @@ def at_read(raw, items, now):
                         "indicatori_macro_osservati":sum(m["stato"]=="OSSERVATO" for m in indicators),
                         "calendari_primari_attuali":sum(s["stato"]=="DOCUMENTO_PRIMARIO_CON_SCHEDULE" for s in read_schedules),
             "regole_vesting_primarie_attuali":sum(s["stato"]=="DOCUMENTO_PRIMARIO_REGOLA_VESTING" for s in read_schedules),
+            "calendari_con_massimi_datati_primari":sum(s["stato"]=="DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI" for s in read_schedules),
                         "security_repository_osservati":sum(a.get("stato_alla_lettura") in ("OSSERVATO","NESSUN_AVVISO_NEL_CAMPIONE") for a in verified_advisories),
                         "politiche_emissioni_osservate":sum(e.get("stato_alla_lettura")=="OSSERVATO" for e in verified_emissions),
                         "repository_issue_osservati":sum(e.get("stato_alla_lettura") in ("OSSERVATO","NESSUNA_ISSUE_NEL_CAMPIONE") for e in read_issues)},

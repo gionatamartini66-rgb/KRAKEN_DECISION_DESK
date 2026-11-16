@@ -56,7 +56,7 @@ def identity(token):
 
 
 roster={"posizioni":[],"candidati":[]}
-for n,token in enumerate(("BTC","ETH","SOL","SUI","ARB")):
+for n,token in enumerate(("BTC","ETH","SOL","SUI","ARB","STRK")):
     ident=identity(token)
     assert ident["stato"]=="IDENTITA_VERIFICATA_DA_CATALOGO"
     roster["posizioni"].append({"indice":n,"token":token,"identita":ident,
@@ -68,13 +68,13 @@ def counted(url):
     return fetch(url)
 
 raw=None
-for cycle in range(1,7):
+for cycle in range(1,8):
     moment=dt.datetime.now(dt.timezone.utc)
     before=len(seen)
     raw=primary.collect(moment,roster,raw,counted,rpc_fetch=rpc_fetch,collect_project_issues=True)
     checked=primary.at_read(raw,roster,moment)
     assert checked["schema"]==primary.SCHEMA
-    assert checked["copertura"]["progetti"]==5
+    assert checked["copertura"]["progetti"]==6
     assert raw["richieste_pubbliche"] <= raw["limite_richieste"]
     assert raw["richieste_pubbliche"]==len(seen)-before
     print("PUBLIC_G2_SMOKE_UTC",moment.isoformat(timespec="seconds"),"cycle",cycle)
@@ -102,6 +102,9 @@ for cycle in range(1,7):
     print("ARB_VESTING_PRIMARY",arb["stato"],"source",arb.get("fonte"),
           "months",arb.get("periodi_mensili_derivati"),
           "events_observed",len(arb.get("eventi",[])))
+    strk=next(r for r in checked["calendari"] if r["progetto_id"]=="starknet")
+    print("STRK_OFFICIAL_MAX_UNLOCK",strk["stato"],"events",strk.get("eventi",[]),
+          "source",strk.get("fonte"))
     sui=next(r for r in checked["calendari"] if r["progetto_id"]=="sui")
     print("sui_official_monthly",sui["stato"],"source",sui.get("fonte"),
           "reference_month",sui.get("mese_circolazione"),

@@ -68,6 +68,17 @@
       "id": "near",
       "name": "NEAR Protocol"
     },
+    "STRK": {
+      "id": "starknet",
+      "name": "Starknet",
+      "official_schedule": {
+        "format": "starknet-primary-unlock-mdx-v001",
+        "repository": "starknet-io/starknet-docs",
+        "ref": "main",
+        "path": "learn/protocol/strk.mdx",
+        "homepage": "https://docs.starknet.io/learn/protocol/strk"
+      }
+    },
     "SUI": {
       "id": "sui",
       "name": "Sui",

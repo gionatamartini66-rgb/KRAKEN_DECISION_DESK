@@ -510,6 +510,53 @@ class PrimaryFollowupTests(unittest.TestCase):
         absent=next(x for x in first["calendari"] if x["progetto_id"]=="pepe")
         self.assertEqual(absent["stato"],"SENZA_CALENDARIO_PRIMARIO")
 
+
+    def test_real_strk_primary_document_reports_maximum_quantified_dated_not_executed(self):
+        doc=(
+          "To align long-term incentives of the Investors and Early Contributors, "
+          "all tokens allocated to Investors and Early Contributors is subject to the lock-up schedule. "
+          "- Up to 0.64% (64 million tokens) have been unlocked on the 15th of each month, "
+          "starting April 15, 2024, and going through March 15, 2025, "
+          "for a total of 7.68% (768 million tokens) unlocked by March 15, 2025. "
+          "- Up to 1.27% (127 million tokens) have been and will be unlocked "
+          "on the 15th of each month, starting April 15, 2025, "
+          "and going through March 15, 2027, for a total of 30.48% (3.048 billion tokens).")
+        def firstparty(url):
+            if url==sources.STRK_URL: return doc.encode()
+            return self.fetch(url)
+        roster=self.items(tokens=("BTC","STRK","SUI"))
+        first=sources.collect(T,roster,{},firstparty)
+        # One schedule GET per refresh; use normal source rotation.
+        result=first
+        for i in range(1,4):
+            result=sources.collect(T+dt.timedelta(hours=i),roster,result,firstparty)
+        strk=next(x for x in result["calendari"] if x["progetto_id"]=="starknet")
+        self.assertEqual(strk["stato"],"DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI")
+        self.assertEqual(strk["eventi"][0]["data_prevista"],"2026-12-15")
+        self.assertEqual(strk["eventi"][0]["quantita_massima_token"],127000000)
+        self.assertEqual(strk["eventi"][0]["realizzato"],"NON_ATTESTATO")
+        self.assertEqual(strk["eventi"][0]["ora_evento"],"NON_ATTESTATA")
+        checked=sources.at_read(result,roster,T+dt.timedelta(hours=3))
+        self.assertEqual(checked["copertura"]["calendari_con_massimi_datati_primari"],1)
+        review=sources.decision_review(checked,roster["posizioni"][1],"posizioni")
+        self.assertEqual(review["fatti"][0]["tipo"],"UNLOCK_MASSIMO_DATATO_PRIMARIO")
+        forged=copy.deepcopy(result)
+        next(x for x in forged["calendari"] if x["progetto_id"]=="starknet")[
+            "eventi"][0]["quantita_massima_token"]=128000000
+        with self.assertRaises(ValueError):
+            sources.at_read(forged,roster,T+dt.timedelta(hours=3))
+        forged=copy.deepcopy(result)
+        next(x for x in forged["calendari"] if x["progetto_id"]=="starknet")[
+            "eventi"][0]["realizzato"]="SI"
+        with self.assertRaises(ValueError):
+            sources.at_read(forged,roster,T+dt.timedelta(hours=3))
+        missing=sources.collect(T,roster,{},lambda url:
+            b"outside project source" if url==sources.STRK_URL else self.fetch(url))
+        # Without any valid STRK official page no calendar may be fabricated.
+        self.assertNotEqual(next(x for x in missing["calendari"]
+                                 if x["progetto_id"]=="starknet")["stato"],
+                            "DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI")
+
     def test_machine_readable_primary_schedule_is_planned_not_sale(self):
         existing=dict(economic._CURATED["BTC"])
         existing["official_schedule"]={"repository":"bitcoin/bips","path":"schedules/btc.json","ref":"main"}
