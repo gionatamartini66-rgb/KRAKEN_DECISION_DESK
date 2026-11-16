@@ -595,15 +595,22 @@ def regime_participation(base, derivatives, primary, now, previous=None):
     financial = primary.get("flussi_finanziari") if isinstance(primary,dict) else None
     if isinstance(financial,list):
         for rec in financial:
-            if not isinstance(rec,dict) or rec.get("stato")!="OSSERVATO":
+            if (not isinstance(rec,dict)
+                    or rec.get("stato") not in ("OSSERVATO","STORICO_NON_AGGIORNATO")):
                 continue
+            acquired=stamp(rec.get("acquisito_utc"))
             kind=rec.get("id")
+            allowed_age=(dt.timedelta(days=4) if kind.startswith("ETF_")
+                         else dt.timedelta(days=2))
+            if not acquired or not dt.timedelta(0)<=now-acquired<=allowed_age:
+                continue
             data=rec.get("dati") or {}
             if kind in ("ETF_BTC_FARSIDE","ETF_ETH_FARSIDE") and type(data.get("valore")) in (int,float):
                 out["famiglie_osservate"].append({
                     "famiglia":"ETF_SPOT_AGGREGATO",
                     "asset":"BTC" if kind=="ETF_BTC_FARSIDE" else "ETH",
-                    "fonte":rec["fonte"],"periodo":data.get("periodo"),
+                    "fonte":rec["fonte"],"freschezza":rec["stato"],
+                    "acquisito_utc":rec.get("acquisito_utc"),"periodo":data.get("periodo"),
                     "flusso_netto_milioni_usd":data["valore"],
                     "limite":"Stessa famiglia di dati aggregati ETF: non acquisti istituzionali individuali"})
                 if kind=="ETF_BTC_FARSIDE" and out.get("stato") in ("RIALZISTA","RIBASSISTA"):
@@ -616,7 +623,7 @@ def regime_participation(base, derivatives, primary, now, previous=None):
                 out["famiglie_osservate"].append({
                     "famiglia":"DISTRIBUZIONE_STABLECOIN_PER_CHAIN",
                     "fonte":rec["fonte"],"acquisito_utc":rec.get("acquisito_utc"),
-                    "top_chain":data["top_chain"],
+                    "freschezza":rec["stato"],"top_chain":data["top_chain"],
                     "limite":"Supply per chain aggregata; non nuova liquidità acquistatrice o flusso ETF"})
     return out
 

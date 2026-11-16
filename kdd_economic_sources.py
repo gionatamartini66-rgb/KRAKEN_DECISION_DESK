@@ -1616,7 +1616,8 @@ def decision_review(evidence, row, group):
                                   "stato":e.get("stato_pubblicato"),
                                   "tipo":e.get("tipo")})
     for f in evidence.get("flussi_finanziari") or []:
-        if not isinstance(f,dict) or f.get("stato_alla_lettura")!="OSSERVATO":
+        if (not isinstance(f,dict) or f.get("stato_alla_lettura") not in (
+                "OSSERVATO","STORICO_NON_AGGIORNATO")):
             continue
         if ((f.get("id")=="ETF_BTC_FARSIDE" and pid=="bitcoin") or
                 (f.get("id")=="ETF_ETH_FARSIDE" and pid=="ethereum")):

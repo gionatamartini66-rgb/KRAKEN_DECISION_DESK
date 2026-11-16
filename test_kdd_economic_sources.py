@@ -511,6 +511,94 @@ class PrimaryFollowupTests(unittest.TestCase):
         self.assertEqual(absent["stato"],"SENZA_CALENDARIO_PRIMARIO")
 
 
+
+    def test_live_shape_kraken_market_exact_assets_candidate_changes_and_expiry(self):
+        """Official market message, rather than an issue/PR, is a separate fact."""
+        candidate=self.row("ADA")
+        candidate["indice"]=0
+        roster=self.items(tokens=("BTC","ETH"),extra=candidate)
+        def payload(url,third=False):
+            if url==sources.KRAKEN_STATUS_FEEDS[0][1]:
+                status="resolved" if third else "identified"
+                return json.dumps({"page":{"id":"lfz25gyhcpjf"},"incidents":[
+                    {"id":"bbbbbbbbbbbb","name":"Bitcoin (BTC) Funding Delays",
+                     "status":status,"updated_at":T.isoformat(),"components":[]},
+                    {"id":"aaaaaaaaaaaa","name":"Cardano (ADA) Funding Delays",
+                     "status":"identified","updated_at":T.isoformat(),"components":[]},
+                    {"id":"xxxxxxxxxxxx","name":"XRP (XRP) Funding Delays",
+                     "status":"identified","updated_at":T.isoformat(),"components":[]}]}).encode()
+            if url==sources.KRAKEN_STATUS_FEEDS[1][1]:
+                return json.dumps({"page":{"id":"lfz25gyhcpjf"},"scheduled_maintenances":[
+                    {"id":"eeeeeeeeeeee","name":"Ethereum (ETH) Funding Maintenance",
+                     "status":"scheduled","updated_at":T.isoformat(),"components":[]}]}).encode()
+            if url in (sources.FINANCIAL_FEEDS[0][1],sources.FINANCIAL_FEEDS[1][1]):
+                return ("""<table><tr><td>12 Nov 2026</td><td>0.0</td><td>(5.0)</td></tr>
+                        <tr><td>13 Nov 2026</td><td>0.0</td><td>(10.4)</td>
+                        <td>0.0</td><td>0.0</td><td>(10.4)</td></tr></table>""").encode()
+            if url==sources.FINANCIAL_FEEDS[2][1]:
+                return json.dumps([{"name":"Ethereum","totalCirculatingUSD":{"peggedUSD":100e9}},
+                                   {"name":"Solana","totalCirculatingUSD":{"peggedUSD":15e9}}]).encode()
+            return self.fetch(url)
+        result={}
+        for i in range(6):
+            current=T+dt.timedelta(hours=i)
+            result=sources.collect(current,roster,result,
+                lambda url: payload(url,third=(i==5)),collect_kraken_status=True)
+            checked=sources.at_read(result,roster,current)
+            self.assertLessEqual(result["richieste_pubbliche"],8)
+            if i==0:
+                first=checked["comunicazioni_kraken"][0]
+                self.assertEqual(first["stato_alla_lettura"],"OSSERVATO")
+                self.assertEqual({x["token"] for x in first["eventi"]},{"BTC","ADA"})
+                self.assertTrue(any(x["tipo"]=="ANNUNCIO_UFFICIALE_KRAKEN"
+                                    for x in sources.decision_review(
+                                         checked,roster["posizioni"][0],"posizioni")["fatti"]))
+            if i==1:
+                event=checked["comunicazioni_kraken"][1]["eventi"][0]
+                self.assertEqual(event["token"],"ETH")
+                self.assertEqual(event["stato_pubblicato"],"scheduled")
+            if i==2:
+                obs=checked["flussi_finanziari"][0]
+                self.assertEqual(obs["stato_alla_lettura"],"OSSERVATO")
+                self.assertEqual(obs["dati"]["valore"],-10.4)
+                self.assertEqual(obs["dati"]["periodo"],"2026-11-13")
+            if i==4:
+                self.assertEqual(checked["flussi_finanziari"][2]
+                                 ["dati"]["top_chain"][0]["chain"],"Ethereum")
+            if i==5:
+                self.assertEqual(checked["comunicazioni_kraken"][0]
+                                 ["cambiamenti"][0]["dopo"],"resolved")
+        forged=copy.deepcopy(result)
+        forged["comunicazioni_kraken"][0]["eventi"][0]["token"]="XRP"
+        with self.assertRaises(ValueError):
+            sources.at_read(forged,roster,T+dt.timedelta(hours=5))
+        # After source-age expiry, never pass an old notice as a current incident.
+        old=sources.at_read(result,roster,T+dt.timedelta(days=8))
+        self.assertEqual(old["comunicazioni_kraken"][0]["stato_alla_lettura"],"SCADUTO")
+
+    def test_stablecoin_and_etf_consecutive_observations_do_not_create_trading_signal(self):
+        day=T
+        html=("<table><tr><td>12 Nov 2026</td><td>1.0</td><td>2.0</td>"
+              "<td>3.0</td><td>4.0</td><td>(5.0)</td></tr>"
+              "<tr><td>13 Nov 2026</td><td>0.0</td><td>0.0</td>"
+              "<td>0.0</td><td>0.0</td><td>(10.4)</td></tr></table>")
+        parsed=sources._etf_farside(html,"ETF_BTC_FARSIDE",day)
+        self.assertEqual(parsed["valore"],-10.4)
+        self.assertIsNone(sources._etf_farside(
+            "<table><tr><td>13 Nov 2026</td><td>0.0</td><td>0.0</td>"
+            "<td>0.0</td><td>0.0</td><td>N/A</td></tr></table>",
+            "ETF_ETH_FARSIDE",day))
+        coins=[{"name":"Ethereum","totalCirculatingUSD":{"peggedUSD":100e9}},
+               {"name":"Solana","totalCirculatingUSD":{"peggedUSD":10e9}}]
+        current=sources._stablecoin_llama(coins,day)
+        self.assertEqual(current["top_chain"][0]["chain"],"Ethereum")
+        self.assertNotIn("flusso_istituzionale",current)
+        obj=[{"id":k,"fonte":url,"categoria":kind,"stato":"RINVIATO_BUDGET",
+              "dati":None,"acquisito_utc":None} for k,url,kind in sources.FINANCIAL_FEEDS]
+        obj[0].update(stato="OSSERVATO",dati=parsed,acquisito_utc=day.isoformat())
+        self.assertEqual(sources._financial_read(obj,day)[0]["stato_alla_lettura"],"OSSERVATO")
+        self.assertEqual(sources._financial_read(obj,day+dt.timedelta(days=9))
+                         [0]["stato_alla_lettura"],"SCADUTO")
     def test_real_strk_primary_document_reports_maximum_quantified_dated_not_executed(self):
         doc=(
           "To align long-term incentives of the Investors and Early Contributors, "
