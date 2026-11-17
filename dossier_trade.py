@@ -53,6 +53,27 @@ def summarize_candles(raw, seconds, now):
     )
 
 
+def livelli_da_frame_4tf(frame, now):
+    """Legacy levels from the *same already checked* closed series, no extra GET."""
+    if not isinstance(frame,dict) or frame.get('stato')!='AGGIORNATO':
+        return {'stato':(frame.get('stato','NON_DISPONIBILE')
+                         if isinstance(frame,dict) else 'NON_DISPONIBILE'),
+                'motivo':(frame.get('motivo','Non aggiornato')
+                          if isinstance(frame,dict) else 'Frame mancante')}
+    records=frame.get('serie_ohlcv_chiuse')
+    seconds=frame.get('intervallo_secondi')
+    if not isinstance(records,list) or seconds not in (900,3600,14400,86400):
+        return {'stato':'NON_DISPONIBILE','motivo':'Serie 4TF non verificata'}
+    raw=[[x['time'],x['open'],x['high'],x['low'],x['close'],
+          x['close'],x['volume'],0] for x in records]
+    try:
+        return dict(summarize_candles(raw,seconds,now.timestamp()),
+                    stato='AGGIORNATO',coppia=frame['coppia'],
+                    pair_key=frame['pair_key'],fonte=frame['fonte'])
+    except (ValueError,TypeError,KeyError,IndexError,ZeroDivisionError,OverflowError):
+        return {'stato':'NON_DISPONIBILE','motivo':'Riepilogo serie OHLCV non valido'}
+
+
 def documenta_4h(raw, now):
     """Dataset 4H verificabile, non grafico ne' pattern certificato.
     Una candela 4H in corso non puo' essere usata come chiusura.
@@ -712,57 +733,81 @@ def collect(source=None, *, asset_pairs=None):
             for x in card.get('costi_roundtrip',[]) if x.get('valuta_partenza')=='EUR']
         matching=next((x for x in card.get('alternative',[]) if x['pair']==base_pair),None)
         if matching:
-            row["kraken_pair_key"] = matching.get("pair_key")
+            row["kraken_pair_key"]=matching.get("pair_key")
             row["ultimo_prezzo_in_quote"]=matching.get("prezzo_quote")
-            try:
-                result=desk.kraken('OHLC',pair=matching["pair_key"],interval=15)
-                candles=next(v for k,v in result.items() if k!='last')
-                row["livelli_15m"]=summarize_candles(candles,900,now.timestamp())
-                time.sleep(.6)
-                result=desk.kraken('OHLC',pair=matching["pair_key"],interval=60)
-                candles=next(v for k,v in result.items() if k!='last')
-                row["livelli_1h"]=summarize_candles(candles,3600,now.timestamp())
-            except Exception as exc:
-                row["limite_livelli"]=type(exc).__name__+": "+str(exc)[:120]
-        if matching:
-            row["flusso_spot_kraken"]=flusso_spot.fetch(
-                base_pair,matching["pair_key"],
-                chiusura_15m_utc=(row.get("livelli_15m") or {}).get("ultima_chiusura_utc"))
-            time.sleep(.8)
         else:
-            row["flusso_spot_kraken"]={
-                "stato":"NON_DISPONIBILE","motivo":"Coppia di riferimento non valida"}
+            row["limite_livelli"]="Coppia della scheda non presente nelle alternative Kraken"
         if row["token"] in COINGECKO_IDS:
             try: row["fondamentali_coingecko"]=token_fundamentals(row["token"])
             except Exception as exc: row["fondamentali_coingecko"]={"errore":type(exc).__name__}
         else:
             row["fondamentali_coingecko"]={
                 "stato":"ID token non validato su CoinGecko: nessun dato fondamentale attribuito"}
-        # KDD-11: candidate shortlist does not carry the verified four-frame
-        # closed OHLCV series. Never promote 15m/1H level summaries to patterns.
-        row["figure_candlestick"] = {
-            "stato": "NON_DISPONIBILE",
-            "motivo": "Serie OHLCV chiuse 4TF non attestata per candidato nel dossier",
-            "coppia": row.get("coppia_analisi"),
-            "fonte": "Nessuna serie verificata per riconoscimento KDD-11"}
+        row["origine_scanner"]=card.get("origine_scanner")
+        row["copertura_scanner"]=card.get("copertura_scanner")
+        row["figure_candlestick"]={
+            "stato":"NON_DISPONIBILE","motivo":"Acquisizione 4TF non eseguita",
+            "coppia":row.get("coppia_analisi")}
         candidates.append(row)
         time.sleep(.5)
     # Campione 4H anche dei quattro asset strategici (non solo gainer).
     # Kraken restituisce la candela 4H corrente: esclusa esplicitamente.
     quattro_ore=recupera_4h(source,candidates,now.timestamp())
-    for row in candidates:
+    import patrimonio_4tf
+    # KDD-07 candidates reuse the existing verified chart/candle engines,
+    # never a second indicator implementation. Same-pair cached 4H may be reused.
+    if asset_pairs is None:
+        try:
+            asset_pairs=desk.kraken("AssetPairs")
+        except (OSError,RuntimeError,TypeError,ValueError,KeyError):
+            asset_pairs={}
+    cand_4tf=patrimonio_4tf.collect_candidates(
+        candidates,asset_pairs=asset_pairs,now=now,old_4h=quattro_ore)
+    for index,row in enumerate(candidates):
+        tf=cand_4tf["candidati"][index]
+        row["tecnica_4tf"]=tf
+        row["livelli_15m"]=livelli_da_frame_4tf(tf["timeframe"]["15m"],now)
+        row["livelli_1h"]=livelli_da_frame_4tf(tf["timeframe"]["1H"],now)
+        same=(tf.get("token")==row.get("token") and
+              tf.get("coppia")==row.get("coppia_analisi") and
+              tf.get("pair_key")==row.get("kraken_pair_key"))
+        if not same:
+            row["tecnica_4tf"]["stato"]="COPPIA_DIVERSA_O_ASSENTE"
+            row["livelli_15m"]={"stato":"COPPIA_DIVERSA_O_ASSENTE"}
+            row["livelli_1h"]={"stato":"COPPIA_DIVERSA_O_ASSENTE"}
+        row["figure_candlestick"]={
+            "stato":("AGGIORNATO" if same and tf["stato"]=="COMPLETO"
+                     else "NON_DISPONIBILE"),
+            "coppia":row.get("coppia_analisi"),
+            "pair_key":row.get("kraken_pair_key"),
+            "confronto_4tf":tf.get("confronto_figure_4tf"),
+            "per_timeframe":{label:{
+                "stato":frame.get("stato"),
+                "fonte":frame.get("fonte"),
+                "chiusura_utc":frame.get("chiusura_utc"),
+                "figure":frame.get("figure_candlestick")}
+                for label,frame in tf["timeframe"].items()},
+            "motivo":("Serie 4TF verificata, nessun segnale operativo"
+                       if same and tf["stato"]=="COMPLETO"
+                       else "Coppia o timeframe incompleti/non aggiornati")}
+        row["livelli_4h"]=livelli_da_frame_4tf(tf["timeframe"]["4H"],now)
         obs=quattro_ore.get(row["token"],{})
-        if obs.get("coppia") == row.get("coppia_analisi"):
-            row["livelli_4h"]=dict(obs.get("lettura_indicativa") or {},
-                                   stato=obs.get("stato","NON_DISPONIBILE"),
-                                   coppia=obs.get("coppia"),
-                                   serie_numerica="grafici_4h["+row["token"]+"]")
+        if obs.get("coppia")==row.get("coppia_analisi"):
+            row["grafico_4h_riferimento"]=row["token"]
+        match=row.get("kraken_pair_key")
+        if same and match:
+            try:
+                row["flusso_spot_kraken"]=flusso_spot.fetch(
+                    row["coppia_analisi"],match,
+                    chiusura_15m_utc=(row.get("livelli_15m") or {}).get("ultima_chiusura_utc"))
+                time.sleep(.8)
+            except (OSError,RuntimeError,TypeError,ValueError,KeyError) as exc:
+                row["flusso_spot_kraken"]={"stato":"NON_DISPONIBILE",
+                                          "motivo":type(exc).__name__}
         else:
-            row["livelli_4h"]={"stato":"COPPIA_DIVERSA_O_ASSENTE",
-                               "coppia_analisi":row.get("coppia_analisi"),
-                               "coppia_4h_osservata":obs.get("coppia"),
-                               "nota":"Non associare livelli 4H di coppie differenti "
-                                      "alla coppia operativa senza esplicitarlo."}
+            row["flusso_spot_kraken"]={
+                "stato":"NON_DISPONIBILE",
+                "motivo":"Coppia candidata non riconciliata con AssetPairs"}
     external={}
     try: external["coingecko_global"]=global_context()
     except Exception as exc: external["coingecko_global"]={"errore":type(exc).__name__+": "+str(exc)[:80]}
@@ -773,7 +818,6 @@ def collect(source=None, *, asset_pairs=None):
     qualita = desk.qualita_portafoglio(source, portafoglio)
     saldo = qualita["stato_saldo"]
     fonte = portafoglio.get("fonte_quantita") if isinstance(portafoglio, dict) else None
-    import patrimonio_4tf
     # One actual public AssetPairs snapshot shared by 4TF and economics.
     if asset_pairs is None:
         try:
@@ -838,6 +882,12 @@ def collect(source=None, *, asset_pairs=None):
         "patrimonio_4tf":analisi_patrimonio,
         "finanziamento_150_book_pubblico":finanziamento_book,
         "ricerca_setup":source.get("ricerca_setup",{}),
+        "approfondimento_candidati_4tf":{
+            "fonte":cand_4tf["fonte"],"richieste_ohlc":cand_4tf["richieste_ohlc"],
+            "riusi_4h":cand_4tf["riusi_4h"],"budget_ohlc":cand_4tf["budget_ohlc"],
+            "n_candidati":len(cand_4tf["candidati"]),
+            "completi":sum(x["stato"]=="COMPLETO" for x in cand_4tf["candidati"]),
+            "parziali":sum(x["stato"]!="COMPLETO" for x in cand_4tf["candidati"])},
         "fonti_esterne":external,
         "contesto_derivati_btc":derivatives,
         "contesto_macro_news":"Ricerca GPT separata: non inferire macro dai soli RSS",

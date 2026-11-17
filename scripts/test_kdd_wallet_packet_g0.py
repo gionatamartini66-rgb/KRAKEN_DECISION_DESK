@@ -305,6 +305,93 @@ class WalletPacketG0Tests(unittest.TestCase):
         with self.assertRaisesRegex(bridge.BridgeError,"economica"):
             bridge.read_context(fake,now=T)
 
+    def test_kdd07_scanner_four_tf_full_packet_bridge_preserves_holdings(self):
+        """Synthetic: selected SOL passes dossier, packet and actual GPT reader."""
+        import kdd_bridge_g2 as bridge
+        self._analytic_fixture()
+        obs=T.isoformat()
+        self.snapshot["schede_v02"][0].update(
+            categoria="transizione in recupero",
+            perche_selezionato="4h recupero con volumi; nessun segnale BUY",
+            origine_scanner={
+                "fonte":"Kraken Spot pubblico OHLC 1h + AssetPairs/Ticker",
+                "osservato_utc":obs,"ciclo":6,"pair_key":"SOLUSD",
+                "regime_osservato":"TRANSIZIONE",
+                "invalidazione":"Nuova chiusura sotto il minimo delle ultime 8h",
+                "segnali_contrari":["DIREZIONI_4H_E_24H_CONTRARIE"],
+                "qualita_dati":"33_OHLC_1H_CHIUSE_CONTIGUE"},
+            copertura_scanner={
+                "mercati_osservati_ticker":110,"universo_ammissibile":96,
+                "campionati":24,"analizzati":24,
+                "ammissibili_non_campionati":72,
+                "universo_esaminato_almeno_una_volta":96,
+                "universo_mai_esaminato":0,"copertura_progressiva_pct":100})
+        labels={"15m":900,"1H":3600,"4H":14400,"1D":86400}
+        frame={}
+        for label,seconds in labels.items():
+            frame[label]={
+                "timeframe":label,"stato":"AGGIORNATO",
+                "coppia":"SOL/USD","pair_key":"SOLUSD",
+                "chiusura_utc":(T-dt.timedelta(seconds=seconds)).isoformat(),
+                "rilevazione_utc":obs,
+                "close":101,"ema20":100.4,"ema50":99.8,
+                "supporto_vicino":98,"resistenza_vicina":103,
+                "orientamento":"PREZZO_SOPRA_EMA20_SOPRA_EMA50",
+                "volume_vs_media20":1.1,
+                "pivot_giornaliero":{"pivot":100},
+                "livelli_strutturali":{"supports":[{"price":98}],
+                                      "resistances":[{"price":103}]},
+                "figure_candlestick":{"figure":[{"figura":"HAMMER_PIN_BAR",
+                                                "stato":"IN_ATTESA",
+                                                "segnali_contrari":["FALSO_POSITIVO"]}]},
+                "fonte":"Kraken Spot pubblico /0/public/OHLC"}
+        self.dossier["candidati"][0]["tecnica_4tf"]={
+            "token":"SOL","coppia":"SOL/USD","pair_key":"SOLUSD",
+            "stato":"COMPLETO","timeframe":frame,
+            "confronto_figure_4tf":{
+                "stato_confronto":"VALUTABILE",
+                "contraddizione_alto_basso":False}}
+        self.dump()
+        packet=self.pack()
+        self.assertEqual(packet["patrimonio"]["n_posizioni"],3)
+        shortlisted=packet["opportunita_esterne_scanner"]
+        self.assertEqual(len(shortlisted),1)
+        self.assertEqual(shortlisted[0]["analisi_candidato_4tf"]["stato"],"COMPLETO")
+        self.assertEqual(set(shortlisted[0]["analisi_candidato_4tf"]["timeframe"]),
+                         set(labels))
+        self.assertEqual(shortlisted[0]["copertura_scanner"]["universo_ammissibile"],96)
+        self.assertNotIn("SHOULD_NOT_EXPORT_RAW_CANDLES",json.dumps(packet))
+        bundle={"schema":bridge.SCHEMA_BUNDLE,"packet":packet,
+                "packet_sha256":bridge.digest(packet),
+                "preparato_utc":T.isoformat(),
+                "provenienza":"KDD_LOCALE_DICHIARATA_NON_AUTENTICATA",
+                "trasporto":"MANUALE_NON_ESEGUITO"}
+        read=bridge.read_context(bundle,now=T)
+        self.assertEqual(read["n_posizioni"],3)
+        self.assertEqual(len(read["candidati_scanner_alla_lettura"]),1)
+        answer=read["candidati_scanner_alla_lettura"][0]
+        self.assertEqual(answer["quattro_tf"]["stato"],"COMPLETO")
+        self.assertEqual(answer["origine_scanner"]["regime_osservato"],"TRANSIZIONE")
+        self.assertEqual(float(answer["quattro_tf"]["timeframe"]["4H"]["ema20"]),100.4)
+        old=bridge.read_context(bundle,now=T+dt.timedelta(days=3))
+        self.assertEqual(old["n_posizioni"],3)
+        self.assertEqual(old["candidati_scanner_alla_lettura"][0]["quattro_tf"]["stato"],
+                         "PARZIALE")
+        self.assertIsNone(old["candidati_scanner_alla_lettura"][0]
+                          ["quattro_tf"]["timeframe"]["4H"]["ema20"])
+        forged=json.loads(json.dumps(bundle))
+        forged["packet"]["opportunita_esterne_scanner"][0][
+            "analisi_candidato_4tf"]["timeframe"]["1H"]["coppia"]="ETH/USD"
+        forged["packet_sha256"]=bridge.digest(forged["packet"])
+        with self.assertRaisesRegex(bridge.BridgeError,"altra coppia"):
+            bridge.read_context(forged,now=T)
+        cross_market=json.loads(json.dumps(bundle))
+        cross_market["packet"]["opportunita_esterne_scanner"][0][
+            "analisi_candidato_4tf"]["timeframe"]["1D"]["pair_key"]="ETHUSD"
+        cross_market["packet_sha256"]=bridge.digest(cross_market["packet"])
+        with self.assertRaisesRegex(bridge.BridgeError,"pair_key"):
+            bridge.read_context(cross_market,now=T)
+
     def test_requested_pepe_third_group_packet_bridge_does_not_invent_scanner_position(self):
         import kdd_economics as econ
         import kdd_economic_sources as primary

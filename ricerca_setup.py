@@ -32,60 +32,108 @@ def tier(volume):
     return 'esplorativa'
 
 
-def sample(markets, scanner, size=MAX_SCREEN):
-    """Stratificazione 5 contesti giornalieri × 3 fasce di liquidità.
+def eligible_markets(markets, scanner):
+    """Observe the complete ticker-based universe; OHLC is a separate, bounded phase.
 
-    Il dato ticker è la prima fotografia, non la prova di una ripartenza.
-    La fascia esplorativa amplia la COPERTURA, ma richiede un book verificato
-    e non può diventare automaticamente una proposta operativa.
+    The effective search thresholds are the existing user configuration and
+    legacy exploratory-spread policy. No fixed volume target is introduced.
     """
-    if not isinstance(size,int) or not (0 <= size <= MAX_SCREEN):
-        raise ValueError('Budget massimo campione: '+str(MAX_SCREEN))
     min_volume=float(scanner.get('volume_24h_min_eur',500000))
     max_spread=float(scanner.get('spread_massimo_pct',0.8))
-    # Il filtro operativo del book resta quello delle schede precedenti.
-    # Per ricerca si consente una fascia più piccola, con spread più severo.
     lower_volume=min(150_000,min_volume)
-    grouped={(b,t):[] for b in BUCKETS for t in LIQUIDITY_TIERS}
-    for row in markets.values():
+    groups={(b,t):[] for b in BUCKETS for t in LIQUIDITY_TIERS}
+    exclusions={}
+    excluded_examples={}
+    for token,row in markets.items():
+        reason=None
+        if not isinstance(row,dict) or row.get('token')!=token or not row.get('pair_key'):
+            reason='IDENTITA_NON_VERIFICABILE'
+        elif token in NON_NEGOZIABILI_SEE:
+            reason='RESTRIZIONE_SEE_DOCUMENTATA'
+        elif token in ('BTC','ETH'):
+            reason='BENCHMARK_NON_CANDIDATO'
+        else:
+            try:
+                vol=float(row['volume_24h_eur_stimato'])
+                spread=float(row['spread_pct'])
+                change=float(row['var_oggi_utc_pct'])
+                price=float(row['prezzo_eur'])
+                if not all(math.isfinite(x) for x in (vol,spread,change,price)) or price<=0:
+                    reason='DATI_TICKER_NON_VERIFICABILI'
+                elif vol<lower_volume:
+                    reason='VOLUME_SOTTO_FILTRO_RICERCA'
+                elif not 0<=spread<=max_spread:
+                    reason='SPREAD_OLTRE_FILTRO'
+                elif vol<350_000 and spread>min(max_spread,0.35):
+                    reason='FASCIA_ESPLORATIVA_SPREAD'
+                else:
+                    r=dict(row,fascia_liquidita=tier(vol))
+                    groups[(bucket(change),r['fascia_liquidita'])].append(r)
+            except (KeyError,TypeError,ValueError,OverflowError):
+                reason='DATI_TICKER_NON_VERIFICABILI'
+        if reason:
+            exclusions[reason]=exclusions.get(reason,0)+1
+            if len(excluded_examples.setdefault(reason,[]))<6:
+                excluded_examples[reason].append(str(token))
+    return groups,exclusions,excluded_examples
+
+
+def sample(markets, scanner, size=MAX_SCREEN, *, previous=None):
+    """Fair bounded rotation across all eligible Spot assets in successive cycles.
+
+    Never-seen eligible pairs precede recently scanned pairs within each
+    daily-context/liquidity bucket. A changed pair identity resets the visit.
+    Visible ticker anomalies affect priority only *among equally old* visits;
+    they cannot indefinitely displace a market never yet examined.
+    """
+    if not isinstance(size,int) or not (0<=size<=MAX_SCREEN):
+        raise ValueError('Budget massimo campione: '+str(MAX_SCREEN))
+    groups,_,_=eligible_markets(markets,scanner)
+    previous=previous if isinstance(previous,dict) else {}
+    visits=previous.get('ultime_analisi') if isinstance(previous.get('ultime_analisi'),dict) else {}
+    prior_ticker=previous.get('ticker_precedente') if isinstance(previous.get('ticker_precedente'),dict) else {}
+    def priority(row):
+        token=row['token']
+        previous_visit=visits.get(token)
+        seen=(previous_visit.get('ciclo') if isinstance(previous_visit,dict)
+              and previous_visit.get('pair_key')==row['pair_key']
+              and type(previous_visit.get('ciclo')) is int else -1)
+        old=prior_ticker.get(token) or {}
+        anomaly=0
         try:
-            vol=float(row['volume_24h_eur_stimato'])
-            spread=float(row['spread_pct'])
-            change=float(row['var_oggi_utc_pct'])
-            price=float(row['prezzo_eur'])
-        except (KeyError,TypeError,ValueError,OverflowError):continue
-        if not all(math.isfinite(x) for x in (vol,spread,change,price)):continue
-        if vol<lower_volume or not (0<=spread<=max_spread) or price<=0:
-            continue
-        if vol<350_000 and spread>min(max_spread,0.35):
-            continue
-        if row.get('token') in NON_NEGOZIABILI_SEE or row.get('token') in ('BTC','ETH'):
-            continue
-        r=dict(row,fascia_liquidita=tier(vol))
-        grouped[(bucket(change),r['fascia_liquidita'])].append(r)
-    for group in grouped.values():
-        group.sort(key=lambda r:(-r['volume_24h_eur_stimato']/(1+r['spread_pct']*3),
-                                 r['token']))
+            if old.get('pair_key')==row['pair_key']:
+                change=abs(row['var_oggi_utc_pct']-old['variazione_pct'])
+                volume_ratio=(row['volume_24h_eur_stimato']/old['volume_eur']
+                              if old.get('volume_eur',0)>0 else 1)
+                anomaly=int(change>=4)+int(volume_ratio>=2)
+        except (KeyError,TypeError,ValueError,ZeroDivisionError,OverflowError):
+            anomaly=0
+        return (seen,-anomaly,
+                -row['volume_24h_eur_stimato']/(1+row['spread_pct']*3),token)
+    for group in groups.values():
+        group.sort(key=priority)
     chosen=[]
     count_tier={t:0 for t in LIQUIDITY_TIERS}
-    # La fascia sperimentale non può occupare tutto il radar:
-    # massimo sei mercati sotto 350k EUR/24h, e solo a spread stretto.
-    exploratory_cap=6
-    # Ogni giro da spazio ai movimenti piccoli, ai laterali e alle tre fasce.
-    # Non si sceglie prima 24 high-cap e poi si dice che non c'è altro.
-    while len(chosen)<size and any(grouped.values()):
-        before=len(chosen)
-        for b in BUCKETS:
-            for t in LIQUIDITY_TIERS:
-                if len(chosen)>=size:break
-                if t=='esplorativa' and count_tier[t]>=exploratory_cap:
-                    continue
-                group=grouped[(b,t)]
-                if group:
+    # First use all available never-scanned markets across EVERY stratum.
+    # Otherwise a rare bucket with one frequently observed asset consumes a
+    # request each refresh while other buckets still contain unseen markets.
+    # Only when new identities are exhausted for the chosen per-cycle budget
+    # may the scanner revisit older rows, least recently visited first.
+    for allow_repeat in (False,True):
+        while len(chosen)<size and any(groups.values()):
+            before=len(chosen)
+            for b in BUCKETS:
+                for t in LIQUIDITY_TIERS:
+                    if len(chosen)>=size:break
+                    if t=='esplorativa' and count_tier[t]>=6:continue
+                    group=groups[(b,t)]
+                    if not group:continue
+                    if not allow_repeat and priority(group[0])[0]>=0:
+                        continue
                     chosen.append(group.pop(0))
                     count_tier[t]+=1
-            if len(chosen)>=size:break
-        if len(chosen)==before:break
+                if len(chosen)>=size:break
+            if len(chosen)==before:break
     return chosen
 
 
@@ -119,6 +167,7 @@ def geometry(raw, now):
     high24=max(x['high'] for x in window)
     low24=min(x['low'] for x in window)
     priorhigh=max(x['high'] for x in candles[-13:-1])
+    priorlow=min(x['low'] for x in candles[-13:-1])
     ret24=change(last['close'],candles[-25]['close'])
     ret4=change(last['close'],candles[-5]['close'])
     drawdown=100*(last['close']/high24-1)
@@ -135,6 +184,14 @@ def geometry(raw, now):
           volume_ratio is not None and volume_ratio>=1.15 and ret24<18):
         category='tentativo di ripartenza'
         reason='Chiusura 1h oltre i massimi delle 12 ore precedenti, con volumi 4h in aumento.'
+    elif (last['close']<priorlow and ret4< -0.75 and ret24< -2
+          and volume_ratio is not None and volume_ratio>=1.12):
+        category='pressione ribassista'
+        reason='Chiusura 1h sotto i minimi precedenti e volumi in crescita: rischio di prosecuzione del calo, nessun invito allo short.'
+    elif (ret24< -3 and 0.75<ret4<8 and
+          volume_ratio is not None and volume_ratio>=1.08):
+        category='transizione in recupero'
+        reason='Recupero 4h dopo una discesa 24h, con volumi relativi: cambio di fase da verificare, non inversione confermata.'
     elif (narrowing is not None and narrowing<=0.68 and now8<=7.5
           and abs(ret4)<3.5 and -12<ret24<15):
         category='consolidamento'
@@ -147,7 +204,28 @@ def geometry(raw, now):
           volume_ratio is not None and volume_ratio>=1.08):
         category='movimento iniziale'
         reason='Prime 4h positive su candele chiuse con volume superiore alle 4h precedenti.'
+    regime=('RIBASSISTA' if ret24<=-3 and ret4<0 else
+            'RIALZISTA' if ret24>=3 and ret4>0 else
+            'LATERALE' if abs(ret24)<3 and abs(ret4)<1.5 else 'TRANSIZIONE')
+    contra=[]
+    if volume_ratio is None:contra.append('VOLUMI_RELATIVI_NON_VALUTABILI')
+    elif volume_ratio<1:contra.append('VOLUMI_4H_INFERIORI_AL_PERIODO_PRECEDENTE')
+    if ret4*ret24<0:contra.append('DIREZIONI_4H_E_24H_CONTRARIE')
+    if category in ('tentativo di ripartenza','movimento iniziale','transizione in recupero'):
+        invalidazione='Nuova chiusura sotto il minimo delle ultime 8h chiuse'
+    elif category=='pressione ribassista':
+        invalidazione='Nuova chiusura sopra il massimo delle ultime 8h chiuse'
+    elif category=='consolidamento':
+        invalidazione='Espansione del range 8h senza successiva conferma direzionale'
+    elif category=='ritracciamento':
+        invalidazione='Perdita del minimo delle ultime 8h con volumi in aumento'
+    else:
+        invalidazione='Nessuna configurazione confermata da invalidare'
     return {'stato':'OSSERVATO','categoria':category,'motivo':reason,
+            'regime_osservato':regime,'segnali_contrari':contra,
+            'invalidazione':invalidazione,
+            'qualita_dati':'33_OHLC_1H_CHIUSE_CONTIGUE',
+            'base_regime':'Variazioni 24h/4h da OHLC Kraken, non regime macro',
             'chiusura_1h_utc':dt.datetime.fromtimestamp(last['t']+3600,dt.timezone.utc).isoformat(),
             'var_24h_pct':round(ret24,3),'var_4h_pct':round(ret4,3),
             'range_8h_pct':round(now8,3),'range_8h_precedente_pct':round(prev8,3),
@@ -175,7 +253,8 @@ def select(rows, observations, max_items=MAX_FINAL):
         evaluated.append((score,row,observation))
     # Tie deterministico; classi a rischio falsi segnali restano ipotesi.
     evaluated.sort(key=lambda item:(-item[0],item[1]['token']))
-    groups=('tentativo di ripartenza','consolidamento',
+    groups=('tentativo di ripartenza','pressione ribassista',
+            'consolidamento','transizione in recupero',
             'ritracciamento','movimento iniziale')
     actual=[x for x in evaluated if x[2]['categoria'] in groups]
     neutral=[x for x in evaluated if x[2]['categoria']=='nessun setup confermato']
@@ -186,7 +265,11 @@ def select(rows, observations, max_items=MAX_FINAL):
         if r['token'] in seen or len(selected)>=max_items:return
         selected.append({'token':r['token'],'pair_key':r['pair_key'],
                          'categoria':obs['categoria'],
-                         'perche':obs['motivo'],'preselezione':obs})
+                         'perche':obs['motivo'],'preselezione':obs,
+                         'regime_osservato':obs.get('regime_osservato'),
+                         'segnali_contrari':obs.get('segnali_contrari',[]),
+                         'invalidazione':obs.get('invalidazione'),
+                         'qualita_dati':obs.get('qualita_dati')})
         seen.add(r['token'])
     # Uno per tipologia quando possibile.
     for category in groups:
@@ -206,8 +289,13 @@ def select(rows, observations, max_items=MAX_FINAL):
     return selected
 
 
-def scan(markets, scanner, kraken, now, max_requests=MAX_SCREEN):
-    pool=sample(markets,scanner,size=max_requests)
+def scan(markets, scanner, kraken, now, max_requests=MAX_SCREEN, *, previous=None):
+    previous=previous if isinstance(previous,dict) else {}
+    cycle=previous.get('ciclo',0)
+    cycle=cycle+1 if type(cycle) is int and 0<=cycle<2**31 else 1
+    grouped,excluded,examples=eligible_markets(markets,scanner)
+    eligible={r['token']:r for members in grouped.values() for r in members}
+    pool=sample(markets,scanner,size=max_requests,previous=previous)
     observations={}
     issues=[]
     hourly_cache={}
@@ -224,7 +312,38 @@ def scan(markets, scanner, kraken, now, max_requests=MAX_SCREEN):
             issues.append(row['token']+': '+type(exc).__name__)
         time.sleep(0.85)
     chosen=select(pool,observations)
-    return chosen,{'campionati':len(pool),'analizzati':len(pool)-len(issues),
+    now_iso=dt.datetime.fromtimestamp(now,dt.timezone.utc).isoformat(timespec='seconds')
+    past=previous.get('ultime_analisi') if isinstance(previous.get('ultime_analisi'),dict) else {}
+    visits={tok:v for tok,v in past.items() if tok in eligible
+            and isinstance(v,dict) and v.get('pair_key')==eligible[tok]['pair_key']
+            and type(v.get('ciclo')) is int}
+    for row in pool:
+        visits[row['token']]={'ciclo':cycle,'pair_key':row['pair_key'],
+                              'esito':observations[row['token']]['stato']}
+    ticker_base={tok:{'pair_key':row['pair_key'],
+                        'volume_eur':row['volume_24h_eur_stimato'],
+                        'variazione_pct':row['var_oggi_utc_pct']}
+                 for tok,row in eligible.items()}
+    seen=len(visits)
+    total=len(eligible)
+    for item in chosen:
+        item['origine']='SCANNER_KRAKEN_1H'
+        item['osservato_utc']=now_iso
+        item['ciclo_scanner']=cycle
+    return chosen,{'ciclo':cycle,'ultime_analisi':visits,
+                   'ticker_precedente':ticker_base,
+                   'mercati_osservati_ticker':len(markets),
+                   'universo_ammissibile':total,
+                   'universo_escluso':sum(excluded.values()),
+                   'esclusioni_per_motivo':excluded,
+                   'esclusioni_esempi':examples,
+                   'ammissibili_non_campionati':total-len(pool),
+                   'universo_esaminato_almeno_una_volta':seen,
+                   'universo_mai_esaminato':total-seen,
+                   'copertura_progressiva_pct':round(100*seen/total,2) if total else None,
+                   'budget_ohlc_1h':max_requests,
+                   'richieste_ohlc_1h':len(pool),
+                   'campionati':len(pool),'analizzati':len(pool)-len(issues),
                    'scelti':len(chosen),
                    'fasce_esaminate':{t:sum(x['fascia_liquidita']==t for x in pool)
                                       for t in LIQUIDITY_TIERS},
@@ -237,6 +356,6 @@ def scan(markets, scanner, kraken, now, max_requests=MAX_SCREEN):
                                     for x in pool],
                    'categorie':[{'token':x['token'],'categoria':x['categoria']} for x in chosen],
                    'limiti':issues,
-                   'ambito':'24 o meno token: 5 gruppi giornalieri × 3 fasce liquidità; opportunità non esaustive, non segnali di acquisto',
+                   'ambito':'Massimo 24 OHLC 1h per ciclo, rotazione tra tutte le fasce; copertura progressiva solo dell universo ticker ammissibile, non dell intera lista Kraken senza filtro',
                    'restrizioni_see_note':NON_NEGOZIABILI_SEE,
                    'negoziabilita_personale':'NON VERIFICATA: controllo finale nella app Kraken Pro richiesto'},hourly_cache

@@ -230,3 +230,110 @@ def collect(portfolio, source, *, asset_pairs=None, fetch=None, now=None,
         entry["confronto_figure_4tf"] = kdd_candles.compare_context(entry["timeframe"])
         result["posizioni"].append(entry)
     return result
+
+
+def collect_candidates(candidates, *, asset_pairs=None, fetch=None, now=None,
+                       old_4h=None, max_queries=16, pause=None):
+    """The existing KDD-08 chart/figure analyzers for up to four scanner assets.
+
+    No wallet data, invented OHLC, independent ranking or new producer. Every
+    shortlisted row survives partial availability and a mismatched pair.
+    The same exact AssetPairs identity is checked at each OHLC request.
+    """
+    import serve
+    now=now or desk.NOW()
+    fetch=fetch or desk.kraken
+    pause=time.sleep if pause is None else pause
+    if not isinstance(candidates,list) or len(candidates)>4:
+        raise ValueError('KDD-07: massimo quattro candidati')
+    if type(max_queries) is not int or not 0<=max_queries<=16:
+        raise ValueError('KDD-07: budget OHLC candidati non valido')
+    result={'schema':1,'fonte':SOURCE,'creato_utc':now.isoformat(timespec='seconds'),
+            'richieste_ohlc':0,'riusi_4h':0,'budget_ohlc':max_queries,
+            'candidati':[],'limite':'Coppie pubbliche; nessuna attestazione account, ordine o prezzo eseguibile'}
+    try:
+        catalog=serve.spot_catalog(lambda name:
+            asset_pairs if asset_pairs is not None else fetch('AssetPairs'))
+        catalog_error=None
+    except (OSError,RuntimeError,ValueError,TypeError,KeyError) as exc:
+        catalog={}
+        catalog_error=type(exc).__name__+': catalogo Kraken non verificabile'
+    seen_tokens=set()
+    for index,row in enumerate(candidates):
+        token=row.get('token') if isinstance(row,dict) else None
+        key=row.get('kraken_pair_key') if isinstance(row,dict) else None
+        pair=row.get('coppia_analisi') if isinstance(row,dict) else None
+        entry={'indice':index,'token':token,'coppia':pair,'pair_key':key,
+               'stato':'IN_ANALISI',
+               'timeframe':{label:{'timeframe':label,'stato':'NON_DISPONIBILE',
+                                   'motivo':'Non acquisito'} for label,_ in LABELS}}
+        canonical=canonical_base(token) if isinstance(token,str) else None
+        if not canonical or canonical in seen_tokens:
+            entry.update(stato='IDENTITA_ASSENTE_O_DUPLICATA')
+        elif catalog_error:
+            entry.update(stato='CATALOGO_NON_DISPONIBILE',motivo=catalog_error)
+        elif not isinstance(key,str) or not isinstance(pair,str) or key not in catalog:
+            entry.update(stato='COPPIA_NON_VERIFICATA')
+        else:
+            meta=catalog[key]
+            if (meta['pair']!=pair or
+                canonical_base(meta['base'])!=canonical or
+                meta['quote'] not in QUOTES):
+                entry.update(stato='COPPIA_DIVERSA_O_NON_SPOT')
+            else:
+                entry['_meta']=meta
+        if canonical:seen_tokens.add(canonical)
+        if entry['stato']!='IN_ANALISI':
+            for label,_ in LABELS:
+                entry['timeframe'][label]['motivo']=entry['stato']
+        result['candidati'].append(entry)
+    cache={}
+    for label,tf in LABELS:
+        for entry in result['candidati']:
+            meta=entry.get('_meta')
+            if not meta:continue
+            cachekey=(meta['pair_key'],label)
+            if cachekey not in cache:
+                frame=None
+                if label=='4H' and isinstance(old_4h,dict):
+                    try:
+                        frame=from_old_4h(old_4h.get(entry['token']),meta,now)
+                    except (KeyError,ValueError,TypeError,OverflowError):
+                        frame=None
+                    if frame is not None:result['riusi_4h']+=1
+                if frame is None:
+                    if result['richieste_ohlc']>=max_queries:
+                        cache[cachekey]={'timeframe':label,'stato':'RINVIATO_BUDGET',
+                                         'motivo':'Budget OHLC massimo raggiunto'}
+                    else:
+                        result['richieste_ohlc']+=1
+                        try:
+                            raw=fetch('OHLC',pair=meta['pair_key'],
+                                      interval=charts.TIMEFRAMES[tf][0])
+                            checked=serve.checked_spot_ohlc(raw,meta)
+                            frame=charts.data_from_kraken_ohlc(
+                                checked,tf,now=now,pair=meta['pair'],
+                                token=meta['base'],pair_key=meta['pair_key'])
+                        except (OSError,RuntimeError,ValueError,KeyError,
+                                TypeError,IndexError,OverflowError) as exc:
+                            cache[cachekey]={'timeframe':label,'stato':'NON_DISPONIBILE',
+                                             'motivo':type(exc).__name__+': '+str(exc)[:120]}
+                        pause(.25)
+                if cachekey not in cache:
+                    try:
+                        cache[cachekey]=analyze_frame(frame,now)
+                    except (KeyError,ValueError,TypeError,IndexError,
+                            OverflowError,ZeroDivisionError) as exc:
+                        cache[cachekey]={'timeframe':label,'stato':'NON_VALIDO',
+                                         'motivo':type(exc).__name__+': serie/figure non verificabili'}
+            entry['timeframe'][label]=cache[cachekey]
+    for entry in result['candidati']:
+        entry.pop('_meta',None)
+        if entry['stato']=='IN_ANALISI':
+            frames=list(entry['timeframe'].values())
+            entry['stato']=('COMPLETO' if all(v['stato']=='AGGIORNATO'
+                                             for v in frames) else 'PARZIALE')
+        entry['confronto_figure_4tf']=kdd_candles.compare_context(entry['timeframe'])
+        entry['timeframe_attuali']=sum(v['stato']=='AGGIORNATO'
+                                    for v in entry['timeframe'].values())
+    return result
