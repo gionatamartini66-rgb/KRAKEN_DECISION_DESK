@@ -80,6 +80,8 @@ class EconomicEvidenceTests(unittest.TestCase):
         phase = [0]
 
         def public_source(url, timeout=12):
+            if "/coins/markets?" in url:
+                raise OSError("Batch not in legacy fixture: exercise individual fallback")
             if "/releases/latest" in url:
                 repo = url.split("/repos/")[1].split("/releases/")[0]
                 return json.dumps({"html_url": "https://github.com/" + repo +
@@ -513,6 +515,19 @@ class EconomicEvidenceTests(unittest.TestCase):
         rows=at_gpt["evidenze_economiche_alla_lettura"]
         self.assertEqual(len(rows["posizioni"]),10)
         self.assertEqual(len(rows["candidati"]),1)
+        self.assertEqual(rows["copertura_tokenomics"]["posizioni"]["totali"],10)
+        self.assertEqual(rows["copertura_tokenomics"]["candidati"]["totali"],1)
+        self.assertEqual(len([r for r in rows["posizioni"]
+                              if isinstance(r.get("quadro_tokenomics"),dict)]),10)
+        self.assertEqual(rows["posizioni"][tokens.index("BTC")]
+                         ["quadro_tokenomics"]["token"],"BTC")
+        self.assertTrue(rows["posizioni"][tokens.index("SOL")]
+                        ["quadro_tokenomics"]["controipotesi"])
+        self.assertEqual(rows["candidati"][0]["quadro_tokenomics"]["token"],"ZEC")
+        self.assertEqual(rows["candidati"][0]["quadro_tokenomics"]["calendario"]
+                         ["categoria"],"NON_VERIFICATO")
+        self.assertIsNone(rows["candidati"][0]["quadro_tokenomics"]
+                          ["supply"]["offerta_circolante"])
         self.assertEqual(rows["posizioni"][tokens.index("BTC")]["evento"]["tag"],"v32.1")
         self.assertEqual(rows["posizioni"][tokens.index("SOL")]["evento"]["tag"],"v4.4.1")
         self.assertIsNone(rows["candidati"][0]["fondamentali"]["prossimo_unlock_utc"])
@@ -525,6 +540,10 @@ class EconomicEvidenceTests(unittest.TestCase):
         self.assertNotEqual(old["mercato"]["stato"],"RECENTE")
         self.assertEqual(old["evidenze_economiche_alla_lettura"]["regime"]
                          ["qualita"],"SCADUTO")
+        self.assertEqual(old["evidenze_economiche_alla_lettura"]
+                         ["copertura_tokenomics"]["posizioni"]["supply_attuale"],0)
+        self.assertTrue(all(r["quadro_tokenomics"]["supply"]["stato"]!="VERIFICATO"
+                            for r in old["evidenze_economiche_alla_lettura"]["posizioni"]))
         changed=copy.deepcopy(bundle)
         changed["packet"]["evidenze_multifonte"]["economia"]["candidati"][0]["token"]="BTC"
         changed["packet_sha256"]=bridge.digest(changed["packet"])
@@ -549,6 +568,280 @@ class EconomicEvidenceTests(unittest.TestCase):
                 "regime":{"stato":"RIALZISTA","qualita":"PARZIALE"},
                 "macro":e.macro([],T)}
         return source,positions,shortlist
+
+    def test_cp1_current_supply_plus_independent_issuance_is_not_called_missing(self):
+        row={"token":"SOL","identita":self.ident("SOL"),
+             "fondamentali":e.fundamentals(
+                 self.ident("SOL"),self.market(self.ident("SOL")),T,T)}
+        primary={"politiche_emissioni":[{
+            "progetto_id":"solana","stato":"OSSERVATO",
+            "stato_alla_lettura":"OSSERVATO",
+            "fonte":"https://api.mainnet.solana.com",
+            "acquisito_utc":T.isoformat()}]}
+        view=e.tokenomics_view(row,primary)
+        self.assertEqual(view["stato"],"SUPPLY_E_POLITICA_EMISSIONE")
+        self.assertEqual(view["supply"]["stato"],"VERIFICATO")
+        self.assertEqual(view["politica_emissione"]["stato"],"OSSERVATO")
+        self.assertEqual(view["calendario"]["categoria"],"NON_VERIFICATO")
+        self.assertEqual(view["calendario"]["vendita"],"NON_ATTESTATA")
+
+    def test_cp1_single_public_batch_covers_ten_holdings_two_candidates_and_stale_reuse(self):
+        """Actual producer and GPT reader, public batch JSON fixture; no wallet."""
+        import json
+        import urllib.error
+        from urllib.parse import urlparse,parse_qs
+        import dossier_trade as producer
+        from unittest import mock
+        assets=["BNB","FET","JUP","NEAR","RENDER","SOL","SUI","ETH","BTC","XRP"]
+        selected=["ARB","STRK"]
+        all_tokens=assets+selected
+        pair_catalog={t+"EUR":{"wsname":t+"/EUR","status":"online"}
+                      for t in all_tokens}
+        wallet={"posizioni":[{"token":t} for t in assets]}
+        four={"posizioni":[{"token":t,"coppia":t+"/EUR",
+                            "pair_key":t+"EUR"} for t in assets]}
+        shortlist=[{"token":t,"coppia_analisi":t+"/EUR",
+                    "kraken_pair_key":t+"EUR"} for t in selected]
+        phase=[0]
+        requests=[]
+        def public_source(url,timeout=12):
+            requests.append(url)
+            if url.startswith(e.CG_MARKETS):
+                if phase[0]==1:
+                    raise urllib.error.HTTPError(url,429,"batch limited",{},None)
+                ids=parse_qs(urlparse(url).query)["ids"][0].split(",")
+                if phase[0]==2:
+                    ids=ids[:-1]  # one absent ID is NOT a zero-supply token
+                if phase[0]==3:
+                    ids.append("invalid-unknown-project")
+                rows=[]
+                for pid in ids:
+                    token=next((t for t in all_tokens if e.PROJECTS[t][0]==pid),None)
+                    if token is None:
+                        rows.append({"id":pid,"name":"Unknown","symbol":"unknown"})
+                        continue
+                    raw=self.market(self.ident(token),max_supply=100)
+                    md=raw["market_data"]
+                    rows.append({"id":pid,"symbol":raw["symbol"],
+                                 "name":raw["name"],
+                                 "last_updated":md["last_updated"],
+                                 "market_cap":md["market_cap"]["usd"],
+                                 "fully_diluted_valuation":md["fully_diluted_valuation"]["usd"],
+                                 "circulating_supply":md["circulating_supply"],
+                                 "total_supply":md["total_supply"],
+                                 "max_supply":md["max_supply"]})
+                return json.dumps(rows).encode()
+            raise OSError("Individual metadata/release provider unavailable")
+        with mock.patch.object(producer.desk,"request",side_effect=public_source),\
+             mock.patch.object(producer.time,"sleep"):
+            first=producer.economic_evidence(
+                {"feed":[]},wallet,four,shortlist,T,asset_pairs=pair_catalog)
+            direct=e.at_read(first,wallet["posizioni"],shortlist,T)
+            self.assertEqual(first["richieste_batch_coingecko"],1)
+            self.assertEqual(first["copertura_batch_fondamentali"]["id_restituiti"],12)
+            self.assertLessEqual(first["richieste_effettuate"],9)
+            self.assertEqual(direct["copertura_tokenomics"]["posizioni"]["supply_attuale"],10)
+            self.assertEqual(direct["copertura_tokenomics"]["candidati"]["supply_attuale"],2)
+            self.assertTrue(all(r["fondamentali"]["fonte"].startswith(e.CG_MARKETS)
+                                for r in direct["posizioni"]+direct["candidati"]))
+            # Source URLs are rechecked for the actual project in the reader.
+            forged=copy.deepcopy(first)
+            forged["posizioni"][0]["fondamentali"]["fonte"]=e.market_batch_url(["bitcoin"])
+            with self.assertRaises(ValueError):
+                e.at_read(forged,wallet["posizioni"],shortlist,T)
+            phase[0]=1
+            second=producer.economic_evidence(
+                {"feed":[]},wallet,four,shortlist,T+dt.timedelta(hours=1),
+                asset_pairs=pair_catalog,previous=first)
+            held=e.at_read(second,wallet["posizioni"],shortlist,T+dt.timedelta(hours=1))
+            self.assertEqual(second["richieste_batch_coingecko"],1)
+            self.assertEqual(second["richieste_coingecko"],0)
+            self.assertEqual(held["copertura_tokenomics"]["posizioni"]["supply_attuale"],10)
+            self.assertTrue(all(r["fondamentali"].get("origine")=="CACHE_LOCALE_FONTE_PUBBLICA"
+                                for r in held["posizioni"]))
+            older=e.at_read(held,wallet["posizioni"],shortlist,T+dt.timedelta(days=3))
+            self.assertEqual(older["copertura_tokenomics"]["posizioni"]["supply_attuale"],0)
+            phase[0]=2
+            absent=producer.economic_evidence({"feed":[]},wallet,four,shortlist,
+                               T+dt.timedelta(minutes=2),asset_pairs=pair_catalog)
+            self.assertEqual(absent["copertura_batch_fondamentali"]["id_restituiti"],11)
+            self.assertEqual(sum(r["fondamentali"]["stato"]=="VERIFICATO"
+                                 for r in absent["posizioni"]+absent["candidati"]),11)
+            phase[0]=3
+            ambiguous=producer.economic_evidence({"feed":[]},wallet,four,shortlist,
+                                  T+dt.timedelta(minutes=3),asset_pairs=pair_catalog)
+            self.assertEqual(ambiguous["copertura_batch_fondamentali"]["id_restituiti"],0)
+            self.assertEqual(sum(r["fondamentali"]["stato"]=="VERIFICATO"
+                                 for r in ambiguous["posizioni"]+ambiguous["candidati"]),0)
+
+    def test_cp1_coingecko_rate_limit_cannot_block_independent_primary_issuance(self):
+        import json
+        import urllib.error
+        import dossier_trade as producer
+        import kdd_network_defi
+        from unittest import mock
+        token="SOL"
+        source={"feed":[]}
+        portfolio={"posizioni":[{"token":token}]}
+        four={"posizioni":[{"token":token,"coppia":"SOL/EUR",
+                            "pair_key":"SOLEUR"}]}
+        pairs={"SOLEUR":{"wsname":"SOL/EUR","status":"online"}}
+        called=[]
+        def fetch(url,timeout=12):
+            called.append(url)
+            if "api.coingecko.com" in url:
+                raise urllib.error.HTTPError(url,429,"rate limited",{},None)
+            if "/pulls?" in url or "/issues?" in url or "security-advisories?" in url:
+                return b"[]"
+            raise OSError("Other public primary source not available in this test")
+        def rpc(url,payload=None):
+            self.assertEqual(url,"https://api.mainnet.solana.com")
+            self.assertEqual(payload["method"],"getInflationGovernor")
+            called.append(url+"#"+payload["method"])
+            return {"result":{"initial":.08,"taper":.15,"terminal":.015,
+                              "foundation":0.0,"foundationTerm":0}}
+        with mock.patch.object(producer.desk,"request",side_effect=fetch),\
+             mock.patch.object(kdd_network_defi,"_http",side_effect=rpc),\
+             mock.patch.object(producer.time,"sleep"):
+            with producer.primary_refresh_context():
+                output=producer.economic_evidence(
+                    source,portfolio,four,[],T,asset_pairs=pairs)
+        self.assertEqual(output["richieste_coingecko"],1)
+        self.assertEqual(len([v for v in called
+                              if v.startswith("https://api.coingecko.com")]),1)
+        self.assertGreater(output["monitor_fonti"]["richieste_pubbliche"],0)
+        issuance=output["monitor_fonti"]["politiche_emissioni"][0]
+        self.assertEqual(issuance["stato"],"OSSERVATO")
+        self.assertEqual(issuance["stato_unlock"],"NON_ATTESTATO")
+        self.assertEqual(output["posizioni"][0]["fondamentali"]["stato"],
+                         "NON_DISPONIBILE_FONTE")
+        reviewed=e.at_read(output,portfolio["posizioni"],[],T)
+        view=reviewed["posizioni"][0]["quadro_tokenomics"]
+        self.assertEqual(view["stato"],"FONTE_PRIMARIA_SENZA_SUPPLY_ATTUALE")
+        self.assertEqual(view["politica_emissione"]["stato"],"OSSERVATO")
+        self.assertIsNone(view["supply"]["offerta_circolante"])
+        self.assertEqual(reviewed["copertura_tokenomics"]["posizioni"]
+                         ["fonti_emissione_attuali"],1)
+
+    def test_cp1_supply_anomalies_are_not_verified_and_not_unlocks(self):
+        ident=self.ident("BTC")
+        for attribute,value,expected in (
+                ("total_supply",8,"CIRCOLANTE_SUPERIORE_AL_TOTALE"),
+                ("max_supply",5,"CIRCOLANTE_SUPERIORE_AL_MASSIMO"),
+                ("max_supply",0,"MASSIMO_ZERO")):
+            with self.subTest(attribute=attribute,value=value):
+                response=self.market(ident)
+                response["market_data"][attribute]=value
+                observed=e.fundamentals(ident,response,T,T)
+                self.assertEqual(observed["stato"],"ANOMALIA_SUPPLY")
+                self.assertIn(expected,observed["anomalie_supply"])
+                self.assertIsNone(observed["emissione_residua_massima_su_circolante_pct"])
+                self.assertEqual(observed["unlock"],"NON_VERIFICATO")
+                self.assertEqual(observed["vesting"],"NON_VERIFICATO")
+                e.verify_supply_at_read(observed)
+                source,positions,shortlist=self.sample()
+                source["posizioni"][0]["fondamentali"]=observed
+                current=e.at_read(source,positions,shortlist,T)
+                self.assertEqual(current["posizioni"][0]["fondamentali"]["stato"],
+                                 "ANOMALIA_SUPPLY")
+                expired=e.at_read(source,positions,shortlist,T+dt.timedelta(days=3))
+                self.assertEqual(expired["posizioni"][0]["fondamentali"]["stato"],
+                                 "SCADUTO")
+                self.assertEqual(expired["posizioni"][0]["quadro_tokenomics"]
+                                 ["supply"]["stato"],"SCADUTO")
+                self.assertIsNone(expired["posizioni"][0]["quadro_tokenomics"]
+                                  ["supply"]["offerta_massima"])
+        no_max=e.fundamentals(ident,self.market(ident,max_supply=None),T,T)
+        self.assertEqual(no_max["stato"],"VERIFICATO")
+        self.assertEqual(no_max["diluizione"],
+                         "MAX_NON_DICHIARATO_NON_EQUIVALE_A_ILLIMITATO")
+
+    def test_cp1_derived_supply_and_calendar_not_forged_at_gpt_read(self):
+        import kdd_economic_sources as sources
+        source,positions,shortlist=self.sample()
+        source["fonti_economiche"]=e.sources_matrix()
+        source["monitor_fonti"]=sources.collect(
+            T,source,{},lambda url: (_ for _ in ()).throw(
+                AssertionError("Public source not acquired outside refresh")),
+            network_allowed=False,skipped_reason="FUORI_REFRESH")
+        read=e.at_read(source,positions,shortlist,T)
+        self.assertEqual(read["copertura_tokenomics"]["posizioni"]["totali"],2)
+        self.assertEqual(read["copertura_tokenomics"]["posizioni"]["supply_attuale"],2)
+        self.assertEqual(read["copertura_tokenomics"]["candidati"]["totali"],1)
+        self.assertEqual(read["copertura_tokenomics"]["candidati"]["supply_attuale"],1)
+        for group in ("posizioni","candidati"):
+            for row in read[group]:
+                view=row["quadro_tokenomics"]
+                self.assertEqual(view["token"],row["token"])
+                self.assertEqual(view["supply"]["stato"],"VERIFICATO")
+                self.assertEqual(view["stato"],"SOLO_SUPPLY_AGGREGATA")
+                self.assertEqual(view["calendario"]["categoria"],"NON_VERIFICATO")
+                self.assertEqual(view["calendario"]["realizzazione"],"NON_ATTESTATA")
+                self.assertTrue(view["controipotesi"])
+        reread=e.at_read(read,positions,shortlist,T)
+        self.assertEqual(read["copertura_tokenomics"],reread["copertura_tokenomics"])
+        self.assertEqual(read["posizioni"][0]["quadro_tokenomics"],
+                         reread["posizioni"][0]["quadro_tokenomics"])
+        old=e.at_read(read,positions,shortlist,T+dt.timedelta(days=3))
+        self.assertEqual(old["copertura_tokenomics"]["posizioni"]["supply_attuale"],0)
+        self.assertEqual(old["posizioni"][0]["quadro_tokenomics"]["supply"]["stato"],
+                         "SCADUTO")
+        self.assertIsNone(old["posizioni"][0]["quadro_tokenomics"]["supply"]["capitalizzazione_usd"])
+        altered=copy.deepcopy(source)
+        altered["posizioni"][0]["fondamentali"][
+            "emissione_residua_massima_su_circolante_pct"]=999999
+        with self.assertRaisesRegex(ValueError,"supply inconsistency"):
+            e.at_read(altered,positions,shortlist,T)
+        altered=copy.deepcopy(source)
+        altered["posizioni"][0]["fondamentali"]["unlock"]="VERIFICATO"
+        with self.assertRaisesRegex(ValueError,"invented unlock"):
+            e.at_read(altered,positions,shortlist,T)
+        altered=copy.deepcopy(read)
+        altered["posizioni"][0]["quadro_tokenomics"]["supply"]["fdv_usd"]=12345
+        with self.assertRaisesRegex(ValueError,"Tokenomics at read distorted"):
+            e.at_read(altered,positions,shortlist,T)
+
+    def test_cp1_official_sui_forecast_reaches_correct_asset_view(self):
+        import kdd_economic_sources as sources
+        ident=self.ident("SUI")
+        position={"indice":0,"token":"SUI","identita":ident,
+            "fondamentali":e.fundamentals(ident,self.market(ident),T,T),
+            "evento":e.release_event(ident,None,T,T)}
+        source={"schema":e.VERSION,"acquisito_utc":T.isoformat(),
+                "posizioni":[position],"candidati":[],
+                "regime":{"stato":"INDETERMINATO","qualita":"INSUFFICIENTE"},
+                "macro":e.macro([],T),"fonti_economiche":e.sources_matrix()}
+        schedule=[
+            {"year":2026,"month":10,"circulatingSupplyValue":4100000000,
+             "circulatingSupplyPercentage":.41},
+            {"year":2026,"month":11,"circulatingSupplyValue":4139000000,
+             "circulatingSupplyPercentage":.4139},
+            {"year":2026,"month":12,"circulatingSupplyValue":4159000000,
+             "circulatingSupplyPercentage":.4159},
+            {"year":2027,"month":1,"circulatingSupplyValue":4200000000,
+             "circulatingSupplyPercentage":.42}]
+        def fetch(url):
+            if url==sources.SUI_CIRCULATION:
+                return __import__("json").dumps(schedule).encode()
+            raise OSError("No independent primary endpoint in fixture")
+        source["monitor_fonti"]=sources.collect(
+            T,source,{},fetch,network_allowed=True,
+            asset_pairs={"SUIEUR":{"status":"online","wsname":"SUI/EUR"}})
+        read=e.at_read(source,[{"token":"SUI"}],[],T)
+        view=read["posizioni"][0]["quadro_tokenomics"]
+        self.assertEqual(view["stato"],"SUPPLY_E_DOCUMENTO_PRIMARIO")
+        self.assertEqual(view["calendario"]["categoria"],
+                         "PROIEZIONE_CIRCOLAZIONE_NON_UNLOCK")
+        self.assertEqual(view["calendario"]["numero_eventi_documentati"],0)
+        self.assertEqual(view["calendario"]["fonte"],sources.SUI_CIRCULATION)
+        self.assertEqual(read["copertura_tokenomics"]["posizioni"]
+                         ["documenti_primari_attuali"],1)
+        # Same reader returns the observation as history, not future unlock.
+        old=e.at_read(read,[{"token":"SUI"}],[],T+dt.timedelta(days=36))
+        self.assertEqual(old["posizioni"][0]["quadro_tokenomics"]["calendario"]
+                         ["categoria"],"STORICO_NON_CONFERMATO")
+        self.assertEqual(old["copertura_tokenomics"]["posizioni"]
+                         ["documenti_primari_attuali"],0)
 
     def test_all_assets_remain_even_when_missing(self):
         source,positions,shortlist=self.sample()
@@ -628,6 +921,8 @@ class EconomicEvidenceTests(unittest.TestCase):
                     "kraken_pair_key":"ADAEUR"}]
 
         def response(url, timeout=12):
+            if "/coins/markets?" in url:
+                raise OSError("Batch not in legacy fixture: exercise individual fallback")
             if "/releases/latest" in url:
                 repo=url.split("/repos/")[1].split("/releases/")[0]
                 return json.dumps({"html_url":"https://github.com/"+repo+"/releases/tag/v1",
@@ -777,6 +1072,8 @@ class AdaptivePortfolioTests(unittest.TestCase):
         seen = []
         def response(url, timeout=12):
             seen.append(url)
+            if "/coins/markets?" in url:
+                raise OSError("No batch in this legacy fixture")
             if "/search?query=ZEC" in url:
                 return json.dumps(self.search).encode()
             if "/tickers?exchange_ids=kraken" in url:
@@ -1063,6 +1360,8 @@ class AdaptivePortfolioTests(unittest.TestCase):
         seen = []
         def source(url, timeout=12):
             seen.append(url)
+            if "/coins/markets?" in url:
+                raise OSError("No batch in this legacy fixture")
             if url.endswith("/search?query=DOGE"):
                 return json.dumps({"coins": [
                     {"id": "dogecoin", "symbol": "doge", "name": "Dogecoin"},

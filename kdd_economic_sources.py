@@ -1182,8 +1182,8 @@ def _supply_samples(roster, old, now):
                       if isinstance(r.get("fondamentali"), dict)
                       and r["fondamentali"].get("stato") == "VERIFICATO"
                       and r["fondamentali"].get("origine") == "ACQUISIZIONE_PUBBLICA"
-                      and r["fondamentali"].get("fonte") ==
-                      "https://api.coingecko.com/api/v3/coins/" + project), None)
+                      and __import__("kdd_economics").fundamental_source_valid(
+                          r["fondamentali"].get("fonte"),project)), None)
         if not fresh or not _time(fresh.get("rilevato_utc")):
             continue
         t = fresh["rilevato_utc"]

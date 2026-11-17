@@ -5,7 +5,7 @@ import math
 import json
 import re
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote, parse_qs
 
 # Il file JSON e' un registro dati modificabile senza modificare il motore Python.
 # Le nuove identita' non vengono aggiunte automaticamente al registro curato:
@@ -32,6 +32,8 @@ PROJECT_CAVEATS = {k: v["caveat"] for k, v in _CURATED.items()
                    if isinstance(v.get("caveat"), str)}
 CG = "https://api.coingecko.com/api/v3/coins/"
 CG_SEARCH = "https://api.coingecko.com/api/v3/search?query="
+CG_MARKETS = "https://api.coingecko.com/api/v3/coins/markets?"
+MAX_CG_BATCH_IDS = 50
 # One search plus every exact-symbol market check must fit the nine-request budget.
 MAX_MARKET_CANDIDATES = 8
 VERSION = "kdd-economic-v001"
@@ -277,7 +279,140 @@ def resolve_public(token, pair, search_result, market_results, now):
             "coingecko_id": coin["id"], "progetto": coin["name"],
             "prova_mercato": proof}
 
-def fundamentals(identity, payload, now, acquired):
+def market_batch_url(ids):
+    """Deterministic public /coins/markets supply request for verified IDs."""
+    if (not isinstance(ids,(list,tuple)) or not 1<=len(ids)<=MAX_CG_BATCH_IDS
+            or len(set(ids))!=len(ids)
+            or any(not isinstance(pid,str) or not re.fullmatch(r"[a-z0-9-]{2,120}",pid)
+                   for pid in ids)):
+        raise ValueError("Batch CoinGecko IDs non validi")
+    return (CG_MARKETS+"vs_currency=usd&ids="
+            +quote(",".join(sorted(ids)),safe=",")
+            +"&order=market_cap_desc&per_page=50&page=1&sparkline=false")
+
+
+def fundamental_source_valid(url,project_id):
+    """Validate exact source URL: one /coins ID or this registered batch."""
+    if not isinstance(project_id,str) or not re.fullmatch(r"[a-z0-9-]{2,120}",project_id):
+        return False
+    if url==CG+project_id:
+        return True
+    if not isinstance(url,str) or not url.startswith(CG_MARKETS):
+        return False
+    parsed=urlparse(url)
+    if (parsed.scheme!="https" or parsed.hostname!="api.coingecko.com"
+            or parsed.username or parsed.password or parsed.fragment
+            or parsed.path!="/api/v3/coins/markets"):
+        return False
+    query=parse_qs(parsed.query,keep_blank_values=True)
+    if set(query)!=set(("vs_currency","ids","order","per_page","page","sparkline")):
+        return False
+    candidates=query["ids"]
+    if len(candidates)!=1:
+        return False
+    ids=candidates[0].split(",")
+    try:
+        return project_id in ids and market_batch_url(ids)==url
+    except ValueError:
+        return False
+
+
+def market_batch_fundamentals(identity,row,now,acquired,source_url):
+    """Adapt a real /coins/markets item to the existing fundamentals engine.
+
+    This is only a formatting adapter. No source-less synthetic supply is used:
+    the exact batch HTTP request is recorded and verified at GPT read time.
+    """
+    if (not isinstance(row,dict) or not isinstance(identity,dict)
+            or not fundamental_source_valid(source_url,identity.get("coingecko_id"))):
+        return fundamentals(identity,None,now,acquired)
+    fields=("market_cap","fully_diluted_valuation",
+            "circulating_supply","total_supply","max_supply")
+    data={key:row.get(key) for key in fields}
+    raw={"id":row.get("id"),"symbol":row.get("symbol"),
+         "name":row.get("name"),"market_data":dict(data,
+             last_updated=row.get("last_updated"),
+             market_cap={"usd":data["market_cap"]},
+             fully_diluted_valuation={"usd":data["fully_diluted_valuation"]})}
+    return fundamentals(identity,raw,now,acquired,source_url=source_url)
+
+
+def _supply_consistency(data):
+    """Structural ratios are observations, not unlock or sell-volume claims."""
+    circ,total,maximum=(data.get(k) for k in
+                        ("offerta_circolante","offerta_totale","offerta_massima"))
+    for field in ("offerta_circolante","offerta_totale","offerta_massima",
+                  "capitalizzazione_usd","fdv_usd"):
+        v=data.get(field)
+        if v is not None and (type(v) not in (float,int) or
+                              not math.isfinite(v) or v<0):
+            raise ValueError("Dato economico numerico non valido: "+field)
+    diagnostics={"rapporto_fdv_cap":None,
+                 "quota_circolante_su_totale_pct":None,
+                 "emissione_residua_massima_su_circolante_pct":None,
+                 "diluizione":"NON_CALCOLABILE"}
+    cap,fdv=data.get("capitalizzazione_usd"),data.get("fdv_usd")
+    if cap and fdv:
+        diagnostics["rapporto_fdv_cap"]=round(fdv/cap,4)
+    inconsistencies=[]
+    if circ is not None and total is not None and circ>total:
+        inconsistencies.append("CIRCOLANTE_SUPERIORE_AL_TOTALE")
+    if circ is not None and maximum is not None and maximum>0 and circ>maximum:
+        inconsistencies.append("CIRCOLANTE_SUPERIORE_AL_MASSIMO")
+    if total is not None and maximum is not None and maximum>0 and total>maximum:
+        inconsistencies.append("TOTALE_SUPERIORE_AL_MASSIMO")
+    if maximum==0:
+        diagnostics["diluizione"]="MAX_ZERO_DATO_ANOMALO"
+        inconsistencies.append("MASSIMO_ZERO")
+    elif maximum is None:
+        diagnostics["diluizione"]="MAX_NON_DICHIARATO_NON_EQUIVALE_A_ILLIMITATO"
+    elif circ is not None and circ>maximum:
+        diagnostics["diluizione"]="SUPPLY_MAX_INFERIORE_AL_CIRCOLANTE_ANOMALIA"
+    elif circ is not None and circ>0:
+        diagnostics["diluizione"]="RAPPORTO_CALCOLABILE"
+    elif circ==0:
+        diagnostics["diluizione"]="CIRCOLANTE_ZERO"
+    if not inconsistencies:
+        if circ is not None and total is not None and total>0:
+            diagnostics["quota_circolante_su_totale_pct"]=round(100*circ/total,4)
+        if circ is not None and circ>0 and maximum is not None and maximum>0:
+            diagnostics["emissione_residua_massima_su_circolante_pct"]=round(
+                100*(maximum-circ)/circ,4)
+    return diagnostics,sorted(set(inconsistencies))
+
+
+def verify_supply_at_read(fundamental):
+    """Recheck numeric source semantics at every packet/bridge consumption.
+
+    Source text plus packet checksum alone cannot attest the economic values.
+    Ratios are recomputed; missing raw values never become zeros, schedules
+    or proof of sale. Legacy readings without our derived fields stay readable.
+    """
+    if not isinstance(fundamental,dict):
+        raise ValueError("Fondamentali non strutturati")
+    if fundamental.get("stato") not in ("VERIFICATO","SCADUTO","ANOMALIA_SUPPLY"):
+        return
+    expected,anomalies=_supply_consistency(fundamental)
+    if fundamental.get("fonte_supply")=="COINGECKO_AGGREGATORE_NON_SCHEDULE_PRIMARIO":
+        for k in ("rapporto_fdv_cap","quota_circolante_su_totale_pct",
+                  "emissione_residua_massima_su_circolante_pct","diluizione"):
+            if fundamental.get(k)!=expected[k]:
+                raise ValueError("Fundamentals derived supply inconsistency: "+k)
+        if sorted(fundamental.get("anomalie_supply") or [])!=anomalies:
+            raise ValueError("Fundamentals anomaly evidence mismatch")
+        if (anomalies and fundamental.get("stato") not in ("ANOMALIA_SUPPLY","SCADUTO")
+                or not anomalies and fundamental.get("stato")=="ANOMALIA_SUPPLY"):
+            raise ValueError("Fundamentals invalid status for contradictory supply")
+        if (fundamental.get("unlock")!="NON_VERIFICATO" or
+                fundamental.get("vesting")!="NON_VERIFICATO" or
+                fundamental.get("prossimo_unlock_utc") is not None or
+                fundamental.get("fonte_calendario_unlock") is not None):
+            raise ValueError("Fundamentals invented unlock from aggregator")
+    elif anomalies and fundamental.get("stato")=="VERIFICATO":
+        raise ValueError("Contradictory source cannot be verified")
+
+
+def fundamentals(identity, payload, now, acquired, *, source_url=None):
     out = {"stato": "NON_VERIFICATO", "fonte": None, "rilevato_utc": None,
            "acquisito_utc": acquired.isoformat(timespec="seconds"),
            "capitalizzazione_usd": None, "fdv_usd": None,
@@ -286,7 +421,8 @@ def fundamentals(identity, payload, now, acquired):
            "quota_circolante_su_totale_pct": None,
            "emissione_residua_massima_su_circolante_pct": None,
            "fonte_supply": "COINGECKO_AGGREGATORE_NON_SCHEDULE_PRIMARIO",
-           "diluizione": "NON_CALCOLABILE", "unlock": "NON_VERIFICATO",
+           "diluizione": "NON_CALCOLABILE", "anomalie_supply": [],
+           "unlock": "NON_VERIFICATO",
            "vesting": "NON_VERIFICATO", "prossimo_unlock_utc": None,
            "fonte_calendario_unlock": None,
            "limite": "Nessun calendario vesting deducibile dalla supply"}
@@ -309,32 +445,16 @@ def fundamentals(identity, payload, now, acquired):
     values["fdv_usd"] = numeric((m.get("fully_diluted_valuation") or {}).get("usd"))
     out.update(values)
     out["rilevato_utc"] = updated.isoformat(timespec="seconds")
-    out["fonte"] = CG + cg
+    out["fonte"] = source_url if source_url is not None and fundamental_source_valid(source_url,cg) else CG + cg
     age = (now-updated).total_seconds()
     out["stato"] = "VERIFICATO" if age <= 86400 else "SCADUTO"
-    if values["capitalizzazione_usd"] and values["fdv_usd"]:
-        out["rapporto_fdv_cap"] = round(values["fdv_usd"]/values["capitalizzazione_usd"], 4)
-    circulating, total, maximum = (values["offerta_circolante"],
-                                   values["offerta_totale"],
-                                   values["offerta_massima"])
-    if (circulating is not None and total is not None
-            and total > 0 and 0 <= circulating <= total):
-        out["quota_circolante_su_totale_pct"] = round(100 * circulating / total, 4)
-    if (circulating is not None and circulating > 0
-            and maximum is not None and maximum >= circulating):
-        out["emissione_residua_massima_su_circolante_pct"] = round(
-            100 * (maximum - circulating) / circulating, 4)
-    if (circulating is not None and maximum is not None
-            and maximum > 0 and maximum < circulating):
-        out["diluizione"] = "SUPPLY_MAX_INFERIORE_AL_CIRCOLANTE_ANOMALIA"
-        out["limite"] = "Supply numericamente contraddittoria: non inferire emissione o unlock"
-    elif values["offerta_massima"] is None:
-        out["diluizione"] = "MAX_NON_DICHIARATO_NON_EQUIVALE_A_ILLIMITATO"
-    elif values["offerta_massima"] == 0:
-        out["diluizione"] = "MAX_ZERO_DATO_ANOMALO"
-    elif values["offerta_circolante"] is not None:
-        out["diluizione"] = ("RAPPORTO_CALCOLABILE" if values["offerta_circolante"] > 0
-                            else "CIRCOLANTE_ZERO")
+    diagnostics,anomalies=_supply_consistency(values)
+    out.update(diagnostics,anomalie_supply=anomalies)
+    if anomalies:
+        out["stato"]="ANOMALIA_SUPPLY"
+        out["limite"]=("Fonte CoinGecko attribuita ma supply contraddittoria: "
+                       +", ".join(anomalies)
+                       +"; non inferire diluizione, unlock, immissione o vendita")
     return out
 
 
@@ -665,6 +785,117 @@ def decision_context(identity, fundamental, event):
                                  "per release verificare adozione/rete e non solo annuncio"}
 
 
+def tokenomics_view(row, primary):
+    """One per-asset economic view of the already verified source evidence.
+
+    No HTTP here, no second producer, no default unlock dates and no claim
+    that a new token in circulation was sold. Preserves the missing state for
+    every genuine portfolio asset and shortlisted market.
+    """
+    ident=row.get("identita") or {}
+    fund=row.get("fondamentali") or {}
+    project=(ident.get("coingecko_id") if
+             ident.get("stato")=="IDENTITA_VERIFICATA_DA_CATALOGO" else None)
+    def primary_row(name):
+        rows=primary.get(name) if isinstance(primary,dict) else []
+        if not project or not isinstance(rows,list):
+            return None
+        return next((r for r in rows if isinstance(r,dict)
+                     and r.get("progetto_id")==project),None)
+    schedule=primary_row("calendari") or {}
+    issuance=primary_row("politiche_emissioni") or {}
+    valid=fund.get("stato")=="VERIFICATO"
+    anomaly=fund.get("stato")=="ANOMALIA_SUPPLY"
+    remaining=fund.get("emissione_residua_massima_su_circolante_pct") if valid else None
+    schedule_kind=schedule.get("stato","NON_ACQUISITO")
+    schedule_source=schedule.get("fonte")
+    schedule_current=schedule_kind in (
+        "DOCUMENTO_PRIMARIO_CON_SCHEDULE","DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI",
+        "DOCUMENTO_PRIMARIO_REGOLA_VESTING","PROIEZIONE_PRIMARIA_NON_UNLOCK")
+    emission_current=issuance.get("stato_alla_lettura")=="OSSERVATO"
+    if anomaly:
+        state="DATI_SUPPLY_CONTRADDITTORI"
+        hypothesis="I valori aggregati discordanti non permettono di quantificare la diluizione"
+        counter="L'anomalia della fonte non prova una modifica reale dell'offerta"
+    elif not valid and not schedule_current and not emission_current:
+        state="SENZA_PROVE_ECONOMICHE_ATTUALI"
+        hypothesis="Non è possibile quantificare l'esposizione alla diluizione con i dati presenti"
+        counter="Assenza o scadenza della fonte non dimostra tokenomics favorevole o sfavorevole"
+    elif valid and schedule_current:
+        state="SUPPLY_E_DOCUMENTO_PRIMARIO"
+        hypothesis="Una quota non circolante e un piano documentato possono richiedere riesame del rischio di diluizione"
+        counter="Programma, circolazione futura e vendita sono osservazioni diverse"
+    elif valid and emission_current:
+        state="SUPPLY_E_POLITICA_EMISSIONE"
+        hypothesis="I parametri ufficiali di emissione possono modificare nel tempo la supply osservata"
+        counter="Policy di emissione, supply circolante e vendite sono misure distinte"
+    elif schedule_current or emission_current:
+        state="FONTE_PRIMARIA_SENZA_SUPPLY_ATTUALE"
+        hypothesis="Politiche o piani primari richiedono confronto con supply osservata"
+        counter="Senza supply fresca non si puo quantificare la quota effettivamente circolante"
+    else:
+        state="SOLO_SUPPLY_AGGREGATA"
+        hypothesis="La quota ancora non circolante potrebbe modificare la partecipazione economica futura"
+        counter="Supply e FDV non attestano un calendario unlock, emissione eseguita o vendita"
+    if not project:
+        state="IDENTITA_NON_VERIFICATA"
+        hypothesis="Non attribuire supply o documenti di progetto a un ticker ambiguo"
+        counter="L'assenza di identificazione non equivale ad assenza di emissioni"
+    return {
+        "token":row.get("token"),"coppia":ident.get("coppia"),
+        "progetto_id":project,"stato":state,
+        "supply":{
+            "stato":fund.get("stato","NON_DISPONIBILE"),
+            "fonte":fund.get("fonte") if project else None,
+            "rilevato_utc":fund.get("rilevato_utc") if project else None,
+            "acquisito_utc":fund.get("acquisito_utc") if project else None,
+            "offerta_circolante":fund.get("offerta_circolante") if valid else None,
+            "offerta_totale":fund.get("offerta_totale") if valid else None,
+            "offerta_massima":fund.get("offerta_massima") if valid else None,
+            "capitalizzazione_usd":fund.get("capitalizzazione_usd") if valid else None,
+            "fdv_usd":fund.get("fdv_usd") if valid else None,
+            "rapporto_fdv_cap":fund.get("rapporto_fdv_cap") if valid else None,
+            "quota_circolante_su_totale_pct":fund.get("quota_circolante_su_totale_pct") if valid else None,
+            "emissione_residua_massima_su_circolante_pct":remaining,
+            "diluizione":fund.get("diluizione","NON_CALCOLABILE"),
+            "anomalie":fund.get("anomalie_supply",[]) if anomaly else [],
+            "limite":"Dati CoinGecko aggregati, non registro dei token venduti o calendario unlock"},
+        "calendario":{
+            "stato":schedule_kind,"fonte":schedule_source,
+            "acquisito_utc":schedule.get("acquisito_utc"),
+            "categoria":(
+                "UNLOCK_PROGRAMMATO_QUANTITA"
+                if schedule_kind=="DOCUMENTO_PRIMARIO_CON_SCHEDULE" else
+                "MASSIMI_SBLOCCABILI_DATATI"
+                if schedule_kind=="DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI" else
+                "REGOLA_VESTING_SENZA_TRANCHE_ESATTE"
+                if schedule_kind=="DOCUMENTO_PRIMARIO_REGOLA_VESTING" else
+                "PROIEZIONE_CIRCOLAZIONE_NON_UNLOCK"
+                if schedule_kind=="PROIEZIONE_PRIMARIA_NON_UNLOCK" else
+                "STORICO_NON_CONFERMATO"
+                if schedule_kind in ("STORICO_DA_RICONFERMARE",
+                    "PROIEZIONE_STORICA","REGOLA_VESTING_STORICA",
+                    "MASSIMI_DATATI_STORICI") else "NON_VERIFICATO"),
+            "numero_eventi_documentati":len(schedule.get("eventi") or [])
+                if schedule_current else 0,
+            "realizzazione":"NON_ATTESTATA","vendita":"NON_ATTESTATA",
+            "limite":schedule.get("limite") or "Nessun calendario primario associato o corrente"},
+        "politica_emissione":{
+            "stato":issuance.get("stato_alla_lettura",
+                                  issuance.get("stato","NON_ACQUISITO")),
+            "fonte":issuance.get("fonte"),
+            "acquisito_utc":issuance.get("acquisito_utc"),
+            "tipo":issuance.get("tipo"),
+            "limite":issuance.get("limite") or "Politica di emissione non acquisita"},
+        "rischio_opportunita_ipotesi":hypothesis,
+        "controipotesi":counter,
+        "condizione_di_riesame":(
+            "Controllare identita Kraken/progetto, nuovi dati di supply e "
+            "documentazione primaria datata; verificare separatamente "
+            "emissione, unlock effettivo, immissione e vendite"),
+        "nessun_segnale_operativo":True}
+
+
 def at_read(source, positions, shortlist, now, *, requested=None):
     """Validate attribution and recalculate economic age, without source fetches."""
     if not isinstance(source, dict) or source.get("schema") != VERSION:
@@ -747,12 +978,13 @@ def at_read(source, positions, shortlist, now, *, requested=None):
                 evidence = row.get(field)
                 if not isinstance(evidence, dict):
                     raise ValueError("Fonte economica mancante")
-                if evidence.get("stato") in ("VERIFICATO", "SCADUTO"):
+                if evidence.get("stato") in ("VERIFICATO", "SCADUTO", "ANOMALIA_SUPPLY"):
                     t = stamp(evidence.get("rilevato_utc") if field == "fondamentali"
                               else evidence.get("pubblicato_utc"))
                     if t is None or t > now + dt.timedelta(minutes=2):
                         raise ValueError("Fonte economica senza orario valido")
-                    if field == "fondamentali" and evidence.get("fonte") != CG + identity.get("coingecko_id", ""):
+                    if field == "fondamentali" and not fundamental_source_valid(
+                            evidence.get("fonte"),identity.get("coingecko_id")):
                         raise ValueError("Fonte fondamentali incoerente")
                     if field == "evento":
                         repo = identity.get("repository_primario")
@@ -762,8 +994,9 @@ def at_read(source, positions, shortlist, now, *, requested=None):
                             raise ValueError("Evento non attribuibile")
                     max_age = dt.timedelta(days=1 if field == "fondamentali" else 90)
                     row_copy[field] = dict(evidence, stato=(
-                        "VERIFICATO" if evidence["stato"] == "VERIFICATO" and now-t <= max_age
-                        else "SCADUTO"))
+                        evidence["stato"] if evidence["stato"] in ("VERIFICATO","ANOMALIA_SUPPLY")
+                        and now-t <= max_age else "SCADUTO"))
+            verify_supply_at_read(row_copy["fondamentali"])
             if row_copy["identita"].get("stato") != "IDENTITA_VERIFICATA_DA_CATALOGO":
                 # An expired project binding cannot leave verified numerical
                 # fundamentals attached to the historical wallet position.
@@ -848,4 +1081,43 @@ def at_read(source, positions, shortlist, now, *, requested=None):
                 if same_read and old is not None and old != derived:
                     raise ValueError("Lettura primaria per asset alterata")
                 item["valutazione_fonti_primarie"] = derived
+    # Keep a per-asset tokenomics row even in a legacy economic dossier
+    # without the primary monitor. Missing upstream is never a missing token.
+    primary_read=result.get("monitor_fonti") or {}
+    previous_read=stamp(source.get("letto_utc"))
+    same_read=bool(previous_read and abs((now-previous_read).total_seconds())<=1)
+    for group in ("posizioni","candidati","richiesti"):
+        for original,item in zip(source.get(group,[]),result[group]):
+            tokenomics=tokenomics_view(item,primary_read)
+            prior_tokenomics=original.get("quadro_tokenomics")
+            if same_read and prior_tokenomics is not None and prior_tokenomics!=tokenomics:
+                raise ValueError("Tokenomics at read distorted")
+            item["quadro_tokenomics"]=tokenomics
+    result["copertura_tokenomics"]={}
+    for group in ("posizioni","candidati","richiesti"):
+        rows=result[group]
+        result["copertura_tokenomics"][group]={
+            "totali":len(rows),
+            "identita_verificate":sum(r["identita"].get("stato")==
+                "IDENTITA_VERIFICATA_DA_CATALOGO" for r in rows),
+            "supply_attuale":sum(r["quadro_tokenomics"]["supply"]["stato"]==
+                "VERIFICATO" for r in rows),
+            "supply_contraddittoria":sum(r["quadro_tokenomics"]["supply"]["stato"]==
+                "ANOMALIA_SUPPLY" for r in rows),
+            "supply_senza_massimo":sum(
+                r["quadro_tokenomics"]["supply"]["stato"]=="VERIFICATO"
+                and r["quadro_tokenomics"]["supply"]["offerta_massima"] is None
+                for r in rows),
+            "documenti_primari_attuali":sum(
+                r["quadro_tokenomics"]["stato"] in
+                ("SUPPLY_E_DOCUMENTO_PRIMARIO","FONTE_PRIMARIA_SENZA_SUPPLY_ATTUALE")
+                and r["quadro_tokenomics"]["calendario"]["categoria"] in
+                ("UNLOCK_PROGRAMMATO_QUANTITA","MASSIMI_SBLOCCABILI_DATATI",
+                 "REGOLA_VESTING_SENZA_TRANCHE_ESATTE","PROIEZIONE_CIRCOLAZIONE_NON_UNLOCK")
+                for r in rows),
+            "fonti_emissione_attuali":sum(
+                r["quadro_tokenomics"]["politica_emissione"]["stato"]=="OSSERVATO"
+                for r in rows),
+            "fonte_supply":"CoinGecko pubblica per asset, non calendario primario",
+            "limite":"Copertura del roster del packet, non prova del wallet o dell'esecuzione degli unlock"}
     return result
