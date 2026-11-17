@@ -1,0 +1,119 @@
+{
+  "C1": {
+    "case_id": "C1",
+    "input_baseline_bundle": "01_BUNDLE_PATRIMONIALE_SOLO_SINTETICO.json",
+    "input_baseline_context": "02_CONTESTO_RIVALIDATO_BRIDGE.json",
+    "mutation_status": "SPECIFICATA_NEL_PROTOCOLLO_NON_ESEGUITA",
+    "protocol": "00_PROTOCOLLO_C0_C4_CONGELATO.md",
+    "source_ids": [
+      "E-C1-SUPPLY-REMOVED"
+    ],
+    "stato_modello": "NON_ESEGUITO"
+  },
+  "C2": {
+    "case_id": "C2",
+    "input_baseline_bundle": "01_BUNDLE_PATRIMONIALE_SOLO_SINTETICO.json",
+    "input_baseline_context": "02_CONTESTO_RIVALIDATO_BRIDGE.json",
+    "mutation_status": "SPECIFICATA_NEL_PROTOCOLLO_NON_ESEGUITA",
+    "protocol": "00_PROTOCOLLO_C0_C4_CONGELATO.md",
+    "source_ids": [
+      "E-C2-SUPPLY-CONFLICT"
+    ],
+    "stato_modello": "NON_ESEGUITO"
+  },
+  "C3": {
+    "case_id": "C3",
+    "input_baseline_bundle": "01_BUNDLE_PATRIMONIALE_SOLO_SINTETICO.json",
+    "input_baseline_context": "02_CONTESTO_RIVALIDATO_BRIDGE.json",
+    "mutation_status": "SPECIFICATA_NEL_PROTOCOLLO_NON_ESEGUITA",
+    "protocol": "00_PROTOCOLLO_C0_C4_CONGELATO.md",
+    "source_ids": [
+      "E-C3-CROSSPROJECT"
+    ],
+    "stato_modello": "NON_ESEGUITO"
+  },
+  "C4": {
+    "case_id": "C4",
+    "input_baseline_bundle": "01_BUNDLE_PATRIMONIALE_SOLO_SINTETICO.json",
+    "input_baseline_context": "02_CONTESTO_RIVALIDATO_BRIDGE.json",
+    "mutation_status": "SPECIFICATA_NEL_PROTOCOLLO_NON_ESEGUITA",
+    "protocol": "00_PROTOCOLLO_C0_C4_CONGELATO.md",
+    "source_ids": [
+      "E-C4-REGIME-CHANGE"
+    ],
+    "stato_modello": "NON_ESEGUITO"
+  },
+  "C5": {
+    "case_id": "C5",
+    "input_baseline_bundle": "01_BUNDLE_PATRIMONIALE_SOLO_SINTETICO.json",
+    "input_baseline_context": "02_CONTESTO_RIVALIDATO_BRIDGE.json",
+    "mutation_status": "SPECIFICATA_NEL_PROTOCOLLO_NON_ESEGUITA",
+    "protocol": "00_PROTOCOLLO_C0_C4_CONGELATO.md",
+    "source_ids": [
+      "E-C5-HEADLINE"
+    ],
+    "stato_modello": "NON_ESEGUITO"
+  },
+  "C6": {
+    "case_id": "C6",
+    "input_baseline_bundle": "01_BUNDLE_PATRIMONIALE_SOLO_SINTETICO.json",
+    "input_baseline_context": "02_CONTESTO_RIVALIDATO_BRIDGE.json",
+    "mutation_status": "SPECIFICATA_NEL_PROTOCOLLO_NON_ESEGUITA",
+    "protocol": "00_PROTOCOLLO_C0_C4_CONGELATO.md",
+    "source_ids": [
+      "E-C6-TWO-ALTERNATIVES"
+    ],
+    "stato_modello": "NON_ESEGUITO"
+  },
+  "P1": {
+    "case_id": "P1",
+    "input_baseline_bundle": "01_BUNDLE_PATRIMONIALE_SOLO_SINTETICO.json",
+    "input_baseline_context": "02_CONTESTO_RIVALIDATO_BRIDGE.json",
+    "protocol": "00_PROTOCOLLO_C0_C4_CONGELATO.md",
+    "source_ids": [
+      "E-BTC-REL-32-1"
+    ],
+    "stato_modello": "NON_ESEGUITO"
+  },
+  "P2": {
+    "case_id": "P2",
+    "input_baseline_bundle": "01_BUNDLE_PATRIMONIALE_SOLO_SINTETICO.json",
+    "input_baseline_context": "02_CONTESTO_RIVALIDATO_BRIDGE.json",
+    "protocol": "00_PROTOCOLLO_C0_C4_CONGELATO.md",
+    "source_ids": [
+      "E-SOL-AGAVE-441"
+    ],
+    "stato_modello": "NON_ESEGUITO"
+  },
+  "P3": {
+    "case_id": "P3",
+    "input_baseline_bundle": "01_BUNDLE_PATRIMONIALE_SOLO_SINTETICO.json",
+    "input_baseline_context": "02_CONTESTO_RIVALIDATO_BRIDGE.json",
+    "protocol": "00_PROTOCOLLO_C0_C4_CONGELATO.md",
+    "source_ids": [
+      "E-STRK-SCHEDULE"
+    ],
+    "stato_modello": "NON_ESEGUITO"
+  },
+  "P4": {
+    "case_id": "P4",
+    "input_baseline_bundle": "01_BUNDLE_PATRIMONIALE_SOLO_SINTETICO.json",
+    "input_baseline_context": "02_CONTESTO_RIVALIDATO_BRIDGE.json",
+    "protocol": "00_PROTOCOLLO_C0_C4_CONGELATO.md",
+    "source_ids": [
+      "E-FED-20261028",
+      "E-UE-20261116"
+    ],
+    "stato_modello": "NON_ESEGUITO"
+  },
+  "P5": {
+    "case_id": "P5",
+    "input_baseline_bundle": "01_BUNDLE_PATRIMONIALE_SOLO_SINTETICO.json",
+    "input_baseline_context": "02_CONTESTO_RIVALIDATO_BRIDGE.json",
+    "protocol": "00_PROTOCOLLO_C0_C4_CONGELATO.md",
+    "source_ids": [
+      "E-REGIME-CP4-20261117"
+    ],
+    "stato_modello": "NON_ESEGUITO"
+  }
+}
