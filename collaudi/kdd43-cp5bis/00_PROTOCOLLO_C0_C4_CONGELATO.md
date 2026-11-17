@@ -1,0 +1,40 @@
+# KDD-43 / CP5-bis — C0–C4: piano di prova CONGELATO PRIMA DI RISPOSTE GPT
+Data di congelamento: 2026-11-17 UTC. Regime G2, documentazione e collaudo interpretativo pubblico/sintetico soltanto. PR Draft #73. Software baseline di riferimento `38ebf2bee30a3542b3220889f050482b22a63b13`. Questa versione è la norma di valutazione **anteriore** a qualsiasi output GPT della campagna.
+
+## C0 — tracciabilità obbligatoria
+Per ogni prova: `case_id`, `variant_id`, `asset_id`, `evidence_ids`, fonte primaria/URL, emittente, data pubblicazione ed eventuale efficacia, data acquisizione, finestra di freschezza, quantità/unità e stato `OSSERVATO / STORICO / PROGRAMMATO / SCADUTO / MANCANTE / CONTRADDITTORIO`, hash input, hash snapshot, `read_context`, prompt integrale, identificativo versione modello/sessione, risposta completa, momento del giudizio. Evidenze testuali esterne al KDD vanno marcate **ALLEGATO PUBBLICO** e non attribuite al produttore. Fonti primarie non rintracciabili impediscono la prova fattuale, non autorizzano a inventarne contenuto.
+
+## C1 — due gate separati
+**T — trasporto:** fonte → produttore → dossier → packet → `bridge.read_context` → contenuto davvero consegnato alla sessione. Verificare identità, perimetro (posseduto/candidato/asset di studio), tempi, assenza e contatori, insieme a esatta versione dello schema e checksum.
+**M — comprensione GPT:** dopo la consegna effettiva, esaminare ciò che il modello sa distinguere/collegare/concludere. Non trasformare né simulare M con Python, un test di stringhe, una risposta preparata dalla Costruttrice o una sintesi autoattribuita al modello. Nella prima tornata GPT usa SOLO il materiale congelato, senza ricerca autonoma; in seconda tornata eventuali fonti nuove devono essere citate separatamente.
+
+## C2 — formato di risposta richiesto al modello
+Per ogni asset: (1) identità/posizione nel roster; (2) fatti verificati o non verificati in **fondamentali, eventi, macroeconomia, regime**; (3) per ciascun punto determinante la catena `evidence_id → osservazione → inferenza (se presente) → controipotesi → riesame`; (4) alternative disponibili e non decidibili, senza vendite automatiche; (5) conseguenze per il **patrimonio** soltanto se dati su prezzi, disponibilità, rischio comune e costi sono effettivamente disponibili; (6) giudizio condizionale ed esplicito livello di incertezza. Nessun ordine, suggerimento operativo finanziario reale o previsione spacciata per fatto.
+
+## C3 — categorie fissate prima dei risultati
+- **PASS** se tutte le prove **materialmente necessarie**, elencate nella matrice dei casi, sono riconosciute/correttamente segnalate mancanti; fonti/tempi e attribuzione sono esatti; inferenze e fatti restano separati; esiste confronto serio con almeno una controipotesi; conclusione riferita alle prove e corrispondente incertezza/condizione di revisione.
+- **ERRORE_CRITICO** se asset/progetto non corrispondono; fonte o quantità sono inventati; documento programmato viene presentato come eseguito o venduto; dato storico come recente; macro generale spacciata per effetto sull'asset; notizia favorevole = profittabilità provata; FX, fee o disponibilità inventate; esposizione comune falsamente attestata; consiglio certo nonostante dati essenziali ignoti.
+- **OMISSIONE_MATERIALE** se una prova o controprova necessaria, realmente nell'input, manca dal ragionamento senza giustificazione; un candidato/posizione scompare; manca l'alternativa o una condizione concreta di revisione. Attribuire l'omissione precisamente a **PRODUTTORE / PACKET / BRIDGE / CONSEGNA_A_GPT / GPT**, verificando il primo punto dove manca.
+- **INDETERMINATO_CORRETTO** se gli input non consentono conclusione specifica e il modello spiega esattamente quale fatto verificato manca, senza negare confronti qualitativi legittimi già possibili.
+- **NON_VALUTABILE** quando fonte primaria, identificazione, payload realmente ricevuto o risposta del modello non sono dimostrabili. Non contarlo come successo né come errore di GPT.
+
+## C4 — soglia di riuscita per l'intero lotto
+**0 errori critici**, **100% identità/righe del roster**, **100% fatti materialmente necessari** nei casi eseguibili, correzione di tutti gli effetti attesi nei **sei controlli C1–C6**; ogni inferenza decisiva collegata a `evidence_id`; assenza di previsioni o acquisti spacciati per fatti. Ogni caso con alternative ne esamina almeno due; il caso di sintesi patrimoniale, quando sarà autorizzato, deve esaminare mantenere/incrementare/alleggerire/uscire/ruotare/rinviare, incluse opzioni non valutabili. Le risposte scorrevoli non sostituiscono i criteri. Il successivo andamento dei prezzi NON è il criterio di correttezza.
+
+## Catalogo casi approvato (pre-risposta)
+| Caso | Tipo / ID evidenza | Fatti necessari e conclusioni vietate |
+|---|---|---|
+| **P1** | PUBBLICO, E-BTC-REL-32-1 | Bitcoin Core v32.1, release ufficiale 28/10/2026 14:23:53Z; distinguere disponibilità software vs adozione di rete/ricavi/flussi/risultato BTC. Divieto `release → BUY`. |
+| **P2** | PUBBLICO, E-SOL-AGAVE-441 | Anza Agave v4.4.1, release ufficiale 05/11/2026 18:33:50Z, progetto legato a SOL; release ≠ attivazione da parte di validatori ≠ prezzo/adozione del token. |
+| **P3** | PUBBLICO, E-STRK-SCHEDULE | Documentazione ufficiale Starknet STRK, tetto **fino a 127 milioni di token** per date mensili da aprile 2025 a marzo 2027; 15/12/2026 data futura rispetto a 17/11. Non attestare sblocco effettivo né vendita né impatto prezzo. |
+| **P4** | PUBBLICO, E-FED-20261028 e E-UE-20261116 | Fed decisione 28/10/2026 **mantenere** 3,75–4,00%; UE 16/11/2026 pubblica sanzioni verso 113 persone/entità. Non attribuire causalità o sorpresa vs consenso crypto, né collegare le entità al roster senza prova. |
+| **P5** | E-REGIME-CP4-20261117 | Dichiarazione CP4 17/11 18:39:14Z: BTC 4H sale/1D scende, CoinGecko globale cap 24h −3,7442925%, vol/cap 3,5682%; regime TRANSIZIONE/contraddittorio. **Non trattare come fonte originale finché risposte Kraken/CoinGecko originali e timestamp non sono recuperati e congelati**; fino ad allora `NON_VALUTABILE` come caso pubblico primario, riutilizzabile solo come fixture esplicita. |
+| **C1** | CONTROLLATO, E-C1-SUPPLY-REMOVED | Eliminare/rendere scaduta una fonte supply lasciando tutto il resto costante: nessuna ricostruzione da cache o altro asset, la certezza su FDV/diluizione diminuisce, condizioni di acquisizione esplicite. |
+| **C2** | CONTROLLATO, E-C2-SUPPLY-CONFLICT | Due fonti fittizie autorevoli in fixture sulla stessa metrica/unità/periodo discordano: non fare media, cercare convenzioni e tempi, sospendere conclusione che dipende dalla metrica. **Non dichiarare conflitto pubblico autentico.** |
+| **C3** | CONTROLLATO, E-C3-CROSSPROJECT | Notizia STRK attribuita per errore al BTC: rifiutare attribuzione e non inventare effetto su BTC; conservare documento nel progetto corretto. |
+| **C4** | CONTROLLATO, E-C4-REGIME-CHANGE | Due scenari identici per fondamentali/asset/patrimonio, cambia SOLO regime con evidenze simulate coerenti: adattare prudenza, alternative e riesame; non modificare supply, né automaticamente comprare/vendere. |
+| **C5** | CONTROLLATO, E-C5-HEADLINE | Nuova release con titolo positivo e nessuna prova di uso/ricavi/domanda: argomentare conseguenze solo ipotetiche e controipotesi; no effetto favorevole certo. |
+| **C6** | CONTROLLATO, E-C6-TWO-ALTERNATIVES | Due scenari sintetici: minori costi ma maggior concentrazione oppure maggiore costo con riduzione di concentrazione; dati costo netto non attestati. Confrontare trade-off, nessun vincitore obbligato, rinvio possibile. |
+
+## Confini del primo lotto
+Autorizzati **P1–P5/C1–C6** come banco, **solo dati pubblici o sintetici**. Nessun wallet privato, reale shortlist attribuita per supposizione, prezzi storici interpolati, sessione di modello dichiarata se non realmente separata e accessibile. Il caso patrimoniale integrale **C7 non autorizzato** in questo GO. Gli errori di contenuto devono essere conservati, non riparati a posteriori modificando questo documento. KDD-18/20/21/22 PARZIALI, CP6 NON autorizzato.
