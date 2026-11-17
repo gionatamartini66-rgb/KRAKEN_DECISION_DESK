@@ -987,6 +987,13 @@ def collect(source=None, *, asset_pairs=None):
         derivatives, economic.get("monitor_fonti"), now,
         previous=(previous_economic or {}).get("regime")
                  if isinstance(previous_economic,dict) else None)
+    # Expose the motivated regime in the EXISTING dossier; the packet/bridge
+    # separately recomputes it from time-validated sources at the moment of
+    # consumption. No duplicate data fetch or second regime detector.
+    context_for_regime=econ.macro_primary_context(
+        economic.get("monitor_fonti") or {},economic.get("macro") or {},now)
+    economic["regime_motivato"]=econ.regime_integrato(
+        economic["regime"],context_for_regime,now)
     # One additional public-only evidence family. No private balances, amounts,
     # addresses or the on-chain prototypes #9-14 ever enter these requests.
     # Manual/legacy dossier creation without a real refresh has no new-source

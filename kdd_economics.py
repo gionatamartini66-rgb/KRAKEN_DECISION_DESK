@@ -571,16 +571,14 @@ def regime(btc_four, global_row, now):
     out["famiglie_osservate"].append({
         "famiglia": "TREND_BTC", "timeframe": ["4H", "1D"], "stato": "DISPONIBILE",
         "osservazione": dict(trend), "limite": "Un unico mercato in due timeframe"})
-    if trend["4H"] != trend["1D"]:
-        out.update(stato="TRANSIZIONE", qualita="PARZIALE",
-                   contrari=["BTC 4H e 1D discordanti"])
-        return out
+    disagree=(trend["4H"]!=trend["1D"])
     if not isinstance(global_row, dict):
         out["mancanti"].append("CoinGecko globale datato")
         return out
     updated = stamp(global_row.get("aggiornato_sorgente_utc"))
     change = global_row.get("var_capitalizzazione_24h_pct")
-    if (not updated or updated > now + dt.timedelta(minutes=2)
+    if (global_row.get("fonte") not in (None,"https://api.coingecko.com/api/v3/global")
+            or not updated or updated > now + dt.timedelta(minutes=2)
             or now-updated > dt.timedelta(hours=2)
             or not isinstance(change, (int, float)) or isinstance(change, bool)
             or not math.isfinite(change)):
@@ -588,7 +586,7 @@ def regime(btc_four, global_row, now):
         return out
     out["famiglie_osservate"].append({
         "famiglia": "CAPITALIZZAZIONE_CRYPTO_AGGREGATA",
-        "fonte": global_row.get("fonte"),
+        "fonte": global_row.get("fonte") or "https://api.coingecko.com/api/v3/global",
         "pubblicato_utc": updated.isoformat(timespec="seconds"),
         "variazione_24h_pct": change,
         "limite": "Aggregatore, non capitali istituzionali né flussi ETF."})
@@ -602,6 +600,17 @@ def regime(btc_four, global_row, now):
             "limite": "Rapporto tra volume riportato e capitalizzazione; non prova partecipazione netta o acquisti."})
     else:
         out["mancanti"].append("Volume aggregato 24h e rapporto volume/capitalizzazione attendibile")
+    if disagree:
+        # A discordant pair of BTC frames is an observed transition only
+        # when we can also inspect the fresh aggregate market and participation.
+        # A missing CoinGecko observation must stay INDETERMINATO, not create
+        # a directionally loaded market regime out of BTC alone.
+        out.update(stato="TRANSIZIONE",qualita="PARZIALE",
+                   contrari=["BTC 4H e 1D discordanti"])
+        if "ATTIVITA_AGGREGATA" not in [
+                r.get("famiglia") for r in out["famiglie_osservate"]]:
+            out["mancanti"].append("Conferma dei volumi aggregati")
+        return out
     out["favorevoli"].append("BTC 4H/1D concordi: " + trend["4H"])
     # Sideways BTC with a directional broad market is a contradiction, not a
     # neutral regime. This threshold separates clearly directional changes
@@ -738,7 +747,8 @@ def regime_participation(base, derivatives, primary, now, previous=None):
                     "acquisito_utc":rec.get("acquisito_utc"),"periodo":data.get("periodo"),
                     "flusso_netto_milioni_usd":data["valore"],
                     "limite":"Stessa famiglia di dati aggregati ETF: non acquisti istituzionali individuali"})
-                if kind=="ETF_BTC_FARSIDE" and out.get("stato") in ("RIALZISTA","RIBASSISTA"):
+                if (kind=="ETF_BTC_FARSIDE" and rec.get("stato")=="OSSERVATO"
+                        and out.get("stato") in ("RIALZISTA","RIBASSISTA")):
                     contradictory=(data["valore"]<0 and out["stato"]=="RIALZISTA"
                                    or data["valore"]>0 and out["stato"]=="RIBASSISTA")
                     if contradictory:
@@ -750,6 +760,155 @@ def regime_participation(base, derivatives, primary, now, previous=None):
                     "fonte":rec["fonte"],"acquisito_utc":rec.get("acquisito_utc"),
                     "freschezza":rec["stato"],"top_chain":data["top_chain"],
                     "limite":"Supply per chain aggregata; non nuova liquidità acquistatrice o flusso ETF"})
+    return out
+
+
+def regime_integrato(core, macro, now):
+    """CP4: conservative final decision from ALREADY observed KDD-22 families.
+
+    A BTC trend is one source family across 4H+1D. CoinGecko market change
+    and turnover are one other family, not two votes. ETF flows, CVD and OI
+    are independent diagnostics with narrower coverage. Fed/ECB/CFTC headlines
+    are dated context, never an automatic vote for a bullish/bearish label.
+    """
+    allowed=("RIALZISTA","RIBASSISTA","LATERALE","TRANSIZIONE","INDETERMINATO")
+    core=core if isinstance(core,dict) else {}
+    macro=macro if isinstance(macro,dict) else {}
+    preliminary=core.get("stato")
+    observations=core.get("famiglie_osservate")
+    observations=observations if isinstance(observations,list) else []
+    families={}
+    for row in observations:
+        if not isinstance(row,dict):continue
+        family=row.get("famiglia")
+        if family=="TREND_BTC":
+            families["BTC_CERTEZZA_TREND"]=row
+        elif family=="CAPITALIZZAZIONE_CRYPTO_AGGREGATA":
+            families["AGGREGATO_CRYPTO"]=row
+        elif family=="ATTIVITA_AGGREGATA":
+            families["AGGREGATO_VOLUME"]=row
+        elif family=="DERIVATI_BTC_KRAKEN":
+            families["DERIVATI_BTC_KRAKEN"]=row
+        elif family=="ETF_SPOT_AGGREGATO":
+            asset=row.get("asset")
+            if asset in ("BTC","ETH"):families["ETF_"+asset]=row
+        elif family=="DISTRIBUZIONE_STABLECOIN_PER_CHAIN":
+            families["STABLECOIN_STOCK"]=row
+        elif isinstance(family,str) and family.startswith(("MACRO_ECB_","FUTURES_CFTC_")):
+            families[family]=row
+    acquired=stamp(core.get("acquisito_utc"))
+    recent=bool(acquired and dt.timedelta(0)<=now-acquired<=dt.timedelta(hours=2))
+    btc=families.get("BTC_CERTEZZA_TREND") or {}
+    btc_dir=btc.get("osservazione") or {}
+    btc_valid=(btc.get("stato")=="DISPONIBILE"
+               and all(btc_dir.get(tf) in ("SALITA","DISCESA","LATERALE")
+                       for tf in ("4H","1D")))
+    global_row=families.get("AGGREGATO_CRYPTO") or {}
+    global_when=stamp(global_row.get("pubblicato_utc"))
+    global_valid=bool(global_when and recent and
+                      dt.timedelta(0)<=now-global_when<=dt.timedelta(hours=2)
+                      and global_row.get("fonte")=="https://api.coingecko.com/api/v3/global"
+                      and type(global_row.get("variazione_24h_pct")) in (int,float)
+                      and math.isfinite(global_row["variazione_24h_pct"]))
+    activity=families.get("AGGREGATO_VOLUME") or {}
+    turnover=activity.get("turnover_24h_su_cap_pct")
+    activity_valid=bool(global_valid and type(turnover) in (int,float)
+                        and math.isfinite(turnover) and 0<turnover<=1000
+                        and activity.get("pubblicato_utc")==global_row.get("pubblicato_utc"))
+    missing=[]
+    if not recent:missing.append("Regime acquisito da oltre due ore o senza timestamp attendibile")
+    if not btc_valid:missing.append("BTC 4H/1D concordi o discordanti verificati")
+    if not global_valid:missing.append("Capitalizzazione aggregata CoinGecko fresca e con provenienza")
+    if not activity_valid:missing.append("Volume/capitalizzazione globale attendibile")
+    contradictions=list(core.get("contrari") or [])
+    positives=list(core.get("favorevoli") or [])
+    out={
+        "stato":"INDETERMINATO","qualita":"INSUFFICIENTE",
+        "stato_preliminare":preliminary if preliminary in allowed else "INDETERMINATO",
+        "statuto":"REGIME_MOTIVATO_DA_USARE_NEL_CONSUMER_GPT",
+        "applicabilita":"MERCATO_GENERALE_NON_ASSET_SINGOLO",
+        "evidenze_indipendenti":[{
+            "famiglia":"BTC_PREZZO_4H_1D","fonte":"Kraken Spot pubblico /0/public/OHLC",
+            "rilevazione_utc":core.get("acquisito_utc"),
+            "osservazione":btc_dir if btc_valid else None,
+            "stato":"OSSERVATO" if btc_valid and recent else "NON_ATTUALE"
+        },{
+            "famiglia":"AGGREGATO_CRYPTO_PREZZO_E_ATTIVITA",
+            "fonte":global_row.get("fonte"),
+            "osservato_utc":global_row.get("pubblicato_utc"),
+            "var_cap_24h_pct":global_row.get("variazione_24h_pct") if global_valid else None,
+            "turnover_24h_pct":turnover if activity_valid else None,
+            "stato":"OSSERVATO" if global_valid and activity_valid else "INCOMPLETO_O_SCADUTO",
+            "limite":"Capitalizzazione e volume sono la medesima famiglia aggregata, non due conferme indipendenti"
+        }],
+        "famiglie_conferma":[name for name in ("BTC_CERTEZZA_TREND","AGGREGATO_CRYPTO")
+                            if (btc_valid if name=="BTC_CERTEZZA_TREND" else global_valid)],
+        "famiglie_partecipazione":[name for name in
+             ("AGGREGATO_VOLUME","DERIVATI_BTC_KRAKEN","ETF_BTC","ETF_ETH","STABLECOIN_STOCK")
+             if name in families and (name!="AGGREGATO_VOLUME" or activity_valid)],
+        "osservazioni_distinte":{
+            "btc_4h_1d":btc_dir if btc_valid else None,
+            "cap_24h_pct":global_row.get("variazione_24h_pct") if global_valid else None,
+            "turnover_globale_24h_pct":turnover if activity_valid else None},
+        "segnali_favorevoli":positives,"segnali_contrari":contradictions,
+        "informazioni_mancanti":missing,
+        "invalidazione":"Ricalcolare alla chiusura BTC 4H/1D o al cambio della capitalizzazione e della partecipazione; "
+                        "rivedere in caso di segnali contrari ETF/CVD o di dati scaduti",
+        "ipotesi_macro":macro.get("scenari_condizionali",[])[:2],
+        "stato_contesto_macro":macro.get("stato","NESSUN_DATO_VERIFICABILE_NEL_CAMPIONE"),
+        "esito_previsione_prezzo":"NON_INFERIBILE",
+        "nessuna_raccomandazione_operativa":True,
+        "rilevazione_utc":core.get("acquisito_utc"),
+        "limite":"Descrizione del mercato generale, non previsione o segnale sul singolo asset"}
+    if not (recent and btc_valid and global_valid and activity_valid):
+        return out
+    if preliminary not in allowed or preliminary=="INDETERMINATO":
+        return out
+    # Recalculate the two independent directional assertions from their
+    # retained numerical/technical facts, rather than trusting a saved label.
+    change=global_row["variazione_24h_pct"]
+    first,second=btc_dir["4H"],btc_dir["1D"]
+    if first!=second:
+        expected="TRANSIZIONE"
+    elif first=="LATERALE":
+        expected="LATERALE" if abs(change)<=1 else "TRANSIZIONE"
+    elif change==0:
+        expected="INDETERMINATO"
+    else:
+        direction="RIALZISTA" if first=="SALITA" else "RIBASSISTA"
+        expected=(direction if ((change>0)==(direction=="RIALZISTA"))
+                  else "TRANSIZIONE")
+    if expected!=preliminary:
+        out["segnali_contrari"].append("Etichetta tecnica non coerente con trend BTC e variazione aggregata")
+        out["informazioni_mancanti"].append("Ricalcolo del regime tecnico richiesto")
+        return out
+    # A sideways 4H/1D versus moving capital, a 4H/1D disagreement or
+    # global change opposite to BTC is a transition: never a trend confirmed.
+    if preliminary=="TRANSIZIONE":
+        out.update(stato="TRANSIZIONE",qualita="PARZIALE_CON_CONTRADDIZIONI")
+        if not contradictions:
+            out["segnali_contrari"].append("Indicatori tecnici e capitalizzazione discordanti")
+    else:
+        out.update(stato=preliminary,qualita="PARZIALE")
+    # Two independently sourced counter-signals do not turn an already
+    # contradictory market into an apparently confident direction.
+    independent=[]
+    for category,fragment in (
+        ("DERIVATI","CVD 4H di PF_XBTUSD divergente"),
+        ("ETF_BTC","Flusso netto ETF BTC aggregato divergente")):
+        if any(fragment in v for v in contradictions) and (
+                category=="DERIVATI" and "DERIVATI_BTC_KRAKEN" in families
+                or category=="ETF_BTC" and "ETF_BTC" in families):
+            independent.append(category)
+    if len(independent)>=2 and out["stato"] in ("RIALZISTA","RIBASSISTA"):
+        out.update(stato="TRANSIZIONE",qualita="PARZIALE_CON_CONTRADDIZIONI")
+        out["segnali_contrari"].append(
+            "Due famiglie di partecipazione indipendenti contraddicono il quadro direzionale")
+    elif independent and out["stato"] in ("RIALZISTA","RIBASSISTA"):
+        out["qualita"]="PARZIALE_CON_CONTRADDIZIONI"
+    # Macro headlines are hypotheses, not counted confirmation of trends.
+    out["famiglie_conferma"]=["TREND_BTC_4H_1D","CAPITALIZZAZIONE_E_ATTIVITA_AGGREGATA"]
+    out["informazioni_mancanti"]=missing
     return out
 
 
@@ -1368,6 +1527,15 @@ def at_read(source, positions, shortlist, now, *, requested=None):
             and earlier_context!=macro_context):
         raise ValueError("Macro context at GPT read distorted")
     result["contesto_macro_primario"]=macro_context
+    # The existing technical regime is provisional. A single validated final
+    # classification is recomputed at packet AND bridge read, not trusted
+    # merely because a packet checksum happened to match.
+    review=regime_integrato(result["regime"],macro_context,now)
+    old_review=source.get("regime_motivato")
+    if old_review is not None and earlier_read and abs((now-earlier_read).total_seconds())<=1:
+        if old_review!=review:
+            raise ValueError("Regime motivated summary tampered at GPT read")
+    result["regime_motivato"]=review
     # Keep a per-asset tokenomics row even in a legacy economic dossier
     # without the primary monitor. Missing upstream is never a missing token.
     primary_read=result.get("monitor_fonti") or {}

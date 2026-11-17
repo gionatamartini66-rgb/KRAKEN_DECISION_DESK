@@ -227,6 +227,144 @@ class EconomicEvidenceTests(unittest.TestCase):
         frames["4H"]["stato"]="SCADUTO"
         self.assertEqual(e.regime({"timeframe":frames},glob,T)["stato"],"INDETERMINATO")
 
+    def test_cp4_all_five_regimes_with_explicit_invalidations_and_alternatives(self):
+        """Discriminating CLOSED BTC 4H/1D trends + dated public aggregate."""
+        now=T
+        macro={"stato":"CON_EVIDENZE_DATATE",
+               "scenari_condizionali":[
+                   {"famiglia":"POLITICA_MONETARIA",
+                    "stato":"FATTO_CORRENTE_DA_INTERPRETARE",
+                    "direzione_crypto":"NON_INFERIBILE",
+                    "ipotesi":"Interest rates may affect risk-taking",
+                    "controipotesi":"Already priced"}]}
+        def core(four,day,change,volume=300000,age=0):
+            frames={label:{"stato":"AGGIORNATO","figure_candlestick":{
+                "stato":"AGGIORNATO",
+                "trend_precedente":trend}}
+                for label,trend in (("4H",four),("1D",day))}
+            global_row={"fonte":"https://api.coingecko.com/api/v3/global",
+                        "aggiornato_sorgente_utc":(now-dt.timedelta(hours=age)).timestamp(),
+                        "var_capitalizzazione_24h_pct":change,
+                        "capitalizzazione_totale_usd":3000000,
+                        "volume_24h_usd":volume}
+            a=e.regime({"timeframe":frames},global_row,now)
+            return e.regime_participation(a,{},{"indicatori_macro":[],
+                                               "flussi_finanziari":[]},now)
+        for first,second,change,expected in (
+            ("SALITA","SALITA",2,"RIALZISTA"),
+            ("DISCESA","DISCESA",-2,"RIBASSISTA"),
+            ("LATERALE","LATERALE",.2,"LATERALE"),
+            ("SALITA","SALITA",-2,"TRANSIZIONE"),
+            ("SALITA","SALITA",0,"INDETERMINATO")):
+            with self.subTest(expected=expected):
+                base=core(first,second,change)
+                reviewed=e.regime_integrato(base,macro,now)
+                self.assertEqual(reviewed["stato"],expected)
+                self.assertEqual(reviewed["esito_previsione_prezzo"],"NON_INFERIBILE")
+                self.assertEqual(reviewed["ipotesi_macro"][0]["direzione_crypto"],
+                                 "NON_INFERIBILE")
+                self.assertTrue(reviewed["invalidazione"])
+                if expected!="INDETERMINATO":
+                    self.assertEqual(len(reviewed["famiglie_conferma"]),2)
+                    self.assertEqual(reviewed["qualita"],
+                                     "PARZIALE_CON_CONTRADDIZIONI" if expected=="TRANSIZIONE"
+                                     else "PARZIALE")
+        # Previously the core stopped at BTC frame disagreement, before
+        # the already available global capital and volume were ever read.
+        disagree=core("SALITA","DISCESA",-3)
+        self.assertEqual(disagree["stato"],"TRANSIZIONE")
+        self.assertIn("CAPITALIZZAZIONE_CRYPTO_AGGREGATA",
+                      [x["famiglia"] for x in disagree["famiglie_osservate"]])
+        self.assertIn("ATTIVITA_AGGREGATA",
+                      [x["famiglia"] for x in disagree["famiglie_osservate"]])
+        self.assertEqual(e.regime_integrato(disagree,macro,now)["stato"],
+                         "TRANSIZIONE")
+        insufficient=core("SALITA","DISCESA",-3,volume=None)
+        self.assertEqual(e.regime_integrato(insufficient,macro,now)["stato"],
+                         "INDETERMINATO")
+        missing_volume=e.regime_integrato(core("SALITA","SALITA",2,volume=None),macro,now)
+        self.assertEqual(missing_volume["stato"],"INDETERMINATO")
+        self.assertTrue(any("Volume" in x for x in missing_volume["informazioni_mancanti"]))
+        stale_global=e.regime_integrato(core("SALITA","SALITA",2,age=4),macro,now)
+        self.assertEqual(stale_global["stato"],"INDETERMINATO")
+        delayed=e.regime_integrato(core("SALITA","SALITA",2),macro,now+dt.timedelta(hours=3))
+        self.assertEqual(delayed["stato"],"INDETERMINATO")
+        suspicious=core("DISCESA","DISCESA",-2)
+        suspicious["stato"]="RIALZISTA"
+        self.assertEqual(e.regime_integrato(suspicious,macro,now)["stato"],"INDETERMINATO")
+        unrelated_macro=e.regime_integrato(core("DISCESA","DISCESA",-2),
+            {"scenari_condizionali":[{"stato":"FATTO_CORRENTE_DA_INTERPRETARE",
+                                     "direzione_crypto":"RIALZISTA"}]},now)
+        self.assertEqual(unrelated_macro["stato"],"RIBASSISTA")
+
+    def test_cp4_two_distinct_participation_conflicts_are_not_bullish_confirmation(self):
+        now=T
+        frames={tf:{"stato":"AGGIORNATO","figure_candlestick":{
+            "stato":"AGGIORNATO","trend_precedente":"SALITA"}}
+            for tf in ("4H","1D")}
+        aggregate={"fonte":"https://api.coingecko.com/api/v3/global",
+                   "aggiornato_sorgente_utc":now.timestamp(),
+                   "var_capitalizzazione_24h_pct":1.8,
+                   "capitalizzazione_totale_usd":5000000,"volume_24h_usd":650000}
+        initial=e.regime({"timeframe":frames},aggregate,now)
+        derivative={"open-interest":{
+            "ultimo_punto_utc":now.isoformat(),"ultimo_punto_provvisorio":False,
+            "ultimo_close":110,"close_4h_fa":100},
+            "cvd":{
+            "ultimo_punto_utc":now.isoformat(),"ultimo_punto_provvisorio":False,
+            "ultimo_cvd":-20,"cvd_4h_fa":-10}}
+        primary={"indicatori_macro":[],"flussi_finanziari":[
+            {"id":"ETF_BTC_FARSIDE","stato":"OSSERVATO",
+             "fonte":"https://farside.co.uk/btc/",
+             "acquisito_utc":now.isoformat(),
+             "dati":{"periodo":(now-dt.timedelta(days=1)).date().isoformat(),
+                     "valore":-220}}]}
+        both=e.regime_participation(initial,derivative,primary,now)
+        reviewed=e.regime_integrato(both,{},now)
+        self.assertEqual(both["stato"],"RIALZISTA") # prior, technical layer
+        self.assertEqual(reviewed["stato"],"TRANSIZIONE")
+        self.assertEqual(reviewed["qualita"],"PARZIALE_CON_CONTRADDIZIONI")
+        self.assertEqual(reviewed["famiglie_conferma"],
+                         ["TREND_BTC_4H_1D","CAPITALIZZAZIONE_E_ATTIVITA_AGGREGATA"])
+        self.assertTrue(any("due famiglie" in x.lower()
+                            for x in reviewed["segnali_contrari"]))
+        old=copy.deepcopy(primary)
+        old["flussi_finanziari"][0]["stato"]="STORICO_NON_AGGIORNATO"
+        historic=e.regime_participation(initial,derivative,old,now)
+        reviewed_historic=e.regime_integrato(historic,{},now)
+        self.assertEqual(reviewed_historic["stato"],"RIALZISTA")
+        self.assertEqual(reviewed_historic["qualita"],"PARZIALE_CON_CONTRADDIZIONI")
+
+    def test_cp4_gpt_consumer_rereads_and_downgrades_forged_or_expired_regime(self):
+        source,positions,shortlist=self.sample()
+        source["fonti_economiche"]=e.sources_matrix()
+        frames={tf:{"stato":"AGGIORNATO","figure_candlestick":{
+            "stato":"AGGIORNATO","trend_precedente":"SALITA"}}
+            for tf in ("4H","1D")}
+        global_market={"fonte":"https://api.coingecko.com/api/v3/global",
+            "aggiornato_sorgente_utc":T.timestamp(),
+            "var_capitalizzazione_24h_pct":2,
+            "capitalizzazione_totale_usd":3000000,"volume_24h_usd":240000}
+        source["regime"]=e.regime_participation(
+            e.regime({"timeframe":frames},global_market,T),
+            {},{"indicatori_macro":[],"flussi_finanziari":[]},T)
+        at_gpt=e.at_read(source,positions,shortlist,T)
+        self.assertEqual(at_gpt["regime_motivato"]["stato"],"RIALZISTA")
+        self.assertEqual(len(at_gpt["posizioni"]),2)
+        self.assertEqual(len(at_gpt["candidati"]),1)
+        self.assertTrue(at_gpt["regime_motivato"]["nessuna_raccomandazione_operativa"]
+                        if "nessuna_raccomandazione_operativa" in at_gpt["regime_motivato"]
+                        else at_gpt["regime_motivato"]["esito_previsione_prezzo"]==
+                        "NON_INFERIBILE")
+        reread=e.at_read(at_gpt,positions,shortlist,T)
+        self.assertEqual(reread["regime_motivato"],at_gpt["regime_motivato"])
+        late=e.at_read(at_gpt,positions,shortlist,T+dt.timedelta(hours=3))
+        self.assertEqual(late["regime_motivato"]["stato"],"INDETERMINATO")
+        forged=copy.deepcopy(at_gpt)
+        forged["regime_motivato"]["stato"]="RIBASSISTA"
+        with self.assertRaisesRegex(ValueError,"Regime motivated summary tampered"):
+            e.at_read(forged,positions,shortlist,T)
+
     def test_g2_primary_release_cases_and_supply_no_invented_unlock(self):
         """Real primary-release metadata checked 11 Nov 2026; synthetic CoinGecko amounts."""
         moment=dt.datetime(2026,11,11,8,tzinfo=dt.timezone.utc)
@@ -485,6 +623,10 @@ class EconomicEvidenceTests(unittest.TestCase):
                     {"token":"ZEC","coppia_analisi":"ZEC/EUR",
                      "kraken_pair_key":"ZECEUR"}],T,
                 asset_pairs=pairs,previous=previous)
+        # The operational dossier does this after the first economy producer.
+        # Exercise the actual bounded participation layer before packet.
+        economics["regime"]=e.regime_participation(
+            economics["regime"],{},economics.get("monitor_fonti"),T)
         self.assertLessEqual(economics["richieste_effettuate"],9)
         self.assertEqual(len(economics["posizioni"]),10)
         self.assertEqual(len(economics["candidati"]),1)
@@ -517,6 +659,13 @@ class EconomicEvidenceTests(unittest.TestCase):
         self.assertEqual(len(rows["candidati"]),1)
         self.assertEqual(rows["contesto_macro_primario"]["stato"],
                          "NESSUN_DATO_VERIFICABILE_NEL_CAMPIONE")
+        self.assertIn("regime_motivato",rows)
+        self.assertEqual(rows["regime_motivato"]["stato"],"RIALZISTA")
+        self.assertEqual(rows["regime_motivato"]["qualita"],"PARZIALE")
+        self.assertEqual(rows["regime_motivato"]["famiglie_conferma"],
+                         ["TREND_BTC_4H_1D","CAPITALIZZAZIONE_E_ATTIVITA_AGGREGATA"])
+        self.assertEqual(rows["regime_motivato"]["esito_previsione_prezzo"],
+                         "NON_INFERIBILE")
         self.assertTrue(all(x["nessuna_causalita_attestata"] for x in
                             rows["contesto_macro_primario"]["scenari_condizionali"]))
         self.assertEqual(rows["copertura_eventi"]["posizioni"]["totali"],10)
@@ -551,6 +700,8 @@ class EconomicEvidenceTests(unittest.TestCase):
         self.assertNotEqual(old["mercato"]["stato"],"RECENTE")
         self.assertEqual(old["evidenze_economiche_alla_lettura"]["regime"]
                          ["qualita"],"SCADUTO")
+        self.assertEqual(old["evidenze_economiche_alla_lettura"]
+                         ["regime_motivato"]["stato"],"INDETERMINATO")
         self.assertEqual(old["evidenze_economiche_alla_lettura"]
                          ["copertura_tokenomics"]["posizioni"]["supply_attuale"],0)
         self.assertTrue(all(r["quadro_tokenomics"]["supply"]["stato"]!="VERIFICATO"
