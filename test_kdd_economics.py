@@ -515,6 +515,10 @@ class EconomicEvidenceTests(unittest.TestCase):
         rows=at_gpt["evidenze_economiche_alla_lettura"]
         self.assertEqual(len(rows["posizioni"]),10)
         self.assertEqual(len(rows["candidati"]),1)
+        self.assertEqual(rows["contesto_macro_primario"]["stato"],
+                         "NESSUN_DATO_VERIFICABILE_NEL_CAMPIONE")
+        self.assertTrue(all(x["nessuna_causalita_attestata"] for x in
+                            rows["contesto_macro_primario"]["scenari_condizionali"]))
         self.assertEqual(rows["copertura_eventi"]["posizioni"]["totali"],10)
         self.assertEqual(rows["copertura_eventi"]["candidati"]["totali"],1)
         self.assertEqual(rows["posizioni"][tokens.index("BTC")]
@@ -767,6 +771,49 @@ class EconomicEvidenceTests(unittest.TestCase):
         result=e.project_events_view(unknown,{})
         self.assertEqual(result["stato"],"IDENTITA_NON_VERIFICATA")
         self.assertFalse(result["eventi"])
+
+    def test_cp3_duplicate_rss_and_numeric_macro_are_reconciled_without_trade_claim(self):
+        url=("https://www.federalreserve.gov/newsevents/pressreleases/"
+             "monetary20261108a.htm")
+        p={"letto_utc":T.isoformat(),
+           "eventi_macro_ufficiali":[
+               {"id":"FED_MONETARY_RSS","stato":"OSSERVATO",
+                "stato_alla_lettura":"OSSERVATO","acquisito_utc":T.isoformat(),
+                "eventi":[{"tipo":"FED_COMUNICATO_MONETARIO",
+                           "categoria":"POLITICA_MONETARIA_USA",
+                           "titolo":"Federal Reserve issues FOMC statement",
+                           "fonte":url,"pubblicato_utc":T.isoformat(),
+                           "precisione_pubblicazione":"ORARIO_RSS",
+                           "aggiornato_fonte_utc":None}]},
+               {"id":"EU_COUNCIL_RSS","stato":"RINVIATO_BUDGET","eventi":[]}
+           ],
+           "indicatori_macro":[{
+               "id":"ECB_DEPOSIT_RATE","stato":"OSSERVATO",
+               "periodo":"2026-11-08","valore":2.5,
+               "acquisito_utc":T.isoformat(),
+               "unita":"percentuale annua",
+               "fonte":"https://data-api.ecb.europa.eu/service/data/FM/example"}],
+           "flussi_finanziari":[{
+               "id":"ETF_BTC_FARSIDE","stato":"STORICO_NON_AGGIORNATO",
+               "stato_alla_lettura":"SCADUTO","acquisito_utc":T.isoformat(),
+               "fonte":"https://farside.co.uk/btc/",
+               "dati":{"periodo":"2026-10-01","valore":-10,
+                       "unita":"milioni USD"}}]}
+        feed=e.macro([{"fonte":"Fed — politica monetaria","link":url,
+                       "titolo":"Federal Reserve issues FOMC statement",
+                       "data":T.isoformat()}],T)
+        ctx=e.macro_primary_context(p,feed,T)
+        self.assertEqual(ctx["duplicati_rss_gia_contati"],1)
+        self.assertEqual(len([f for f in ctx["fatti"]
+                             if f["classe"]=="COMUNICATO_UFFICIALE"]),1)
+        self.assertEqual(ctx["numero_indicatori_attuali"],1)
+        self.assertEqual(ctx["numero_flussi_attuali"],0)
+        self.assertEqual(ctx["scenari_condizionali"][0]["stato"],
+                         "FATTO_CORRENTE_DA_INTERPRETARE")
+        self.assertEqual(ctx["scenari_condizionali"][1]["stato"],"NON_VALUTABILE")
+        self.assertTrue(all(x["direzione_crypto"]=="NON_INFERIBILE"
+                             for x in ctx["scenari_condizionali"]))
+        self.assertTrue(ctx["nessuna_raccomandazione_operativa"])
 
     def test_cp1_current_supply_plus_independent_issuance_is_not_called_missing(self):
         row={"token":"SOL","identita":self.ident("SOL"),

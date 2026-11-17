@@ -1009,6 +1009,145 @@ def project_events_view(row, verified_primary):
             "nessuna_causalita_di_prezzo":True}
 
 
+def macro_primary_context(primary, published_feed, now):
+    """CP3: economic context from one read-validated primary producer only.
+
+    Observed number / published official decision / hypothesis are distinct.
+    This context is global, not evidence that a particular coin will move.
+    """
+    primary=primary if isinstance(primary,dict) else {}
+    published_feed=published_feed if isinstance(published_feed,dict) else {}
+    rss=primary.get("eventi_macro_ufficiali")
+    rss=rss if isinstance(rss,list) else []
+    indicators=primary.get("indicatori_macro")
+    indicators=indicators if isinstance(indicators,list) else []
+    financial=primary.get("flussi_finanziari")
+    financial=financial if isinstance(financial,list) else []
+    facts=[]
+    source_coverage={}
+    urls=set()
+    for family in rss:
+        fid=family.get("id")
+        state=family.get("stato_alla_lettura",family.get("stato","NON_ACQUISITO"))
+        source_coverage[fid]=state
+        if state not in ("OSSERVATO","STORICO_NON_AGGIORNATO"):
+            continue
+        for notice in family.get("eventi",[])[:5]:
+            if notice["fonte"] in urls:
+                continue
+            urls.add(notice["fonte"])
+            published=stamp(notice["pubblicato_utc"])
+            status=("PUBBLICAZIONE_RECENTE" if state=="OSSERVATO" and
+                    published and now-published<=dt.timedelta(days=14)
+                    else "PUBBLICAZIONE_DATATA_O_NON_RICONFERMATA")
+            facts.append({
+                "classe":"COMUNICATO_UFFICIALE",
+                "tipo":notice["tipo"],
+                "fatto_osservato":"Pubblicazione di un comunicato ufficiale verificato nel feed",
+                "titolo":notice["titolo"],"fonte":notice["fonte"],
+                "pubblicato_utc":notice["pubblicato_utc"],
+                "precisione_pubblicazione":notice.get("precisione_pubblicazione"),
+                "aggiornato_fonte_utc":notice.get("aggiornato_fonte_utc"),
+                "acquisito_utc":family.get("acquisito_utc"),
+                "efficacia_confermata_utc":None,
+                "stato_prova":status,
+                "possibile_conseguenza":(
+                    "La comunicazione monetaria potrebbe incidere sul costo del rischio"
+                    if fid=="FED_MONETARY_RSS" else
+                    "Misure geopolitiche potrebbero modificare accesso, controparti o appetito per il rischio"),
+                "interpretazione_alternativa":(
+                    "Una comunicazione attesa non determina di per se nuova liquidita o direzione dei prezzi"
+                    if fid=="FED_MONETARY_RSS" else
+                    "La misura potrebbe non colpire mercati crypto, protocolli o controparti dell'asset"),
+                "riesame":"Verificare testo integrale, soggetti, efficacia e dati di mercato indipendenti",
+                "limite":"Fonte ufficiale primaria: titolo non certifica efficacia o reazione del mercato"})
+    for indicator in indicators:
+        key=indicator.get("id")
+        state=indicator.get("stato","NON_ACQUISITO")
+        source_coverage[key]=state
+        if (indicator.get("valore") is None or
+                state not in ("OSSERVATO","STORICO_NON_AGGIORNATO","SCADUTO")):
+            continue
+        facts.append({
+            "classe":"INDICATORE_PUBBLICO",
+            "tipo":key,"fatto_osservato":"Valore pubblicato da serie ufficiale, soggetto a revisioni",
+            "fonte":indicator.get("fonte"),"pubblicato_utc":None,
+            "periodo":indicator.get("periodo"),"acquisito_utc":indicator.get("acquisito_utc"),
+            "valore":indicator.get("valore"),"unita":indicator.get("unita"),
+            "stato_prova":state,
+            "possibile_conseguenza":"Indicatori monetari e futures possono modificare le condizioni di rischio",
+            "interpretazione_alternativa":"Una variazione non dimostra flussi crypto o causalita di mercato",
+            "riesame":"Controllare aggiornamento e confronto della stessa serie ufficiale",
+            "limite":indicator.get("limite")})
+    for flow in financial:
+        key=flow.get("id")
+        state=flow.get("stato_alla_lettura",flow.get("stato","NON_ACQUISITO"))
+        source_coverage[key]=state
+        if not isinstance(flow.get("dati"),dict) or state not in (
+            "OSSERVATO","STORICO_NON_AGGIORNATO","SCADUTO"):
+            continue
+        data=flow["dati"]
+        fact={
+            "classe":"FLUSSO_O_STOCK_AGGREGATO",
+            "tipo":key,"fatto_osservato":"Dato pubblicato da aggregatore pubblico, non primaria istituzionale",
+            "fonte":flow.get("fonte"),"pubblicato_utc":None,
+            "periodo":data.get("periodo"),"acquisito_utc":flow.get("acquisito_utc"),
+            "valore":data.get("valore"),"unita":data.get("unita"),
+            "stato_prova":state,
+            "possibile_conseguenza":"Flussi ETF o stock stablecoin possono concorrere al quadro di liquidita",
+            "interpretazione_alternativa":"Flussi netti ETF e supply stablecoin non provano acquisti spot degli asset considerati",
+            "riesame":"Confrontare periodi, provenienza e dati di scambio indipendenti",
+            "limite":data.get("limite")}
+        facts.append(fact)
+    # Same official articles can also arrive in the legacy RSS title producer.
+    # Keep its existing scenario API intact, but avoid counting those articles
+    # twice in the verified evidence ledger.
+    previous_titles=published_feed.get("fonti_ufficiali") or []
+    duplicate_links=len({row.get("url") for row in previous_titles
+                         if isinstance(row,dict) and row.get("url") in urls})
+    geo=[v for v in facts if v.get("tipo")=="UE_COMUNICATO_SANZIONI"]
+    monetary=[v for v in facts if v.get("tipo")=="FED_COMUNICATO_MONETARIO"]
+    monetary+= [v for v in facts if v.get("tipo") in (
+        "ECB_DEPOSIT_RATE","ECB_MAIN_REFI_RATE","EA_HICP","EA_M3_GROWTH")]
+    def scenario(family,obs,question,alternative,recheck):
+        current=next((x for x in obs if x.get("stato_prova") in
+            ("OSSERVATO","PUBBLICAZIONE_RECENTE")),None)
+        latest=current or (obs[0] if obs else None)
+        return {"famiglia":family,
+                "stato":"FATTO_CORRENTE_DA_INTERPRETARE" if current else
+                        "SOLO_DATI_DATATI" if latest else "NON_VALUTABILE",
+                "fonte":latest.get("fonte") if latest else None,
+                "periodo_o_pubblicazione":(
+                    latest.get("pubblicato_utc") or latest.get("periodo") if latest else None),
+                "fatto":latest.get("fatto_osservato") if latest else None,
+                "ipotesi":question,"controipotesi":alternative,
+                "condizione_di_riesame":recheck,
+                "direzione_crypto":"NON_INFERIBILE",
+                "nessuna_causalita_attestata":True}
+    scenarios=[
+        scenario("POLITICA_MONETARIA",monetary,
+            "Tassi, inflazione e aspettative possono influire sul costo del denaro e sulla propensione al rischio",
+            "L'informazione potrebbe essere gia prezzata o compensata da altri fattori",
+            "Verificare decisione/testo, consenso precedente, liquidita e risposta osservata"),
+        scenario("GEOPOLITICA_E_SANZIONI",geo,
+            "Restrizioni e sanzioni potrebbero influenzare accesso a servizi e controparti",
+            "Il provvedimento potrebbe non riguardare asset crypto o non incidere sui volumi",
+            "Verificare destinatari, entrata in vigore, giurisdizione e operativita effettiva")]
+    return {
+        "stato":"CON_EVIDENZE_DATATE" if facts else "NESSUN_DATO_VERIFICABILE_NEL_CAMPIONE",
+        "fatti":facts[:20],"fatti_totali_nel_campione":len(facts),
+        "fatti_non_mostrati":max(0,len(facts)-20),
+        "scenari_condizionali":scenarios,
+        "copertura_fonti":source_coverage,
+        "duplicati_rss_gia_contati":duplicate_links,
+        "numero_feed_primari_freschi":sum(x.get("stato_alla_lettura")=="OSSERVATO" for x in rss),
+        "numero_indicatori_attuali":sum(x.get("stato")=="OSSERVATO" for x in indicators),
+        "numero_flussi_attuali":sum(x.get("stato_alla_lettura")=="OSSERVATO" for x in financial),
+        "limite":"Una pubblicazione ufficiale non dimostra applicazione, impatto sul prezzo "
+                 "o nesso causale. Questo e un contesto generale, non una valutazione del singolo asset",
+        "nessuna_raccomandazione_operativa":True}
+
+
 def at_read(source, positions, shortlist, now, *, requested=None):
     """Validate attribution and recalculate economic age, without source fetches."""
     if not isinstance(source, dict) or source.get("schema") != VERSION:
@@ -1220,6 +1359,15 @@ def at_read(source, positions, shortlist, now, *, requested=None):
                 if same_read and old is not None and old != derived:
                     raise ValueError("Lettura primaria per asset alterata")
                 item["valutazione_fonti_primarie"] = derived
+    macro_context=macro_primary_context(result.get("monitor_fonti"),
+                                        result["macro"],now)
+    earlier_context=source.get("contesto_macro_primario")
+    earlier_read=stamp(source.get("letto_utc"))
+    if (earlier_context is not None and earlier_read
+            and abs((now-earlier_read).total_seconds())<=1
+            and earlier_context!=macro_context):
+        raise ValueError("Macro context at GPT read distorted")
+    result["contesto_macro_primario"]=macro_context
     # Keep a per-asset tokenomics row even in a legacy economic dossier
     # without the primary monitor. Missing upstream is never a missing token.
     primary_read=result.get("monitor_fonti") or {}
