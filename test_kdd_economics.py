@@ -515,6 +515,13 @@ class EconomicEvidenceTests(unittest.TestCase):
         rows=at_gpt["evidenze_economiche_alla_lettura"]
         self.assertEqual(len(rows["posizioni"]),10)
         self.assertEqual(len(rows["candidati"]),1)
+        self.assertEqual(rows["copertura_eventi"]["posizioni"]["totali"],10)
+        self.assertEqual(rows["copertura_eventi"]["candidati"]["totali"],1)
+        self.assertEqual(rows["posizioni"][tokens.index("BTC")]
+                         ["quadro_eventi"]["eventi"][0]["tipo"],"RELEASE_SOFTWARE")
+        self.assertIsNone(rows["posizioni"][tokens.index("BTC")]
+                          ["quadro_eventi"]["eventi"][0]["efficacia_confermata_utc"])
+        self.assertEqual(rows["candidati"][0]["quadro_eventi"]["progetto_id"],"zcash")
         self.assertEqual(rows["copertura_tokenomics"]["posizioni"]["totali"],10)
         self.assertEqual(rows["copertura_tokenomics"]["candidati"]["totali"],1)
         self.assertEqual(len([r for r in rows["posizioni"]
@@ -568,6 +575,198 @@ class EconomicEvidenceTests(unittest.TestCase):
                 "regime":{"stato":"RIALZISTA","qualita":"PARZIALE"},
                 "macro":e.macro([],T)}
         return source,positions,shortlist
+
+    def test_cp2_releases_rotate_all_projects_and_read_as_historical(self):
+        """Four curated real repositories, synthetic response bytes, two cycles."""
+        import json
+        import dossier_trade as producer
+        from unittest import mock
+        tokens=("BTC","ETH","SOL","ADA")
+        pairs={t+"EUR":{"wsname":t+"/EUR","status":"online"} for t in tokens}
+        wallet={"posizioni":[{"token":t} for t in tokens]}
+        four={"posizioni":[{"token":t,"coppia":t+"/EUR","pair_key":t+"EUR"}
+                            for t in tokens]}
+        releases=[]
+        phase=[0]
+        def fetch(url,timeout=12):
+            if "/releases/latest" in url:
+                repo=url.split("/repos/")[1].split("/releases/")[0]
+                releases.append((phase[0],repo))
+                return json.dumps({
+                    "html_url":"https://github.com/"+repo+"/releases/tag/v27.1",
+                    "tag_name":"v27.1","published_at":T.isoformat(),
+                    "name":"Release published on the project repository",
+                    "draft":False,"prerelease":False}).encode()
+            if "/coins/" in url:
+                coin_id=url.split("/coins/")[1].split("?")[0]
+                token=next(t for t in tokens if e.PROJECTS[t][0]==coin_id)
+                return json.dumps(self.market(self.ident(token))).encode()
+            raise OSError("Other primary source unavailable in isolated synthetic probe")
+        with mock.patch.object(producer.desk,"request",side_effect=fetch),\
+             mock.patch.object(producer.time,"sleep"):
+            first=producer.economic_evidence({"feed":[]},wallet,four,[],T,
+                                              asset_pairs=pairs)
+            phase[0]=1
+            second=producer.economic_evidence({"feed":[]},wallet,four,[],
+                T+dt.timedelta(minutes=10),asset_pairs=pairs,previous=first)
+        repositories=set(e.PROJECTS[t][2] for t in tokens)
+        self.assertEqual(first["richieste_release"],3)
+        self.assertEqual(second["richieste_release"],3)
+        self.assertEqual(len({repo for _,repo in releases}),4)
+        self.assertEqual(first["copertura_release"]["repository_associati"],4)
+        self.assertEqual(second["copertura_release"]["repository_associati"],4)
+        self.assertLessEqual(first["richieste_effettuate"],9)
+        self.assertLessEqual(second["richieste_effettuate"],9)
+        fresh_first={row["evento"].get("emittente") for row in first["posizioni"]
+                     if row["evento"]["stato"]=="VERIFICATO"}
+        self.assertEqual(len(fresh_first),3)
+        second_verified={repo for phaseid,repo in releases if phaseid==1}
+        historic=repositories-second_verified
+        self.assertEqual(len(historic),1)
+        historical_row=next(r for r in second["posizioni"]
+                             if r["identita"]["repository_primario"] in historic)
+        self.assertEqual(historical_row["evento"]["stato"],
+                         "STORICO_NON_AGGIORNATO")
+        self.assertEqual(historical_row["evento"]["acquisito_utc"],T.isoformat(timespec="seconds"))
+        read=e.at_read(second,wallet["posizioni"],[],T+dt.timedelta(minutes=10))
+        self.assertEqual(read["copertura_eventi"]["posizioni"]["totali"],4)
+        self.assertEqual(read["copertura_eventi"]["posizioni"]["con_documenti_o_avvisi"],4)
+        self.assertEqual(read["copertura_eventi"]["posizioni"]["release_storiche"],1)
+        self.assertEqual(read["copertura_eventi"]["posizioni"]["release_confermate_alla_lettura"],3)
+        for entry in read["posizioni"]:
+            event=entry["quadro_eventi"]["eventi"][0]
+            self.assertEqual(event["tipo"],"RELEASE_SOFTWARE")
+            self.assertEqual(event["fonte"],entry["evento"]["fonte"])
+            self.assertIsNone(event["efficacia_confermata_utc"])
+            self.assertTrue(event["controipotesi"])
+        later=e.at_read(read,wallet["posizioni"],[],T+dt.timedelta(days=8))
+        self.assertEqual(later["copertura_eventi"]["posizioni"]["release_confermate_alla_lettura"],0)
+        self.assertTrue(all(row["evento"]["stato"]=="SCADUTO" for row in later["posizioni"]))
+        tampered=copy.deepcopy(second)
+        tampered["posizioni"][0]["evento"]["tag"]="fabricated"
+        with self.assertRaisesRegex(ValueError,"Release attribution"):
+            e.at_read(tampered,wallet["posizioni"],[],T+dt.timedelta(minutes=10))
+        altered=copy.deepcopy(read)
+        altered["posizioni"][0]["quadro_eventi"]["eventi"][0][
+            "efficacia_confermata_utc"]=T.isoformat()
+        with self.assertRaisesRegex(ValueError,"Project events at read distorted"):
+            e.at_read(altered,wallet["posizioni"],[],T+dt.timedelta(minutes=10))
+
+    def test_cp2_published_repository_advisory_goes_to_gpt_without_fake_exploit(self):
+        import json
+        import kdd_economic_sources as primary
+        source,positions,shortlist=self.sample()
+        source["fonti_economiche"]=e.sources_matrix()
+        repo="bitcoin/bitcoin"
+        ghsa="GHSA-abcd-efgh-ijkl"
+        url="https://github.com/"+repo+"/security/advisories/"+ghsa
+        def fetch(endpoint):
+            if endpoint.endswith("/security-advisories?per_page=5"):
+                if endpoint=="https://api.github.com/repos/"+repo+"/security-advisories?per_page=5":
+                    return json.dumps([{"ghsa_id":ghsa,"html_url":url,
+                        "summary":"Repository advisory in synthetic fixture",
+                        "state":"published","published_at":T.isoformat(),
+                        "withdrawn_at":None}]).encode()
+            if "/pulls?" in endpoint or "/issues?" in endpoint:
+                return b"[]"
+            raise OSError("Other primary unavailable")
+        source["monitor_fonti"]=primary.collect(
+            T,source,{},fetch,network_allowed=True)
+        first=e.at_read(source,positions,shortlist,T)
+        btc=first["posizioni"][0]["quadro_eventi"]
+        advisories=[x for x in btc["eventi"]
+                    if x["tipo"]=="AVVISO_SICUREZZA_REPOSITORY"]
+        self.assertEqual(len(advisories),1)
+        self.assertEqual(advisories[0]["fonte"],url)
+        self.assertEqual(advisories[0]["categoria"],"ADVISORY_SICUREZZA_NON_EXPLOIT")
+        self.assertIsNone(advisories[0]["efficacia_confermata_utc"])
+        self.assertTrue(advisories[0]["controipotesi"])
+        self.assertEqual(first["posizioni"][1]["quadro_eventi"]["progetto_id"],"solana")
+        after=e.at_read(first,positions,shortlist,T+dt.timedelta(days=15))
+        self.assertFalse(any(x["tipo"]=="AVVISO_SICUREZZA_REPOSITORY"
+            for x in after["posizioni"][0]["quadro_eventi"]["eventi"]))
+        forged=copy.deepcopy(source)
+        btcrow=next(x for x in forged["monitor_fonti"]["avvisi_repository"]
+                    if x["progetto_id"]=="bitcoin")
+        btcrow["avvisi"][0]["fonte"]="https://github.com/unrelated/client/security/advisories/"+ghsa
+        with self.assertRaises(ValueError):
+            e.at_read(forged,positions,shortlist,T)
+
+    def test_cp2_completed_kraken_maintenance_and_old_proposals_are_not_current_news(self):
+        identity=self.ident("BTC")
+        old="2023-06-21T17:02:10+00:00"
+        row={"token":"BTC","identita":identity,"evento":e.release_event(identity,None,T,T),
+             "valutazione_fonti_primarie":{"fatti":[
+                 {"tipo":"ANNUNCIO_UFFICIALE_KRAKEN",
+                  "fonte":"https://status.kraken.com/incidents/maintenance",
+                  "stato_prova":"COMUNICAZIONE_CONCLUSA",
+                  "pubblicato_o_periodo_utc":T.isoformat(),
+                  "dettaglio":{"tipo":"EVENTO_SERVIZIO","stato":"resolved"},
+                  "acquisito_utc":T.isoformat(),"fatto":"Routine concluded"},
+                 {"tipo":"PROPOSTA_GOVERNANCE_DOCUMENTALE",
+                  "fonte":"https://github.com/bitcoin/bips/pull/101",
+                  "stato_prova":"PROPOSTA_DOCUMENTALE",
+                  "pubblicato_o_periodo_utc":old,
+                  "acquisito_utc":T.isoformat(),
+                  "dettaglio":{"stato_documento":"INCORPORATO_NEL_REPO"},
+                  "fatto":"Old documentation"},
+                 {"tipo":"ANNUNCIO_UFFICIALE_KRAKEN",
+                  "fonte":"https://status.kraken.com/incidents/delisting",
+                  "stato_prova":"COMUNICAZIONE_UFFICIALE",
+                  "pubblicato_o_periodo_utc":T.isoformat(),
+                  "acquisito_utc":T.isoformat(),
+                  "dettaglio":{"tipo":"DELISTING_COMUNICATO",
+                              "creato_fonte_utc":T.isoformat()},
+                  "fatto":"Documented delisting notice"}]}}
+        view=e.project_events_view(row,{"letto_utc":T.isoformat()})
+        self.assertEqual(view["notifiche_ordinarie_escluse"],1)
+        self.assertEqual(len(view["eventi"]),2)
+        old_doc=next(x for x in view["eventi"]
+                     if x["tipo"]=="PROPOSTA_GOVERNANCE_DOCUMENTALE")
+        self.assertEqual(old_doc["stato_prova"],
+                         "DOCUMENTO_DATATO_NON_RICONFERMA_DECISIONE")
+        self.assertEqual(old_doc["prova_documento_origine"],"PROPOSTA_DOCUMENTALE")
+        delisting=next(x for x in view["eventi"]
+                       if x["tipo"]=="ANNUNCIO_UFFICIALE_KRAKEN")
+        self.assertEqual(delisting["stato_prova"],"COMUNICAZIONE_UFFICIALE")
+        self.assertIsNone(delisting["efficacia_confermata_utc"])
+
+    def test_cp2_repository_event_types_do_not_claim_execution_or_price_causality(self):
+        ident=self.ident("BTC")
+        row={"token":"BTC","identita":ident,
+             "evento":e.release_event(ident,None,T,T),
+             "valutazione_fonti_primarie":{"fatti":[
+                {"tipo":"PROPOSTA_GOVERNANCE_DOCUMENTALE",
+                 "fonte":"https://github.com/bitcoin/bips/pull/101",
+                 "fatto":"Document PR","pubblicato_o_periodo_utc":T.isoformat(),
+                 "acquisito_utc":T.isoformat(),"stato_prova":"PROPOSTA_DOCUMENTALE",
+                 "dettaglio":{"stato_documento":"INCORPORATO_NEL_REPO"}},
+                {"tipo":"AVVISO_SICUREZZA_REPOSITORY",
+                 "fonte":"https://github.com/bitcoin/bitcoin/security/advisories/GHSA-abcd-efgh-ijkl",
+                 "fatto":"Repository advisory","pubblicato_o_periodo_utc":T.isoformat(),
+                 "acquisito_utc":T.isoformat(),"stato_prova":"DOCUMENTO_REPOSITORY",
+                 "dettaglio":{"stato":"PUBBLICATO"}},
+                {"tipo":"UNLOCK_MASSIMO_DATATO_PRIMARIO",
+                 "fonte":"https://example.com/primary-schedule",
+                 "fatto":"Documented maximum","pubblicato_o_periodo_utc":"2026-12-15",
+                 "acquisito_utc":T.isoformat(),"stato_prova":"MASSIMO_PRIMARIO_PROGRAMMATO"}],
+                 "non_mostrati_per_tipo":{}}}
+        view=e.project_events_view(row,{})
+        self.assertEqual(len(view["eventi"]),3)
+        self.assertTrue(view["nessuna_causalita_di_prezzo"])
+        self.assertTrue(all(x["efficacia_confermata_utc"] is None
+                            for x in view["eventi"]))
+        self.assertIsNone(view["eventi"][2]["pubblicato_utc"])
+        self.assertEqual(view["eventi"][2]["efficacia_programmata_utc"],"2026-12-15")
+        self.assertEqual(view["eventi"][0]["categoria"],"DOCUMENTO_NON_VOTO_DI_RETE")
+        self.assertEqual(view["eventi"][1]["categoria"],"ADVISORY_SICUREZZA_NON_EXPLOIT")
+        # A ticker alone cannot authorize a cached event of a different project.
+        unknown={"token":"BTC","identita":{"stato":"NON_VERIFICATO",
+                 "coppia":"BTC/EUR","coingecko_id":"bitcoin"},
+                 "evento":row["evento"],"valutazione_fonti_primarie":{"fatti":[]}}
+        result=e.project_events_view(unknown,{})
+        self.assertEqual(result["stato"],"IDENTITA_NON_VERIFICATA")
+        self.assertFalse(result["eventi"])
 
     def test_cp1_current_supply_plus_independent_issuance_is_not_called_missing(self):
         row={"token":"SOL","identita":self.ident("SOL"),

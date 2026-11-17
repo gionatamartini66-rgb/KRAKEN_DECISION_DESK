@@ -648,17 +648,66 @@ def economic_evidence(source, wallet, four, candidates, now, *,
         cache[cg], failures[cg] = public_json(url)
         time.sleep(.35)
 
+    # KDD-20: rotate official project releases over ALL eligible repositories.
+    # Previously projects[:3] permanently excluded the fourth repository.
+    # Keep the existing shared 9-request ceiling (including CoinGecko).
     release_cache, release_calls = {}, 0
     projects = sorted({row["identita"]["repository_primario"]
                        for group in items.values() for row in group
-                       if row["identita"].get("repository_primario")})
-    for project_repo in projects[:min(3, max(0, 9-discovery_calls-batch_calls-cg_calls))]:
-        release_calls += 1
+                       if row["identita"].get("stato")=="IDENTITA_VERIFICATA_DA_CATALOGO"
+                       and row["identita"].get("repository_primario")})
+    release_cursor=prior.get("prossimo_repository_release") if allowed_history else None
+    release_start=next((i for i,repo in enumerate(projects)
+                        if isinstance(release_cursor,str) and repo>=release_cursor),0)
+    release_capacity=min(3,max(0,9-discovery_calls-batch_calls-cg_calls))
+    release_selected=[projects[(release_start+i)%len(projects)]
+                      for i in range(min(release_capacity,len(projects)))]
+    next_release=(projects[(release_start+len(release_selected))%len(projects)]
+                  if projects else None)
+    release_failures={}
+    for project_repo in release_selected:
+        release_calls+=1
         try:
-            url = "https://api.github.com/repos/" + project_repo + "/releases/latest"
-            release_cache[project_repo] = json.loads(desk.request(url, timeout=10).decode("utf-8"))
-        except (ValueError, OSError, RuntimeError, KeyError, TypeError):
-            release_cache[project_repo] = None
+            url="https://api.github.com/repos/"+project_repo+"/releases/latest"
+            release_cache[project_repo]=json.loads(desk.request(url,timeout=10).decode("utf-8"))
+        except (ValueError,OSError,RuntimeError,KeyError,TypeError) as exc:
+            release_cache[project_repo]=None
+            release_failures[project_repo]=(
+                "HTTP_"+str(exc.code) if getattr(exc,"code",None)
+                in (403,404,429,500,502,503) else "ERRORE_"+type(exc).__name__)
+    # A released version is observable through its official repo even after
+    # it rotates out of the request budget. Preserve it ONLY as historical,
+    # with its original acquisition date, project and exact Kraken pair.
+    previous_releases={}
+    if allowed_history:
+        for group in ("posizioni","candidati","richiesti"):
+            for old in prior.get(group,[]):
+                if not isinstance(old,dict):
+                    continue
+                ident,event=old.get("identita"),old.get("evento")
+                if (not isinstance(ident,dict) or
+                        ident.get("stato")!="IDENTITA_VERIFICATA_DA_CATALOGO" or
+                        not isinstance(event,dict) or
+                        event.get("stato") not in ("VERIFICATO","STORICO_NON_AGGIORNATO")):
+                    continue
+                acquired=econ.stamp(event.get("acquisito_utc"))
+                if not acquired or not dt.timedelta(0)<=now-acquired<=dt.timedelta(days=7):
+                    continue
+                reconstructed=econ.release_event(ident,{
+                    "html_url":event.get("fonte"),"tag_name":event.get("tag"),
+                    "published_at":event.get("pubblicato_utc"),
+                    "name":event.get("sintesi"),
+                    "draft":False,"prerelease":event.get("pre_release") is True},
+                    now,acquired)
+                if reconstructed.get("stato")!="VERIFICATO":
+                    continue
+                keys=("fonte","emittente","tag","pubblicato_utc","evento_utc",
+                      "sintesi","pre_release","adozione_rete","impatto_economico")
+                if any(reconstructed.get(key)!=event.get(key) for key in keys):
+                    continue
+                key=(ident.get("token"),ident.get("coppia"),
+                     ident.get("pair_key"),ident.get("coingecko_id"))
+                previous_releases[key]=event
 
     for group in ("posizioni", "candidati", "richiesti"):
         for row in items[group]:
@@ -709,7 +758,24 @@ def economic_evidence(source, wallet, four, candidates, now, *,
             row["network_metadata"] = metadata
             row["fondamentali"] = fund
             repo_name = identity.get("repository_primario")
-            row["evento"] = econ.release_event(identity, release_cache.get(repo_name), now, now)
+            release=econ.release_event(identity,release_cache.get(repo_name),now,now)
+            if release["stato"]=="VERIFICATO":
+                release["origine"]="ACQUISIZIONE_REPOSITORY_PUBBLICO"
+            else:
+                previous_key=(identity.get("token"),identity.get("coppia"),
+                              identity.get("pair_key"),identity.get("coingecko_id"))
+                old_release=previous_releases.get(previous_key)
+                if old_release and repo_name==old_release.get("emittente"):
+                    release=dict(old_release,stato="STORICO_NON_AGGIORNATO",
+                        origine="CACHE_LOCALE_RELEASE_PUBBLICA",
+                        motivo_rinvio=("RINVIATO_BUDGET" if repo_name not in release_selected
+                                      else release_failures.get(repo_name,"FONTE_NON_CONFORME")))
+                elif repo_name and identity.get("stato")=="IDENTITA_VERIFICATA_DA_CATALOGO":
+                    release["stato"]=("RINVIATO_BUDGET" if repo_name not in release_selected
+                                     else "FONTE_NON_DISPONIBILE")
+                    release["motivo"]=release_failures.get(repo_name,
+                                                         "RELEASE_NON_ATTESTATA")
+            row["evento"]=release
             # A curated primary monetary-policy URL is a research reference,
             # NOT a newly acquired unlock/vesting schedule.
             row["politica_monetaria_primaria"] = econ.monetary_reference(identity)
@@ -767,6 +833,17 @@ def economic_evidence(source, wallet, four, candidates, now, *,
             "richieste_coingecko": cg_calls,
             "richieste_batch_coingecko":batch_calls,
             "richieste_release": release_calls,
+            "prossimo_repository_release":next_release,
+            "copertura_release":{
+                "repository_associati":len(projects),
+                "repository_richiesti":len(release_selected),
+                "repository_con_release_confermata":len({
+                    row["evento"]["emittente"]
+                    for group in items.values() for row in group
+                    if row["evento"].get("stato")=="VERIFICATO"
+                    and row["evento"].get("origine")=="ACQUISIZIONE_REPOSITORY_PUBBLICO"
+                    and row["evento"].get("emittente") in release_selected}),
+                "limite":"Release software ufficiale non equivale a attivazione del protocollo"},
             "richieste_esterne_massime": 9,
             "richieste_effettuate": discovery_calls+batch_calls+cg_calls+release_calls,
             "limite": "Risoluzione pubblica incrociata, non prova chain/contract, unlock, acquisti o ordini"}

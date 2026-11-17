@@ -896,6 +896,119 @@ def tokenomics_view(row, primary):
         "nessun_segnale_operativo":True}
 
 
+_PROJECT_EVENT_CLASSES={
+    "ANNUNCIO_UFFICIALE_KRAKEN":"AVVISO_KRAKEN",
+    "STATO_COPPIA_KRAKEN":"RESTRIZIONE_O_TRANSIZIONE_MERCATO",
+    "AVVISO_SICUREZZA_REPOSITORY":"ADVISORY_SICUREZZA_NON_EXPLOIT",
+    "ISSUE_TECNICA_ETICHETTATA":"SEGNALAZIONE_NON_INCIDENTE_CONFERMATO",
+    "PROPOSTA_GOVERNANCE_DOCUMENTALE":"DOCUMENTO_NON_VOTO_DI_RETE",
+    "REVISIONE_TOKENOMICS_PRIMARIA":"REVISIONE_PIANO_NON_EMISSIONE",
+    "VARIAZIONE_POLICY_EMISSIONE":"VARIAZIONE_POLICY_NON_EMISSIONE",
+    "UNLOCK_SOLO_PROGRAMMATO":"UNLOCK_SOLO_PREVISTO",
+    "UNLOCK_MASSIMO_DATATO_PRIMARIO":"MASSIMO_SBLOCCABILE_NON_REALIZZAZIONE",
+}
+
+
+def project_events_view(row, verified_primary):
+    """KDD-20: the existing reader's per-asset project-event representation.
+
+    It consumes only read-validated source facts and the already authenticated
+    release. Event publication, effectiveness and market effects stay separate.
+    """
+    identity=row.get("identita") or {}
+    project=(identity.get("coingecko_id") if
+             identity.get("stato")=="IDENTITA_VERIFICATA_DA_CATALOGO" else None)
+    release=row.get("evento") or {}
+    review=row.get("valutazione_fonti_primarie") or {}
+    events=[]
+    read_time=stamp(verified_primary.get("letto_utc")) if isinstance(verified_primary,dict) else None
+    omitted_routine=0
+    if project and release.get("stato") in ("VERIFICATO","STORICO_NON_AGGIORNATO","SCADUTO"):
+        events.append({
+            "tipo":"RELEASE_SOFTWARE","categoria":"SVILUPPO_PROTOCOLLO",
+            "fonte":release.get("fonte"),"pubblicato_utc":release.get("pubblicato_utc"),
+            "efficacia_programmata_utc":None,"efficacia_confermata_utc":None,
+            "acquisito_utc":release.get("acquisito_utc"),
+            "stato_prova":release.get("stato"),
+            "dettaglio":{"titolo":release.get("sintesi"),"tag":release.get("tag"),
+                        "pre_release":release.get("pre_release"),
+                        "origine":release.get("origine")},
+            "fatto":"Release software pubblicata dal repository ufficiale",
+            "ipotesi_economica":"Una modifica del software potrebbe diventare rilevante se adottata",
+            "controipotesi":"La release non dimostra adozione, attivazione, modifica tokenomics o prezzo",
+            "condizione_di_riesame":"Verificare changelog e attivazione effettiva sulla rete"})
+    for f in review.get("fatti",[])[:20]:
+        if not isinstance(f,dict) or f.get("tipo") not in _PROJECT_EVENT_CLASSES:
+            continue
+        kind=f["tipo"]
+        d=f.get("dettaglio") if isinstance(f.get("dettaglio"),dict) else {}
+        if kind=="STATO_COPPIA_KRAKEN" and d.get("status")=="online" and not d.get("cambiamento"):
+            omitted_routine+=1
+            continue # routine online is not a project event
+        if (kind=="ANNUNCIO_UFFICIALE_KRAKEN"
+                and d.get("tipo")!="DELISTING_COMUNICATO"
+                and f.get("stato_prova") in
+                    ("COMUNICAZIONE_CONCLUSA","STORICO_NON_RICONFERMATO")):
+            omitted_routine+=1
+            continue # concluded service notice is NOT a new project event
+        future=kind in ("UNLOCK_SOLO_PROGRAMMATO","UNLOCK_MASSIMO_DATATO_PRIMARIO")
+        dated=f.get("pubblicato_o_periodo_utc")
+        published=(d.get("creato_fonte_utc") or dated
+                   if kind=="ANNUNCIO_UFFICIALE_KRAKEN" else
+                   None if future else dated)
+        proof=f.get("stato_prova")
+        # An old proposal merely returned in the latest API page is not a
+        # newly approved governance decision. Preserve it as dated history.
+        parsed=stamp(published)
+        if (read_time and parsed and dt.timedelta(days=180)<read_time-parsed
+                and kind in ("PROPOSTA_GOVERNANCE_DOCUMENTALE",
+                             "ISSUE_TECNICA_ETICHETTATA")):
+            proof="DOCUMENTO_DATATO_NON_RICONFERMA_DECISIONE"
+        events.append({
+            "tipo":kind,"categoria":_PROJECT_EVENT_CLASSES[kind],
+            "fonte":f.get("fonte"),"pubblicato_utc":published,
+            "aggiornato_fonte_utc":dated if kind=="ANNUNCIO_UFFICIALE_KRAKEN" else None,
+            "efficacia_programmata_utc":dated if future else None,
+            "efficacia_confermata_utc":None,
+            "acquisito_utc":f.get("acquisito_utc"),
+            "stato_prova":proof,"prova_documento_origine":f.get("stato_prova"),
+            "dettaglio":d,
+            "fatto":f.get("fatto"),
+            "ipotesi_economica":"Il documento potrebbe modificare il giudizio se confermato e pertinente",
+            "controipotesi":"La fonte non dimostra esecuzione, impatto sul conto o causalità di prezzo",
+            "condizione_di_riesame":"Verificare documento originale, stato attuale ed eventuale esecuzione"})
+    if not project:
+        state="IDENTITA_NON_VERIFICATA"
+    elif any(e["stato_prova"] in ("VERIFICATO","COMUNICAZIONE_UFFICIALE",
+              "DOCUMENTO_REPOSITORY","PROPOSTA_DOCUMENTALE","CONFRONTO_DOCUMENTALE",
+              "SEGNALAZIONE_NON_CONFERMA","PROGRAMMA_PRIMARIO","MASSIMO_PRIMARIO_PROGRAMMATO",
+              "OSSERVAZIONE_API","CONFRONTO_RPC") for e in events):
+        state="EVENTI_O_DOCUMENTI_RILEVANTI_NEL_CAMPIONE"
+    elif events:
+        state="SOLO_EVIDENZE_STORICHE_O_NON_RICONFERMATE"
+    else:
+        state="NESSUN_EVENTO_IDENTIFICATO_NEL_CAMPIONE"
+    # Missing coverage is explicit even if no events occurred in sampled feeds.
+    families={}
+    for name in ("progetti","segnalazioni_repo","avvisi_repository"):
+        rows=verified_primary.get(name) if isinstance(verified_primary,dict) else []
+        match=next((x for x in rows if isinstance(x,dict) and
+                    x.get("progetto_id")==project),{}) if isinstance(rows,list) else {}
+        families[name]=match.get("stato_alla_lettura",match.get("stato","NON_ACQUISITO"))
+    unshown=review.get("non_mostrati_per_tipo")
+    hidden={k:v for k,v in (unshown or {}).items()
+            if k in _PROJECT_EVENT_CLASSES and type(v) is int and v>0} if isinstance(unshown,dict) else {}
+    return {"token":row.get("token"),"coppia":identity.get("coppia"),
+            "progetto_id":project,"stato":state,"eventi":events[:18],
+            "eventi_non_mostrati":sum(hidden.values())+max(0,len(events)-18),
+            "notifiche_ordinarie_escluse":omitted_routine,
+            "non_mostrati_per_tipo":hidden,
+            "copertura_fonti":dict(families,release=release.get("stato","NON_ACQUISITO")),
+            "limite":"Un campione vuoto o una fonte fallita non prova assenza di eventi; "
+                     "una notizia non equivale a voto, exploit, unlock eseguito o vendita",
+            "nessuna_causalita_di_prezzo":True}
+
+
 def at_read(source, positions, shortlist, now, *, requested=None):
     """Validate attribution and recalculate economic age, without source fetches."""
     if not isinstance(source, dict) or source.get("schema") != VERSION:
@@ -978,7 +1091,8 @@ def at_read(source, positions, shortlist, now, *, requested=None):
                 evidence = row.get(field)
                 if not isinstance(evidence, dict):
                     raise ValueError("Fonte economica mancante")
-                if evidence.get("stato") in ("VERIFICATO", "SCADUTO", "ANOMALIA_SUPPLY"):
+                if evidence.get("stato") in ("VERIFICATO", "SCADUTO", "ANOMALIA_SUPPLY",
+                                               "STORICO_NON_AGGIORNATO"):
                     t = stamp(evidence.get("rilevato_utc") if field == "fondamentali"
                               else evidence.get("pubblicato_utc"))
                     if t is None or t > now + dt.timedelta(minutes=2):
@@ -987,15 +1101,40 @@ def at_read(source, positions, shortlist, now, *, requested=None):
                             evidence.get("fonte"),identity.get("coingecko_id")):
                         raise ValueError("Fonte fondamentali incoerente")
                     if field == "evento":
-                        repo = identity.get("repository_primario")
-                        url = evidence.get("fonte")
-                        if not repo or not isinstance(url, str) or not url.startswith(
-                                "https://github.com/" + repo + "/releases/tag/"):
-                            raise ValueError("Evento non attribuibile")
-                    max_age = dt.timedelta(days=1 if field == "fondamentali" else 90)
-                    row_copy[field] = dict(evidence, stato=(
-                        evidence["stato"] if evidence["stato"] in ("VERIFICATO","ANOMALIA_SUPPLY")
-                        and now-t <= max_age else "SCADUTO"))
+                        repo=identity.get("repository_primario")
+                        url=evidence.get("fonte")
+                        tag=evidence.get("tag")
+                        source_seen=stamp(evidence.get("acquisito_utc"))
+                        if (not repo or not isinstance(tag,str) or not tag
+                                or url!="https://github.com/"+repo+"/releases/tag/"+tag
+                                or evidence.get("emittente")!=repo
+                                or evidence.get("evento_utc")!=evidence.get("pubblicato_utc")
+                                or evidence.get("adozione_rete")!="NON_VERIFICATA"
+                                or evidence.get("impatto_economico")!="NON_DIMOSTRATO"
+                                or not isinstance(evidence.get("sintesi"),str)
+                                or not evidence["sintesi"].strip()
+                                or type(evidence.get("pre_release")) is not bool
+                                or not source_seen
+                                or not dt.timedelta(0)<=acquired-source_seen
+                                   <=dt.timedelta(days=7)
+                                or source_seen<t-dt.timedelta(minutes=2)):
+                            raise ValueError("Release attribution, timing or execution forged")
+                        age_source=now-source_seen
+                        age_publication=now-t
+                        if (evidence["stato"]=="SCADUTO"
+                                or age_publication>dt.timedelta(days=90)
+                                or age_source>dt.timedelta(days=7)):
+                            next_state="SCADUTO"
+                        elif (evidence["stato"]=="STORICO_NON_AGGIORNATO"
+                              or age_source>dt.timedelta(days=1)):
+                            next_state="STORICO_NON_AGGIORNATO"
+                        else:
+                            next_state="VERIFICATO"
+                        row_copy[field]=dict(evidence,stato=next_state)
+                    else:
+                        row_copy[field]=dict(evidence,stato=(
+                            evidence["stato"] if evidence["stato"] in ("VERIFICATO","ANOMALIA_SUPPLY")
+                            and now-t<=dt.timedelta(days=1) else "SCADUTO"))
             verify_supply_at_read(row_copy["fondamentali"])
             if row_copy["identita"].get("stato") != "IDENTITA_VERIFICATA_DA_CATALOGO":
                 # An expired project binding cannot leave verified numerical
@@ -1093,6 +1232,27 @@ def at_read(source, positions, shortlist, now, *, requested=None):
             if same_read and prior_tokenomics is not None and prior_tokenomics!=tokenomics:
                 raise ValueError("Tokenomics at read distorted")
             item["quadro_tokenomics"]=tokenomics
+    for group in ("posizioni","candidati","richiesti"):
+        for original,item in zip(source.get(group,[]),result[group]):
+            event_view=project_events_view(item,primary_read)
+            previous_view=original.get("quadro_eventi")
+            if same_read and previous_view is not None and previous_view!=event_view:
+                raise ValueError("Project events at read distorted")
+            item["quadro_eventi"]=event_view
+    result["copertura_eventi"]={}
+    for group in ("posizioni","candidati","richiesti"):
+        items_group=result[group]
+        result["copertura_eventi"][group]={
+            "totali":len(items_group),
+            "progetti_identificati":sum(x["quadro_eventi"]["progetto_id"] is not None
+                                       for x in items_group),
+            "con_documenti_o_avvisi":sum(bool(x["quadro_eventi"]["eventi"])
+                                        for x in items_group),
+            "release_confermate_alla_lettura":sum(x["evento"].get("stato")=="VERIFICATO"
+                                                  for x in items_group),
+            "release_storiche":sum(x["evento"].get("stato") in
+                                   ("STORICO_NON_AGGIORNATO","SCADUTO") for x in items_group),
+            "limite":"Copertura del roster osservato, non degli eventi assenti dal campione"}
     result["copertura_tokenomics"]={}
     for group in ("posizioni","candidati","richiesti"):
         rows=result[group]

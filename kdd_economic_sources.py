@@ -1902,7 +1902,8 @@ def decision_review(evidence, row, group):
                 entry.get("limite"),
                 {"status":entry.get("status_kraken"),"cambiamento":entry.get("cambiamento")})
     security=by_project("avvisi_repository")
-    if security.get("stato_alla_lettura")=="OSSERVATO":
+    if security.get("stato_alla_lettura") in ("OSSERVATO","STORICO"):
+        is_historic=security["stato_alla_lettura"]!="OSSERVATO"
         for event in security.get("avvisi",[])[:5]:
             if not isinstance(event,dict): continue
             add("AVVISO_SICUREZZA_REPOSITORY",
@@ -1910,8 +1911,10 @@ def decision_review(evidence, row, group):
                     " ritirato" if event.get("stato")=="RITIRATO" else "")+
                     ": impatto sul token non attestato",
                 event.get("fonte"),event.get("pubblicato_utc"),
-                security.get("acquisito_utc"),"DOCUMENTO_REPOSITORY",
-                event.get("limite"),{"titolo":event.get("titolo"),"stato":event.get("stato")})
+                security.get("acquisito_utc"),
+                "DOCUMENTO_REPOSITORY_STORICO_NON_RICONFERMATO" if is_historic
+                else "DOCUMENTO_REPOSITORY",
+                event.get("limite"),{"titolo":event.get("titolo"),"stato":event.get("stato"),"ritirato_utc":event.get("ritirato_utc")})
     emission=by_project("politiche_emissioni")
     if emission.get("stato_alla_lettura")=="OSSERVATO":
         if isinstance(emission.get("confronto"),dict):
@@ -1927,23 +1930,29 @@ def decision_review(evidence, row, group):
             "PARAMETRI_RPC",emission.get("limite"),
             {"valori":emission.get("valori")})
     governance=by_project("progetti")
-    if governance.get("stato")=="OSSERVATO":
+    if governance.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO"):
+        is_historic=governance["stato"]!="OSSERVATO"
         for event in governance.get("eventi",[])[:3]:
             if not isinstance(event,dict): continue
             add("PROPOSTA_GOVERNANCE_DOCUMENTALE",
                 "Esiste una proposta di documentazione; attivazione sulla rete non attestata",
                 event.get("fonte"),event.get("pubblicato_utc"),
-                governance.get("acquisito_utc"),"PROPOSTA_DOCUMENTALE",
+                governance.get("acquisito_utc"),
+                "PROPOSTA_DOCUMENTALE_STORICA_NON_RICONFERMATA" if is_historic
+                else "PROPOSTA_DOCUMENTALE",
                 event.get("limite"),{"titolo":event.get("titolo"),
-                                      "stato_documento":event.get("stato_documento")})
+                                      "stato_documento":event.get("stato_documento"),"merge_documento_utc":event.get("evento_utc")})
     issues=by_project("segnalazioni_repo")
-    if issues.get("stato_alla_lettura")=="OSSERVATO":
+    if issues.get("stato_alla_lettura") in ("OSSERVATO","STORICO"):
+        is_historic=issues["stato_alla_lettura"]!="OSSERVATO"
         for event in issues.get("eventi",[])[:4]:
             if not isinstance(event,dict): continue
             add("ISSUE_TECNICA_ETICHETTATA",
                 "È pubblicata una issue etichettata: l'esito tecnico non è accertato",
                 event.get("fonte"),event.get("pubblicato_utc"),
-                issues.get("acquisito_utc"),"SEGNALAZIONE_NON_CONFERMA",
+                issues.get("acquisito_utc"),
+                "SEGNALAZIONE_STORICA_NON_RICONFERMATA" if is_historic
+                else "SEGNALAZIONE_NON_CONFERMA",
                 event.get("limite"),{"titolo":event.get("titolo"),
                                       "categorie":event.get("categorie")})
     observed_contract=({"bitcoin":"CFTC_BTC_TFF","ethereum":"CFTC_ETH_TFF"}
@@ -2063,11 +2072,11 @@ def decision_review(evidence, row, group):
         "UNLOCK_SOLO_PROGRAMMATO":len(schedule.get("eventi",[]))
             if schedule.get("stato")=="DOCUMENTO_PRIMARIO_CON_SCHEDULE" else 0,
         "AVVISO_SICUREZZA_REPOSITORY":len(security.get("avvisi",[]))
-            if security.get("stato_alla_lettura")=="OSSERVATO" else 0,
+            if security.get("stato_alla_lettura") in ("OSSERVATO","STORICO") else 0,
         "PROPOSTA_GOVERNANCE_DOCUMENTALE":len(governance.get("eventi",[]))
-            if governance.get("stato")=="OSSERVATO" else 0,
+            if governance.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO") else 0,
         "ISSUE_TECNICA_ETICHETTATA":len(issues.get("eventi",[]))
-            if issues.get("stato_alla_lettura")=="OSSERVATO" else 0}
+            if issues.get("stato_alla_lettura") in ("OSSERVATO","STORICO") else 0}
     # Count both facts beyond the twenty-row output bound and source events
     # beyond per-family presentation limits. No hidden observed fact is zero.
     hidden={}
