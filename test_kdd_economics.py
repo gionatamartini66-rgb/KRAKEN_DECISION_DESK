@@ -675,6 +675,16 @@ class EconomicEvidenceTests(unittest.TestCase):
         self.assertIsNone(rows["posizioni"][tokens.index("BTC")]
                           ["quadro_eventi"]["eventi"][0]["efficacia_confermata_utc"])
         self.assertEqual(rows["candidati"][0]["quadro_eventi"]["progetto_id"],"zcash")
+        self.assertEqual(rows["copertura_integrazione"]["posizioni"]
+                         ["quattro_famiglie_esposte"],10)
+        self.assertEqual(rows["copertura_integrazione"]["candidati"]
+                         ["quattro_famiglie_esposte"],1)
+        self.assertEqual([r["giudizio_economico_integrato"]["token"]
+                          for r in rows["posizioni"]],tokens)
+        self.assertTrue(all(r["giudizio_economico_integrato"]["ordine"]==
+                            "NON_GENERATO" for r in rows["posizioni"]+rows["candidati"]))
+        self.assertTrue(all(len(r["giudizio_economico_integrato"]["componenti"])==4
+                            for r in rows["posizioni"]+rows["candidati"]))
         self.assertEqual(rows["copertura_tokenomics"]["posizioni"]["totali"],10)
         self.assertEqual(rows["copertura_tokenomics"]["candidati"]["totali"],1)
         self.assertEqual(len([r for r in rows["posizioni"]
@@ -706,11 +716,139 @@ class EconomicEvidenceTests(unittest.TestCase):
                          ["copertura_tokenomics"]["posizioni"]["supply_attuale"],0)
         self.assertTrue(all(r["quadro_tokenomics"]["supply"]["stato"]!="VERIFICATO"
                             for r in old["evidenze_economiche_alla_lettura"]["posizioni"]))
+        self.assertEqual(old["evidenze_economiche_alla_lettura"]
+                         ["copertura_integrazione"]["posizioni"]
+                         ["quattro_famiglie_esposte"],10)
+        self.assertTrue(all(r["giudizio_economico_integrato"]["previsione_prezzo"]
+                            =="NON_INFERIBILE" for r in
+                            old["evidenze_economiche_alla_lettura"]["posizioni"]))
+
         changed=copy.deepcopy(bundle)
         changed["packet"]["evidenze_multifonte"]["economia"]["candidati"][0]["token"]="BTC"
         changed["packet_sha256"]=bridge.digest(changed["packet"])
         with self.assertRaises(bridge.BridgeError):
             bridge.read_context(changed,now=T)
+
+    def test_cp5_four_families_jointly_attributed_with_historical_release_and_stale_reads(self):
+        source,positions,shortlist=self.sample()
+        source["fonti_economiche"]=e.sources_matrix()
+        # Synthetic but real KDD-20 source validator, with publication earlier
+        # than its GET. A newly acquired OLD release is never a new event.
+        ident=source["posizioni"][0]["identita"]
+        repo=ident["repository_primario"]
+        published=T-dt.timedelta(days=24)
+        source["posizioni"][0]["evento"]=e.release_event(ident,{
+            "html_url":"https://github.com/"+repo+"/releases/tag/v1.0",
+            "tag_name":"v1.0","name":"Historical release",
+            "published_at":published.isoformat(),
+            "draft":False,"prerelease":False},T,T)
+        source["posizioni"][1]["fondamentali"]=e.fundamentals({},None,T,T)
+        frames={tf:{"stato":"AGGIORNATO","figure_candlestick":{
+            "stato":"AGGIORNATO","trend_precedente":trend}}
+            for tf,trend in (("4H","SALITA"),("1D","DISCESA"))}
+        global_row={"fonte":"https://api.coingecko.com/api/v3/global",
+            "aggiornato_sorgente_utc":T.timestamp(),
+            "var_capitalizzazione_24h_pct":-1.4,
+            "capitalizzazione_totale_usd":5_000_000,
+            "volume_24h_usd":400_000}
+        source["regime"]=e.regime_participation(
+            e.regime({"timeframe":frames},global_row,T),
+            {},{"indicatori_macro":[],"flussi_finanziari":[]},T)
+        read=e.at_read(source,positions,shortlist,T)
+        self.assertEqual((len(read["posizioni"]),len(read["candidati"])),(2,1))
+        self.assertEqual(read["copertura_integrazione"]["posizioni"]
+                         ["quattro_famiglie_esposte"],2)
+        for group in ("posizioni","candidati"):
+            for item in read[group]:
+                view=item["giudizio_economico_integrato"]
+                self.assertEqual(view["token"],item["token"])
+                self.assertEqual(view["progetto_id"],item["identita"]["coingecko_id"])
+                self.assertEqual(set(view["componenti"]),
+                    {"fondamentali","eventi","macroeconomia","regime"})
+                self.assertEqual({x["ambito"] for x in view["ipotesi_e_alternative"]},
+                    {"FONDAMENTALI","EVENTI","MACROECONOMIA","REGIME"})
+                self.assertEqual(view["previsione_prezzo"],"NON_INFERIBILE")
+                self.assertEqual(view["raccomandazione"],"NON_GENERATA")
+                self.assertEqual(view["ordine"],"NON_GENERATO")
+        btc=read["posizioni"][0]["giudizio_economico_integrato"]
+        sol=read["posizioni"][1]["giudizio_economico_integrato"]
+        self.assertEqual(btc["componenti"]["fondamentali"]["stato_informazione"],
+                         "RECENTE")
+        self.assertEqual(btc["componenti"]["eventi"]["stato_informazione"],
+                         "STORICA")
+        self.assertEqual(btc["componenti"]["eventi"]["riferimenti"][0]
+                         ["pubblicato_utc"],published.isoformat(timespec="seconds"))
+        self.assertEqual(btc["componenti"]["eventi"]["riferimenti"][0]
+                         ["acquisito_utc"],T.isoformat(timespec="seconds"))
+        self.assertEqual(btc["componenti"]["regime"]["stato_informazione"],
+                         "CONTRADDITTORIA")
+        self.assertEqual(btc["componenti"]["regime"]["stato"],"TRANSIZIONE")
+        self.assertEqual(btc["componenti"]["macroeconomia"]["stato_informazione"],
+                         "NON_DISPONIBILE")
+        self.assertEqual(sol["componenti"]["fondamentali"]["stato_informazione"],
+                         "NON_DISPONIBILE")
+        # Same-time second consumer cannot take ownership of a forged summary.
+        reread=e.at_read(read,positions,shortlist,T)
+        self.assertEqual(reread["posizioni"][0]["giudizio_economico_integrato"],btc)
+        forged=copy.deepcopy(read)
+        forged["posizioni"][0]["giudizio_economico_integrato"]["raccomandazione"]="BUY"
+        with self.assertRaisesRegex(ValueError,"Integrated economic GPT view altered"):
+            e.at_read(forged,positions,shortlist,T)
+        old=e.at_read(read,positions,shortlist,T+dt.timedelta(days=3))
+        old_btc=old["posizioni"][0]["giudizio_economico_integrato"]
+        self.assertEqual(old_btc["componenti"]["fondamentali"]["stato_informazione"],
+                         "SCADUTA")
+        self.assertEqual(old_btc["componenti"]["regime"]["stato_informazione"],
+                         "SCADUTA")
+        self.assertEqual(old_btc["componenti"]["eventi"]["stato_informazione"],
+                         "STORICA")
+        expired=e.at_read(read,positions,shortlist,T+dt.timedelta(days=8))
+        self.assertEqual(expired["posizioni"][0]["giudizio_economico_integrato"]
+                         ["componenti"]["eventi"]["stato_informazione"],"SCADUTA")
+        self.assertEqual(old_btc["previsione_prezzo"],"NON_INFERIBILE")
+
+    def test_cp5_distinguishes_macro_current_historic_expired_and_future_event(self):
+        source,positions,shortlist=self.sample()
+        row=e.at_read(source,positions,shortlist,T)["posizioni"][0]
+        row["quadro_eventi"]={"stato":"EVENTI_O_DOCUMENTI_RILEVANTI_NEL_CAMPIONE",
+             "eventi":[{
+                 "tipo":"UNLOCK_SOLO_PROGRAMMATO",
+                 "stato_prova":"PROGRAMMA_PRIMARIO",
+                 "fonte":"https://example.org/schedule",
+                 "efficacia_programmata_utc":(T+dt.timedelta(days=15)).isoformat(),
+                 "efficacia_confermata_utc":None,
+                 "acquisito_utc":T.isoformat(),
+                 "pubblicato_utc":(T-dt.timedelta(days=50)).isoformat()}]}
+        macro={"fatti":[
+             {"stato_prova":"PUBBLICAZIONE_RECENTE",
+              "fonte":"https://www.federalreserve.gov/newsevents/pressreleases/monetary20261028a.htm",
+              "pubblicato_utc":T.isoformat(),"acquisito_utc":T.isoformat()},
+             {"stato_prova":"PUBBLICAZIONE_DATATA_O_NON_RICONFERMATA",
+              "fonte":"https://www.federalreserve.gov/old",
+              "pubblicato_utc":(T-dt.timedelta(days=40)).isoformat()}],
+             "scenari_condizionali":[{"ipotesi":"Possibile rischio",
+                                      "controipotesi":"Effetto assente",
+                                      "condizione_di_riesame":"Verificare"}]}
+        regime={"stato":"INDETERMINATO","qualita":"INSUFFICIENTE",
+                "rilevazione_utc":T.isoformat(),"evidenze_indipendenti":[]}
+        view=e.integrated_asset_view(row,macro,regime,T)
+        self.assertEqual(view["componenti"]["eventi"]["stato_informazione"],
+                         "PROGRAMMATA")
+        self.assertEqual(view["componenti"]["eventi"]
+                         ["eventi_programmati_non_eseguiti"],1)
+        self.assertEqual(view["componenti"]["macroeconomia"]["stato_informazione"],
+                         "RECENTE")
+        self.assertEqual(view["componenti"]["macroeconomia"]["fatti_storici"],1)
+        self.assertEqual(view["componenti"]["regime"]["stato_informazione"],
+                         "NON_DISPONIBILE")
+        self.assertEqual(view["causalita_sul_prezzo"],"NON_ATTESTATA")
+        row["identita"]["stato"]="NON_VERIFICATO"
+        no_identity=e.integrated_asset_view(row,macro,regime,T)
+        self.assertIsNone(no_identity["progetto_id"])
+        self.assertEqual(no_identity["componenti"]["eventi"]["stato_informazione"],
+                         "NON_DISPONIBILE")
+        self.assertEqual(no_identity["componenti"]["fondamentali"]["stato_informazione"],
+                         "NON_DISPONIBILE")
 
     def sample(self):
         positions=[{"token":"BTC"},{"token":"SOL"}]

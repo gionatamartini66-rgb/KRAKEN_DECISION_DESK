@@ -1307,6 +1307,178 @@ def macro_primary_context(primary, published_feed, now):
         "nessuna_raccomandazione_operativa":True}
 
 
+
+def integrated_asset_view(row, macro_context, regime_view, now):
+    """CP5: four economic families in ONE falsifiable GPT reading per asset.
+
+    Input is exclusively revalidated at-read KDD-18/20/21/22 evidence.
+    Macro and regime are global context, NEVER causal evidence for the token.
+    No additional fetch, portfolio inference, scoring, forecast or order.
+    """
+    identity=row.get("identita") or {}
+    tokenomics=row.get("quadro_tokenomics") or {}
+    events=row.get("quadro_eventi") or {}
+    supply=tokenomics.get("supply") or {}
+    project=(identity.get("coingecko_id") if
+             identity.get("stato")=="IDENTITA_VERIFICATA_DA_CATALOGO" else None)
+
+    supply_state=supply.get("stato","NON_DISPONIBILE")
+    supply_status=("CONTRADDITTORIA" if supply_state=="ANOMALIA_SUPPLY" else
+                   "RECENTE" if supply_state=="VERIFICATO" and project else
+                   "SCADUTA" if supply_state=="SCADUTO" else "NON_DISPONIBILE")
+    documents=(events.get("eventi") or []) if project else []
+    if not isinstance(documents,list):
+        documents=[]
+    current_proofs={
+        "VERIFICATO","COMUNICAZIONE_UFFICIALE","DOCUMENTO_REPOSITORY",
+        "PROPOSTA_DOCUMENTALE","CONFRONTO_DOCUMENTALE",
+        "SEGNALAZIONE_NON_CONFERMA","PROGRAMMA_PRIMARIO",
+        "MASSIMO_PRIMARIO_PROGRAMMATO","OSSERVAZIONE_API","CONFRONTO_RPC"}
+    fresh_events=[]
+    historical_events=[]
+    scheduled_events=[]
+    for event in documents:
+        if not isinstance(event,dict):
+            continue
+        published=stamp(event.get("pubblicato_utc"))
+        planned=stamp(event.get("efficacia_programmata_utc"))
+        acquired=stamp(event.get("acquisito_utc"))
+        if planned and planned>now and event.get("efficacia_confermata_utc") is None:
+            scheduled_events.append(event)
+        # Verification of a repository API request is NOT publication of a
+        # new release. Distinguish source refresh from actual dated event.
+        recent=bool(published and acquired and
+                    dt.timedelta(0)<=now-published<=dt.timedelta(days=14) and
+                    dt.timedelta(0)<=now-acquired<=dt.timedelta(days=7) and
+                    event.get("stato_prova") in current_proofs)
+        (fresh_events if recent else historical_events).append(event)
+    event_status=("RECENTE" if fresh_events else
+                  "PROGRAMMATA" if scheduled_events else
+                  "SCADUTA" if historical_events and all(
+                      x.get("stato_prova")=="SCADUTO" for x in historical_events) else
+                  "STORICA" if historical_events else "NON_DISPONIBILE")
+    # The event ledger is already on the same row. Keep a bounded primary
+    # reference list instead of duplicating the unabridged documents.
+    refs=[{"tipo":x.get("tipo"),"fonte":x.get("fonte"),
+           "pubblicato_utc":x.get("pubblicato_utc"),
+           "efficacia_programmata_utc":x.get("efficacia_programmata_utc"),
+           "acquisito_utc":x.get("acquisito_utc"),
+           "stato_prova":x.get("stato_prova")}
+          for x in (fresh_events+scheduled_events+historical_events)[:4]]
+
+    macro=macro_context if isinstance(macro_context,dict) else {}
+    facts=macro.get("fatti") or []
+    macro_current=[x for x in facts if isinstance(x,dict) and
+                   x.get("stato_prova") in ("OSSERVATO","PUBBLICAZIONE_RECENTE")]
+    macro_historical=[x for x in facts if isinstance(x,dict) and
+                      x.get("stato_prova") in
+                      ("SCADUTO","STORICO_NON_AGGIORNATO",
+                       "PUBBLICAZIONE_DATATA_O_NON_RICONFERMATA")]
+    macro_status=("RECENTE" if macro_current else
+                  "SCADUTA" if macro_historical and all(
+                      x.get("stato_prova")=="SCADUTO" for x in macro_historical) else
+                  "STORICA" if macro_historical else "NON_DISPONIBILE")
+    macro_first=(macro_current or macro_historical or [None])[0]
+
+    regime=regime_view if isinstance(regime_view,dict) else {}
+    regime_state=regime.get("stato","INDETERMINATO")
+    regime_quality=regime.get("qualita")
+    regime_timestamp=stamp(regime.get("rilevazione_utc"))
+    regime_status=("SCADUTA" if regime_quality=="SCADUTO" or
+                   (regime_timestamp and now-regime_timestamp>dt.timedelta(hours=2)) else
+                   "NON_DISPONIBILE" if regime_state=="INDETERMINATO" else
+                   "CONTRADDITTORIA" if regime_state=="TRANSIZIONE" or
+                   regime_quality=="PARZIALE_CON_CONTRADDIZIONI" else "RECENTE")
+    components={
+        "fondamentali":{
+            "stato_informazione":supply_status,"stato_fonte":supply_state,
+            "fonte":supply.get("fonte") if project else None,
+            "rilevato_utc":supply.get("rilevato_utc") if project else None,
+            "acquisito_utc":supply.get("acquisito_utc") if project else None,
+            "attendibilita":"AGGREGATORE_ATTRIBUITO_NON_FONTE_UNLOCK"
+                            if supply_status=="RECENTE" else "NON_ATTUALE_O_NON_VERIFICATA",
+            "riferimento_dettaglio":"quadro_tokenomics"},
+        "eventi":{
+            "stato_informazione":event_status,
+            "stato_copertura":events.get("stato","NON_ACQUISITO"),
+            "documenti_recenti":len(fresh_events),
+            "documenti_storici":len(historical_events),
+            "eventi_programmati_non_eseguiti":len(scheduled_events),
+            "documenti_non_mostrati":events.get("eventi_non_mostrati",0),
+            "riferimenti":refs,"riferimento_dettaglio":"quadro_eventi",
+            "attendibilita":"PROVE_DOCUMENTALI_DA_DISTINGUERE_DA_ESECUZIONE"},
+        "macroeconomia":{
+            "stato_informazione":macro_status,
+            "ambito":"MERCATO_GENERALE_NON_SPECIFICO_ASSET",
+            "fatti_recenti":len(macro_current),"fatti_storici":len(macro_historical),
+            "fatti_non_mostrati":macro.get("fatti_non_mostrati",0),
+            "fonte_esempio":macro_first.get("fonte") if macro_first else None,
+            "data_esempio":(macro_first.get("pubblicato_utc") or
+                           macro_first.get("periodo")) if macro_first else None,
+            "acquisito_utc":macro_first.get("acquisito_utc") if macro_first else None,
+            "stato_prova_esempio":macro_first.get("stato_prova") if macro_first else None,
+            "riferimento_dettaglio":"contesto_macro_primario",
+            "attendibilita":"FONTI_PRIMARIE_E_AGGREGATORI_DISTINTI_NON_CAUSALITA"},
+        "regime":{
+            "stato_informazione":regime_status,
+            "ambito":"MERCATO_GENERALE_NON_SPECIFICO_ASSET",
+            "stato":regime_state,"qualita":regime_quality,
+            "acquisito_utc":regime.get("rilevazione_utc"),
+            "fonti":regime.get("evidenze_indipendenti",[])[:2],
+            "riferimento_dettaglio":"regime_motivato",
+            "attendibilita":"CLASSIFICAZIONE_DERIVATA_NON_PREVISIONE"}
+    }
+    if not project:
+        # Global macro/regime may still be available but cannot become
+        # project-specific proof when a ticker/project binding fails.
+        components["fondamentali"]["stato_informazione"]="NON_DISPONIBILE"
+        components["eventi"]["stato_informazione"]="NON_DISPONIBILE"
+    missing=[name for name,value in components.items()
+             if value["stato_informazione"] in ("NON_DISPONIBILE","SCADUTA")]
+    contradictions=[name for name,value in components.items()
+                    if value["stato_informazione"]=="CONTRADDITTORIA"]
+    alternatives=[
+        {"ambito":"FONDAMENTALI",
+         "ipotesi":tokenomics.get("rischio_opportunita_ipotesi"),
+         "controipotesi":tokenomics.get("controipotesi"),
+         "riesame":tokenomics.get("condizione_di_riesame")},
+        {"ambito":"EVENTI",
+         "ipotesi":"Il documento potrebbe avere conseguenze solo se pertinente e attuato",
+         "controipotesi":"La pubblicazione non dimostra adozione, unlock eseguito o effetto sul prezzo",
+         "riesame":"Riconfermare fonte, data ed efficacia di ogni evento"},
+    ]
+    alternatives.extend({
+        "ambito":"MACROECONOMIA",
+        "ipotesi":s.get("ipotesi"),
+        "controipotesi":s.get("controipotesi"),
+        "riesame":s.get("condizione_di_riesame")}
+        for s in macro.get("scenari_condizionali",[])[:2]
+        if isinstance(s,dict))
+    alternatives.append({
+        "ambito":"REGIME",
+        "ipotesi":"Il contesto generale potrebbe condizionare la lettura di rischio",
+        "controipotesi":"Il regime generale non misura domanda, valore o ritorno di questo asset",
+        "riesame":regime.get("invalidazione")})
+    return {
+        "token":row.get("token"),"coppia":identity.get("coppia"),
+        "progetto_id":project,
+        "stato":"QUADRO_PARZIALE_DA_INTERPRETARE" if project else
+                "IDENTITA_NON_ATTRIBUIBILE",
+        "componenti":components,
+        "categorie_temporali_presenti":sorted({
+            x["stato_informazione"] for x in components.values()}),
+        "informazioni_mancanti_o_scadute":missing,
+        "contraddizioni_da_esaminare":contradictions,
+        "ipotesi_e_alternative":alternatives,
+        "novita_evento_non_inferibile_dalla_sola_acquisizione":True,
+        "causalita_sul_prezzo":"NON_ATTESTATA",
+        "previsione_prezzo":"NON_INFERIBILE",
+        "raccomandazione":"NON_GENERATA",
+        "ordine":"NON_GENERATO",
+        "limite":"Quattro famiglie considerate insieme senza punteggio o voto. "
+                 "Regime e macro sono contesto generale, non prova sull'asset; "
+                 "documenti futuri e osservazioni storiche non equivalgono a fatti eseguiti."}
+
 def at_read(source, positions, shortlist, now, *, requested=None):
     """Validate attribution and recalculate economic age, without source fetches."""
     if not isinstance(source, dict) or source.get("schema") != VERSION:
@@ -1596,4 +1768,35 @@ def at_read(source, positions, shortlist, now, *, requested=None):
                 for r in rows),
             "fonte_supply":"CoinGecko pubblica per asset, non calendario primario",
             "limite":"Copertura del roster del packet, non prova del wallet o dell'esecuzione degli unlock"}
+    # CP5: single per-asset integration for the actual GPT consumer; no
+    # network fetches, source producer, advice or asset omission.
+    result["copertura_integrazione"]={}
+    for group in ("posizioni","candidati","richiesti"):
+        for original,item in zip(source.get(group,[]),result[group]):
+            view=integrated_asset_view(item,macro_context,review,now)
+            old=original.get("giudizio_economico_integrato")
+            if same_read and old is not None and old!=view:
+                raise ValueError("Integrated economic GPT view altered")
+            item["giudizio_economico_integrato"]=view
+        rows=result[group]
+        result["copertura_integrazione"][group]={
+            "totali":len(rows),
+            "con_identita_attribuibile":sum(
+                v["giudizio_economico_integrato"]["progetto_id"] is not None
+                for v in rows),
+            "quattro_famiglie_esposte":sum(
+                len(v["giudizio_economico_integrato"]["componenti"])==4
+                for v in rows),
+            "con_evidenza_fondamentale_recente":sum(
+                v["giudizio_economico_integrato"]["componenti"]
+                ["fondamentali"]["stato_informazione"]=="RECENTE" for v in rows),
+            "con_eventi_recenti":sum(
+                v["giudizio_economico_integrato"]["componenti"]
+                ["eventi"]["documenti_recenti"]>0 for v in rows),
+            "con_copertura_parziale":sum(
+                bool(v["giudizio_economico_integrato"]
+                     ["informazioni_mancanti_o_scadute"] or
+                     v["giudizio_economico_integrato"]
+                     ["contraddizioni_da_esaminare"]) for v in rows),
+            "limite":"Cardinalita e informazioni disponibili; non qualita di previsione"}
     return result
