@@ -890,7 +890,11 @@ def regime_integrato(core, macro, now):
         "evidenze_indipendenti":[{
             "famiglia":"BTC_PREZZO_4H_1D",
             "evidence_id":evidence_ref("REGIME","BTC_4H_1D",
-                core.get("acquisito_utc") or "",str(btc_dir)) if btc_valid and recent else None,
+                core.get("acquisito_utc") or "",
+                # Keep the historical 4H -> 1D evidence-id material stable
+                # across dict insertion order and JSON sort_keys=True.
+                str({"4H":btc_dir["4H"],"1D":btc_dir["1D"]}))
+                if btc_valid and recent else None,
             "fonte":"Kraken Spot pubblico /0/public/OHLC",
             "rilevazione_utc":core.get("acquisito_utc"),
             "osservazione":btc_dir if btc_valid else None,

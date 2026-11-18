@@ -1,6 +1,7 @@
 """Synthetic economic evidence tests: no private wallet, no network."""
 import copy
 import datetime as dt
+import json
 import unittest
 import kdd_economics as e
 
@@ -226,6 +227,43 @@ class EconomicEvidenceTests(unittest.TestCase):
         self.assertEqual(e.regime({"timeframe":frames},glob,T)["stato"],"RIALZISTA")
         frames["4H"]["stato"]="SCADUTO"
         self.assertEqual(e.regime({"timeframe":frames},glob,T)["stato"],"INDETERMINATO")
+
+    def test_kdd43_btc_e_regime_id_json_key_order_and_historical_material(self):
+        """BTC regime evidence must survive sort_keys JSON without weakening ids."""
+        frames={tf:{"stato":"AGGIORNATO","figure_candlestick":{
+            "stato":"AGGIORNATO","trend_precedente":direction}}
+            for tf,direction in (("4H","LATERALE"),("1D","DISCESA"))}
+        market={"fonte":"https://api.coingecko.com/api/v3/global",
+                "aggiornato_sorgente_utc":T.timestamp(),
+                "var_capitalizzazione_24h_pct":-3.7,
+                "capitalizzazione_totale_usd":2000000,
+                "volume_24h_usd":80000}
+        base=e.regime({"timeframe":frames},market,T)
+        core=e.regime_participation(base,None,{},T)
+        btc=next(row for row in core["famiglie_osservate"]
+                 if row["famiglia"]=="TREND_BTC")
+        original=e.regime_integrato(core,{},T)
+        ref=original["evidenze_indipendenti"][0]["evidence_id"]
+        self.assertIsNotNone(ref)
+        original_order=btc["osservazione"]
+        historical=e.evidence_ref("REGIME","BTC_4H_1D",core["acquisito_utc"],
+            str({"4H":original_order["4H"],"1D":original_order["1D"]}))
+        self.assertEqual(ref,historical)  # Retain genuine historical 4H/1D ids.
+        swapped=copy.deepcopy(core)
+        row=next(x for x in swapped["famiglie_osservate"]
+                 if x["famiglia"]=="TREND_BTC")
+        row["osservazione"]={"1D":original_order["1D"],
+                             "4H":original_order["4H"]}
+        self.assertEqual(list(row["osservazione"]),["1D","4H"])
+        self.assertEqual(e.regime_integrato(swapped,{},T),original)
+        reread=json.loads(json.dumps(core,ensure_ascii=False,sort_keys=True))
+        self.assertEqual(e.regime_integrato(reread,{},T),original)
+        altered=copy.deepcopy(swapped)
+        row=next(x for x in altered["famiglie_osservate"]
+                 if x["famiglia"]=="TREND_BTC")
+        row["osservazione"]["4H"]="SALITA"
+        self.assertNotEqual(e.regime_integrato(altered,{},T)[
+            "evidenze_indipendenti"][0]["evidence_id"],ref)
 
     def test_cp4_all_five_regimes_with_explicit_invalidations_and_alternatives(self):
         """Discriminating CLOSED BTC 4H/1D trends + dated public aggregate."""
