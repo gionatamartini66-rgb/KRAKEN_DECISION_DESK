@@ -162,11 +162,15 @@ class G2FunctionalChainTests(unittest.TestCase):
         btc=context["evidenze_economiche_alla_lettura"]["posizioni"][0]
         supply=btc["quadro_tokenomics"]["supply"]
         self.assertEqual(supply["provenienza_acquisizione"],
-                         "RISPOSTA_HTTP_PASSATA_AL_PRODUTTORE")
-        self.assertTrue(supply["evidence_id"].startswith("E-FUND-bitcoin-"))
+                         "HTTP_DICHIARATO_ORIGINALE_NON_RIVALIDABILE")
+        self.assertIsNone(supply["evidence_id"])
+        self.assertTrue(supply["riferimento_evidenza_dichiarato"].startswith("E-FUND-bitcoin-"))
         self.assertRegex(supply["sha256_risposta"],r"^[0-9a-f]{64}$")
+        self.assertIsNone(btc["giudizio_economico_integrato"]["componenti"]
+                         ["fondamentali"]["evidence_id"])
         self.assertEqual(btc["giudizio_economico_integrato"]["componenti"]
-                         ["fondamentali"]["evidence_id"],supply["evidence_id"])
+                         ["fondamentali"]["riferimento_evidenza_dichiarato"],
+                         supply["riferimento_evidenza_dichiarato"])
         strk=context["evidenze_economiche_alla_lettura"]["posizioni"][2]
         calendar=strk["quadro_tokenomics"]["calendario"]
         self.assertEqual(calendar["stato"],"DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI")
@@ -226,7 +230,7 @@ class G2FunctionalChainTests(unittest.TestCase):
                          {"calendari":[],"politiche_emissioni":[]})
         self.assertEqual(displayed["supply"]["validita_strutturale"],"VALIDATA")
         self.assertEqual(displayed["supply"]["provenienza_acquisizione"],
-                         "NON_ATTESTATA_DAL_PRODUTTORE")
+                         "ACQUISIZIONE_NON_ATTESTATA")
         self.assertIsNone(displayed["supply"]["evidence_id"])
 
     def test_g2_regime_insufficient_wrong_source_and_conflicting_frames(self):

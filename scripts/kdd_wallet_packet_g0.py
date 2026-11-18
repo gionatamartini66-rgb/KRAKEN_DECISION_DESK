@@ -1128,17 +1128,58 @@ def disponibilita_lorda_per_gpt(positions, *, mercato_stato=None, saldo_stato=No
         if (None in (price,held,free) or not isinstance(source,dict)
             or source.get("token")!=token or source.get("valuta")!="EUR"
             or not isinstance(source.get("pair"),str)
-            or source["pair"].split("/")[-1]!="EUR"
-            or canonical_wallet_alias(source["pair"].split("/")[0])
-               !=canonical_wallet_alias(token)):
+            or source["pair"].count("/")!=1):
+            rows.append(out);continue
+        base,quote=source["pair"].split("/")
+        if (quote not in ("EUR","USD","USDC")
+                or canonical_wallet_alias(base)!=canonical_wallet_alias(token)):
             rows.append(out);continue
         price,held,free=Decimal(price),Decimal(held),Decimal(free)
+        if quote in ("USD","USDC"):
+            # brief_positions already verified the exact same-snapshot Kraken
+            # pair, USD/USDC quote and FX. Preserve these independent fields;
+            # no parity shortcut or invented EUR book bid is allowed here.
+            spot=row.get("mercato_spot_kraken")
+            try:
+                rate=amount(source.get("eur_per_quote"),"FX Kraken")
+                quote_price=amount(source.get("prezzo_quote"),"Prezzo Kraken quote")
+            except PacketError:
+                rows.append(out);continue
+            fx_source=source.get("conversione_fonte")
+            allowed=(("EUR/USD","USD/EUR") if quote=="USD"
+                     else ("USDC/EUR","EUR/USDC"))
+            if (not isinstance(spot,dict)
+                    or spot.get("stato")!="DISPONIBILE_ALLO_SNAPSHOT"
+                    or source.get("valuta_mercato")!=quote
+                    or fx_source not in allowed
+                    or not isinstance(source.get("pair_key"),str)
+                    or not KRAKEN_PAIR_KEY.fullmatch(source["pair_key"])
+                    or spot.get("coppia")!=source["pair"]
+                    or spot.get("pair_key")!=source["pair_key"]
+                    or spot.get("valuta_quotazione")!=quote
+                    or spot.get("prezzo_quote")!=quote_price
+                    or spot.get("eur_per_quote")!=rate
+                    or spot.get("conversione_fonte")!=fx_source
+                    or not isinstance(source.get("rilevazione_utc"),str)
+                    or spot.get("rilevazione_utc")!=source.get("rilevazione_utc")
+                    or rate is None or quote_price is None):
+                rows.append(out);continue
+            # The existing packet/bridge contract uses exactly this
+            # two-factor floating conversion from the original snapshot.
+            # Equal EUR theoretical values remain comparable by holding;
+            # quote currency cash is NOT added to the user's EUR balances.
+            if (Decimal(rate)<=0 or Decimal(quote_price)<=0
+                    or float(price)!=float(quote_price)*float(rate)):
+                rows.append(out);continue
         if not price>0 or free>held:
             rows.append(out);continue
         out.update(stato="CAPACITA_LORDA_INDICATIVA" if free>0
                    else "NESSUNA_DISPONIBILITA_SPOT",
                    quantita_disponibile_spot=format(free,"f"),
-                   capienza_lorda_indicativa_eur=format(price*free,"f"))
+                   capienza_lorda_indicativa_eur=format(price*free,"f"),
+                   coppia_kraken=source["pair"],
+                   valuta_quotazione_kraken=quote,
+                   fonte_conversione_eur=fx_source if quote!="EUR" else None)
         rows.append(out)
     return {"stato":"FOTOGRAFIA_RECENTE" if
             mercato_stato=="RECENTE" and saldo_stato=="RECENTE"

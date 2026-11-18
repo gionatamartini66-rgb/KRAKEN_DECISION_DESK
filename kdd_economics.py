@@ -1,5 +1,6 @@
 """KDD-18/20/21/22: bounded, attributable economic evidence; never trading signals."""
 import datetime as dt
+import copy
 import hashlib
 import email.utils
 import math
@@ -1030,7 +1031,14 @@ def tokenomics_view(row, primary):
     issuance=primary_row("politiche_emissioni") or {}
     valid=fund.get("stato")=="VERIFICATO"
     acquisition=fund.get("prova_acquisizione") or {}
-    acquisition_state=acquisition.get("stato","NON_ATTESTATA_DAL_PRODUTTORE")
+    acquisition_claim=acquisition.get("stato","NON_ATTESTATA_DAL_PRODUTTORE")
+    # The producer did not retain exact original HTTP bytes in the packet.
+    # Its URL/hash/id declaration is useful for provenance tracing, but cannot
+    # verify acquisition or source authenticity against an independently held
+    # original during a read of this packet.
+    acquisition_state=("HTTP_DICHIARATO_ORIGINALE_NON_RIVALIDABILE"
+                       if acquisition_claim=="RISPOSTA_HTTP_PASSATA_AL_PRODUTTORE"
+                       else "ACQUISIZIONE_NON_ATTESTATA")
     anomaly=fund.get("stato")=="ANOMALIA_SUPPLY"
     remaining=fund.get("emissione_residua_massima_su_circolante_pct") if valid else None
     schedule_kind=schedule.get("stato","NON_ACQUISITO")
@@ -1074,12 +1082,18 @@ def tokenomics_view(row, primary):
             "stato":fund.get("stato","NON_DISPONIBILE"),
             "validita_strutturale":"VALIDATA" if valid else "NON_VERIFICATA_O_SCADUTA",
             "provenienza_acquisizione":acquisition_state,
-            "evidence_id":acquisition.get("id_evidenza"),
+            "acquisizione_http_dichiarata":acquisition_claim,
+            "integrita_originale_alla_lettura":"NON_RICALCOLABILE_SENZA_CORPO_HTTP",
+            "autenticita_fonte_esterna":"NON_ATTESTATA",
+            "evidence_id":None,  # No attestation without original bytes
+            "riferimento_evidenza_dichiarato":acquisition.get("id_evidenza"),
             "sha256_risposta":acquisition.get("sha256_corpo_risposta"),
-            "fonte_http_effettiva":acquisition.get("url_richiesto"),
-            "limite_provenienza":"L'hash catturato dal produttore non e firma del fornitore "
-                "e non prova autenticita esterna; senza prova HTTP i valori "
-                "sono soltanto strutturalmente validi.",
+            "url_http_dichiarato":acquisition.get("url_richiesto"),
+            "fonte_http_effettiva":None,
+            "limite_provenienza":"Il produttore dichiara un HTTP e un hash, "
+                "ma la lettura non ha il corpo originale: hash ed E-FUND "
+                "autoconsistenti NON provano acquisizione o autenticita esterna; "
+                "dati supply validati separatamente sul piano strutturale.",
             "fonte":fund.get("fonte") if project else None,
             "rilevato_utc":fund.get("rilevato_utc") if project else None,
             "acquisito_utc":fund.get("acquisito_utc") if project else None,
@@ -1300,6 +1314,9 @@ def macro_primary_context(primary, published_feed, now):
                     notice["fonte"],notice["pubblicato_utc"]),
                 "sha256_feed_originale":family.get("sha256_feed_originale"),
                 "provenienza_feed":family.get("stato_acquisizione","NON_ATTESTATA"),
+                "integrita_feed_alla_lettura":family.get(
+                    "integrita_feed_alla_lettura",
+                    "IMPRONTA_ORIGINALE_NON_DISPONIBILE"),
                 "tipo":notice["tipo"],
                 "fatto_osservato":"Pubblicazione di un comunicato ufficiale verificato nel feed",
                 "titolo":notice["titolo"],"fonte":notice["fonte"],
@@ -1499,11 +1516,14 @@ def integrated_asset_view(row, macro_context, regime_view, now):
             "rilevato_utc":supply.get("rilevato_utc") if project else None,
             "acquisito_utc":supply.get("acquisito_utc") if project else None,
             "evidence_id":supply.get("evidence_id"),
+            "riferimento_evidenza_dichiarato":supply.get("riferimento_evidenza_dichiarato"),
             "provenienza_acquisizione":supply.get("provenienza_acquisizione"),
+            "integrita_originale_alla_lettura":supply.get("integrita_originale_alla_lettura"),
             "attendibilita":(
-                "HTTP_PRODUTTORE_CON_HASH_NON_FIRMA_FORNITORE"
+                "DATI_VALIDATI_HTTP_DICHIARATO_NON_RIVALIDABILE"
                 if supply_status=="RECENTE" and
-                supply.get("provenienza_acquisizione")=="RISPOSTA_HTTP_PASSATA_AL_PRODUTTORE"
+                supply.get("provenienza_acquisizione")==
+                "HTTP_DICHIARATO_ORIGINALE_NON_RIVALIDABILE"
                 else "DATO_STRUTTURALMENTE_VALIDO_HTTP_NON_ATTESTATO"
                 if supply_status=="RECENTE" else "NON_ATTUALE_O_NON_VERIFICATA"),
             "riferimento_dettaglio":"quadro_tokenomics"},
@@ -1587,6 +1607,57 @@ def integrated_asset_view(row, macro_context, regime_view, now):
         "limite":"Quattro famiglie considerate insieme senza punteggio o voto. "
                  "Regime e macro sono contesto generale, non prova sull'asset; "
                  "documenti futuri e osservazioni storiche non equivalgono a fatti eseguiti."}
+
+def _historical_provenance_view(current, old_proof, family):
+    """Exact PR#73 3cb12e3 provenance-only compatibility, never an override.
+
+    A previous packet can retain the OLD truthful-but-overconfident labels.
+    Reconstruct just that historical deterministic display from CURRENT
+    revalidated source facts. Accept only an exact match; always EMIT the
+    current conservative provenance status. Arbitrary view edits still fail.
+    """
+    if not isinstance(current,dict) or not isinstance(old_proof,dict):
+        return None
+    snapshot=copy.deepcopy(current)
+    if family=="macro":
+        for fact in snapshot.get("fatti",[]):
+            if isinstance(fact,dict) and fact.get("classe")=="COMUNICATO_UFFICIALE":
+                fact.pop("integrita_feed_alla_lettura",None)
+        return snapshot
+    claim=old_proof.get("stato","NON_ATTESTATA_DAL_PRODUTTORE")
+    if family=="tokenomics":
+        supply=snapshot.get("supply")
+        if not isinstance(supply,dict):return None
+        for key in ("acquisizione_http_dichiarata","integrita_originale_alla_lettura",
+                    "autenticita_fonte_esterna","riferimento_evidenza_dichiarato",
+                    "url_http_dichiarato"):
+            supply.pop(key,None)
+        supply["provenienza_acquisizione"]=claim
+        supply["evidence_id"]=old_proof.get("id_evidenza")
+        supply["fonte_http_effettiva"]=old_proof.get("url_richiesto")
+        supply["limite_provenienza"]=(
+            "L'hash catturato dal produttore non e firma del fornitore "
+            "e non prova autenticita esterna; senza prova HTTP i valori "
+            "sono soltanto strutturalmente validi.")
+        return snapshot
+    if family=="integrated":
+        components=snapshot.get("componenti")
+        supply=components.get("fondamentali") if isinstance(components,dict) else None
+        if not isinstance(supply,dict):return None
+        for key in ("riferimento_evidenza_dichiarato",
+                    "integrita_originale_alla_lettura"):
+            supply.pop(key,None)
+        supply["provenienza_acquisizione"]=claim
+        supply["evidence_id"]=old_proof.get("id_evidenza")
+        state=supply.get("stato_informazione")
+        supply["attendibilita"]=(
+            "HTTP_PRODUTTORE_CON_HASH_NON_FIRMA_FORNITORE"
+            if state=="RECENTE" and claim=="RISPOSTA_HTTP_PASSATA_AL_PRODUTTORE"
+            else "DATO_STRUTTURALMENTE_VALIDO_HTTP_NON_ATTESTATO"
+            if state=="RECENTE" else "NON_ATTUALE_O_NON_VERIFICATA")
+        return snapshot
+    return None
+
 
 def at_read(source, positions, shortlist, now, *, requested=None):
     """Validate attribution and recalculate economic age, without source fetches."""
@@ -1715,6 +1786,19 @@ def at_read(source, positions, shortlist, now, *, requested=None):
                             evidence["stato"] if evidence["stato"] in ("VERIFICATO","ANOMALIA_SUPPLY")
                             and now-t<=dt.timedelta(days=1) else "SCADUTO"))
             verify_supply_at_read(row_copy["fondamentali"])
+            # Once source bytes have been discarded, a self-consistent
+            # SHA/E-FUND is NOT re-verification of the actual HTTP response.
+            # Preserve the production assertion without laundering it into
+            # an independently authenticated acquisition at the GPT read.
+            proof=row_copy["fondamentali"].get("prova_acquisizione")
+            if isinstance(proof,dict):
+                original=proof.get("stato")
+                row_copy["fondamentali"]["prova_acquisizione"]=dict(
+                    proof, qualifica_alla_lettura=(
+                        "HTTP_DICHIARATO_ORIGINALE_NON_RIVALIDABILE"
+                        if original=="RISPOSTA_HTTP_PASSATA_AL_PRODUTTORE"
+                        else "ACQUISIZIONE_NON_ATTESTATA"),
+                    integrita_originale_alla_lettura="NON_RICALCOLABILE_SENZA_CORPO_HTTP")
             if row_copy["identita"].get("stato") != "IDENTITA_VERIFICATA_DA_CATALOGO":
                 # An expired project binding cannot leave verified numerical
                 # fundamentals attached to the historical wallet position.
@@ -1805,7 +1889,9 @@ def at_read(source, positions, shortlist, now, *, requested=None):
     earlier_read=stamp(source.get("letto_utc"))
     if (earlier_context is not None and earlier_read
             and abs((now-earlier_read).total_seconds())<=1
-            and earlier_context!=macro_context):
+            and earlier_context!=macro_context
+            and earlier_context!=_historical_provenance_view(
+                macro_context,{}, "macro")):
         raise ValueError("Macro context at GPT read distorted")
     result["contesto_macro_primario"]=macro_context
     # The existing technical regime is provisional. A single validated final
@@ -1826,7 +1912,11 @@ def at_read(source, positions, shortlist, now, *, requested=None):
         for original,item in zip(source.get(group,[]),result[group]):
             tokenomics=tokenomics_view(item,primary_read)
             prior_tokenomics=original.get("quadro_tokenomics")
-            if same_read and prior_tokenomics is not None and prior_tokenomics!=tokenomics:
+            if (same_read and prior_tokenomics is not None
+                    and prior_tokenomics!=tokenomics
+                    and prior_tokenomics!=_historical_provenance_view(
+                        tokenomics,original.get("fondamentali",{}).get("prova_acquisizione") or {},
+                        "tokenomics")):
                 raise ValueError("Tokenomics at read distorted")
             item["quadro_tokenomics"]=tokenomics
     for group in ("posizioni","candidati","richiesti"):
@@ -1884,7 +1974,10 @@ def at_read(source, positions, shortlist, now, *, requested=None):
         for original,item in zip(source.get(group,[]),result[group]):
             view=integrated_asset_view(item,macro_context,review,now)
             old=original.get("giudizio_economico_integrato")
-            if same_read and old is not None and old!=view:
+            if (same_read and old is not None and old!=view
+                    and old!=_historical_provenance_view(
+                        view,original.get("fondamentali",{}).get("prova_acquisizione") or {},
+                        "integrated")):
                 raise ValueError("Integrated economic GPT view altered")
             item["giudizio_economico_integrato"]=view
         rows=result[group]

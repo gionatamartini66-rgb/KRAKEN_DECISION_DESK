@@ -517,6 +517,24 @@ def _macro_release_read(raw,now):
                 row.get("fonte")!=url or row.get("categoria")!=category):
             raise ValueError("Macro event source mismatch")
         item=dict(row)
+        sha=row.get("sha256_feed_originale")
+        claimed=row.get("stato_acquisizione")
+        # Legacy feeds without either field remain readable, but are not
+        # upgraded to verified HTTP. Present fields must form a valid pair.
+        if ((sha is not None and
+             (not isinstance(sha,str) or re.fullmatch(r"[0-9a-f]{64}",sha) is None))
+            or claimed not in (None,"RISPOSTA_PUBBLICA_RICEVUTA_DAL_PRODUTTORE")
+            or (sha is None)!=(claimed is None)):
+            raise ValueError("Macro feed original digest/acquisition mismatch")
+        if sha is not None and (
+                row.get("stato") not in ("OSSERVATO","STORICO_NON_AGGIORNATO",
+                                          "NESSUN_EVENTO_PERTINENTE_NEL_CAMPIONE")
+                or not _time(row.get("acquisito_utc"))
+                or _time(row["acquisito_utc"])>now+dt.timedelta(minutes=2)):
+            raise ValueError("Macro feed original digest without acquisition")
+        item["integrita_feed_alla_lettura"]=(
+            "IMPRONTA_DICHIARATA_ORIGINALE_NON_RICALCOLABILE"
+            if sha is not None else "IMPRONTA_ORIGINALE_NON_DISPONIBILE")
         if row.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO"):
             acquired=_time(row.get("acquisito_utc"))
             events=row.get("eventi")
