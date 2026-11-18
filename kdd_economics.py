@@ -1790,6 +1790,10 @@ def at_read(source, positions, shortlist, now, *, requested=None):
             # SHA/E-FUND is NOT re-verification of the actual HTTP response.
             # Preserve the production assertion without laundering it into
             # an independently authenticated acquisition at the GPT read.
+            # Some legacy/non-VERIFICATO branches retain the original
+            # fundamentals object through row_copy = dict(row). Never mutate
+            # the hashed packet while deriving a GPT read-time qualification.
+            row_copy["fondamentali"]=dict(row_copy["fondamentali"])
             proof=row_copy["fondamentali"].get("prova_acquisizione")
             if isinstance(proof,dict):
                 original=proof.get("stato")

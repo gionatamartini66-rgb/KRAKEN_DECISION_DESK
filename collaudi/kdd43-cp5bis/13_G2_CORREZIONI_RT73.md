@@ -53,3 +53,14 @@ Il nuovo test di chain G2 precedente resta attivo: roster sintetico BTC/ETH/STRK
 **Lacune residue, non equiparabili ai difetti riparati:** integrità CoinGecko non riconfermabile contro contenuto originale (assente nel packet); digest dei feed Fed/UE non equivale a autenticazione esterna; provider e calendario non coprono esaustivamente gli asset; valutazione di fee/FX/costi e negoziabilità del conto incompleta; regime non è previsione di prezzo; GPT non valutato in questa sessione.
 
 **Raccomandazione alla Supervisione:** verifica Red Team G0 **mirata soltanto ai tre rilievi** e alle dipendenze direttamente toccate; non promuovere alcuno dei requisiti KDD-18/20/21/22 a CHIUSO senza successiva autorizzazione. **STOP dopo deposito.**
+
+
+## 7. CI della prima HEAD correttiva: regressione di immutabilita individuata e riparata
+
+**CI sulla HEAD 9b07773483216bb5e1ba9395b2e07f408ede3d9e: 3/4, NON verde.** Il job synthetic-regressions, nella [run 44286083719](https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/actions/runs/44286083719), falliva con due test precedenti di doppia lettura: test_issue43_economic_source_packet_bridge_and_aging e test_primary_per_asset_facts_survive_real_packet_and_bridge_double_read; entrambi riportavano BridgeError: Integrita locale pacchetto discordante. Gli altri 3 job erano verdi. Questo fallimento NON e stato descritto come un successo.
+
+**Riproduzione isolata anche su Android Python 3.14.6:** entrambi i casi fallivano se richiamati per nome, malgrado la regressione aggregata locale iniziale fosse risultata verde. La causa verificata era un alias mutable: in kdd_economics.at_read la copia superficiale row_copy=dict(row) poteva mantenere il dizionario fondamentale originale; la nuova etichetta di provenienza alla lettura veniva scritta direttamente nel packet coperto da SHA-256. Una successiva lettura falliva correttamente sul checksum cambiato, ma la prima lettura non avrebbe mai dovuto cambiare il packet.
+
+**Rimedio minimale:** copiare il dizionario fondamentali prima di aggiungere la qualifica di provenance alla lettura. Non sono stati alterati digest, controlli economici, provenienza, cronologia o compatibilita. Nuovo test test_rt73_bridge_double_read_never_mutates_sha_protected_packet: packet sintetico con supply non attestata, due letture, digest e JSON identici prima/dopo, stessa identita dello snapshot; test esistenti di doppia lettura nuovamente PASS. Suite mirata 15/15 PASS.
+
+**Stessa selezione di 264 test del job CI, eseguita con il comando effettivo su Termux dopo la correzione:** 264/264 PASS, processo 0. La regressione completa e la CI sulla nuova HEAD finale vengono verificate e documentate separatamente; nessun esito CI viene presunto.

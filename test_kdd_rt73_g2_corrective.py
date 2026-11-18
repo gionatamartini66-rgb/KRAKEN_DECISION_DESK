@@ -233,6 +233,27 @@ class Rt73Corrections(unittest.TestCase):
         self.assertTrue(all(z["integrita_feed_alla_lettura"]==
             "IMPRONTA_ORIGINALE_NON_DISPONIBILE" for z in checked))
 
+    def test_rt73_bridge_double_read_never_mutates_sha_protected_packet(self):
+        """Historical or unavailable fundamentals are not modified in place."""
+        import kdd_economics as econ
+        x, source, packet_orig, bundle_orig, _ = self._original_chain()
+        changed=copy.deepcopy(source)
+        btc=changed["posizioni"][0]
+        btc["fondamentali"]=econ.fundamentals(
+            btc["identita"],None,x.clock[0],x.clock[0])
+        x.f.dossier["evidenze_economiche"]=changed
+        x.f.dump()
+        packet_new=x.f.pack(now=x.clock[0])
+        b=dict(bundle_orig,packet=packet_new,packet_sha256=bridge.digest(packet_new))
+        before=json.dumps(packet_new,sort_keys=True,ensure_ascii=False)
+        first=bridge.read_context(b,now=x.clock[0])
+        self.assertEqual(bridge.digest(b["packet"]),b["packet_sha256"])
+        self.assertEqual(json.dumps(packet_new,sort_keys=True,ensure_ascii=False),before)
+        again=bridge.read_context(b,now=x.clock[0])
+        self.assertEqual(bridge.digest(b["packet"]),b["packet_sha256"])
+        self.assertEqual(json.dumps(packet_new,sort_keys=True,ensure_ascii=False),before)
+        self.assertEqual(first["snapshot_id"],again["snapshot_id"])
+
     def test_rt73_legacy_bundle_previous_pr73_view_only_is_compatible(self):
         # Rebuild the previous PR #73's economic display on top of the same
         # reproducible public-mock producer/packet fixture. Unlike a literal
