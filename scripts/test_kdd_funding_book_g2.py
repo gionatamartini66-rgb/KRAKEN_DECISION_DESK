@@ -339,29 +339,30 @@ class FundingBookTests(unittest.TestCase):
         with mock.patch.object(dossier_trade.desk, "NOW", return_value=T), \
              mock.patch.object(dossier_trade.time, "sleep"):
             funding = dossier_trade.finanziamento_150_book(
-                source, fixture.portfolio, saldo_recente=True, kraken_client=depth)
+                source, fixture.portfolio, saldo_recente=True,
+                kraken_client=depth, target_eur=None)
         self.assertEqual(set(calls), {"XETHZEUR", "ADAEUR"})
         self.assertEqual(funding["righe"][1]["stato"], "BOOK_PUBBLICO_OSSERVATO")
         self.assertEqual(funding["righe"][0]["stato"], "BOOK_PUBBLICO_OSSERVATO")
         self.assertLess(
             float(funding["righe"][0]["stima"]["proventi_netto_fee_ipotesi_eur"]), 150)
-        fixture.dossier["finanziamento_150_book_pubblico"] = funding
+        fixture.dossier["profondita_book_pubblica"] = funding
         fixture.dossier["fotografia_portafoglio_sha256"] = p.portfolio_identity(fixture.portfolio)
         fixture.report["fotografia_portafoglio_sha256"] = p.portfolio_identity(fixture.portfolio)
         fixture.dump()
         packet = p.build(fixture.root, now=T)
-        self.assertEqual(packet["patrimonio"]["book_pubblico_150"]["stato"],
-                         "STIMA_BOOK_CON_FEE_IPOTETICA")
-        alternative = packet["patrimonio"]["book_pubblico_150"]["righe"][0]["stima"]
-        self.assertTrue(alternative["sotto_riferimento_non_esclusa"])
+        self.assertEqual(packet["patrimonio"]["profondita_book_pubblica"]["stato"],
+                         "STIMA_BOOK_DISPONIBILITA_CON_FEE_IPOTETICA")
+        alternative = packet["patrimonio"]["profondita_book_pubblica"]["righe"][0]["stima"]
+        self.assertNotIn("sotto_riferimento_non_esclusa",alternative)
         self.assertIsNone(alternative["usdc_effettivamente_disponibili_da_vendita"])
         self.assertGreater(float(alternative["netto_fee_ipotetica_eur"]), 0)
         prepared = bridge.prepare(fixture.root, now=T, _fixture=True)
         context = bridge.read_context(prepared, now=T)
-        self.assertEqual(context["book_150_alla_lettura"]["stato"],
+        self.assertEqual(context["book_alla_lettura"]["stato"],
                          "RECENTE_SOLO_FEE_IPOTETICA")
         late = bridge.read_context(prepared, now=T + dt.timedelta(minutes=7))
-        self.assertNotEqual(late["book_150_alla_lettura"]["stato"],
+        self.assertNotEqual(late["book_alla_lettura"]["stato"],
                             "RECENTE_SOLO_FEE_IPOTETICA")
         self.assertTrue(packet["nessun_ordine"])
         wrong = copy.deepcopy(source)

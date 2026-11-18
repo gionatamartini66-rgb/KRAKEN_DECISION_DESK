@@ -1024,11 +1024,13 @@ def alternative_liquidazione_150_lorda(positions: list, total, *,
 
 
 
-def book_150_per_gpt(dossier, positions, wallet_sha, snapshot_utc, now):
+def book_150_per_gpt(dossier, positions, wallet_sha, snapshot_utc, now, *,
+                     target_eur="150"):
     """Valida origine, righe, coppia e ora della stima book prima di esporla a GPT."""
     fallback = {"stato": "NON_ATTESTATO", "righe": [],
                 "limite": "Nessun confronto book verificato per la fotografia corrente."}
-    raw = dossier.get("finanziamento_150_book_pubblico")
+    raw = dossier.get("profondita_book_pubblica" if target_eur is None
+                      else "finanziamento_150_book_pubblico")
     if (not isinstance(raw, dict) or dossier.get("fotografia_portafoglio_sha256") != wallet_sha
             or raw.get("rilevazione_mercato_utc") != snapshot_utc):
         return fallback
@@ -1076,8 +1078,11 @@ def book_150_per_gpt(dossier, positions, wallet_sha, snapshot_utc, now):
             # positive estimate in the dossier is not sufficient evidence.
             import costi_spot
             try:
-                recreated = costi_spot.stima_vendita_book_150(
-                    item.get("bids_osservati"), free, target_eur="150", fee_ipotesi="0.008")
+                recreated = (costi_spot.stima_vendita_book_disponibile(
+                    item.get("bids_osservati"), free, fee_ipotesi="0.008")
+                    if target_eur is None else costi_spot.stima_vendita_book_150(
+                        item.get("bids_osservati"), free,
+                        target_eur=target_eur, fee_ipotesi="0.008"))
             except (ValueError, TypeError, ArithmeticError):
                 return fallback
             if estimate != recreated:
@@ -1086,18 +1091,63 @@ def book_150_per_gpt(dossier, positions, wallet_sha, snapshot_utc, now):
                                   "quantita_base_teorica": qty,
                                   "lordo_eur": gross, "netto_fee_ipotetica_eur": net,
                                   "fee_taker_ipotizzata_pct": "0.8",
-                                  "sotto_riferimento_non_esclusa": (
-                                      Decimal("0") < Decimal(net) < Decimal("150")),
+                                  **({"sotto_riferimento_non_esclusa":
+                                          Decimal("0") < Decimal(net) < Decimal(target_eur)}
+                                      if target_eur is not None else {}),
                                   "usdc_effettivamente_disponibili_da_vendita": None},
                         "osservato_utc": item.get("osservato_utc"),
                         "freschezza": ("RECENTE_ALLA_COMPOSIZIONE"
                                        if (now-observed).total_seconds() <= 300 else "SCADUTO")})
         output.append(row)
-    return {"stato": "STIMA_BOOK_CON_FEE_IPOTETICA", "righe": output,
-            "limite": ("Non è un preventivo: anche le stime nette inferiori al riferimento "
-                       "di circa 150 USDC sono alternative da confrontare, non ordini esclusi. "
-                       "Importi EUR indicativi non diventano USDC disponibili senza conversione, "
-                       "fee, minimi e negoziabilità verificati; rivalutare il book alla lettura.")}
+    return {"stato": ("STIMA_BOOK_DISPONIBILITA_CON_FEE_IPOTETICA"
+                        if target_eur is None else "STIMA_BOOK_CON_FEE_IPOTETICA"),
+            "righe": output,
+            "limite": ("Book fotografato, fee ipotetica, nessun fill attestato. "
+                       "EUR indicativi non diventano USDC disponibili senza conversione, "
+                       "fee reali, minimi e negoziabilita verificati; "
+                       "rivalutare profondita e bid alla lettura.")}
+
+
+def disponibilita_lorda_per_gpt(positions, *, mercato_stato=None, saldo_stato=None):
+    """Describe all held spot capacities, NEVER a prescribed liquidation size."""
+    rows=[]
+    for i,row in enumerate(positions):
+        if not isinstance(row,dict) or row.get("indice",i)!=i:
+            raise PacketError("Disponibilita spot: indice non verificabile")
+        token=row.get("token")
+        out={"indice":i,"token":token,"stato":"NON_VERIFICABILE",
+             "quantita_disponibile_spot":None,"capienza_lorda_indicativa_eur":None,
+             "fee_reali":"NON_VERIFICATE","conversione_usdc":"NON_VERIFICATA"}
+        if row.get("stato_identita")!="VALIDA":
+            out["stato"]="IDENTITA_NON_VERIFICATA"
+            rows.append(out);continue
+        price=amount(row.get("prezzo_eur"),"prezzo EUR")
+        held=amount(row.get("quantita_spot"),"quantita posseduta")
+        free=amount(row.get("disponibile_spot"),"quantita disponibile")
+        source=row.get("fonte_prezzo_eur")
+        if (None in (price,held,free) or not isinstance(source,dict)
+            or source.get("token")!=token or source.get("valuta")!="EUR"
+            or not isinstance(source.get("pair"),str)
+            or source["pair"].split("/")[-1]!="EUR"
+            or canonical_wallet_alias(source["pair"].split("/")[0])
+               !=canonical_wallet_alias(token)):
+            rows.append(out);continue
+        price,held,free=Decimal(price),Decimal(held),Decimal(free)
+        if not price>0 or free>held:
+            rows.append(out);continue
+        out.update(stato="CAPACITA_LORDA_INDICATIVA" if free>0
+                   else "NESSUNA_DISPONIBILITA_SPOT",
+                   quantita_disponibile_spot=format(free,"f"),
+                   capienza_lorda_indicativa_eur=format(price*free,"f"))
+        rows.append(out)
+    return {"stato":"FOTOGRAFIA_RECENTE" if
+            mercato_stato=="RECENTE" and saldo_stato=="RECENTE"
+            else "FOTOGRAFIA_NON_RECENTE_O_NON_ATTESTATA",
+            "posizioni":rows,"n_posizioni":len(rows),
+            "obiettivo_monetario_prefissato":None,
+            "limite":"Valore lordo indicativo e non prezzo bid eseguibile; "
+                     "fee, spread, minimi, book e conversioni da verificare, "
+                     "nessuna proposta di vendita."}
 
 
 def quadro_economico_per_gpt(positions: list, cash: dict, total, *, mercato_stato=None, saldo_stato=None) -> dict:
@@ -1142,8 +1192,6 @@ def quadro_economico_per_gpt(positions: list, cash: dict, total, *, mercato_stat
     top = sorted((v for _, v in entries if v is not None), reverse=True) if complete else []
     pct_top2 = (sum(top[:2], Decimal(0)) * 100 / denom).quantize(Decimal("0.01")) if top else None
     pct_top3 = (sum(top[:3], Decimal(0)) * 100 / denom).quantize(Decimal("0.01")) if top else None
-    scenario_150 = (Decimal(150) * 100 / denom).quantize(Decimal("0.01")) if complete else None
-
     currencies = ("EUR", "EURC", "USD", "USDC")
     available = []
     for symbol in currencies:
@@ -1166,20 +1214,16 @@ def quadro_economico_per_gpt(positions: list, cash: dict, total, *, mercato_stat
     return {
         "stato": "INDICATIVO" if complete else "NON_CALCOLABILE_INTEGRALMENTE",
         "base": "valore_eur_posizioni_senza_liquidita",
-        "alternative_liberazione_150_lordi": alternative_liquidazione_150_lorda(
-            positions, total, mercato_stato=mercato_stato, saldo_stato=saldo_stato),
+        "disponibilita_lorda_spot": disponibilita_lorda_per_gpt(
+            positions, mercato_stato=mercato_stato, saldo_stato=saldo_stato),
+        "costi_di_negoziazione":"NON_VERIFICATI_PER_IL_CONTO",
         "quote_posizioni": quote,
         "concentrazione_top2_pct": format(pct_top2, "f") if pct_top2 is not None else None,
         "concentrazione_top3_pct": format(pct_top3, "f") if pct_top3 is not None else None,
         "liquidita_stato": cash_status,
-        "esempio_150_eur_sul_patrimonio_pct": (format(scenario_150, "f")
-                                               if scenario_150 is not None else None),
-        "esempio_150_finanziamento_stato": (
-            "NESSUNA_LIQUIDITA_SULLE_QUATTRO_VALUTE_VERIFICARE_FONTI"
-            if cash_status == "ZERO_RILEVATO_NELLE_QUATTRO_VALUTE" else
-            "NON_DETERMINABILE_SENZA_CAMBIO_SPREAD_E_COSTI"
-            if cash_status == "PRESENTE_PER_VALUTA_EQUIVALENZA_EUR_NON_ATTESTATA" else
-            "NON_VERIFICATO"),
+        "liquidita_spot_per_valuta": {
+            symbol:format(value,"f") for symbol,value in zip(currencies,available)}
+            if len(available)==len(currencies) else None,
         "vincoli": [
             "Calcolo descrittivo: non è proposta di vendita, acquisto o conversione.",
             "Valori indicativi della fotografia, non prezzi eseguibili.",
@@ -1264,7 +1308,8 @@ def build(root: Path, now: dt.datetime | None = None) -> dict:
             if entire_wallet_valued else
             "Peso sul solo valore EUR conosciuto, non sull'intero patrimonio")
     book_for_gpt = book_150_per_gpt(
-        dossier, positions, wallet_sha, snapshot["rilevazione_utc"], now)
+        dossier, positions, wallet_sha, snapshot["rilevazione_utc"], now,
+        target_eur=None)
     return {"schema": SCHEMA, "tipo": "PACCHETTO_PATRIMONIALE_PRIVATO",
             "generato_utc": now.isoformat(timespec="seconds"),
             "rilevazione_kdd_utc": s_time.isoformat(timespec="seconds"),
@@ -1277,7 +1322,7 @@ def build(root: Path, now: dt.datetime | None = None) -> dict:
             "dossier": {"coerente_con_mercato": dossier_fresh,
                         "stato": "UTILIZZABILE_CON_LIMITI" if dossier_fresh else "RILEVAZIONE_DIFFERENTE_NON_ATTRIBUIRE_LIVELLI"},
             "patrimonio": {"posizioni": positions, "liquidita_spot": cash,
-                           "book_pubblico_150": book_for_gpt,
+                           "profondita_book_pubblica": book_for_gpt,
                            "quadro_economico_per_gpt": quadro_economico_per_gpt(
                                positions, cash, total,
                                mercato_stato=status_market["stato"],

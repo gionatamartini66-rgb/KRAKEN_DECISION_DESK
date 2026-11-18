@@ -7,6 +7,7 @@ No source here proves an unlock was sold, a proposal adopted, or a market move c
 from __future__ import annotations
 
 import csv
+import hashlib
 import calendar
 import datetime as dt
 import io
@@ -287,11 +288,14 @@ def _schedule_descriptor(descriptor):
     return {"format":"repository-json-v001","repository": repo, "path": path, "ref": ref}
 
 
-def _fetch(fetch, url, *, json_data=True):
+def _fetch(fetch, url, *, json_data=True, digest_out=None):
     try:
         raw = fetch(url)
         if not isinstance(raw, bytes) or len(raw) > 1_000_000:
             return None, "RISPOSTA_NON_CONFORME"
+        # Record ORIGINAL HTTP bytes before UTF-8-sig removes any BOM.
+        if isinstance(digest_out,dict):
+            digest_out["sha256"]=hashlib.sha256(raw).hexdigest()
         if json_data:
             result = json.loads(raw.decode("utf-8"))
             return result, None
@@ -1667,17 +1671,18 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
              "fonte":None,"eventi":[],"limite":"Supply e FDV non sono un calendario unlock"}
         if descriptor and project in sch_selected:
             used+=1
+            schedule_digest={}
             if descriptor.get("format")==MONTHLY_FORMAT:
                 url=descriptor["url"]
                 raw,error=_fetch(fetch,url)
                 result=_official_monthly(raw,project,descriptor,now) if not error else None
             elif descriptor.get("format")==STRK_UNLOCK_FORMAT:
                 url=STRK_URL
-                raw,error=_fetch(fetch,url,json_data=False)
+                raw,error=_fetch(fetch,url,json_data=False,digest_out=schedule_digest)
                 result=_strk_primary_schedule(raw,project,descriptor,now) if not error else None
             elif descriptor.get("format")==ARB_VESTING_FORMAT:
                 url=ARB_VESTING_URL
-                raw,error=_fetch(fetch,url,json_data=False)
+                raw,error=_fetch(fetch,url,json_data=False,digest_out=schedule_digest)
                 result=_arb_vesting_document(raw,project,descriptor,now) if not error else None
             else:
                 url=("https://raw.githubusercontent.com/"+descriptor["repository"]+"/"+
@@ -1686,6 +1691,11 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
                 result=_official_schedule(raw,project,url,now) if not error else None
             if result:
                 row.update(result)
+                # This digest is of the document text returned through the
+                # source producer, not a signature from the project.
+                if isinstance(raw,str):
+                    row["sha256_documento"]=schedule_digest.get("sha256")
+                    row["stato_acquisizione"]="RISPOSTA_PUBBLICA_RICEVUTA_DAL_PRODUTTORE"
             else:
                 # A failed recheck does not erase the last attributable plan.
                 # Retain it as historical, never as a newly confirmed unlock.
@@ -1889,11 +1899,14 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
                 "limite":"Titolo del comunicato non dimostra attuazione o effetto sul mercato"}
         if selected_status and selected_status[0]==fid:
             used+=1
-            raw,error=_fetch(fetch,url,json_data=False)
+            macro_digest={}
+            raw,error=_fetch(fetch,url,json_data=False,digest_out=macro_digest)
             events=_macro_official_rss(raw,feed,now) if not error else None
             if events is not None:
                 result.update(stato="OSSERVATO" if events else "NESSUN_EVENTO_PERTINENTE_NEL_CAMPIONE",
                               eventi=events,acquisito_utc=_iso(now),
+                              stato_acquisizione="RISPOSTA_PUBBLICA_RICEVUTA_DAL_PRODUTTORE",
+                              sha256_feed_originale=macro_digest.get("sha256"),
                               limite="Campione bounded di fonti ufficiali: nessun impatto automatico sul mercato crypto")
             else:
                 earlier=_time(previous.get("acquisito_utc")) if isinstance(previous,dict) else None
@@ -2492,6 +2505,10 @@ def at_read(raw, items, now):
         if row.get("stato") in ("DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI","MASSIMI_DATATI_STORICI"):
             if not _strk_schedule_valid(row,expected):
                 raise ValueError("Starknet official upper-bound vesting forged")
+            if row.get("sha256_documento") is not None and (
+                    not isinstance(row.get("sha256_documento"),str) or
+                    not re.fullmatch(r"[a-f0-9]{64}",row["sha256_documento"])):
+                raise ValueError("Starknet documented HTTP digest malformed")
             t=_time(row.get("acquisito_utc"))
             new["stato"]=("DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI"
                           if row["stato"]=="DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI"

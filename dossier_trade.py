@@ -232,7 +232,7 @@ def global_context():
 
 
 def finanziamento_150_book(source, portfolio, *, saldo_recente, kraken_client=None,
-                             max_calls=4):
+                             max_calls=4, target_eur="150"):
     """KDD-05/12: pubblica profondita bid su asset posseduti, fee solo ipotetica.
 
     Usa la fotografia Kraken; non controlla negoziabilita/fee del conto e non ordina.
@@ -317,8 +317,10 @@ def finanziamento_150_book(source, portfolio, *, saldo_recente, kraken_client=No
             depth = raw[pair_key]
             if not isinstance(depth, dict):
                 raise ValueError("Book Kraken non strutturato")
-            estimate = costi_spot.stima_vendita_book_150(
-                depth.get("bids"), available, target_eur="150", fee_ipotesi="0.008")
+            estimate = (costi_spot.stima_vendita_book_disponibile(
+                depth.get("bids"), available, fee_ipotesi="0.008")
+                if target_eur is None else costi_spot.stima_vendita_book_150(
+                    depth.get("bids"), available, target_eur=target_eur, fee_ipotesi="0.008"))
             result[i] = {"indice": i, "token": token, "stato": "BOOK_PUBBLICO_OSSERVATO",
                          "pair": pair, "pair_key": pair_key,
                          "osservato_utc": desk.NOW().isoformat(timespec="seconds"),
@@ -495,10 +497,22 @@ def economic_evidence(source, wallet, four, candidates, now, *,
     discovery_problem = None
     resolved = None
 
+    acquired_http = {}
     def public_json(url, *, timeout=12):
         nonlocal rate_limited
         try:
-            return json.loads(desk.request(url, timeout=timeout).decode("utf-8")), None
+            # Capture the actual bytes obtained in this request path; do not
+            # interpret a plausible JSON document as proof of HTTP origin.
+            raw = desk.request(url, timeout=timeout)
+            decoded = json.loads(raw.decode("utf-8"))
+            import hashlib
+            acquired_http[url] = {"url_richiesto": url,
+                "sha256_corpo_risposta": hashlib.sha256(raw).hexdigest(),
+                "acquisito_utc": now.isoformat(timespec="seconds"),
+                "canale": "REQUEST_PUBBLICA_DEL_PRODUTTORE",
+                "limite": "Hash e URL documentano il percorso di acquisizione locale; "
+                          "non attestano da soli autenticita esterna o veridicita dei dati."}
+            return decoded, None
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
                 rate_limited = True
@@ -718,9 +732,13 @@ def economic_evidence(source, wallet, four, candidates, now, *,
                             stato="NON_VERIFICATO_IDENTITA",
                             motivo=identity.get("motivo"))
             else:
-                individual = econ.fundamentals(identity, cache.get(cg), now, now)
+                individual_url=(econ.CG + cg
+                    + "?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false")
+                individual = econ.fundamentals(identity, cache.get(cg), now, now,
+                    acquisition=acquired_http.get(individual_url))
                 batched=(econ.market_batch_fundamentals(
-                    identity,batch_rows[cg],now,now,batch_url)
+                    identity,batch_rows[cg],now,now,batch_url,
+                    acquisition=acquired_http.get(batch_url))
                     if cg in batch_rows and batch_url else None)
                 fresh=(batched if batched and batched["stato"] in
                     ("VERIFICATO","ANOMALIA_SUPPLY","SCADUTO") else individual)
@@ -972,7 +990,7 @@ def collect(source=None, *, asset_pairs=None):
         now=now, old_4h=quattro_ore)
     finanziamento_book = finanziamento_150_book(
         dict(source, _verified_asset_pairs=asset_pairs), portafoglio,
-        saldo_recente=qualita.get("saldo_recente_verificato", False))
+        saldo_recente=qualita.get("saldo_recente_verificato", False), target_eur=None)
     config=desk.load("config.json",{})
     requested=(config.get("analisi_asset_richiesti") if isinstance(config,dict) else None)
     economic = economic_evidence(source, portafoglio, analisi_patrimonio, candidates, now,
@@ -1024,7 +1042,7 @@ def collect(source=None, *, asset_pairs=None):
             for r in economic.get("richiesti",[])],
         "evidenze_rete_defi": network_defi,
         "patrimonio_4tf":analisi_patrimonio,
-        "finanziamento_150_book_pubblico":finanziamento_book,
+        "profondita_book_pubblica":finanziamento_book,
         "ricerca_setup":source.get("ricerca_setup",{}),
         "approfondimento_candidati_4tf":{
             "fonte":cand_4tf["fonte"],"richieste_ohlc":cand_4tf["richieste_ohlc"],

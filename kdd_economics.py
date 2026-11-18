@@ -1,5 +1,6 @@
 """KDD-18/20/21/22: bounded, attributable economic evidence; never trading signals."""
 import datetime as dt
+import hashlib
 import email.utils
 import math
 import json
@@ -279,6 +280,19 @@ def resolve_public(token, pair, search_result, market_results, now):
             "coingecko_id": coin["id"], "progetto": coin["name"],
             "prova_mercato": proof}
 
+def evidence_ref(family, *parts):
+    """Stable *internal* evidence identifier derived from an attributable fact.
+
+    An evidence ID is a navigation reference, NOT a signature or proof of the
+    original provider's authenticity. It is recalculated at consumer read.
+    """
+    if not isinstance(family,str) or any(not isinstance(p,(str,int,float))
+                                           for p in parts):
+        return None
+    material="\x1f".join(str(p) for p in (family,)+parts)
+    return "E-"+family+"-"+hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
+
+
 def market_batch_url(ids):
     """Deterministic public /coins/markets supply request for verified IDs."""
     if (not isinstance(ids,(list,tuple)) or not 1<=len(ids)<=MAX_CG_BATCH_IDS
@@ -317,7 +331,7 @@ def fundamental_source_valid(url,project_id):
         return False
 
 
-def market_batch_fundamentals(identity,row,now,acquired,source_url):
+def market_batch_fundamentals(identity,row,now,acquired,source_url, *, acquisition=None):
     """Adapt a real /coins/markets item to the existing fundamentals engine.
 
     This is only a formatting adapter. No source-less synthetic supply is used:
@@ -334,7 +348,8 @@ def market_batch_fundamentals(identity,row,now,acquired,source_url):
              last_updated=row.get("last_updated"),
              market_cap={"usd":data["market_cap"]},
              fully_diluted_valuation={"usd":data["fully_diluted_valuation"]})}
-    return fundamentals(identity,raw,now,acquired,source_url=source_url)
+    return fundamentals(identity,raw,now,acquired,source_url=source_url,
+                        acquisition=acquisition)
 
 
 def _supply_consistency(data):
@@ -390,6 +405,31 @@ def verify_supply_at_read(fundamental):
     """
     if not isinstance(fundamental,dict):
         raise ValueError("Fondamentali non strutturati")
+    proof=fundamental.get("prova_acquisizione")
+    if proof is not None:
+        if not isinstance(proof,dict):
+            raise ValueError("Provenienza fondamentali non strutturata")
+        status=proof.get("stato","NON_ATTESTATA_DAL_PRODUTTORE")
+        if status=="RISPOSTA_HTTP_PASSATA_AL_PRODUTTORE":
+            digest=proof.get("sha256_corpo_risposta")
+            url=proof.get("url_richiesto")
+            acquired=stamp(proof.get("acquisito_utc"))
+            source=fundamental.get("fonte")
+            cg=proof.get("progetto_id")
+            if (not isinstance(cg,str) or
+                    not fundamental_source_valid(source,cg) or
+                    not isinstance(digest,str) or
+                    not re.fullmatch(r"[a-f0-9]{64}",digest) or
+                    proof.get("canale")!="REQUEST_PUBBLICA_DEL_PRODUTTORE" or
+                    not acquired or acquired!=stamp(fundamental.get("acquisito_utc")) or
+                    not isinstance(url,str) or
+                    not (url==source if isinstance(source,str) and source.startswith(CG_MARKETS)
+                         else url==CG+cg+
+                         "?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false") or
+                    proof.get("id_evidenza")!="E-FUND-"+cg+"-"+digest[:16]):
+                raise ValueError("Provenienza HTTP fondamentali alterata")
+        elif status!="NON_ATTESTATA_DAL_PRODUTTORE":
+            raise ValueError("Provenienza fondamentali non riconosciuta")
     if fundamental.get("stato") not in ("VERIFICATO","SCADUTO","ANOMALIA_SUPPLY"):
         return
     expected,anomalies=_supply_consistency(fundamental)
@@ -412,8 +452,9 @@ def verify_supply_at_read(fundamental):
         raise ValueError("Contradictory source cannot be verified")
 
 
-def fundamentals(identity, payload, now, acquired, *, source_url=None):
+def fundamentals(identity, payload, now, acquired, *, source_url=None, acquisition=None):
     out = {"stato": "NON_VERIFICATO", "fonte": None, "rilevato_utc": None,
+           "prova_acquisizione": {"stato": "NON_ATTESTATA_DAL_PRODUTTORE"},
            "acquisito_utc": acquired.isoformat(timespec="seconds"),
            "capitalizzazione_usd": None, "fdv_usd": None,
            "offerta_circolante": None, "offerta_totale": None,
@@ -446,6 +487,22 @@ def fundamentals(identity, payload, now, acquired, *, source_url=None):
     out.update(values)
     out["rilevato_utc"] = updated.isoformat(timespec="seconds")
     out["fonte"] = source_url if source_url is not None and fundamental_source_valid(source_url,cg) else CG + cg
+    # The source URL in the JSON is structural attribution. This separate
+    # attestation exists only when the producer actually read the bytes.
+    # Mocks can exercise the same path, so no cryptographic authenticity claim.
+    if isinstance(acquisition,dict):
+        actual_url=acquisition.get("url_richiesto")
+        valid_request=(actual_url==source_url if source_url is not None else
+                       actual_url==CG+cg+
+                       "?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false")
+        sha=acquisition.get("sha256_corpo_risposta")
+        observed=stamp(acquisition.get("acquisito_utc"))
+        if (valid_request and isinstance(sha,str)
+                and re.fullmatch(r"[0-9a-f]{64}",sha)
+                and observed and abs((observed-acquired).total_seconds())<=2):
+            out["prova_acquisizione"]=dict(acquisition, progetto_id=cg,
+                stato="RISPOSTA_HTTP_PASSATA_AL_PRODUTTORE",
+                id_evidenza="E-FUND-"+cg+"-"+sha[:16])
     age = (now-updated).total_seconds()
     out["stato"] = "VERIFICATO" if age <= 86400 else "SCADUTO"
     diagnostics,anomalies=_supply_consistency(values)
@@ -595,6 +652,7 @@ def regime(btc_four, global_row, now):
     if cap is not None and cap > 0 and volume is not None and 0 < volume <= cap*10:
         out["famiglie_osservate"].append({
             "famiglia": "ATTIVITA_AGGREGATA",
+            "fonte":global_row.get("fonte") or "https://api.coingecko.com/api/v3/global",
             "turnover_24h_su_cap_pct": round(volume / cap * 100, 4),
             "pubblicato_utc": updated.isoformat(timespec="seconds"),
             "limite": "Rapporto tra volume riportato e capitalizzazione; non prova partecipazione netta o acquisti."})
@@ -814,7 +872,8 @@ def regime_integrato(core, macro, now):
     turnover=activity.get("turnover_24h_su_cap_pct")
     activity_valid=bool(global_valid and type(turnover) in (int,float)
                         and math.isfinite(turnover) and 0<turnover<=1000
-                        and activity.get("pubblicato_utc")==global_row.get("pubblicato_utc"))
+                        and activity.get("pubblicato_utc")==global_row.get("pubblicato_utc")
+                        and activity.get("fonte",global_row.get("fonte"))==global_row.get("fonte"))
     missing=[]
     if not recent:missing.append("Regime acquisito da oltre due ore o senza timestamp attendibile")
     if not btc_valid:missing.append("BTC 4H/1D concordi o discordanti verificati")
@@ -828,12 +887,18 @@ def regime_integrato(core, macro, now):
         "statuto":"REGIME_MOTIVATO_DA_USARE_NEL_CONSUMER_GPT",
         "applicabilita":"MERCATO_GENERALE_NON_ASSET_SINGOLO",
         "evidenze_indipendenti":[{
-            "famiglia":"BTC_PREZZO_4H_1D","fonte":"Kraken Spot pubblico /0/public/OHLC",
+            "famiglia":"BTC_PREZZO_4H_1D",
+            "evidence_id":evidence_ref("REGIME","BTC_4H_1D",
+                core.get("acquisito_utc") or "",str(btc_dir)) if btc_valid and recent else None,
+            "fonte":"Kraken Spot pubblico /0/public/OHLC",
             "rilevazione_utc":core.get("acquisito_utc"),
             "osservazione":btc_dir if btc_valid else None,
             "stato":"OSSERVATO" if btc_valid and recent else "NON_ATTUALE"
         },{
             "famiglia":"AGGREGATO_CRYPTO_PREZZO_E_ATTIVITA",
+            "evidence_id":evidence_ref("REGIME","GLOBAL",
+                global_row.get("fonte") or "",global_row.get("pubblicato_utc") or "",
+                global_row.get("variazione_24h_pct")) if global_valid and activity_valid else None,
             "fonte":global_row.get("fonte"),
             "osservato_utc":global_row.get("pubblicato_utc"),
             "var_cap_24h_pct":global_row.get("variazione_24h_pct") if global_valid else None,
@@ -964,6 +1029,8 @@ def tokenomics_view(row, primary):
     schedule=primary_row("calendari") or {}
     issuance=primary_row("politiche_emissioni") or {}
     valid=fund.get("stato")=="VERIFICATO"
+    acquisition=fund.get("prova_acquisizione") or {}
+    acquisition_state=acquisition.get("stato","NON_ATTESTATA_DAL_PRODUTTORE")
     anomaly=fund.get("stato")=="ANOMALIA_SUPPLY"
     remaining=fund.get("emissione_residua_massima_su_circolante_pct") if valid else None
     schedule_kind=schedule.get("stato","NON_ACQUISITO")
@@ -1005,6 +1072,14 @@ def tokenomics_view(row, primary):
         "progetto_id":project,"stato":state,
         "supply":{
             "stato":fund.get("stato","NON_DISPONIBILE"),
+            "validita_strutturale":"VALIDATA" if valid else "NON_VERIFICATA_O_SCADUTA",
+            "provenienza_acquisizione":acquisition_state,
+            "evidence_id":acquisition.get("id_evidenza"),
+            "sha256_risposta":acquisition.get("sha256_corpo_risposta"),
+            "fonte_http_effettiva":acquisition.get("url_richiesto"),
+            "limite_provenienza":"L'hash catturato dal produttore non e firma del fornitore "
+                "e non prova autenticita esterna; senza prova HTTP i valori "
+                "sono soltanto strutturalmente validi.",
             "fonte":fund.get("fonte") if project else None,
             "rilevato_utc":fund.get("rilevato_utc") if project else None,
             "acquisito_utc":fund.get("acquisito_utc") if project else None,
@@ -1037,6 +1112,19 @@ def tokenomics_view(row, primary):
                     "MASSIMI_DATATI_STORICI") else "NON_VERIFICATO"),
             "numero_eventi_documentati":len(schedule.get("eventi") or [])
                 if schedule_current else 0,
+            "provenienza_documento":schedule.get("stato_acquisizione","NON_ATTESTATA"),
+            "sha256_documento_originale":schedule.get("sha256_documento"),
+            "prossime_scadenze_documentate":[{
+                "evidence_id":evidence_ref("SCHEDULE",project,
+                    schedule_source,e.get("data_prevista") or e.get("evento_utc"),
+                    e.get("quantita_massima_token") if e.get("quantita_massima_token") is not None
+                    else e.get("quantita_token")),
+                "data_programmata":e.get("data_prevista") or e.get("evento_utc"),
+                "quantita_massima_token":e.get("quantita_massima_token"),
+                "quantita_programmata_token":e.get("quantita_token"),
+                "esecuzione":"NON_ATTESTATA","vendita":"NON_ATTESTATA"
+            } for e in (schedule.get("eventi") or [])[:4]
+               if isinstance(e,dict)] if schedule_current else [],
             "realizzazione":"NON_ATTESTATA","vendita":"NON_ATTESTATA",
             "limite":schedule.get("limite") or "Nessun calendario primario associato o corrente"},
         "politica_emissione":{
@@ -1147,6 +1235,13 @@ def project_events_view(row, verified_primary):
         state="SOLO_EVIDENZE_STORICHE_O_NON_RICONFERMATE"
     else:
         state="NESSUN_EVENTO_IDENTIFICATO_NEL_CAMPIONE"
+    # Navigation IDs are composed after producer + project attribution checks:
+    # a schedule is not a sale and a document is not implementation.
+    for event in events:
+        if event.get("fonte"):
+            event["evidence_id"]=evidence_ref("EVENTO",project,event.get("tipo"),
+                event["fonte"],event.get("pubblicato_utc") or
+                event.get("efficacia_programmata_utc") or "DATA_NON_ATTESTATA")
     # Missing coverage is explicit even if no events occurred in sampled feeds.
     families={}
     for name in ("progetti","segnalazioni_repo","avvisi_repository"):
@@ -1201,6 +1296,10 @@ def macro_primary_context(primary, published_feed, now):
                     else "PUBBLICAZIONE_DATATA_O_NON_RICONFERMATA")
             facts.append({
                 "classe":"COMUNICATO_UFFICIALE",
+                "evidence_id":evidence_ref("MACRO",notice["tipo"],
+                    notice["fonte"],notice["pubblicato_utc"]),
+                "sha256_feed_originale":family.get("sha256_feed_originale"),
+                "provenienza_feed":family.get("stato_acquisizione","NON_ATTESTATA"),
                 "tipo":notice["tipo"],
                 "fatto_osservato":"Pubblicazione di un comunicato ufficiale verificato nel feed",
                 "titolo":notice["titolo"],"fonte":notice["fonte"],
@@ -1229,6 +1328,8 @@ def macro_primary_context(primary, published_feed, now):
             continue
         facts.append({
             "classe":"INDICATORE_PUBBLICO",
+            "evidence_id":evidence_ref("MACRO",key,indicator.get("fonte") or "",
+                                       indicator.get("periodo") or ""),
             "tipo":key,"fatto_osservato":"Valore pubblicato da serie ufficiale, soggetto a revisioni",
             "fonte":indicator.get("fonte"),"pubblicato_utc":None,
             "periodo":indicator.get("periodo"),"acquisito_utc":indicator.get("acquisito_utc"),
@@ -1248,6 +1349,8 @@ def macro_primary_context(primary, published_feed, now):
         data=flow["dati"]
         fact={
             "classe":"FLUSSO_O_STOCK_AGGREGATO",
+            "evidence_id":evidence_ref("MACRO",key,flow.get("fonte") or "",
+                                       data.get("periodo") or flow.get("acquisito_utc") or ""),
             "tipo":key,"fatto_osservato":"Dato pubblicato da aggregatore pubblico, non primaria istituzionale",
             "fonte":flow.get("fonte"),"pubblicato_utc":None,
             "periodo":data.get("periodo"),"acquisito_utc":flow.get("acquisito_utc"),
@@ -1395,8 +1498,14 @@ def integrated_asset_view(row, macro_context, regime_view, now):
             "fonte":supply.get("fonte") if project else None,
             "rilevato_utc":supply.get("rilevato_utc") if project else None,
             "acquisito_utc":supply.get("acquisito_utc") if project else None,
-            "attendibilita":"AGGREGATORE_ATTRIBUITO_NON_FONTE_UNLOCK"
-                            if supply_status=="RECENTE" else "NON_ATTUALE_O_NON_VERIFICATA",
+            "evidence_id":supply.get("evidence_id"),
+            "provenienza_acquisizione":supply.get("provenienza_acquisizione"),
+            "attendibilita":(
+                "HTTP_PRODUTTORE_CON_HASH_NON_FIRMA_FORNITORE"
+                if supply_status=="RECENTE" and
+                supply.get("provenienza_acquisizione")=="RISPOSTA_HTTP_PASSATA_AL_PRODUTTORE"
+                else "DATO_STRUTTURALMENTE_VALIDO_HTTP_NON_ATTESTATO"
+                if supply_status=="RECENTE" else "NON_ATTUALE_O_NON_VERIFICATA"),
             "riferimento_dettaglio":"quadro_tokenomics"},
         "eventi":{
             "stato_informazione":event_status,
