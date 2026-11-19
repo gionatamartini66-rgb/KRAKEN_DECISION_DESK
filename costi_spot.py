@@ -295,3 +295,55 @@ def stima_vendita_book_150(bids, disponibile_base, *, target_eur="150", fee_ipot
                    "minimi e precisione ordine da controllare, nessuna negoziabilita "
                    "personale o risultato di vendita attestato."),
     }
+
+def stima_vendita_book_disponibile(bids, disponibile_base, *, fee_ipotesi="0.008"):
+    """Target-free depth capacity for ALL available units, not a sales goal.
+
+    Uses public bid levels and a disclosed hypothetical fee; it cannot attest
+    account-specific fees, trading permission, or execution. No order is sent.
+    """
+    from decimal import Decimal, InvalidOperation
+    def decimal(value):
+        if type(value) not in (str,int,float,Decimal):
+            raise ValueError("Depth: malformed number")
+        try: v=Decimal(str(value))
+        except InvalidOperation as exc:raise ValueError("Depth: malformed number") from exc
+        if not v.is_finite():raise ValueError("Depth: non-finite number")
+        return v
+    available=decimal(disponibile_base)
+    fee=decimal(fee_ipotesi)
+    if available<0 or not 0<=fee<1:
+        raise ValueError("Depth: available amount or fee invalid")
+    if not isinstance(bids,list) or not 1<=len(bids)<=500:
+        raise ValueError("Depth: missing or oversized bids")
+    remaining=available
+    gross=Decimal(0)
+    last=None
+    used=0
+    for level in bids:
+        if not isinstance(level,(list,tuple)) or len(level)<2:
+            raise ValueError("Depth: malformed bid")
+        price,quantity=decimal(level[0]),decimal(level[1])
+        if price<=0 or quantity<=0 or (last is not None and price>=last):
+            raise ValueError("Depth: non-descending/invalid bids")
+        last=price
+        if remaining<=0: continue
+        consume=min(remaining,quantity)
+        remaining-=consume
+        gross+=consume*price
+        used+=1
+    net=gross*(1-fee)
+    return {
+        "stato":"CAPACITA_TOTALE_BOOK_OSSERVATA" if remaining==0 else
+                "CAPACITA_PARZIALE_BOOK_OSSERVATA",
+        "quantita_base_teorica":format(available-remaining,"f"),
+        "quantita_senza_profondita":format(remaining,"f"),
+        "proventi_lordi_stimati_eur":format(gross,"f"),
+        "fee_ipotetica_eur":format(gross*fee,"f"),
+        "proventi_netto_fee_ipotesi_eur":format(net,"f"),
+        "fee_ipotetica_pct":format(fee*100,"f"),
+        "livelli_bid_utilizzati":used,
+        "nessun_fill_attestato":True,
+        "limite":"Analisi di capienza senza importo-obiettivo: profondita e bid mobili, "
+                 "fee solo ipotetica, minimi, precisione e disponibilita a negoziare "
+                 "non verificati; nessun importo netto effettivamente ottenuto."}

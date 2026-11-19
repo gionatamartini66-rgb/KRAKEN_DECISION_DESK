@@ -84,6 +84,112 @@ class PrimaryFollowupTests(unittest.TestCase):
                     "quantita_token":100,"allocazione":"example"}]}).encode()
         raise AssertionError("source URL not registered: "+url)
 
+    def test_cp3_official_fed_eu_rss_shared_rotation_and_gpt(self):
+        fed,eu=sources.MACRO_RELEASE_FEEDS
+        fedurl="https://www.federalreserve.gov/newsevents/pressreleases/monetary20261114a.htm"
+        euurl=("https://www.consilium.europa.eu/en/press/press-releases/"
+               "2026/11/15/council-imposes-sanctions-on-four-entities/")
+        fedxml=('<rss version="2.0"><channel><item>'
+                '<title>Federal Reserve issues FOMC statement</title>'
+                '<link>'+fedurl+'</link>'
+                '<pubDate>Sat, 14 Nov 2026 18:00:00 GMT</pubDate>'
+                '</item></channel></rss>').encode()
+        euxml=('<rss xmlns:a10="http://www.w3.org/2005/Atom" version="2.0">'
+               '<channel><item><title>Council imposes sanctions on four entities</title>'
+               '<link>'+euurl+'</link>'
+               '<a10:updated>2026-11-15T08:00:00+00:00</a10:updated>'
+               '</item></channel></rss>').encode()
+        calls=[]
+        def fetch(url):
+            calls.append(url)
+            if url==fed[1]:return fedxml
+            if url==eu[1]:return euxml
+            try:return self.fetch(url)
+            except AssertionError:raise OSError("Auxiliary fixture unavailable")
+        roster=self.items(tokens=("BTC","SOL"))
+        old={}
+        for i in range(7):
+            t=T+dt.timedelta(hours=i+1)
+            old=sources.collect(t,roster,old,fetch,collect_kraken_status=True)
+            checked=sources.at_read(old,roster,t)
+            self.assertLessEqual(old["richieste_pubbliche"],8)
+        self.assertEqual(calls.count(fed[1]),1)
+        self.assertEqual(calls.count(eu[1]),1)
+        self.assertEqual([r["stato_alla_lettura"]
+                          for r in checked["eventi_macro_ufficiali"]],
+                         ["STORICO_NON_AGGIORNATO","OSSERVATO"])
+        self.assertEqual(checked["eventi_macro_ufficiali"][0]["eventi"][0]["fonte"],fedurl)
+        euitem=checked["eventi_macro_ufficiali"][1]["eventi"][0]
+        self.assertEqual(euitem["fonte"],euurl)
+        self.assertEqual(euitem["precisione_pubblicazione"],"GIORNO_DA_URL")
+        self.assertEqual(euitem["pubblicato_utc"],"2026-11-15T00:00:00+00:00")
+        self.assertEqual(euitem["aggiornato_fonte_utc"],"2026-11-15T08:00:00+00:00")
+        moment=T+dt.timedelta(hours=7)
+        source={"schema":economic.VERSION,"acquisito_utc":moment.isoformat(),
+                "posizioni":roster["posizioni"],"candidati":[],
+                "macro":economic.macro([],moment),
+                "regime":{"stato":"INDETERMINATO","qualita":"INSUFFICIENTE"},
+                "fonti_economiche":economic.sources_matrix(),"monitor_fonti":old}
+        targets=[{"token":"BTC"},{"token":"SOL"}]
+        report=economic.at_read(source,targets,[],moment)
+        context=report["contesto_macro_primario"]
+        facts=[f for f in context["fatti"] if f["classe"]=="COMUNICATO_UFFICIALE"]
+        self.assertEqual({x["fonte"] for x in facts},{fedurl,euurl})
+        self.assertEqual(context["numero_feed_primari_freschi"],1)
+        self.assertEqual(len(report["posizioni"]),2)
+        self.assertTrue(all(x["nessuna_causalita_attestata"]
+                            for x in context["scenari_condizionali"]))
+        later=economic.at_read(report,targets,[],moment+dt.timedelta(days=15))
+        self.assertEqual(later["contesto_macro_primario"]["numero_feed_primari_freschi"],0)
+        forged=copy.deepcopy(source)
+        forged["monitor_fonti"]["eventi_macro_ufficiali"][1]["eventi"][0][
+            "efficacia_confermata_utc"]=moment.isoformat()
+        with self.assertRaises(ValueError):
+            economic.at_read(forged,targets,[],moment)
+        forged=copy.deepcopy(source)
+        forged["monitor_fonti"]["eventi_macro_ufficiali"][0]["eventi"][0][
+            "fonte"]="https://evil.example/pressreleases/monetary20261114a.htm"
+        with self.assertRaises(ValueError):
+            economic.at_read(forged,targets,[],moment)
+        altered=copy.deepcopy(report)
+        altered["contesto_macro_primario"]["scenari_condizionali"][0][
+            "direzione_crypto"]="RIALZISTA"
+        with self.assertRaisesRegex(ValueError,"Macro context at GPT read distorted"):
+            economic.at_read(altered,targets,[],moment)
+
+    def test_cp3_official_rss_no_phishing_future_or_false_relevance(self):
+        fed,eu=sources.MACRO_RELEASE_FEEDS
+        now=T+dt.timedelta(hours=1)
+        fedurl="https://www.federalreserve.gov/newsevents/pressreleases/monetary20261114a.htm"
+        feed=('<rss version="2.0"><channel><item>'
+              '<title>Federal Reserve issues FOMC statement</title>'
+              '<link>'+fedurl+'</link>'
+              '<pubDate>Sat, 14 Nov 2026 18:00:00 GMT</pubDate>'
+              '</item></channel></rss>')
+        self.assertEqual(len(sources._macro_official_rss(feed,fed,now)),1)
+        self.assertIsNone(sources._macro_official_rss("<!DOCTYPE rss><rss/>",fed,now))
+        self.assertEqual(sources._macro_official_rss(
+            feed.replace("www.federalreserve.gov","www.federalreserve.gov.evil.example"),
+            fed,now),[])
+        self.assertEqual(sources._macro_official_rss(
+            feed.replace("monetary20261114a","monetary20261113a"),fed,now),[])
+        self.assertEqual(sources._macro_official_rss(
+            feed.replace("14 Nov 2026","21 Nov 2026").replace(
+                "monetary20261114a","monetary20261121a"),fed,now),[])
+        url=("https://www.consilium.europa.eu/en/press/press-releases/"
+             "2026/11/15/council-imposes-sanctions-on-four-entities/")
+        euroot=('<rss xmlns:a10="http://www.w3.org/2005/Atom" version="2.0">'
+                '<channel><item><title>Council imposes sanctions on four entities</title>'
+                '<link>'+url+'</link>'
+                '<a10:updated>2026-11-15T08:00:00+00:00</a10:updated>'
+                '</item></channel></rss>')
+        self.assertEqual(len(sources._macro_official_rss(euroot,eu,now)),1)
+        self.assertEqual(sources._macro_official_rss(
+            euroot.replace("Council imposes sanctions on four entities",
+                           "Media briefing next week"),eu,now),[])
+        self.assertEqual(sources._macro_official_rss(
+            euroot.replace("/2026/11/15/","/2026/11/13/"),eu,now),[])
+
     def test_out_of_real_refresh_has_no_primary_api_and_no_false_rate_limit(self):
         import dossier_trade as dossier
         self.assertFalse(dossier._PRIMARY_REAL_REFRESH.get())
@@ -619,10 +725,10 @@ class PrimaryFollowupTests(unittest.TestCase):
                                    {"name":"Solana","totalCirculatingUSD":{"peggedUSD":15e9}}]).encode()
             return self.fetch(url)
         result={}
-        for i in range(6):
+        for i in range(8):
             current=T+dt.timedelta(hours=i)
             result=sources.collect(current,roster,result,
-                lambda url: payload(url,third=(i==5)),collect_kraken_status=True)
+                lambda url: payload(url,third=(i==7)),collect_kraken_status=True)
             checked=sources.at_read(result,roster,current)
             self.assertLessEqual(result["richieste_pubbliche"],8)
             if i==0:
@@ -644,13 +750,13 @@ class PrimaryFollowupTests(unittest.TestCase):
             if i==4:
                 self.assertEqual(checked["flussi_finanziari"][2]
                                  ["dati"]["top_chain"][0]["chain"],"Ethereum")
-            if i==5:
+            if i==7:
                 self.assertEqual(checked["comunicazioni_kraken"][0]
                                  ["cambiamenti"][0]["dopo"],"resolved")
         forged=copy.deepcopy(result)
         forged["comunicazioni_kraken"][0]["eventi"][0]["token"]="XRP"
         with self.assertRaises(ValueError):
-            sources.at_read(forged,roster,T+dt.timedelta(hours=5))
+            sources.at_read(forged,roster,T+dt.timedelta(hours=7))
         # After source-age expiry, never pass an old notice as a current incident.
         old=sources.at_read(result,roster,T+dt.timedelta(days=8))
         self.assertEqual(old["comunicazioni_kraken"][0]["stato_alla_lettura"],"SCADUTO")

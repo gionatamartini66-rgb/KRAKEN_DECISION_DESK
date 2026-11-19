@@ -7,6 +7,7 @@ No source here proves an unlock was sold, a proposal adopted, or a market move c
 from __future__ import annotations
 
 import csv
+import hashlib
 import calendar
 import datetime as dt
 import io
@@ -14,7 +15,9 @@ import json
 import math
 import re
 from html.parser import HTMLParser
-from urllib.parse import quote
+from email.utils import parsedate_to_datetime
+from urllib.parse import quote, urlparse
+import xml.etree.ElementTree as ET
 
 SCHEMA = "kdd-primary-economic-followup-v001"
 UTC = dt.timezone.utc
@@ -39,6 +42,16 @@ KRAKEN_STATUS_FEEDS = (
     ("INCIDENTI","https://status.kraken.com/api/v2/incidents.json","incidents"),
     ("MANUTENZIONI","https://status.kraken.com/api/v2/scheduled-maintenances.json","scheduled_maintenances"),
 )
+# KDD-21: first-party machine-readable releases, sharing the existing ONE
+# extra-source GET with Statuspage / Farside / DeFiLlama. No separate poller.
+MACRO_RELEASE_FEEDS=(
+    ("FED_MONETARY_RSS","https://www.federalreserve.gov/feeds/press_monetary.xml",
+     "POLITICA_MONETARIA_USA"),
+    ("EU_COUNCIL_RSS","https://www.consilium.europa.eu/en/rss/pressreleases.ashx",
+     "PROVVEDIMENTI_GEOPOLITICI_UE"),
+)
+MAX_MACRO_RELEASE_ITEMS=5
+
 MAX_SAMPLES = 96
 ECON_SCHEDULE_SCHEMA = "kdd-official-token-schedule-v001"
 SUI_CIRCULATION = "https://sui-circulation.suiexplorer.com/api/sui_circulation"
@@ -275,11 +288,14 @@ def _schedule_descriptor(descriptor):
     return {"format":"repository-json-v001","repository": repo, "path": path, "ref": ref}
 
 
-def _fetch(fetch, url, *, json_data=True):
+def _fetch(fetch, url, *, json_data=True, digest_out=None):
     try:
         raw = fetch(url)
         if not isinstance(raw, bytes) or len(raw) > 1_000_000:
             return None, "RISPOSTA_NON_CONFORME"
+        # Record ORIGINAL HTTP bytes before UTF-8-sig removes any BOM.
+        if isinstance(digest_out,dict):
+            digest_out["sha256"]=hashlib.sha256(raw).hexdigest()
         if json_data:
             result = json.loads(raw.decode("utf-8"))
             return result, None
@@ -394,6 +410,197 @@ def _stablecoin_llama(data,now):
     return {"periodo":now.date().isoformat(),"top_chain":rows[:8],
             "chain_osservate":len(rows),"tipo":"SUPPLY_STABLECOIN_PER_CHAIN_AGGREGATO",
             "limite":"DeFiLlama aggrega stablecoin per chain: acquisizione non è data di pubblicazione; ponti non provano nuova liquidità netta"}
+
+def _macro_official_rss(raw, spec, now):
+    """Only dated original Federal Reserve/Council articles, never price effects.
+
+    The list is a small sample of official publications. Published decisions
+    are not proof of implementation, crypto capital flows or market direction.
+    """
+    if not isinstance(raw,str) or len(raw)>250_000 or "<!DOCTYPE" in raw.upper():
+        return None
+    try:
+        root=ET.fromstring(raw)
+    except (ET.ParseError,ValueError):
+        return None
+    if root.tag!="rss" or root.get("version")!="2.0":
+        return None
+    items=root.findall("./channel/item")
+    if not 1<=len(items)<=100:
+        return None
+    feed,url,category=spec
+    seen=set()
+    events=[]
+    for item in items:
+        title=item.findtext("title")
+        link=item.findtext("link")
+        published_text=item.findtext("pubDate")
+        if not isinstance(title,str) or not title.strip() or len(title)>350:
+            continue
+        if not isinstance(link,str) or not link.startswith("https://"):
+            continue
+        parsed=urlparse(link)
+        if (parsed.username or parsed.password or parsed.query or parsed.fragment
+                or parsed.port is not None):
+            continue
+        title=title.strip()
+        low=title.lower()
+        if feed=="FED_MONETARY_RSS":
+            if (parsed.hostname!="www.federalreserve.gov"
+                    or not re.fullmatch(r"/newsevents/pressreleases/monetary[0-9]{8}[a-z]\.htm",
+                                        parsed.path)):
+                continue
+            # Explicit monetary decisions, minutes and projections, not future
+            # schedules, speeches or administrative announcements.
+            if not any(phrase in low for phrase in (
+                "fomc statement","economic projections","minutes of the federal open market committee",
+                "discount rate meetings")):
+                continue
+            try:published=parsedate_to_datetime(published_text)
+            except (ValueError,TypeError):continue
+            if published.tzinfo is None:continue
+            published=published.astimezone(UTC)
+            match=re.search(r"/monetary([0-9]{4})([0-9]{2})([0-9]{2})[a-z]\.htm",parsed.path)
+            if not match or published.date()!=dt.date(*map(int,match.groups())):
+                continue
+            kind="FED_COMUNICATO_MONETARIO"
+            source_updated=None
+            time_precision="ORARIO_RSS"
+        elif feed=="EU_COUNCIL_RSS":
+            if parsed.hostname!="www.consilium.europa.eu":
+                continue
+            match=re.fullmatch(
+                r"/en/press/press-releases/([0-9]{4})/([0-9]{2})/([0-9]{2})/[a-z0-9-]+/",
+                parsed.path)
+            if not match:
+                continue
+            if not (any(x in low for x in ("sanction","restrict","designation",
+                                          "embargo","export ban","trade measures"))
+                    or ("eu lists" in low and "ukraine" in low)):
+                continue
+            stamp=item.findtext("{http://www.w3.org/2005/Atom}updated")
+            source_updated=_time(stamp)
+            if source_updated is None or source_updated.date()!=dt.date(*map(int,match.groups())):
+                continue
+            # Council feed supplies Atom 'updated', not a 'pubDate'.
+            # The primary page URL establishes the publication DAY only.
+            published=dt.datetime(*map(int,match.groups()),tzinfo=UTC)
+            time_precision="GIORNO_DA_URL"
+            kind="UE_COMUNICATO_SANZIONI"
+        else:
+            return None
+        if (published>now+dt.timedelta(minutes=2)
+                or now-published>dt.timedelta(days=45) or link in seen):
+            continue
+        seen.add(link)
+        events.append({
+            "tipo":kind,"categoria":category,"titolo":title[:260],
+            "fonte":link,"pubblicato_utc":_iso(published),
+            "aggiornato_fonte_utc":_iso(source_updated) if source_updated else None,
+            "precisione_pubblicazione":time_precision,
+            "efficacia_confermata_utc":None,"efficacia_programmata_utc":None,
+            "stato_fatto":"PUBBLICAZIONE_UFFICIALE",
+            "impatto_mercato":"NON_ATTESTATO",
+            "limite":"Titolo primario datato: leggere il testo prima di dedurre portata, efficacia, flussi o prezzi"})
+    events.sort(key=lambda x:(x["pubblicato_utc"],x["fonte"]),reverse=True)
+    return events[:MAX_MACRO_RELEASE_ITEMS]
+
+
+def _macro_release_read(raw,now):
+    """Source and publication integrity at every packet/bridge reread."""
+    if not isinstance(raw,list) or len(raw)!=len(MACRO_RELEASE_FEEDS):
+        raise ValueError("Macro releases source list")
+    out=[]
+    for row,spec in zip(raw,MACRO_RELEASE_FEEDS):
+        key,url,category=spec
+        if (not isinstance(row,dict) or row.get("id")!=key or
+                row.get("fonte")!=url or row.get("categoria")!=category):
+            raise ValueError("Macro event source mismatch")
+        item=dict(row)
+        sha=row.get("sha256_feed_originale")
+        claimed=row.get("stato_acquisizione")
+        # Legacy feeds without either field remain readable, but are not
+        # upgraded to verified HTTP. Present fields must form a valid pair.
+        if ((sha is not None and
+             (not isinstance(sha,str) or re.fullmatch(r"[0-9a-f]{64}",sha) is None))
+            or claimed not in (None,"RISPOSTA_PUBBLICA_RICEVUTA_DAL_PRODUTTORE")
+            or (sha is None)!=(claimed is None)):
+            raise ValueError("Macro feed original digest/acquisition mismatch")
+        if sha is not None and (
+                row.get("stato") not in ("OSSERVATO","STORICO_NON_AGGIORNATO",
+                                          "NESSUN_EVENTO_PERTINENTE_NEL_CAMPIONE")
+                or not _time(row.get("acquisito_utc"))
+                or _time(row["acquisito_utc"])>now+dt.timedelta(minutes=2)):
+            raise ValueError("Macro feed original digest without acquisition")
+        item["integrita_feed_alla_lettura"]=(
+            "IMPRONTA_DICHIARATA_ORIGINALE_NON_RICALCOLABILE"
+            if sha is not None else "IMPRONTA_ORIGINALE_NON_DISPONIBILE")
+        if row.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO"):
+            acquired=_time(row.get("acquisito_utc"))
+            events=row.get("eventi")
+            if (not acquired or acquired>now+dt.timedelta(minutes=2)
+                    or not isinstance(events,list) or len(events)>MAX_MACRO_RELEASE_ITEMS):
+                raise ValueError("Macro primary observation malformed")
+            seen=set()
+            for e in events:
+                if not isinstance(e,dict) or not isinstance(e.get("fonte"),str):
+                    raise ValueError("Macro primary event malformed")
+                link=e["fonte"]
+                parsed=urlparse(link)
+                published=_time(e.get("pubblicato_utc"))
+                if (not published or published>acquired+dt.timedelta(minutes=2)
+                        or published>now+dt.timedelta(minutes=2)
+                        or e.get("categoria")!=category
+                        or e.get("tipo")!=("FED_COMUNICATO_MONETARIO"
+                            if key=="FED_MONETARY_RSS" else "UE_COMUNICATO_SANZIONI")
+                        or e.get("stato_fatto")!="PUBBLICAZIONE_UFFICIALE"
+                        or e.get("impatto_mercato")!="NON_ATTESTATO"
+                        or e.get("efficacia_confermata_utc") is not None
+                        or e.get("efficacia_programmata_utc") is not None
+                        or not isinstance(e.get("titolo"),str) or not e["titolo"].strip()
+                        or len(e["titolo"])>260 or link in seen):
+                    raise ValueError("Macro primary event timestamp or claim forged")
+                seen.add(link)
+                if key=="FED_MONETARY_RSS":
+                    m=re.fullmatch(
+                        r"/newsevents/pressreleases/monetary([0-9]{4})([0-9]{2})([0-9]{2})[a-z]\.htm",
+                        parsed.path)
+                    if (parsed.hostname!="www.federalreserve.gov" or not m
+                            or published.date()!=dt.date(*map(int,m.groups()))
+                            or e.get("precisione_pubblicazione")!="ORARIO_RSS"
+                            or e.get("aggiornato_fonte_utc") is not None
+                            or not any(term in e["titolo"].lower() for term in (
+                                "fomc statement","economic projections",
+                                "minutes of the federal open market committee",
+                                "discount rate meetings"))):
+                        raise ValueError("Fed press attribution")
+                else:
+                    m=re.fullmatch(
+                        r"/en/press/press-releases/([0-9]{4})/([0-9]{2})/([0-9]{2})/[a-z0-9-]+/",
+                        parsed.path)
+                    updated=_time(e.get("aggiornato_fonte_utc"))
+                    if (parsed.hostname!="www.consilium.europa.eu" or not m
+                            or published.date()!=dt.date(*map(int,m.groups()))
+                            or published.time()!=dt.time(0,0) or not updated
+                            or updated.date()!=published.date()
+                            or updated>acquired+dt.timedelta(minutes=2)
+                            or e.get("precisione_pubblicazione")!="GIORNO_DA_URL"
+                            or not (any(term in e["titolo"].lower() for term in (
+                                "sanction","restrict","designation","embargo","export ban",
+                                "trade measures"))
+                              or ("eu lists" in e["titolo"].lower()
+                                  and "ukraine" in e["titolo"].lower()))):
+                        raise ValueError("EU Council press attribution")
+                if (parsed.scheme!="https" or parsed.username or parsed.password
+                        or parsed.query or parsed.fragment or parsed.port is not None):
+                    raise ValueError("Macro primary URL invalid")
+            item["stato_alla_lettura"]=(
+                "SCADUTO" if now-acquired>dt.timedelta(days=14) else
+                "STORICO_NON_AGGIORNATO" if row["stato"]=="STORICO_NON_AGGIORNATO"
+                or now-acquired>dt.timedelta(days=2) else "OSSERVATO")
+        out.append(item)
+    return out
+
 
 def _financial_read(raw,now):
     if not isinstance(raw,list) or len(raw)!=len(FINANCIAL_FEEDS):
@@ -1182,8 +1389,8 @@ def _supply_samples(roster, old, now):
                       if isinstance(r.get("fondamentali"), dict)
                       and r["fondamentali"].get("stato") == "VERIFICATO"
                       and r["fondamentali"].get("origine") == "ACQUISIZIONE_PUBBLICA"
-                      and r["fondamentali"].get("fonte") ==
-                      "https://api.coingecko.com/api/v3/coins/" + project), None)
+                      and __import__("kdd_economics").fundamental_source_valid(
+                          r["fondamentali"].get("fonte"),project)), None)
         if not fresh or not _time(fresh.get("rilevato_utc")):
             continue
         t = fresh["rilevato_utc"]
@@ -1482,17 +1689,18 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
              "fonte":None,"eventi":[],"limite":"Supply e FDV non sono un calendario unlock"}
         if descriptor and project in sch_selected:
             used+=1
+            schedule_digest={}
             if descriptor.get("format")==MONTHLY_FORMAT:
                 url=descriptor["url"]
                 raw,error=_fetch(fetch,url)
                 result=_official_monthly(raw,project,descriptor,now) if not error else None
             elif descriptor.get("format")==STRK_UNLOCK_FORMAT:
                 url=STRK_URL
-                raw,error=_fetch(fetch,url,json_data=False)
+                raw,error=_fetch(fetch,url,json_data=False,digest_out=schedule_digest)
                 result=_strk_primary_schedule(raw,project,descriptor,now) if not error else None
             elif descriptor.get("format")==ARB_VESTING_FORMAT:
                 url=ARB_VESTING_URL
-                raw,error=_fetch(fetch,url,json_data=False)
+                raw,error=_fetch(fetch,url,json_data=False,digest_out=schedule_digest)
                 result=_arb_vesting_document(raw,project,descriptor,now) if not error else None
             else:
                 url=("https://raw.githubusercontent.com/"+descriptor["repository"]+"/"+
@@ -1501,6 +1709,11 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
                 result=_official_schedule(raw,project,url,now) if not error else None
             if result:
                 row.update(result)
+                # This digest is of the document text returned through the
+                # source producer, not a signature from the project.
+                if isinstance(raw,str):
+                    row["sha256_documento"]=schedule_digest.get("sha256")
+                    row["stato_acquisizione"]="RISPOSTA_PUBBLICA_RICEVUTA_DAL_PRODUTTORE"
             else:
                 # A failed recheck does not erase the last attributable plan.
                 # Retain it as historical, never as a newly confirmed unlock.
@@ -1573,7 +1786,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
                 "limite":"Documento aggiornato; non prova rilascio, circolazione o vendita"})
     # Two first-party Statuspage endpoints, one public GET per real refresh.
     # Do not invent a listing event from AssetPairs alone.
-    cycle=KRAKEN_STATUS_FEEDS+FINANCIAL_FEEDS
+    cycle=KRAKEN_STATUS_FEEDS+FINANCIAL_FEEDS+MACRO_RELEASE_FEEDS
     status_cursor=old.get("prossima_fonte_esterna",old.get("prossimo_kraken_status"))
     kix=next((i for i,f in enumerate(cycle)
               if f[0]==status_cursor),0)
@@ -1691,6 +1904,50 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
         elif not network_allowed:
             point["stato"]=paused
         financial.append(point)
+    # KDD-21: rotate first-party Fed and Council RSS with the EXISTING single
+    # external-source GET, not a second scheduler or higher request ceiling.
+    old_macro_releases={x.get("id"):x for x in old.get("eventi_macro_ufficiali",[])
+                        if isinstance(x,dict)}
+    macro_releases=[]
+    for feed in MACRO_RELEASE_FEEDS:
+        fid,url,category=feed
+        previous=old_macro_releases.get(fid)
+        result={"id":fid,"fonte":url,"categoria":category,
+                "stato":"RINVIATO_BUDGET","eventi":[],"acquisito_utc":None,
+                "limite":"Titolo del comunicato non dimostra attuazione o effetto sul mercato"}
+        if selected_status and selected_status[0]==fid:
+            used+=1
+            macro_digest={}
+            raw,error=_fetch(fetch,url,json_data=False,digest_out=macro_digest)
+            events=_macro_official_rss(raw,feed,now) if not error else None
+            if events is not None:
+                result.update(stato="OSSERVATO" if events else "NESSUN_EVENTO_PERTINENTE_NEL_CAMPIONE",
+                              eventi=events,acquisito_utc=_iso(now),
+                              stato_acquisizione="RISPOSTA_PUBBLICA_RICEVUTA_DAL_PRODUTTORE",
+                              sha256_feed_originale=macro_digest.get("sha256"),
+                              limite="Campione bounded di fonti ufficiali: nessun impatto automatico sul mercato crypto")
+            else:
+                earlier=_time(previous.get("acquisito_utc")) if isinstance(previous,dict) else None
+                if (earlier and previous.get("fonte")==url
+                        and previous.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO",
+                                                     "NESSUN_EVENTO_PERTINENTE_NEL_CAMPIONE")
+                        and dt.timedelta(0)<=now-earlier<=dt.timedelta(days=14)):
+                    result.update(previous,stato="STORICO_NON_AGGIORNATO",
+                                  ultimo_tentativo={"stato":"FONTE_NON_DISPONIBILE",
+                                                   "acquisito_utc":_iso(now),
+                                                   "motivo":error or "XML_NON_VERIFICATO"})
+                else:
+                    result.update(stato="FONTE_NON_DISPONIBILE",
+                                  motivo=error or "XML_NON_VERIFICATO")
+        elif isinstance(previous,dict) and previous.get("fonte")==url:
+            acquired=_time(previous.get("acquisito_utc"))
+            if (acquired and dt.timedelta(0)<=now-acquired<=dt.timedelta(days=14)
+                    and previous.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO",
+                                                  "NESSUN_EVENTO_PERTINENTE_NEL_CAMPIONE")):
+                result.update(previous,stato="STORICO_NON_AGGIORNATO")
+        elif not network_allowed:
+            result["stato"]=paused
+        macro_releases.append(result)
     history,changes=_supply_samples(roster,old,now)
     retained_events=sorted(event_history.values(),key=lambda r:(r["acquisito_utc"],r["progetto_id"],r["documento_id"]),reverse=True)[:MAX_SAMPLES]
     kraken_status=_spot_status(now,items,asset_pairs,old)
@@ -1704,6 +1961,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
             "prossimo_kraken_status":cycle[(kix+(1 if selected_status else 0))%len(cycle)][0],
             "prossima_fonte_esterna":cycle[(kix+(1 if selected_status else 0))%len(cycle)][0],
             "flussi_finanziari":financial,
+            "eventi_macro_ufficiali":macro_releases,
             "revisioni_piani":changes_calendar,
             "storico_supply":history,"variazioni_supply":changes,
             "storico_eventi":retained_events,
@@ -1902,7 +2160,8 @@ def decision_review(evidence, row, group):
                 entry.get("limite"),
                 {"status":entry.get("status_kraken"),"cambiamento":entry.get("cambiamento")})
     security=by_project("avvisi_repository")
-    if security.get("stato_alla_lettura")=="OSSERVATO":
+    if security.get("stato_alla_lettura") in ("OSSERVATO","STORICO"):
+        is_historic=security["stato_alla_lettura"]!="OSSERVATO"
         for event in security.get("avvisi",[])[:5]:
             if not isinstance(event,dict): continue
             add("AVVISO_SICUREZZA_REPOSITORY",
@@ -1910,8 +2169,10 @@ def decision_review(evidence, row, group):
                     " ritirato" if event.get("stato")=="RITIRATO" else "")+
                     ": impatto sul token non attestato",
                 event.get("fonte"),event.get("pubblicato_utc"),
-                security.get("acquisito_utc"),"DOCUMENTO_REPOSITORY",
-                event.get("limite"),{"titolo":event.get("titolo"),"stato":event.get("stato")})
+                security.get("acquisito_utc"),
+                "DOCUMENTO_REPOSITORY_STORICO_NON_RICONFERMATO" if is_historic
+                else "DOCUMENTO_REPOSITORY",
+                event.get("limite"),{"titolo":event.get("titolo"),"stato":event.get("stato"),"ritirato_utc":event.get("ritirato_utc")})
     emission=by_project("politiche_emissioni")
     if emission.get("stato_alla_lettura")=="OSSERVATO":
         if isinstance(emission.get("confronto"),dict):
@@ -1927,23 +2188,29 @@ def decision_review(evidence, row, group):
             "PARAMETRI_RPC",emission.get("limite"),
             {"valori":emission.get("valori")})
     governance=by_project("progetti")
-    if governance.get("stato")=="OSSERVATO":
+    if governance.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO"):
+        is_historic=governance["stato"]!="OSSERVATO"
         for event in governance.get("eventi",[])[:3]:
             if not isinstance(event,dict): continue
             add("PROPOSTA_GOVERNANCE_DOCUMENTALE",
                 "Esiste una proposta di documentazione; attivazione sulla rete non attestata",
                 event.get("fonte"),event.get("pubblicato_utc"),
-                governance.get("acquisito_utc"),"PROPOSTA_DOCUMENTALE",
+                governance.get("acquisito_utc"),
+                "PROPOSTA_DOCUMENTALE_STORICA_NON_RICONFERMATA" if is_historic
+                else "PROPOSTA_DOCUMENTALE",
                 event.get("limite"),{"titolo":event.get("titolo"),
-                                      "stato_documento":event.get("stato_documento")})
+                                      "stato_documento":event.get("stato_documento"),"merge_documento_utc":event.get("evento_utc")})
     issues=by_project("segnalazioni_repo")
-    if issues.get("stato_alla_lettura")=="OSSERVATO":
+    if issues.get("stato_alla_lettura") in ("OSSERVATO","STORICO"):
+        is_historic=issues["stato_alla_lettura"]!="OSSERVATO"
         for event in issues.get("eventi",[])[:4]:
             if not isinstance(event,dict): continue
             add("ISSUE_TECNICA_ETICHETTATA",
                 "È pubblicata una issue etichettata: l'esito tecnico non è accertato",
                 event.get("fonte"),event.get("pubblicato_utc"),
-                issues.get("acquisito_utc"),"SEGNALAZIONE_NON_CONFERMA",
+                issues.get("acquisito_utc"),
+                "SEGNALAZIONE_STORICA_NON_RICONFERMATA" if is_historic
+                else "SEGNALAZIONE_NON_CONFERMA",
                 event.get("limite"),{"titolo":event.get("titolo"),
                                       "categorie":event.get("categorie")})
     observed_contract=({"bitcoin":"CFTC_BTC_TFF","ethereum":"CFTC_ETH_TFF"}
@@ -2063,11 +2330,11 @@ def decision_review(evidence, row, group):
         "UNLOCK_SOLO_PROGRAMMATO":len(schedule.get("eventi",[]))
             if schedule.get("stato")=="DOCUMENTO_PRIMARIO_CON_SCHEDULE" else 0,
         "AVVISO_SICUREZZA_REPOSITORY":len(security.get("avvisi",[]))
-            if security.get("stato_alla_lettura")=="OSSERVATO" else 0,
+            if security.get("stato_alla_lettura") in ("OSSERVATO","STORICO") else 0,
         "PROPOSTA_GOVERNANCE_DOCUMENTALE":len(governance.get("eventi",[]))
-            if governance.get("stato")=="OSSERVATO" else 0,
+            if governance.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO") else 0,
         "ISSUE_TECNICA_ETICHETTATA":len(issues.get("eventi",[]))
-            if issues.get("stato_alla_lettura")=="OSSERVATO" else 0}
+            if issues.get("stato_alla_lettura") in ("OSSERVATO","STORICO") else 0}
     # Count both facts beyond the twenty-row output bound and source events
     # beyond per-family presentation limits. No hidden observed fact is zero.
     hidden={}
@@ -2256,6 +2523,10 @@ def at_read(raw, items, now):
         if row.get("stato") in ("DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI","MASSIMI_DATATI_STORICI"):
             if not _strk_schedule_valid(row,expected):
                 raise ValueError("Starknet official upper-bound vesting forged")
+            if row.get("sha256_documento") is not None and (
+                    not isinstance(row.get("sha256_documento"),str) or
+                    not re.fullmatch(r"[a-f0-9]{64}",row["sha256_documento"])):
+                raise ValueError("Starknet documented HTTP digest malformed")
             t=_time(row.get("acquisito_utc"))
             new["stato"]=("DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI"
                           if row["stato"]=="DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI"
@@ -2351,6 +2622,8 @@ def at_read(raw, items, now):
         indicators.append(new)
     financial_read=(_financial_read(raw["flussi_finanziari"],now)
                     if "flussi_finanziari" in raw else None)
+    official_macro_read=(_macro_release_read(raw["eventi_macro_ufficiali"],now)
+                         if "eventi_macro_ufficiali" in raw else None)
     market_read=(_kraken_market_read(raw["comunicazioni_kraken"],items,now)
                  if "comunicazioni_kraken" in raw else None)
     pairs_read=(_spot_status_read(raw["stati_coppie_kraken"],items,now)
@@ -2365,9 +2638,15 @@ def at_read(raw, items, now):
             indicatori_macro=indicators,calendari=read_schedules,
             comunicazioni_kraken=market_read,
             flussi_finanziari=financial_read,
+            eventi_macro_ufficiali=official_macro_read,
             variazioni_supply=raw.get("variazioni_supply",[])[:30],
             copertura={"progetti":len(projects),"governance_osservati":sum(p["stato"]=="OSSERVATO" for p in read_projects),
                         "indicatori_macro_osservati":sum(m["stato"]=="OSSERVATO" for m in indicators),
+                        "feed_macro_ufficiali_osservati":sum(
+                            m.get("stato_alla_lettura")=="OSSERVATO" for m in (official_macro_read or [])),
+                        "eventi_macro_ufficiali_datati":sum(
+                            len(m.get("eventi") or []) for m in (official_macro_read or [])
+                            if m.get("stato_alla_lettura") in ("OSSERVATO","STORICO_NON_AGGIORNATO")),
                         "calendari_primari_attuali":sum(s["stato"]=="DOCUMENTO_PRIMARIO_CON_SCHEDULE" for s in read_schedules),
             "regole_vesting_primarie_attuali":sum(s["stato"]=="DOCUMENTO_PRIMARIO_REGOLA_VESTING" for s in read_schedules),
             "calendari_con_massimi_datati_primari":sum(s["stato"]=="DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI" for s in read_schedules),

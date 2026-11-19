@@ -1,0 +1,1819 @@
+{
+  "book_150_alla_lettura": {
+    "book_recenti": 0,
+    "book_scaduti": 0,
+    "stato": "NON_ATTESTATO"
+  },
+  "candidati_scanner_alla_lettura": [
+    {
+      "categoria": "fixture",
+      "copertura_scanner": {
+        "ammissibili_non_campionati": null,
+        "analizzati": null,
+        "campionati": null,
+        "copertura_progressiva_pct": null,
+        "mercati_osservati_ticker": null,
+        "universo_ammissibile": null,
+        "universo_esaminato_almeno_una_volta": null,
+        "universo_mai_esaminato": null
+      },
+      "coppia_analisi": "SOL/USD",
+      "evidenze_complementari": {
+        "costi_roundtrip": {
+          "limite": "Fee ipotetiche e book campionato, nessuna esecuzione",
+          "righe": [],
+          "stato": "SCADUTO_O_NON_VERIFICATO"
+        },
+        "flusso_spot": {
+          "delta_15m_mobile": null,
+          "delta_4h": null,
+          "limite": "Trades pubblici della singola coppia, non CVD storico",
+          "stato": "SCADUTO_O_INCOMPLETO"
+        },
+        "fondamentali": {
+          "capitalizzazione_usd": null,
+          "id_coingecko": null,
+          "offerta_circolante": null,
+          "stato": "SCADUTO_O_NON_VERIFICATO"
+        }
+      },
+      "invalidazione": null,
+      "mercato": {
+        "fonte": "Kraken Spot Ticker/Depth campionato",
+        "profondita_ask10_eur": null,
+        "profondita_bid10_eur": null,
+        "spread_book_pct": null,
+        "stato": "RECENTE",
+        "volume_coppia_eur_stimato": null
+      },
+      "motivazione": "",
+      "nessun_ordine": true,
+      "origine_scanner": {
+        "ciclo": null,
+        "fonte": null,
+        "invalidazione": null,
+        "limite": null,
+        "osservato_utc": null,
+        "pair_key": null,
+        "qualita_dati": null,
+        "regime_osservato": null,
+        "segnali_contrari": null
+      },
+      "quattro_tf": {
+        "confronto_figure": null,
+        "limite": "Stato ricalcolato alla lettura; nessun segnale operativo",
+        "stato": "PARZIALE",
+        "timeframe": {
+          "15m": {
+            "chiusura_utc": null,
+            "ema20": null,
+            "ema50": null,
+            "figure": [],
+            "fonte": null,
+            "livelli_strutturali": null,
+            "motivo": null,
+            "orientamento": null,
+            "pivot_giornaliero": null,
+            "stato": "NON_DISPONIBILE"
+          },
+          "1D": {
+            "chiusura_utc": null,
+            "ema20": null,
+            "ema50": null,
+            "figure": [],
+            "fonte": null,
+            "livelli_strutturali": null,
+            "motivo": null,
+            "orientamento": null,
+            "pivot_giornaliero": null,
+            "stato": "NON_DISPONIBILE"
+          },
+          "1H": {
+            "chiusura_utc": null,
+            "ema20": null,
+            "ema50": null,
+            "figure": [],
+            "fonte": null,
+            "livelli_strutturali": null,
+            "motivo": null,
+            "orientamento": null,
+            "pivot_giornaliero": null,
+            "stato": "NON_DISPONIBILE"
+          },
+          "4H": {
+            "chiusura_utc": null,
+            "ema20": null,
+            "ema50": null,
+            "figure": [],
+            "fonte": null,
+            "livelli_strutturali": null,
+            "motivo": null,
+            "orientamento": null,
+            "pivot_giornaliero": null,
+            "stato": "NON_DISPONIBILE"
+          }
+        }
+      },
+      "segnali_contrari": null,
+      "token": "SOL"
+    }
+  ],
+  "circolazione_capitale_vs_spot": [],
+  "copertura": [
+    {
+      "confronto_figure_4tf_alla_lettura": {
+        "chiusure_utc": {
+          "15m": null,
+          "1D": null,
+          "1H": null,
+          "4H": null
+        },
+        "contraddizione_alto_basso": null,
+        "copertura_per_timeframe": {
+          "15m": "NON_DISPONIBILE",
+          "1D": "NON_DISPONIBILE",
+          "1H": "NON_DISPONIBILE",
+          "4H": "NON_DISPONIBILE"
+        },
+        "limite": "Dati scaduti o insufficienti; nessun confronto attuale",
+        "schema": "kdd11-candle-v002",
+        "stato_confronto": "NON_VALUTABILE",
+        "trend_per_timeframe": {
+          "15m": "NON_VALUTABILE",
+          "1D": "NON_VALUTABILE",
+          "1H": "NON_VALUTABILE",
+          "4H": "NON_VALUTABILE"
+        },
+        "trend_storici_per_timeframe": {
+          "15m": "NON_DISPONIBILE",
+          "1D": "NON_DISPONIBILE",
+          "1H": "NON_DISPONIBILE",
+          "4H": "NON_DISPONIBILE"
+        }
+      },
+      "figure_candlestick_alla_lettura": {},
+      "indice": 0,
+      "mercato_spot_kraken_alla_lettura": {
+        "book": "NON_ACQUISITO_PER_QUESTA_COPPIA",
+        "conversione_fonte": null,
+        "coppia": "BTC/EUR",
+        "eur_per_quote": null,
+        "fonte": "Kraken Spot public Ticker",
+        "limite": "Volume EUR stimato e spread indicativo: NON trasferimenti blockchain",
+        "prezzo_quote": null,
+        "rilevazione_utc": "2026-11-17T20:24:45+00:00",
+        "spread_pct": null,
+        "stato": "DISPONIBILE",
+        "trades": "NON_ACQUISITI_PER_QUESTA_COPPIA",
+        "valuta_quotazione": "EUR",
+        "volume_24h_eur_stimato": null
+      },
+      "prezzo_eur_attestato_localmente": true,
+      "quattro_tf_aggiornati": false,
+      "stato_identita": "VALIDA",
+      "timeframe_ricalcolati": {
+        "15m": "NON_DISPONIBILE",
+        "1D": "NON_DISPONIBILE",
+        "1H": "NON_DISPONIBILE",
+        "4H": "NON_DISPONIBILE"
+      },
+      "token": "BTC"
+    },
+    {
+      "confronto_figure_4tf_alla_lettura": {
+        "chiusure_utc": {
+          "15m": null,
+          "1D": null,
+          "1H": null,
+          "4H": null
+        },
+        "contraddizione_alto_basso": null,
+        "copertura_per_timeframe": {
+          "15m": "NON_DISPONIBILE",
+          "1D": "NON_DISPONIBILE",
+          "1H": "NON_DISPONIBILE",
+          "4H": "NON_DISPONIBILE"
+        },
+        "limite": "Dati scaduti o insufficienti; nessun confronto attuale",
+        "schema": "kdd11-candle-v002",
+        "stato_confronto": "NON_VALUTABILE",
+        "trend_per_timeframe": {
+          "15m": "NON_VALUTABILE",
+          "1D": "NON_VALUTABILE",
+          "1H": "NON_VALUTABILE",
+          "4H": "NON_VALUTABILE"
+        },
+        "trend_storici_per_timeframe": {
+          "15m": "NON_DISPONIBILE",
+          "1D": "NON_DISPONIBILE",
+          "1H": "NON_DISPONIBILE",
+          "4H": "NON_DISPONIBILE"
+        }
+      },
+      "figure_candlestick_alla_lettura": {},
+      "indice": 1,
+      "mercato_spot_kraken_alla_lettura": {
+        "book": "NON_ACQUISITO_PER_QUESTA_COPPIA",
+        "conversione_fonte": null,
+        "coppia": "ETH/EUR",
+        "eur_per_quote": null,
+        "fonte": "Kraken Spot public Ticker",
+        "limite": "Volume EUR stimato e spread indicativo: NON trasferimenti blockchain",
+        "prezzo_quote": null,
+        "rilevazione_utc": "2026-11-17T20:24:45+00:00",
+        "spread_pct": null,
+        "stato": "DISPONIBILE",
+        "trades": "NON_ACQUISITI_PER_QUESTA_COPPIA",
+        "valuta_quotazione": "EUR",
+        "volume_24h_eur_stimato": null
+      },
+      "prezzo_eur_attestato_localmente": true,
+      "quattro_tf_aggiornati": false,
+      "stato_identita": "VALIDA",
+      "timeframe_ricalcolati": {
+        "15m": "NON_DISPONIBILE",
+        "1D": "NON_DISPONIBILE",
+        "1H": "NON_DISPONIBILE",
+        "4H": "NON_DISPONIBILE"
+      },
+      "token": "ETH"
+    },
+    {
+      "confronto_figure_4tf_alla_lettura": {
+        "chiusure_utc": {
+          "15m": null,
+          "1D": null,
+          "1H": null,
+          "4H": null
+        },
+        "contraddizione_alto_basso": null,
+        "copertura_per_timeframe": {
+          "15m": "NON_DISPONIBILE",
+          "1D": "NON_DISPONIBILE",
+          "1H": "NON_DISPONIBILE",
+          "4H": "NON_DISPONIBILE"
+        },
+        "limite": "Dati scaduti o insufficienti; nessun confronto attuale",
+        "schema": "kdd11-candle-v002",
+        "stato_confronto": "NON_VALUTABILE",
+        "trend_per_timeframe": {
+          "15m": "NON_VALUTABILE",
+          "1D": "NON_VALUTABILE",
+          "1H": "NON_VALUTABILE",
+          "4H": "NON_VALUTABILE"
+        },
+        "trend_storici_per_timeframe": {
+          "15m": "NON_DISPONIBILE",
+          "1D": "NON_DISPONIBILE",
+          "1H": "NON_DISPONIBILE",
+          "4H": "NON_DISPONIBILE"
+        }
+      },
+      "figure_candlestick_alla_lettura": {},
+      "indice": 2,
+      "mercato_spot_kraken_alla_lettura": {
+        "book": "NON_ACQUISITO_PER_QUESTA_COPPIA",
+        "conversione_fonte": null,
+        "coppia": "STRK/EUR",
+        "eur_per_quote": null,
+        "fonte": "Kraken Spot public Ticker",
+        "limite": "Volume EUR stimato e spread indicativo: NON trasferimenti blockchain",
+        "prezzo_quote": null,
+        "rilevazione_utc": "2026-11-17T20:24:45+00:00",
+        "spread_pct": null,
+        "stato": "DISPONIBILE",
+        "trades": "NON_ACQUISITI_PER_QUESTA_COPPIA",
+        "valuta_quotazione": "EUR",
+        "volume_24h_eur_stimato": null
+      },
+      "prezzo_eur_attestato_localmente": true,
+      "quattro_tf_aggiornati": false,
+      "stato_identita": "VALIDA",
+      "timeframe_ricalcolati": {
+        "15m": "NON_DISPONIBILE",
+        "1D": "NON_DISPONIBILE",
+        "1H": "NON_DISPONIBILE",
+        "4H": "NON_DISPONIBILE"
+      },
+      "token": "STRK"
+    }
+  ],
+  "evidenze_economiche_alla_lettura": {
+    "acquisito_utc": "2026-11-17T20:24:45+00:00",
+    "candidati": [
+      {
+        "coppia_analisi": "SOL/USD",
+        "evento": {
+          "acquisito_utc": "2026-11-17T20:24:45+00:00",
+          "adozione_rete": "NON_VERIFICATA",
+          "condizione_riesame": "Verificare adozione reale del software, contenuto release e fatti di rete",
+          "emittente": "anza-xyz/agave",
+          "evento_utc": "2026-11-05T18:33:50+00:00",
+          "fonte": "https://github.com/anza-xyz/agave/releases/tag/v4.4.1",
+          "impatto_economico": "NON_DIMOSTRATO",
+          "limite": "Release non prova impatto sul prezzo né migrazione token",
+          "pre_release": false,
+          "pubblicato_utc": "2026-11-05T18:33:50+00:00",
+          "sintesi": "Release v4.4.1",
+          "stato": "VERIFICATO",
+          "tag": "v4.4.1",
+          "tipo": "RELEASE_SOFTWARE"
+        },
+        "fondamentali": {
+          "acquisito_utc": "2026-11-17T20:24:45+00:00",
+          "anomalie_supply": [],
+          "capitalizzazione_usd": null,
+          "diluizione": "NON_CALCOLABILE",
+          "emissione_residua_massima_su_circolante_pct": null,
+          "fdv_usd": null,
+          "fonte": null,
+          "fonte_calendario_unlock": null,
+          "fonte_supply": "COINGECKO_AGGREGATORE_NON_SCHEDULE_PRIMARIO",
+          "limite": "Nessun calendario vesting deducibile dalla supply",
+          "offerta_circolante": null,
+          "offerta_massima": null,
+          "offerta_totale": null,
+          "prossimo_unlock_utc": null,
+          "quota_circolante_su_totale_pct": null,
+          "rapporto_fdv_cap": null,
+          "rilevato_utc": null,
+          "stato": "NON_VERIFICATO",
+          "unlock": "NON_VERIFICATO",
+          "vesting": "NON_VERIFICATO"
+        },
+        "giudizio_economico_integrato": {
+          "categorie_temporali_presenti": [
+            "NON_DISPONIBILE",
+            "RECENTE"
+          ],
+          "causalita_sul_prezzo": "NON_ATTESTATA",
+          "componenti": {
+            "eventi": {
+              "attendibilita": "PROVE_DOCUMENTALI_DA_DISTINGUERE_DA_ESECUZIONE",
+              "documenti_non_mostrati": 0,
+              "documenti_recenti": 1,
+              "documenti_storici": 0,
+              "eventi_programmati_non_eseguiti": 0,
+              "riferimenti": [
+                {
+                  "acquisito_utc": "2026-11-17T20:24:45+00:00",
+                  "efficacia_programmata_utc": null,
+                  "fonte": "https://github.com/anza-xyz/agave/releases/tag/v4.4.1",
+                  "pubblicato_utc": "2026-11-05T18:33:50+00:00",
+                  "stato_prova": "VERIFICATO",
+                  "tipo": "RELEASE_SOFTWARE"
+                }
+              ],
+              "riferimento_dettaglio": "quadro_eventi",
+              "stato_copertura": "EVENTI_O_DOCUMENTI_RILEVANTI_NEL_CAMPIONE",
+              "stato_informazione": "RECENTE"
+            },
+            "fondamentali": {
+              "acquisito_utc": "2026-11-17T20:24:45+00:00",
+              "attendibilita": "NON_ATTUALE_O_NON_VERIFICATA",
+              "fonte": null,
+              "riferimento_dettaglio": "quadro_tokenomics",
+              "rilevato_utc": null,
+              "stato_fonte": "NON_VERIFICATO",
+              "stato_informazione": "NON_DISPONIBILE"
+            },
+            "macroeconomia": {
+              "acquisito_utc": null,
+              "ambito": "MERCATO_GENERALE_NON_SPECIFICO_ASSET",
+              "attendibilita": "FONTI_PRIMARIE_E_AGGREGATORI_DISTINTI_NON_CAUSALITA",
+              "data_esempio": null,
+              "fatti_non_mostrati": 0,
+              "fatti_recenti": 0,
+              "fatti_storici": 0,
+              "fonte_esempio": null,
+              "riferimento_dettaglio": "contesto_macro_primario",
+              "stato_informazione": "NON_DISPONIBILE",
+              "stato_prova_esempio": null
+            },
+            "regime": {
+              "acquisito_utc": null,
+              "ambito": "MERCATO_GENERALE_NON_SPECIFICO_ASSET",
+              "attendibilita": "CLASSIFICAZIONE_DERIVATA_NON_PREVISIONE",
+              "fonti": [
+                {
+                  "famiglia": "BTC_PREZZO_4H_1D",
+                  "fonte": "Kraken Spot pubblico /0/public/OHLC",
+                  "osservazione": null,
+                  "rilevazione_utc": null,
+                  "stato": "NON_ATTUALE"
+                },
+                {
+                  "famiglia": "AGGREGATO_CRYPTO_PREZZO_E_ATTIVITA",
+                  "fonte": null,
+                  "limite": "Capitalizzazione e volume sono la medesima famiglia aggregata, non due conferme indipendenti",
+                  "osservato_utc": null,
+                  "stato": "INCOMPLETO_O_SCADUTO",
+                  "turnover_24h_pct": null,
+                  "var_cap_24h_pct": null
+                }
+              ],
+              "qualita": "INSUFFICIENTE",
+              "riferimento_dettaglio": "regime_motivato",
+              "stato": "INDETERMINATO",
+              "stato_informazione": "NON_DISPONIBILE"
+            }
+          },
+          "contraddizioni_da_esaminare": [],
+          "coppia": "SOL/USD",
+          "informazioni_mancanti_o_scadute": [
+            "fondamentali",
+            "macroeconomia",
+            "regime"
+          ],
+          "ipotesi_e_alternative": [
+            {
+              "ambito": "FONDAMENTALI",
+              "controipotesi": "Assenza o scadenza della fonte non dimostra tokenomics favorevole o sfavorevole",
+              "ipotesi": "Non è possibile quantificare l'esposizione alla diluizione con i dati presenti",
+              "riesame": "Controllare identita Kraken/progetto, nuovi dati di supply e documentazione primaria datata; verificare separatamente emissione, unlock effettivo, immissione e vendite"
+            },
+            {
+              "ambito": "EVENTI",
+              "controipotesi": "La pubblicazione non dimostra adozione, unlock eseguito o effetto sul prezzo",
+              "ipotesi": "Il documento potrebbe avere conseguenze solo se pertinente e attuato",
+              "riesame": "Riconfermare fonte, data ed efficacia di ogni evento"
+            },
+            {
+              "ambito": "MACROECONOMIA",
+              "controipotesi": "L'informazione potrebbe essere gia prezzata o compensata da altri fattori",
+              "ipotesi": "Tassi, inflazione e aspettative possono influire sul costo del denaro e sulla propensione al rischio",
+              "riesame": "Verificare decisione/testo, consenso precedente, liquidita e risposta osservata"
+            },
+            {
+              "ambito": "MACROECONOMIA",
+              "controipotesi": "Il provvedimento potrebbe non riguardare asset crypto o non incidere sui volumi",
+              "ipotesi": "Restrizioni e sanzioni potrebbero influenzare accesso a servizi e controparti",
+              "riesame": "Verificare destinatari, entrata in vigore, giurisdizione e operativita effettiva"
+            },
+            {
+              "ambito": "REGIME",
+              "controipotesi": "Il regime generale non misura domanda, valore o ritorno di questo asset",
+              "ipotesi": "Il contesto generale potrebbe condizionare la lettura di rischio",
+              "riesame": "Ricalcolare alla chiusura BTC 4H/1D o al cambio della capitalizzazione e della partecipazione; rivedere in caso di segnali contrari ETF/CVD o di dati scaduti"
+            }
+          ],
+          "limite": "Quattro famiglie considerate insieme senza punteggio o voto. Regime e macro sono contesto generale, non prova sull'asset; documenti futuri e osservazioni storiche non equivalgono a fatti eseguiti.",
+          "novita_evento_non_inferibile_dalla_sola_acquisizione": true,
+          "ordine": "NON_GENERATO",
+          "previsione_prezzo": "NON_INFERIBILE",
+          "progetto_id": "solana",
+          "raccomandazione": "NON_GENERATA",
+          "stato": "QUADRO_PARZIALE_DA_INTERPRETARE",
+          "token": "SOL"
+        },
+        "identita": {
+          "asset_base_kraken": "SOL",
+          "coingecko_id": "solana",
+          "coppia": "SOL/USD",
+          "fonte_identita": "Kraken AssetPairs ONLINE + kdd_project_catalog.json",
+          "limite": "Registry curato: chain/contract e negoziabilita conto non attestati. ",
+          "metodo": "REGISTRO_CURATO",
+          "motivo": null,
+          "pair_key": "SOLUSD",
+          "progetto": "Solana",
+          "repository_primario": "anza-xyz/agave",
+          "stato": "IDENTITA_VERIFICATA_DA_CATALOGO",
+          "token": "SOL",
+          "token_progetto": "SOL"
+        },
+        "indice": 0,
+        "lettura_economica": {
+          "condizione_riesame": "Rileggere supply e capitalizzazione da fonte attribuita",
+          "controipotesi": "I dati mancanti non provano un deterioramento del progetto",
+          "fatto": "Fondamentali non attuali o non verificati",
+          "rischio_opportunita_ipotesi": "Diluizione e valutazione relativa non quantificabili"
+        },
+        "politica_monetaria_primaria": {
+          "calendario_unlock_verificato": false,
+          "fonte": "https://solana.com/staking",
+          "limite": "Il documento di progetto va verificato alla lettura: non attesta quantità correnti, unlock datati o vesting.",
+          "stato": "CONSULTABILE_NON_ACQUISITO",
+          "tema": "Politica di inflazione e ricompense staking Solana",
+          "ultimo_controllo_documentale_utc": null
+        },
+        "quadro_eventi": {
+          "copertura_fonti": {
+            "avvisi_repository": "NON_ACQUISITO",
+            "progetti": "NON_ACQUISITO",
+            "release": "VERIFICATO",
+            "segnalazioni_repo": "NON_ACQUISITO"
+          },
+          "coppia": "SOL/USD",
+          "eventi": [
+            {
+              "acquisito_utc": "2026-11-17T20:24:45+00:00",
+              "categoria": "SVILUPPO_PROTOCOLLO",
+              "condizione_di_riesame": "Verificare changelog e attivazione effettiva sulla rete",
+              "controipotesi": "La release non dimostra adozione, attivazione, modifica tokenomics o prezzo",
+              "dettaglio": {
+                "origine": null,
+                "pre_release": false,
+                "tag": "v4.4.1",
+                "titolo": "Release v4.4.1"
+              },
+              "efficacia_confermata_utc": null,
+              "efficacia_programmata_utc": null,
+              "fatto": "Release software pubblicata dal repository ufficiale",
+              "fonte": "https://github.com/anza-xyz/agave/releases/tag/v4.4.1",
+              "ipotesi_economica": "Una modifica del software potrebbe diventare rilevante se adottata",
+              "pubblicato_utc": "2026-11-05T18:33:50+00:00",
+              "stato_prova": "VERIFICATO",
+              "tipo": "RELEASE_SOFTWARE"
+            }
+          ],
+          "eventi_non_mostrati": 0,
+          "limite": "Un campione vuoto o una fonte fallita non prova assenza di eventi; una notizia non equivale a voto, exploit, unlock eseguito o vendita",
+          "nessuna_causalita_di_prezzo": true,
+          "non_mostrati_per_tipo": {},
+          "notifiche_ordinarie_escluse": 0,
+          "progetto_id": "solana",
+          "stato": "EVENTI_O_DOCUMENTI_RILEVANTI_NEL_CAMPIONE",
+          "token": "SOL"
+        },
+        "quadro_tokenomics": {
+          "calendario": {
+            "acquisito_utc": null,
+            "categoria": "NON_VERIFICATO",
+            "fonte": null,
+            "limite": "Nessun calendario primario associato o corrente",
+            "numero_eventi_documentati": 0,
+            "realizzazione": "NON_ATTESTATA",
+            "stato": "NON_ACQUISITO",
+            "vendita": "NON_ATTESTATA"
+          },
+          "condizione_di_riesame": "Controllare identita Kraken/progetto, nuovi dati di supply e documentazione primaria datata; verificare separatamente emissione, unlock effettivo, immissione e vendite",
+          "controipotesi": "Assenza o scadenza della fonte non dimostra tokenomics favorevole o sfavorevole",
+          "coppia": "SOL/USD",
+          "nessun_segnale_operativo": true,
+          "politica_emissione": {
+            "acquisito_utc": null,
+            "fonte": null,
+            "limite": "Politica di emissione non acquisita",
+            "stato": "NON_ACQUISITO",
+            "tipo": null
+          },
+          "progetto_id": "solana",
+          "rischio_opportunita_ipotesi": "Non è possibile quantificare l'esposizione alla diluizione con i dati presenti",
+          "stato": "SENZA_PROVE_ECONOMICHE_ATTUALI",
+          "supply": {
+            "acquisito_utc": "2026-11-17T20:24:45+00:00",
+            "anomalie": [],
+            "capitalizzazione_usd": null,
+            "diluizione": "NON_CALCOLABILE",
+            "emissione_residua_massima_su_circolante_pct": null,
+            "fdv_usd": null,
+            "fonte": null,
+            "limite": "Dati CoinGecko aggregati, non registro dei token venduti o calendario unlock",
+            "offerta_circolante": null,
+            "offerta_massima": null,
+            "offerta_totale": null,
+            "quota_circolante_su_totale_pct": null,
+            "rapporto_fdv_cap": null,
+            "rilevato_utc": null,
+            "stato": "NON_VERIFICATO"
+          },
+          "token": "SOL"
+        },
+        "token": "SOL"
+      }
+    ],
+    "contesto_macro_primario": {
+      "copertura_fonti": {},
+      "duplicati_rss_gia_contati": 0,
+      "fatti": [],
+      "fatti_non_mostrati": 0,
+      "fatti_totali_nel_campione": 0,
+      "limite": "Una pubblicazione ufficiale non dimostra applicazione, impatto sul prezzo o nesso causale. Questo e un contesto generale, non una valutazione del singolo asset",
+      "nessuna_raccomandazione_operativa": true,
+      "numero_feed_primari_freschi": 0,
+      "numero_flussi_attuali": 0,
+      "numero_indicatori_attuali": 0,
+      "scenari_condizionali": [
+        {
+          "condizione_di_riesame": "Verificare decisione/testo, consenso precedente, liquidita e risposta osservata",
+          "controipotesi": "L'informazione potrebbe essere gia prezzata o compensata da altri fattori",
+          "direzione_crypto": "NON_INFERIBILE",
+          "famiglia": "POLITICA_MONETARIA",
+          "fatto": null,
+          "fonte": null,
+          "ipotesi": "Tassi, inflazione e aspettative possono influire sul costo del denaro e sulla propensione al rischio",
+          "nessuna_causalita_attestata": true,
+          "periodo_o_pubblicazione": null,
+          "stato": "NON_VALUTABILE"
+        },
+        {
+          "condizione_di_riesame": "Verificare destinatari, entrata in vigore, giurisdizione e operativita effettiva",
+          "controipotesi": "Il provvedimento potrebbe non riguardare asset crypto o non incidere sui volumi",
+          "direzione_crypto": "NON_INFERIBILE",
+          "famiglia": "GEOPOLITICA_E_SANZIONI",
+          "fatto": null,
+          "fonte": null,
+          "ipotesi": "Restrizioni e sanzioni potrebbero influenzare accesso a servizi e controparti",
+          "nessuna_causalita_attestata": true,
+          "periodo_o_pubblicazione": null,
+          "stato": "NON_VALUTABILE"
+        }
+      ],
+      "stato": "NESSUN_DATO_VERIFICABILE_NEL_CAMPIONE"
+    },
+    "copertura_eventi": {
+      "candidati": {
+        "con_documenti_o_avvisi": 1,
+        "limite": "Copertura del roster osservato, non degli eventi assenti dal campione",
+        "progetti_identificati": 1,
+        "release_confermate_alla_lettura": 1,
+        "release_storiche": 0,
+        "totali": 1
+      },
+      "posizioni": {
+        "con_documenti_o_avvisi": 1,
+        "limite": "Copertura del roster osservato, non degli eventi assenti dal campione",
+        "progetti_identificati": 3,
+        "release_confermate_alla_lettura": 1,
+        "release_storiche": 0,
+        "totali": 3
+      },
+      "richiesti": {
+        "con_documenti_o_avvisi": 0,
+        "limite": "Copertura del roster osservato, non degli eventi assenti dal campione",
+        "progetti_identificati": 0,
+        "release_confermate_alla_lettura": 0,
+        "release_storiche": 0,
+        "totali": 0
+      }
+    },
+    "copertura_fondamentali": {
+      "candidati_totali": 1,
+      "candidati_verificati_alla_lettura": 0,
+      "limite": "La rotazione e la cache locale hanno orari propri; nessuna assenza equivale a zero.",
+      "posizioni_totali": 3,
+      "posizioni_verificate_alla_lettura": 1,
+      "richiesti_espliciti_totali": 0,
+      "richiesti_identificati": 0
+    },
+    "copertura_integrazione": {
+      "candidati": {
+        "con_copertura_parziale": 1,
+        "con_eventi_recenti": 1,
+        "con_evidenza_fondamentale_recente": 0,
+        "con_identita_attribuibile": 1,
+        "limite": "Cardinalita e informazioni disponibili; non qualita di previsione",
+        "quattro_famiglie_esposte": 1,
+        "totali": 1
+      },
+      "posizioni": {
+        "con_copertura_parziale": 3,
+        "con_eventi_recenti": 0,
+        "con_evidenza_fondamentale_recente": 1,
+        "con_identita_attribuibile": 3,
+        "limite": "Cardinalita e informazioni disponibili; non qualita di previsione",
+        "quattro_famiglie_esposte": 3,
+        "totali": 3
+      },
+      "richiesti": {
+        "con_copertura_parziale": 0,
+        "con_eventi_recenti": 0,
+        "con_evidenza_fondamentale_recente": 0,
+        "con_identita_attribuibile": 0,
+        "limite": "Cardinalita e informazioni disponibili; non qualita di previsione",
+        "quattro_famiglie_esposte": 0,
+        "totali": 0
+      }
+    },
+    "copertura_tokenomics": {
+      "candidati": {
+        "documenti_primari_attuali": 0,
+        "fonte_supply": "CoinGecko pubblica per asset, non calendario primario",
+        "fonti_emissione_attuali": 0,
+        "identita_verificate": 1,
+        "limite": "Copertura del roster del packet, non prova del wallet o dell'esecuzione degli unlock",
+        "supply_attuale": 0,
+        "supply_contraddittoria": 0,
+        "supply_senza_massimo": 0,
+        "totali": 1
+      },
+      "posizioni": {
+        "documenti_primari_attuali": 0,
+        "fonte_supply": "CoinGecko pubblica per asset, non calendario primario",
+        "fonti_emissione_attuali": 0,
+        "identita_verificate": 3,
+        "limite": "Copertura del roster del packet, non prova del wallet o dell'esecuzione degli unlock",
+        "supply_attuale": 1,
+        "supply_contraddittoria": 0,
+        "supply_senza_massimo": 0,
+        "totali": 3
+      },
+      "richiesti": {
+        "documenti_primari_attuali": 0,
+        "fonte_supply": "CoinGecko pubblica per asset, non calendario primario",
+        "fonti_emissione_attuali": 0,
+        "identita_verificate": 0,
+        "limite": "Copertura del roster del packet, non prova del wallet o dell'esecuzione degli unlock",
+        "supply_attuale": 0,
+        "supply_contraddittoria": 0,
+        "supply_senza_massimo": 0,
+        "totali": 0
+      }
+    },
+    "fonti_economiche": [
+      {
+        "copertura": "Supply, market cap e FDV per ID attribuito",
+        "fonte": "CoinGecko /coins",
+        "id": "coingecko",
+        "limite": "Non certifica chain, unlock, domanda o identita del conto",
+        "stato": "INTEGRATO",
+        "tipo": "AGGREGATORE",
+        "url": "https://api.coingecko.com/api/v3/coins/"
+      },
+      {
+        "copertura": "Release software dei soli progetti registrati",
+        "fonte": "Release repository di progetto",
+        "id": "release_primarie",
+        "limite": "Non prova adozione o movimento del prezzo",
+        "stato": "INTEGRATO",
+        "tipo": "FONTE_PRIMARIA",
+        "url": "https://github.com/"
+      },
+      {
+        "copertura": "Titoli ufficiali RSS gia acquisiti da KDD",
+        "fonte": "Federal Reserve / BCE / Consiglio UE",
+        "id": "feed_ufficiali",
+        "limite": "Nessun impatto crypto o sorpresa vs consenso dedotto",
+        "stato": "INTEGRATO",
+        "tipo": "FONTE_PRIMARIA",
+        "url": "https://www.federalreserve.gov/"
+      },
+      {
+        "copertura": "Flussi ETF, OI, funding e liquidazioni consultabili",
+        "fonte": "CoinGlass ETF e derivati",
+        "id": "coinglass_web",
+        "limite": "OI non equivale a capitale istituzionale spot",
+        "stato": "CONSULTABILE_DA_GPT_NON_ACQUISITO",
+        "tipo": "AGGREGATORE",
+        "url": "https://www.coinglass.com/it/etf/bitcoin"
+      },
+      {
+        "copertura": "Integrazione automatica CoinGlass",
+        "fonte": "CoinGlass API premium",
+        "id": "coinglass_api",
+        "limite": "Nessun piano a pagamento o chiave autorizzati",
+        "stato": "INDISPONIBILE",
+        "tipo": "AGGREGATORE",
+        "url": "https://www.coinglass.com/it/pricing"
+      },
+      {
+        "copertura": "Flussi netti giornalieri degli ETF spot BTC",
+        "fonte": "Farside Bitcoin ETF Flow",
+        "id": "farside",
+        "limite": "Non distingue investitori istituzionali e retail",
+        "stato": "CONSULTABILE_DA_GPT_NON_ACQUISITO",
+        "tipo": "AGGREGATORE",
+        "url": "https://farside.co.uk/bitcoin-etf-flow-all-data/"
+      },
+      {
+        "copertura": "Posizionamento settimanale futures regolamentati",
+        "fonte": "CFTC Commitments of Traders / CME",
+        "id": "cftc_cme",
+        "limite": "Dati ritardati, non il complesso del mercato crypto",
+        "stato": "INTEGRATO_CAMPIONE_BTC_FUTURES",
+        "tipo": "FONTE_PRIMARIA",
+        "url": "https://www.cftc.gov/MarketReports/CommitmentsofTraders/index.htm"
+      },
+      {
+        "copertura": "Partecipazioni dichiarate da soggetti obbligati",
+        "fonte": "SEC Form 13F",
+        "id": "sec_13f",
+        "limite": "Disclosure trimestrale ritardata, non flusso in tempo reale",
+        "stato": "CONSULTABILE_DA_GPT_NON_ACQUISITO",
+        "tipo": "FONTE_PRIMARIA",
+        "url": "https://www.sec.gov/rules-regulations/staff-guidance/division-investment-management-frequently-asked-questions/frequently-asked-questions-about-form-13f"
+      },
+      {
+        "copertura": "Supply stablecoin per chain e variazioni",
+        "fonte": "DefiLlama Stablecoins",
+        "id": "defillama",
+        "limite": "L'aumento di supply non prova acquisti crypto istituzionali",
+        "stato": "CONSULTABILE_DA_GPT_NON_ACQUISITO",
+        "tipo": "AGGREGATORE_ONCHAIN",
+        "url": "https://defillama.com/stablecoins/chains"
+      },
+      {
+        "copertura": "Scoperta opzionale di notizie",
+        "fonte": "CryptoPanic",
+        "id": "cryptopanic",
+        "limite": "Non misura capitali; verificare la fonte primaria; API con autenticazione",
+        "stato": "CONSULTABILE_DA_GPT_NON_ACQUISITO",
+        "tipo": "INDICE_NOTIZIE",
+        "url": "https://cryptopanic.com/developers/api/"
+      }
+    ],
+    "letto_utc": "2026-11-17T20:24:45+00:00",
+    "macro": {
+      "condizione_di_riesame": "Confrontare decisione ufficiale, consenso datato e prezzi successivi.",
+      "controipotesi": "La variazione potrebbe essere gia incorporata nei prezzi o prevalerebbero altri fattori.",
+      "fonti_ufficiali": [
+        {
+          "fonte": "Fed — politica monetaria",
+          "impatto_asset": "NON_VALUTABILE",
+          "pubblicato_utc": "2026-10-28T18:00:00+00:00",
+          "stato": "SCADUTO",
+          "titolo": "Federal Reserve issues FOMC statement (maintained 3.75 to 4 percent)",
+          "url": "https://www.federalreserve.gov/newsevents/pressreleases/monetary20261028a.htm"
+        },
+        {
+          "fonte": "Consiglio UE — comunicati",
+          "impatto_asset": "NON_VALUTABILE",
+          "pubblicato_utc": "2026-11-16T11:35:00+00:00",
+          "stato": "VERIFICATO",
+          "titolo": "Council lists 113 individuals and entities",
+          "url": "https://www.consilium.europa.eu/en/press/press-releases/2026/11/16/ukraine-eu-lists-113-individuals-and-entities-to-further-restrict-russia-s-ability-to-finance-its-war-of-aggression/"
+        }
+      ],
+      "ipotesi": "Una variazione inattesa della politica monetaria potrebbe modificare le condizioni di liquidita.",
+      "scenari_condizionali": [
+        {
+          "condizione_di_riesame": "Verificare testo completo, consenso datato, tassi e reazione osservata.",
+          "controipotesi": "Il contenuto potrebbe essere atteso dal mercato o compensato da altri fattori.",
+          "fonte": null,
+          "ipotesi": "Una sorpresa monetaria potrebbe cambiare liquidita e costo del rischio.",
+          "limite": "Il titolo non prova sorpresa, causalita o impatto su asset.",
+          "pubblicato_utc": null,
+          "stato": "NON_VALUTABILE",
+          "tipo": "POLITICA_MONETARIA",
+          "titolo_osservato": null
+        },
+        {
+          "condizione_di_riesame": "Verificare campo di applicazione, data di efficacia e soggetti coinvolti.",
+          "controipotesi": "La misura potrebbe non riguardare la rete o la coppia dell'asset considerato.",
+          "fonte": "https://www.consilium.europa.eu/en/press/press-releases/2026/11/16/ukraine-eu-lists-113-individuals-and-entities-to-further-restrict-russia-s-ability-to-finance-its-war-of-aggression/",
+          "ipotesi": "Una decisione geopolitica o regolatoria potrebbe alterare accesso e rischio di controparte.",
+          "limite": "Il titolo non prova sorpresa, causalita o impatto su asset.",
+          "pubblicato_utc": "2026-11-16T11:35:00+00:00",
+          "stato": "IPOTESI_DA_VERIFICARE",
+          "tipo": "GEOPOLITICA_REGOLAZIONE",
+          "titolo_osservato": "Council lists 113 individuals and entities"
+        }
+      ],
+      "sorpresa_vs_consenso": "NON_VALUTABILE",
+      "statuto": "IPOTESI_NON_ATTESTATA_DAI_TITOLI_RSS"
+    },
+    "posizioni": [
+      {
+        "evento": {
+          "acquisito_utc": "2026-11-17T20:24:45+00:00",
+          "adozione_rete": "NON_VERIFICATA",
+          "condizione_riesame": "Verificare adozione reale del software, contenuto release e fatti di rete",
+          "emittente": "bitcoin/bitcoin",
+          "evento_utc": "2026-10-28T14:23:53+00:00",
+          "fonte": "https://github.com/bitcoin/bitcoin/releases/tag/v32.1",
+          "impatto_economico": "NON_DIMOSTRATO",
+          "limite": "Release non prova impatto sul prezzo né migrazione token",
+          "pre_release": false,
+          "pubblicato_utc": "2026-10-28T14:23:53+00:00",
+          "sintesi": "Bitcoin Core 32.1",
+          "stato": "VERIFICATO",
+          "tag": "v32.1",
+          "tipo": "RELEASE_SOFTWARE"
+        },
+        "fondamentali": {
+          "acquisito_utc": "2026-11-17T20:24:45+00:00",
+          "anomalie_supply": [],
+          "capitalizzazione_usd": 100,
+          "diluizione": "RAPPORTO_CALCOLABILE",
+          "emissione_residua_massima_su_circolante_pct": 110.0,
+          "fdv_usd": 200,
+          "fonte": "https://api.coingecko.com/api/v3/coins/bitcoin",
+          "fonte_calendario_unlock": null,
+          "fonte_supply": "COINGECKO_AGGREGATORE_NON_SCHEDULE_PRIMARIO",
+          "limite": "Nessun calendario vesting deducibile dalla supply",
+          "offerta_circolante": 10,
+          "offerta_massima": 21,
+          "offerta_totale": 20,
+          "prossimo_unlock_utc": null,
+          "quota_circolante_su_totale_pct": 50.0,
+          "rapporto_fdv_cap": 2.0,
+          "rilevato_utc": "2026-11-17T20:24:45+00:00",
+          "stato": "VERIFICATO",
+          "unlock": "NON_VERIFICATO",
+          "vesting": "NON_VERIFICATO"
+        },
+        "giudizio_economico_integrato": {
+          "categorie_temporali_presenti": [
+            "NON_DISPONIBILE",
+            "RECENTE",
+            "STORICA"
+          ],
+          "causalita_sul_prezzo": "NON_ATTESTATA",
+          "componenti": {
+            "eventi": {
+              "attendibilita": "PROVE_DOCUMENTALI_DA_DISTINGUERE_DA_ESECUZIONE",
+              "documenti_non_mostrati": 0,
+              "documenti_recenti": 0,
+              "documenti_storici": 1,
+              "eventi_programmati_non_eseguiti": 0,
+              "riferimenti": [
+                {
+                  "acquisito_utc": "2026-11-17T20:24:45+00:00",
+                  "efficacia_programmata_utc": null,
+                  "fonte": "https://github.com/bitcoin/bitcoin/releases/tag/v32.1",
+                  "pubblicato_utc": "2026-10-28T14:23:53+00:00",
+                  "stato_prova": "VERIFICATO",
+                  "tipo": "RELEASE_SOFTWARE"
+                }
+              ],
+              "riferimento_dettaglio": "quadro_eventi",
+              "stato_copertura": "EVENTI_O_DOCUMENTI_RILEVANTI_NEL_CAMPIONE",
+              "stato_informazione": "STORICA"
+            },
+            "fondamentali": {
+              "acquisito_utc": "2026-11-17T20:24:45+00:00",
+              "attendibilita": "AGGREGATORE_ATTRIBUITO_NON_FONTE_UNLOCK",
+              "fonte": "https://api.coingecko.com/api/v3/coins/bitcoin",
+              "riferimento_dettaglio": "quadro_tokenomics",
+              "rilevato_utc": "2026-11-17T20:24:45+00:00",
+              "stato_fonte": "VERIFICATO",
+              "stato_informazione": "RECENTE"
+            },
+            "macroeconomia": {
+              "acquisito_utc": null,
+              "ambito": "MERCATO_GENERALE_NON_SPECIFICO_ASSET",
+              "attendibilita": "FONTI_PRIMARIE_E_AGGREGATORI_DISTINTI_NON_CAUSALITA",
+              "data_esempio": null,
+              "fatti_non_mostrati": 0,
+              "fatti_recenti": 0,
+              "fatti_storici": 0,
+              "fonte_esempio": null,
+              "riferimento_dettaglio": "contesto_macro_primario",
+              "stato_informazione": "NON_DISPONIBILE",
+              "stato_prova_esempio": null
+            },
+            "regime": {
+              "acquisito_utc": null,
+              "ambito": "MERCATO_GENERALE_NON_SPECIFICO_ASSET",
+              "attendibilita": "CLASSIFICAZIONE_DERIVATA_NON_PREVISIONE",
+              "fonti": [
+                {
+                  "famiglia": "BTC_PREZZO_4H_1D",
+                  "fonte": "Kraken Spot pubblico /0/public/OHLC",
+                  "osservazione": null,
+                  "rilevazione_utc": null,
+                  "stato": "NON_ATTUALE"
+                },
+                {
+                  "famiglia": "AGGREGATO_CRYPTO_PREZZO_E_ATTIVITA",
+                  "fonte": null,
+                  "limite": "Capitalizzazione e volume sono la medesima famiglia aggregata, non due conferme indipendenti",
+                  "osservato_utc": null,
+                  "stato": "INCOMPLETO_O_SCADUTO",
+                  "turnover_24h_pct": null,
+                  "var_cap_24h_pct": null
+                }
+              ],
+              "qualita": "INSUFFICIENTE",
+              "riferimento_dettaglio": "regime_motivato",
+              "stato": "INDETERMINATO",
+              "stato_informazione": "NON_DISPONIBILE"
+            }
+          },
+          "contraddizioni_da_esaminare": [],
+          "coppia": "BTC/EUR",
+          "informazioni_mancanti_o_scadute": [
+            "macroeconomia",
+            "regime"
+          ],
+          "ipotesi_e_alternative": [
+            {
+              "ambito": "FONDAMENTALI",
+              "controipotesi": "Supply e FDV non attestano un calendario unlock, emissione eseguita o vendita",
+              "ipotesi": "La quota ancora non circolante potrebbe modificare la partecipazione economica futura",
+              "riesame": "Controllare identita Kraken/progetto, nuovi dati di supply e documentazione primaria datata; verificare separatamente emissione, unlock effettivo, immissione e vendite"
+            },
+            {
+              "ambito": "EVENTI",
+              "controipotesi": "La pubblicazione non dimostra adozione, unlock eseguito o effetto sul prezzo",
+              "ipotesi": "Il documento potrebbe avere conseguenze solo se pertinente e attuato",
+              "riesame": "Riconfermare fonte, data ed efficacia di ogni evento"
+            },
+            {
+              "ambito": "MACROECONOMIA",
+              "controipotesi": "L'informazione potrebbe essere gia prezzata o compensata da altri fattori",
+              "ipotesi": "Tassi, inflazione e aspettative possono influire sul costo del denaro e sulla propensione al rischio",
+              "riesame": "Verificare decisione/testo, consenso precedente, liquidita e risposta osservata"
+            },
+            {
+              "ambito": "MACROECONOMIA",
+              "controipotesi": "Il provvedimento potrebbe non riguardare asset crypto o non incidere sui volumi",
+              "ipotesi": "Restrizioni e sanzioni potrebbero influenzare accesso a servizi e controparti",
+              "riesame": "Verificare destinatari, entrata in vigore, giurisdizione e operativita effettiva"
+            },
+            {
+              "ambito": "REGIME",
+              "controipotesi": "Il regime generale non misura domanda, valore o ritorno di questo asset",
+              "ipotesi": "Il contesto generale potrebbe condizionare la lettura di rischio",
+              "riesame": "Ricalcolare alla chiusura BTC 4H/1D o al cambio della capitalizzazione e della partecipazione; rivedere in caso di segnali contrari ETF/CVD o di dati scaduti"
+            }
+          ],
+          "limite": "Quattro famiglie considerate insieme senza punteggio o voto. Regime e macro sono contesto generale, non prova sull'asset; documenti futuri e osservazioni storiche non equivalgono a fatti eseguiti.",
+          "novita_evento_non_inferibile_dalla_sola_acquisizione": true,
+          "ordine": "NON_GENERATO",
+          "previsione_prezzo": "NON_INFERIBILE",
+          "progetto_id": "bitcoin",
+          "raccomandazione": "NON_GENERATA",
+          "stato": "QUADRO_PARZIALE_DA_INTERPRETARE",
+          "token": "BTC"
+        },
+        "identita": {
+          "asset_base_kraken": "BTC",
+          "coingecko_id": "bitcoin",
+          "coppia": "BTC/EUR",
+          "fonte_identita": "Kraken AssetPairs ONLINE + kdd_project_catalog.json",
+          "limite": "Registry curato: chain/contract e negoziabilita conto non attestati. ",
+          "metodo": "REGISTRO_CURATO",
+          "motivo": null,
+          "pair_key": "XXBTZEUR",
+          "progetto": "Bitcoin",
+          "repository_primario": "bitcoin/bitcoin",
+          "stato": "IDENTITA_VERIFICATA_DA_CATALOGO",
+          "token": "BTC",
+          "token_progetto": "BTC"
+        },
+        "indice": 0,
+        "lettura_economica": {
+          "condizione_riesame": "Confrontare supply osservata e schedule primaria datata; per release verificare adozione/rete e non solo annuncio",
+          "controipotesi": "Supply e FDV da sole non determinano prezzo o calendario unlock; una release non prova adozione della rete o un effetto economico",
+          "fatto": "Capitalizzazione e supply datate disponibili; release software ufficiale documentata (v32.1); emissione residua massima teorica pari al 110.0% del circolante",
+          "rischio_opportunita_ipotesi": "La diluizione potenziale merita confronto con domanda e valore del progetto"
+        },
+        "politica_monetaria_primaria": {
+          "calendario_unlock_verificato": false,
+          "fonte": "https://bitcoin.org/en/faq#how-are-bitcoins-created",
+          "limite": "Il documento di progetto va verificato alla lettura: non attesta quantità correnti, unlock datati o vesting.",
+          "stato": "CONSULTABILE_NON_ACQUISITO",
+          "tema": "Emissione monetaria e limite di offerta Bitcoin",
+          "ultimo_controllo_documentale_utc": null
+        },
+        "quadro_eventi": {
+          "copertura_fonti": {
+            "avvisi_repository": "NON_ACQUISITO",
+            "progetti": "NON_ACQUISITO",
+            "release": "VERIFICATO",
+            "segnalazioni_repo": "NON_ACQUISITO"
+          },
+          "coppia": "BTC/EUR",
+          "eventi": [
+            {
+              "acquisito_utc": "2026-11-17T20:24:45+00:00",
+              "categoria": "SVILUPPO_PROTOCOLLO",
+              "condizione_di_riesame": "Verificare changelog e attivazione effettiva sulla rete",
+              "controipotesi": "La release non dimostra adozione, attivazione, modifica tokenomics o prezzo",
+              "dettaglio": {
+                "origine": null,
+                "pre_release": false,
+                "tag": "v32.1",
+                "titolo": "Bitcoin Core 32.1"
+              },
+              "efficacia_confermata_utc": null,
+              "efficacia_programmata_utc": null,
+              "fatto": "Release software pubblicata dal repository ufficiale",
+              "fonte": "https://github.com/bitcoin/bitcoin/releases/tag/v32.1",
+              "ipotesi_economica": "Una modifica del software potrebbe diventare rilevante se adottata",
+              "pubblicato_utc": "2026-10-28T14:23:53+00:00",
+              "stato_prova": "VERIFICATO",
+              "tipo": "RELEASE_SOFTWARE"
+            }
+          ],
+          "eventi_non_mostrati": 0,
+          "limite": "Un campione vuoto o una fonte fallita non prova assenza di eventi; una notizia non equivale a voto, exploit, unlock eseguito o vendita",
+          "nessuna_causalita_di_prezzo": true,
+          "non_mostrati_per_tipo": {},
+          "notifiche_ordinarie_escluse": 0,
+          "progetto_id": "bitcoin",
+          "stato": "EVENTI_O_DOCUMENTI_RILEVANTI_NEL_CAMPIONE",
+          "token": "BTC"
+        },
+        "quadro_tokenomics": {
+          "calendario": {
+            "acquisito_utc": null,
+            "categoria": "NON_VERIFICATO",
+            "fonte": null,
+            "limite": "Nessun calendario primario associato o corrente",
+            "numero_eventi_documentati": 0,
+            "realizzazione": "NON_ATTESTATA",
+            "stato": "NON_ACQUISITO",
+            "vendita": "NON_ATTESTATA"
+          },
+          "condizione_di_riesame": "Controllare identita Kraken/progetto, nuovi dati di supply e documentazione primaria datata; verificare separatamente emissione, unlock effettivo, immissione e vendite",
+          "controipotesi": "Supply e FDV non attestano un calendario unlock, emissione eseguita o vendita",
+          "coppia": "BTC/EUR",
+          "nessun_segnale_operativo": true,
+          "politica_emissione": {
+            "acquisito_utc": null,
+            "fonte": null,
+            "limite": "Politica di emissione non acquisita",
+            "stato": "NON_ACQUISITO",
+            "tipo": null
+          },
+          "progetto_id": "bitcoin",
+          "rischio_opportunita_ipotesi": "La quota ancora non circolante potrebbe modificare la partecipazione economica futura",
+          "stato": "SOLO_SUPPLY_AGGREGATA",
+          "supply": {
+            "acquisito_utc": "2026-11-17T20:24:45+00:00",
+            "anomalie": [],
+            "capitalizzazione_usd": 100,
+            "diluizione": "RAPPORTO_CALCOLABILE",
+            "emissione_residua_massima_su_circolante_pct": 110.0,
+            "fdv_usd": 200,
+            "fonte": "https://api.coingecko.com/api/v3/coins/bitcoin",
+            "limite": "Dati CoinGecko aggregati, non registro dei token venduti o calendario unlock",
+            "offerta_circolante": 10,
+            "offerta_massima": 21,
+            "offerta_totale": 20,
+            "quota_circolante_su_totale_pct": 50.0,
+            "rapporto_fdv_cap": 2.0,
+            "rilevato_utc": "2026-11-17T20:24:45+00:00",
+            "stato": "VERIFICATO"
+          },
+          "token": "BTC"
+        },
+        "token": "BTC"
+      },
+      {
+        "evento": {
+          "acquisito_utc": "2026-11-17T20:24:45+00:00",
+          "emittente": null,
+          "evento_utc": null,
+          "fonte": null,
+          "limite": "Release non prova impatto sul prezzo né migrazione token",
+          "pubblicato_utc": null,
+          "sintesi": null,
+          "stato": "NON_VERIFICATO",
+          "tipo": "RELEASE_SOFTWARE"
+        },
+        "fondamentali": {
+          "acquisito_utc": "2026-11-17T20:24:45+00:00",
+          "anomalie_supply": [],
+          "capitalizzazione_usd": null,
+          "diluizione": "NON_CALCOLABILE",
+          "emissione_residua_massima_su_circolante_pct": null,
+          "fdv_usd": null,
+          "fonte": null,
+          "fonte_calendario_unlock": null,
+          "fonte_supply": "COINGECKO_AGGREGATORE_NON_SCHEDULE_PRIMARIO",
+          "limite": "Nessun calendario vesting deducibile dalla supply",
+          "offerta_circolante": null,
+          "offerta_massima": null,
+          "offerta_totale": null,
+          "prossimo_unlock_utc": null,
+          "quota_circolante_su_totale_pct": null,
+          "rapporto_fdv_cap": null,
+          "rilevato_utc": null,
+          "stato": "NON_VERIFICATO",
+          "unlock": "NON_VERIFICATO",
+          "vesting": "NON_VERIFICATO"
+        },
+        "giudizio_economico_integrato": {
+          "categorie_temporali_presenti": [
+            "NON_DISPONIBILE"
+          ],
+          "causalita_sul_prezzo": "NON_ATTESTATA",
+          "componenti": {
+            "eventi": {
+              "attendibilita": "PROVE_DOCUMENTALI_DA_DISTINGUERE_DA_ESECUZIONE",
+              "documenti_non_mostrati": 0,
+              "documenti_recenti": 0,
+              "documenti_storici": 0,
+              "eventi_programmati_non_eseguiti": 0,
+              "riferimenti": [],
+              "riferimento_dettaglio": "quadro_eventi",
+              "stato_copertura": "NESSUN_EVENTO_IDENTIFICATO_NEL_CAMPIONE",
+              "stato_informazione": "NON_DISPONIBILE"
+            },
+            "fondamentali": {
+              "acquisito_utc": "2026-11-17T20:24:45+00:00",
+              "attendibilita": "NON_ATTUALE_O_NON_VERIFICATA",
+              "fonte": null,
+              "riferimento_dettaglio": "quadro_tokenomics",
+              "rilevato_utc": null,
+              "stato_fonte": "NON_VERIFICATO",
+              "stato_informazione": "NON_DISPONIBILE"
+            },
+            "macroeconomia": {
+              "acquisito_utc": null,
+              "ambito": "MERCATO_GENERALE_NON_SPECIFICO_ASSET",
+              "attendibilita": "FONTI_PRIMARIE_E_AGGREGATORI_DISTINTI_NON_CAUSALITA",
+              "data_esempio": null,
+              "fatti_non_mostrati": 0,
+              "fatti_recenti": 0,
+              "fatti_storici": 0,
+              "fonte_esempio": null,
+              "riferimento_dettaglio": "contesto_macro_primario",
+              "stato_informazione": "NON_DISPONIBILE",
+              "stato_prova_esempio": null
+            },
+            "regime": {
+              "acquisito_utc": null,
+              "ambito": "MERCATO_GENERALE_NON_SPECIFICO_ASSET",
+              "attendibilita": "CLASSIFICAZIONE_DERIVATA_NON_PREVISIONE",
+              "fonti": [
+                {
+                  "famiglia": "BTC_PREZZO_4H_1D",
+                  "fonte": "Kraken Spot pubblico /0/public/OHLC",
+                  "osservazione": null,
+                  "rilevazione_utc": null,
+                  "stato": "NON_ATTUALE"
+                },
+                {
+                  "famiglia": "AGGREGATO_CRYPTO_PREZZO_E_ATTIVITA",
+                  "fonte": null,
+                  "limite": "Capitalizzazione e volume sono la medesima famiglia aggregata, non due conferme indipendenti",
+                  "osservato_utc": null,
+                  "stato": "INCOMPLETO_O_SCADUTO",
+                  "turnover_24h_pct": null,
+                  "var_cap_24h_pct": null
+                }
+              ],
+              "qualita": "INSUFFICIENTE",
+              "riferimento_dettaglio": "regime_motivato",
+              "stato": "INDETERMINATO",
+              "stato_informazione": "NON_DISPONIBILE"
+            }
+          },
+          "contraddizioni_da_esaminare": [],
+          "coppia": "ETH/EUR",
+          "informazioni_mancanti_o_scadute": [
+            "fondamentali",
+            "eventi",
+            "macroeconomia",
+            "regime"
+          ],
+          "ipotesi_e_alternative": [
+            {
+              "ambito": "FONDAMENTALI",
+              "controipotesi": "Assenza o scadenza della fonte non dimostra tokenomics favorevole o sfavorevole",
+              "ipotesi": "Non è possibile quantificare l'esposizione alla diluizione con i dati presenti",
+              "riesame": "Controllare identita Kraken/progetto, nuovi dati di supply e documentazione primaria datata; verificare separatamente emissione, unlock effettivo, immissione e vendite"
+            },
+            {
+              "ambito": "EVENTI",
+              "controipotesi": "La pubblicazione non dimostra adozione, unlock eseguito o effetto sul prezzo",
+              "ipotesi": "Il documento potrebbe avere conseguenze solo se pertinente e attuato",
+              "riesame": "Riconfermare fonte, data ed efficacia di ogni evento"
+            },
+            {
+              "ambito": "MACROECONOMIA",
+              "controipotesi": "L'informazione potrebbe essere gia prezzata o compensata da altri fattori",
+              "ipotesi": "Tassi, inflazione e aspettative possono influire sul costo del denaro e sulla propensione al rischio",
+              "riesame": "Verificare decisione/testo, consenso precedente, liquidita e risposta osservata"
+            },
+            {
+              "ambito": "MACROECONOMIA",
+              "controipotesi": "Il provvedimento potrebbe non riguardare asset crypto o non incidere sui volumi",
+              "ipotesi": "Restrizioni e sanzioni potrebbero influenzare accesso a servizi e controparti",
+              "riesame": "Verificare destinatari, entrata in vigore, giurisdizione e operativita effettiva"
+            },
+            {
+              "ambito": "REGIME",
+              "controipotesi": "Il regime generale non misura domanda, valore o ritorno di questo asset",
+              "ipotesi": "Il contesto generale potrebbe condizionare la lettura di rischio",
+              "riesame": "Ricalcolare alla chiusura BTC 4H/1D o al cambio della capitalizzazione e della partecipazione; rivedere in caso di segnali contrari ETF/CVD o di dati scaduti"
+            }
+          ],
+          "limite": "Quattro famiglie considerate insieme senza punteggio o voto. Regime e macro sono contesto generale, non prova sull'asset; documenti futuri e osservazioni storiche non equivalgono a fatti eseguiti.",
+          "novita_evento_non_inferibile_dalla_sola_acquisizione": true,
+          "ordine": "NON_GENERATO",
+          "previsione_prezzo": "NON_INFERIBILE",
+          "progetto_id": "ethereum",
+          "raccomandazione": "NON_GENERATA",
+          "stato": "QUADRO_PARZIALE_DA_INTERPRETARE",
+          "token": "ETH"
+        },
+        "identita": {
+          "asset_base_kraken": "ETH",
+          "coingecko_id": "ethereum",
+          "coppia": "ETH/EUR",
+          "fonte_identita": "Kraken AssetPairs ONLINE + kdd_project_catalog.json",
+          "limite": "Registry curato: chain/contract e negoziabilita conto non attestati. ",
+          "metodo": "REGISTRO_CURATO",
+          "motivo": null,
+          "pair_key": "XETHZEUR",
+          "progetto": "Ethereum",
+          "repository_primario": "ethereum/go-ethereum",
+          "stato": "IDENTITA_VERIFICATA_DA_CATALOGO",
+          "token": "ETH",
+          "token_progetto": "ETH"
+        },
+        "indice": 1,
+        "lettura_economica": {
+          "condizione_riesame": "Rileggere supply e capitalizzazione da fonte attribuita",
+          "controipotesi": "I dati mancanti non provano un deterioramento del progetto",
+          "fatto": "Fondamentali non attuali o non verificati",
+          "rischio_opportunita_ipotesi": "Diluizione e valutazione relativa non quantificabili"
+        },
+        "politica_monetaria_primaria": {
+          "calendario_unlock_verificato": false,
+          "fonte": null,
+          "limite": "Nessuna fonte primaria di politica monetaria attribuita",
+          "stato": "NON_DISPONIBILE",
+          "tema": null,
+          "ultimo_controllo_documentale_utc": null
+        },
+        "quadro_eventi": {
+          "copertura_fonti": {
+            "avvisi_repository": "NON_ACQUISITO",
+            "progetti": "NON_ACQUISITO",
+            "release": "NON_VERIFICATO",
+            "segnalazioni_repo": "NON_ACQUISITO"
+          },
+          "coppia": "ETH/EUR",
+          "eventi": [],
+          "eventi_non_mostrati": 0,
+          "limite": "Un campione vuoto o una fonte fallita non prova assenza di eventi; una notizia non equivale a voto, exploit, unlock eseguito o vendita",
+          "nessuna_causalita_di_prezzo": true,
+          "non_mostrati_per_tipo": {},
+          "notifiche_ordinarie_escluse": 0,
+          "progetto_id": "ethereum",
+          "stato": "NESSUN_EVENTO_IDENTIFICATO_NEL_CAMPIONE",
+          "token": "ETH"
+        },
+        "quadro_tokenomics": {
+          "calendario": {
+            "acquisito_utc": null,
+            "categoria": "NON_VERIFICATO",
+            "fonte": null,
+            "limite": "Nessun calendario primario associato o corrente",
+            "numero_eventi_documentati": 0,
+            "realizzazione": "NON_ATTESTATA",
+            "stato": "NON_ACQUISITO",
+            "vendita": "NON_ATTESTATA"
+          },
+          "condizione_di_riesame": "Controllare identita Kraken/progetto, nuovi dati di supply e documentazione primaria datata; verificare separatamente emissione, unlock effettivo, immissione e vendite",
+          "controipotesi": "Assenza o scadenza della fonte non dimostra tokenomics favorevole o sfavorevole",
+          "coppia": "ETH/EUR",
+          "nessun_segnale_operativo": true,
+          "politica_emissione": {
+            "acquisito_utc": null,
+            "fonte": null,
+            "limite": "Politica di emissione non acquisita",
+            "stato": "NON_ACQUISITO",
+            "tipo": null
+          },
+          "progetto_id": "ethereum",
+          "rischio_opportunita_ipotesi": "Non è possibile quantificare l'esposizione alla diluizione con i dati presenti",
+          "stato": "SENZA_PROVE_ECONOMICHE_ATTUALI",
+          "supply": {
+            "acquisito_utc": "2026-11-17T20:24:45+00:00",
+            "anomalie": [],
+            "capitalizzazione_usd": null,
+            "diluizione": "NON_CALCOLABILE",
+            "emissione_residua_massima_su_circolante_pct": null,
+            "fdv_usd": null,
+            "fonte": null,
+            "limite": "Dati CoinGecko aggregati, non registro dei token venduti o calendario unlock",
+            "offerta_circolante": null,
+            "offerta_massima": null,
+            "offerta_totale": null,
+            "quota_circolante_su_totale_pct": null,
+            "rapporto_fdv_cap": null,
+            "rilevato_utc": null,
+            "stato": "NON_VERIFICATO"
+          },
+          "token": "ETH"
+        },
+        "token": "ETH"
+      },
+      {
+        "evento": {
+          "acquisito_utc": "2026-11-17T20:24:45+00:00",
+          "emittente": null,
+          "evento_utc": null,
+          "fonte": null,
+          "limite": "Release non prova impatto sul prezzo né migrazione token",
+          "pubblicato_utc": null,
+          "sintesi": null,
+          "stato": "NON_VERIFICATO",
+          "tipo": "RELEASE_SOFTWARE"
+        },
+        "fondamentali": {
+          "acquisito_utc": "2026-11-17T20:24:45+00:00",
+          "anomalie_supply": [],
+          "capitalizzazione_usd": null,
+          "diluizione": "NON_CALCOLABILE",
+          "emissione_residua_massima_su_circolante_pct": null,
+          "fdv_usd": null,
+          "fonte": null,
+          "fonte_calendario_unlock": null,
+          "fonte_supply": "COINGECKO_AGGREGATORE_NON_SCHEDULE_PRIMARIO",
+          "limite": "Nessun calendario vesting deducibile dalla supply",
+          "offerta_circolante": null,
+          "offerta_massima": null,
+          "offerta_totale": null,
+          "prossimo_unlock_utc": null,
+          "quota_circolante_su_totale_pct": null,
+          "rapporto_fdv_cap": null,
+          "rilevato_utc": null,
+          "stato": "NON_VERIFICATO",
+          "unlock": "NON_VERIFICATO",
+          "vesting": "NON_VERIFICATO"
+        },
+        "giudizio_economico_integrato": {
+          "categorie_temporali_presenti": [
+            "NON_DISPONIBILE"
+          ],
+          "causalita_sul_prezzo": "NON_ATTESTATA",
+          "componenti": {
+            "eventi": {
+              "attendibilita": "PROVE_DOCUMENTALI_DA_DISTINGUERE_DA_ESECUZIONE",
+              "documenti_non_mostrati": 0,
+              "documenti_recenti": 0,
+              "documenti_storici": 0,
+              "eventi_programmati_non_eseguiti": 0,
+              "riferimenti": [],
+              "riferimento_dettaglio": "quadro_eventi",
+              "stato_copertura": "NESSUN_EVENTO_IDENTIFICATO_NEL_CAMPIONE",
+              "stato_informazione": "NON_DISPONIBILE"
+            },
+            "fondamentali": {
+              "acquisito_utc": "2026-11-17T20:24:45+00:00",
+              "attendibilita": "NON_ATTUALE_O_NON_VERIFICATA",
+              "fonte": null,
+              "riferimento_dettaglio": "quadro_tokenomics",
+              "rilevato_utc": null,
+              "stato_fonte": "NON_VERIFICATO",
+              "stato_informazione": "NON_DISPONIBILE"
+            },
+            "macroeconomia": {
+              "acquisito_utc": null,
+              "ambito": "MERCATO_GENERALE_NON_SPECIFICO_ASSET",
+              "attendibilita": "FONTI_PRIMARIE_E_AGGREGATORI_DISTINTI_NON_CAUSALITA",
+              "data_esempio": null,
+              "fatti_non_mostrati": 0,
+              "fatti_recenti": 0,
+              "fatti_storici": 0,
+              "fonte_esempio": null,
+              "riferimento_dettaglio": "contesto_macro_primario",
+              "stato_informazione": "NON_DISPONIBILE",
+              "stato_prova_esempio": null
+            },
+            "regime": {
+              "acquisito_utc": null,
+              "ambito": "MERCATO_GENERALE_NON_SPECIFICO_ASSET",
+              "attendibilita": "CLASSIFICAZIONE_DERIVATA_NON_PREVISIONE",
+              "fonti": [
+                {
+                  "famiglia": "BTC_PREZZO_4H_1D",
+                  "fonte": "Kraken Spot pubblico /0/public/OHLC",
+                  "osservazione": null,
+                  "rilevazione_utc": null,
+                  "stato": "NON_ATTUALE"
+                },
+                {
+                  "famiglia": "AGGREGATO_CRYPTO_PREZZO_E_ATTIVITA",
+                  "fonte": null,
+                  "limite": "Capitalizzazione e volume sono la medesima famiglia aggregata, non due conferme indipendenti",
+                  "osservato_utc": null,
+                  "stato": "INCOMPLETO_O_SCADUTO",
+                  "turnover_24h_pct": null,
+                  "var_cap_24h_pct": null
+                }
+              ],
+              "qualita": "INSUFFICIENTE",
+              "riferimento_dettaglio": "regime_motivato",
+              "stato": "INDETERMINATO",
+              "stato_informazione": "NON_DISPONIBILE"
+            }
+          },
+          "contraddizioni_da_esaminare": [],
+          "coppia": "STRK/EUR",
+          "informazioni_mancanti_o_scadute": [
+            "fondamentali",
+            "eventi",
+            "macroeconomia",
+            "regime"
+          ],
+          "ipotesi_e_alternative": [
+            {
+              "ambito": "FONDAMENTALI",
+              "controipotesi": "Assenza o scadenza della fonte non dimostra tokenomics favorevole o sfavorevole",
+              "ipotesi": "Non è possibile quantificare l'esposizione alla diluizione con i dati presenti",
+              "riesame": "Controllare identita Kraken/progetto, nuovi dati di supply e documentazione primaria datata; verificare separatamente emissione, unlock effettivo, immissione e vendite"
+            },
+            {
+              "ambito": "EVENTI",
+              "controipotesi": "La pubblicazione non dimostra adozione, unlock eseguito o effetto sul prezzo",
+              "ipotesi": "Il documento potrebbe avere conseguenze solo se pertinente e attuato",
+              "riesame": "Riconfermare fonte, data ed efficacia di ogni evento"
+            },
+            {
+              "ambito": "MACROECONOMIA",
+              "controipotesi": "L'informazione potrebbe essere gia prezzata o compensata da altri fattori",
+              "ipotesi": "Tassi, inflazione e aspettative possono influire sul costo del denaro e sulla propensione al rischio",
+              "riesame": "Verificare decisione/testo, consenso precedente, liquidita e risposta osservata"
+            },
+            {
+              "ambito": "MACROECONOMIA",
+              "controipotesi": "Il provvedimento potrebbe non riguardare asset crypto o non incidere sui volumi",
+              "ipotesi": "Restrizioni e sanzioni potrebbero influenzare accesso a servizi e controparti",
+              "riesame": "Verificare destinatari, entrata in vigore, giurisdizione e operativita effettiva"
+            },
+            {
+              "ambito": "REGIME",
+              "controipotesi": "Il regime generale non misura domanda, valore o ritorno di questo asset",
+              "ipotesi": "Il contesto generale potrebbe condizionare la lettura di rischio",
+              "riesame": "Ricalcolare alla chiusura BTC 4H/1D o al cambio della capitalizzazione e della partecipazione; rivedere in caso di segnali contrari ETF/CVD o di dati scaduti"
+            }
+          ],
+          "limite": "Quattro famiglie considerate insieme senza punteggio o voto. Regime e macro sono contesto generale, non prova sull'asset; documenti futuri e osservazioni storiche non equivalgono a fatti eseguiti.",
+          "novita_evento_non_inferibile_dalla_sola_acquisizione": true,
+          "ordine": "NON_GENERATO",
+          "previsione_prezzo": "NON_INFERIBILE",
+          "progetto_id": "starknet",
+          "raccomandazione": "NON_GENERATA",
+          "stato": "QUADRO_PARZIALE_DA_INTERPRETARE",
+          "token": "STRK"
+        },
+        "identita": {
+          "asset_base_kraken": "STRK",
+          "coingecko_id": "starknet",
+          "coppia": "STRK/EUR",
+          "fonte_identita": "Kraken AssetPairs ONLINE + kdd_project_catalog.json",
+          "limite": "Registry curato: chain/contract e negoziabilita conto non attestati. ",
+          "metodo": "REGISTRO_CURATO",
+          "motivo": null,
+          "pair_key": "STRKEUR",
+          "progetto": "Starknet",
+          "repository_primario": null,
+          "stato": "IDENTITA_VERIFICATA_DA_CATALOGO",
+          "token": "STRK",
+          "token_progetto": "STRK"
+        },
+        "indice": 2,
+        "lettura_economica": {
+          "condizione_riesame": "Rileggere supply e capitalizzazione da fonte attribuita",
+          "controipotesi": "I dati mancanti non provano un deterioramento del progetto",
+          "fatto": "Fondamentali non attuali o non verificati",
+          "rischio_opportunita_ipotesi": "Diluizione e valutazione relativa non quantificabili"
+        },
+        "politica_monetaria_primaria": {
+          "calendario_unlock_verificato": false,
+          "fonte": null,
+          "limite": "Nessuna fonte primaria di politica monetaria attribuita",
+          "stato": "NON_DISPONIBILE",
+          "tema": null,
+          "ultimo_controllo_documentale_utc": null
+        },
+        "quadro_eventi": {
+          "copertura_fonti": {
+            "avvisi_repository": "NON_ACQUISITO",
+            "progetti": "NON_ACQUISITO",
+            "release": "NON_VERIFICATO",
+            "segnalazioni_repo": "NON_ACQUISITO"
+          },
+          "coppia": "STRK/EUR",
+          "eventi": [],
+          "eventi_non_mostrati": 0,
+          "limite": "Un campione vuoto o una fonte fallita non prova assenza di eventi; una notizia non equivale a voto, exploit, unlock eseguito o vendita",
+          "nessuna_causalita_di_prezzo": true,
+          "non_mostrati_per_tipo": {},
+          "notifiche_ordinarie_escluse": 0,
+          "progetto_id": "starknet",
+          "stato": "NESSUN_EVENTO_IDENTIFICATO_NEL_CAMPIONE",
+          "token": "STRK"
+        },
+        "quadro_tokenomics": {
+          "calendario": {
+            "acquisito_utc": null,
+            "categoria": "NON_VERIFICATO",
+            "fonte": null,
+            "limite": "Nessun calendario primario associato o corrente",
+            "numero_eventi_documentati": 0,
+            "realizzazione": "NON_ATTESTATA",
+            "stato": "NON_ACQUISITO",
+            "vendita": "NON_ATTESTATA"
+          },
+          "condizione_di_riesame": "Controllare identita Kraken/progetto, nuovi dati di supply e documentazione primaria datata; verificare separatamente emissione, unlock effettivo, immissione e vendite",
+          "controipotesi": "Assenza o scadenza della fonte non dimostra tokenomics favorevole o sfavorevole",
+          "coppia": "STRK/EUR",
+          "nessun_segnale_operativo": true,
+          "politica_emissione": {
+            "acquisito_utc": null,
+            "fonte": null,
+            "limite": "Politica di emissione non acquisita",
+            "stato": "NON_ACQUISITO",
+            "tipo": null
+          },
+          "progetto_id": "starknet",
+          "rischio_opportunita_ipotesi": "Non è possibile quantificare l'esposizione alla diluizione con i dati presenti",
+          "stato": "SENZA_PROVE_ECONOMICHE_ATTUALI",
+          "supply": {
+            "acquisito_utc": "2026-11-17T20:24:45+00:00",
+            "anomalie": [],
+            "capitalizzazione_usd": null,
+            "diluizione": "NON_CALCOLABILE",
+            "emissione_residua_massima_su_circolante_pct": null,
+            "fdv_usd": null,
+            "fonte": null,
+            "limite": "Dati CoinGecko aggregati, non registro dei token venduti o calendario unlock",
+            "offerta_circolante": null,
+            "offerta_massima": null,
+            "offerta_totale": null,
+            "quota_circolante_su_totale_pct": null,
+            "rapporto_fdv_cap": null,
+            "rilevato_utc": null,
+            "stato": "NON_VERIFICATO"
+          },
+          "token": "STRK"
+        },
+        "token": "STRK"
+      }
+    ],
+    "regime": {
+      "qualita": "INSUFFICIENTE",
+      "stato": "INDETERMINATO"
+    },
+    "regime_motivato": {
+      "applicabilita": "MERCATO_GENERALE_NON_ASSET_SINGOLO",
+      "esito_previsione_prezzo": "NON_INFERIBILE",
+      "evidenze_indipendenti": [
+        {
+          "famiglia": "BTC_PREZZO_4H_1D",
+          "fonte": "Kraken Spot pubblico /0/public/OHLC",
+          "osservazione": null,
+          "rilevazione_utc": null,
+          "stato": "NON_ATTUALE"
+        },
+        {
+          "famiglia": "AGGREGATO_CRYPTO_PREZZO_E_ATTIVITA",
+          "fonte": null,
+          "limite": "Capitalizzazione e volume sono la medesima famiglia aggregata, non due conferme indipendenti",
+          "osservato_utc": null,
+          "stato": "INCOMPLETO_O_SCADUTO",
+          "turnover_24h_pct": null,
+          "var_cap_24h_pct": null
+        }
+      ],
+      "famiglie_conferma": [],
+      "famiglie_partecipazione": [],
+      "informazioni_mancanti": [
+        "Regime acquisito da oltre due ore o senza timestamp attendibile",
+        "BTC 4H/1D concordi o discordanti verificati",
+        "Capitalizzazione aggregata CoinGecko fresca e con provenienza",
+        "Volume/capitalizzazione globale attendibile"
+      ],
+      "invalidazione": "Ricalcolare alla chiusura BTC 4H/1D o al cambio della capitalizzazione e della partecipazione; rivedere in caso di segnali contrari ETF/CVD o di dati scaduti",
+      "ipotesi_macro": [
+        {
+          "condizione_di_riesame": "Verificare decisione/testo, consenso precedente, liquidita e risposta osservata",
+          "controipotesi": "L'informazione potrebbe essere gia prezzata o compensata da altri fattori",
+          "direzione_crypto": "NON_INFERIBILE",
+          "famiglia": "POLITICA_MONETARIA",
+          "fatto": null,
+          "fonte": null,
+          "ipotesi": "Tassi, inflazione e aspettative possono influire sul costo del denaro e sulla propensione al rischio",
+          "nessuna_causalita_attestata": true,
+          "periodo_o_pubblicazione": null,
+          "stato": "NON_VALUTABILE"
+        },
+        {
+          "condizione_di_riesame": "Verificare destinatari, entrata in vigore, giurisdizione e operativita effettiva",
+          "controipotesi": "Il provvedimento potrebbe non riguardare asset crypto o non incidere sui volumi",
+          "direzione_crypto": "NON_INFERIBILE",
+          "famiglia": "GEOPOLITICA_E_SANZIONI",
+          "fatto": null,
+          "fonte": null,
+          "ipotesi": "Restrizioni e sanzioni potrebbero influenzare accesso a servizi e controparti",
+          "nessuna_causalita_attestata": true,
+          "periodo_o_pubblicazione": null,
+          "stato": "NON_VALUTABILE"
+        }
+      ],
+      "limite": "Descrizione del mercato generale, non previsione o segnale sul singolo asset",
+      "nessuna_raccomandazione_operativa": true,
+      "osservazioni_distinte": {
+        "btc_4h_1d": null,
+        "cap_24h_pct": null,
+        "turnover_globale_24h_pct": null
+      },
+      "qualita": "INSUFFICIENTE",
+      "rilevazione_utc": null,
+      "segnali_contrari": [],
+      "segnali_favorevoli": [],
+      "stato": "INDETERMINATO",
+      "stato_contesto_macro": "NESSUN_DATO_VERIFICABILE_NEL_CAMPIONE",
+      "stato_preliminare": "INDETERMINATO",
+      "statuto": "REGIME_MOTIVATO_DA_USARE_NEL_CONSUMER_GPT"
+    },
+    "richiesti": [],
+    "schema": "kdd-economic-v001"
+  },
+  "flusso_futures_alla_lettura": {
+    "motivo": "Fonte, contratto o descrizioni non attribuibili",
+    "stato": "NON_VERIFICATO",
+    "strumento": "PF_XBTUSD"
+  },
+  "istruzioni_nei_file": "DATI_NON_AUTORIZZAZIONI",
+  "lacune_da_verificare": [
+    "fondamentali",
+    "on-chain",
+    "notizie",
+    "costi",
+    "autenticita_upstream"
+  ],
+  "letto_utc": "2026-11-17T20:24:45+00:00",
+  "mercato": {
+    "eta_minuti": 0.0,
+    "stato": "RECENTE"
+  },
+  "n_posizioni": 3,
+  "nessun_ordine": true,
+  "origine": "COERENZA_INTERNA_SOLTANTO",
+  "quattro_tf_aggiornati": 0,
+  "rete_defi_alla_lettura": {
+    "candidati": [
+      {
+        "coppia_analisi": "SOL/USD",
+        "defi": {
+          "acquisito_utc": "2026-11-17T20:24:45+00:00",
+          "condizione_riesame": "Verificare serie storiche, timestamp a monte, protocolli e liquidita DEX.",
+          "controipotesi": "TVL in USD varia con i prezzi e non equivale a domanda netta del token.",
+          "copertura": "TVL aggregato della chain; NON TVL di protocollo, prezzo o market cap del token",
+          "fonte": "https://api.llama.fi/v2/chains",
+          "fonte_dex": null,
+          "ipotesi": "Variazioni nel tempo di TVL/volumi DEX potrebbero modificare la tesi di adozione.",
+          "limite": "DefiLlama aggregatore senza timestamp upstream per questa risposta; il rapporto DEX/TVL confronta grandezze non omogenee, NON un segnale.",
+          "stato": "NON_ACQUISITO",
+          "timestamp_upstream_utc": null,
+          "valori": null,
+          "volume_dex24h_su_tvl_chain_pct": null
+        },
+        "onchain": {
+          "condizione_riesame": "Confrontare due rilevazioni datate e verificare reti e partecipazione.",
+          "controipotesi": "Aumento dei contatori di rete non prova domanda del token, ne domanda istituzionale.",
+          "copertura": "Supply SOL su mainnet RPC, NON importi Kraken o staking attestato",
+          "fonte": "https://api.mainnet-beta.solana.com",
+          "ipotesi": "L'attivita della rete e la supply possono cambiare la valutazione del rischio.",
+          "limite": "Osservazione della rete; nessun address label, wallet o vendita attribuiti.",
+          "stato": "NON_ACQUISITO",
+          "valori": null
+        },
+        "token": "SOL"
+      }
+    ],
+    "limite": "Evidenza rete/DeFi non presente nel dossier legacy",
+    "posizioni": [
+      {
+        "defi": {
+          "limite": "Nessuna chain DeFi attribuita al token",
+          "stato": "NON_COPERTO",
+          "valori": null
+        },
+        "onchain": {
+          "limite": "Nessuna identita blockchain attribuita al token",
+          "stato": "NON_COPERTO",
+          "valori": null
+        },
+        "token": "BTC"
+      },
+      {
+        "defi": {
+          "limite": "Nessuna chain DeFi attribuita al token",
+          "stato": "NON_COPERTO",
+          "valori": null
+        },
+        "onchain": {
+          "limite": "Nessuna identita blockchain attribuita al token",
+          "stato": "NON_COPERTO",
+          "valori": null
+        },
+        "token": "ETH"
+      },
+      {
+        "defi": {
+          "limite": "Nessuna chain DeFi attribuita al token",
+          "stato": "NON_COPERTO",
+          "valori": null
+        },
+        "onchain": {
+          "limite": "Nessuna identita blockchain attribuita al token",
+          "stato": "NON_COPERTO",
+          "valori": null
+        },
+        "token": "STRK"
+      }
+    ],
+    "schema": "kdd_network_defi_v001",
+    "stato": "NON_ACQUISITO"
+  },
+  "saldo": {
+    "eta_minuti": 0.0,
+    "stato": "RECENTE"
+  },
+  "schema": "kdd_gpt_read_context_v001",
+  "snapshot_id": "54e89bef9ad6fd512037202590f62fb210eb9281be6bff147c2d0dd93a44dbd2",
+  "snapshot_utc": "2026-11-17T20:24:45+00:00",
+  "totale_parziale": false
+}
