@@ -1372,6 +1372,41 @@ def _prior(previous, now):
     return previous
 
 
+
+# Rotation pointers are operational bookkeeping, NOT market/source observations.
+# Keep _prior()'s 30-day boundary unchanged for all economic evidence.
+_ROTATION_CURSOR_KEYS=(
+    "prossimo_progetto","prossima_emissione","prossima_issue",
+    "prossimo_security","prossimo_indicatore","prossimo_schedule",
+    "prossima_fonte_esterna","prossimo_kraken_status")
+
+
+def _rotation_cursors(previous, now):
+    """Recover only valid, primitive cursor fields, even if evidence expired."""
+    if not isinstance(previous,dict) or previous.get("schema")!=SCHEMA:
+        return {}
+    stamp=_time(previous.get("acquisito_utc"))
+    if not stamp or stamp>now+dt.timedelta(minutes=2):
+        return {}
+    return {name:previous[name] for name in _ROTATION_CURSOR_KEYS
+            if isinstance(previous.get(name),str)}
+
+
+def _eligible_cursor(cursors, name, eligible, *, successor=False):
+    """Resolve against CURRENT approved sources; never map data to old projects.
+
+    When a previously eligible project has been removed, the next lexical
+    successor (if present) receives the turn; wrap to first otherwise.
+    Unknown macro/feed IDs reset safely. No observation row is recovered.
+    """
+    value=cursors.get(name)
+    if value in eligible:
+        return value
+    if (successor and isinstance(value,str)
+            and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}",value)):
+        return next((key for key in eligible if key>value),None)
+    return None
+
 def _supply_samples(roster, old, now):
     samples = {}
     for row in old.get("storico_supply", [])[:MAX_SAMPLES]:
@@ -1421,6 +1456,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
     now = _utc(now)
     roster = _roster(items)
     old = _prior(previous, now)
+    cursors = _rotation_cursors(previous, now)
     paused=("NON_ACQUISITO_FUORI_REFRESH" if skipped_reason=="FUORI_REFRESH"
             else "RINVIATO_RATE_LIMIT_HTTP_429")
     # A project removed from wallet/scanner has no active row; cache may
@@ -1428,7 +1464,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
     old_governance={x["progetto_id"]:x for x in old.get("progetti",[])
                     if isinstance(x,dict) and x.get("progetto_id") in roster}
     eligible=[p for p in roster if _source_repo(roster[p]["source"])]
-    cursor=old.get("prossimo_progetto")
+    cursor=_eligible_cursor(cursors,"prossimo_progetto",eligible,successor=True)
     first=next((i for i,p in enumerate(eligible) if isinstance(cursor,str) and p>=cursor),0)
     selected=eligible[first:first+MAX_GOVERNANCE_CALLS] if network_allowed else []
     if network_allowed and len(selected)<min(MAX_GOVERNANCE_CALLS,len(eligible)):
@@ -1497,7 +1533,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
     emission_eligible=[p for p in roster if _emission_descriptor(roster[p]["source"])]
     old_emission={x["progetto_id"]:x for x in old.get("politiche_emissioni",[])
                   if isinstance(x,dict) and x.get("progetto_id") in roster}
-    emission_cursor=old.get("prossima_emissione")
+    emission_cursor=_eligible_cursor(cursors,"prossima_emissione",emission_eligible,successor=True)
     emission_start=next((i for i,p in enumerate(emission_eligible)
                          if isinstance(emission_cursor,str) and p>=emission_cursor),0)
     emission_selected=(emission_eligible[emission_start:emission_start+MAX_EMISSION_CALLS]
@@ -1546,7 +1582,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
     issue_projects=[key for key in roster if _issue_repo(roster[key]["source"])]
     past_issues={x["progetto_id"]:x for x in old.get("segnalazioni_repo",[])
                  if isinstance(x,dict) and x.get("progetto_id") in roster}
-    old_issue_cursor=old.get("prossima_issue")
+    old_issue_cursor=_eligible_cursor(cursors,"prossima_issue",issue_projects,successor=True)
     issue_start=next((i for i,project in enumerate(issue_projects)
                       if isinstance(old_issue_cursor,str) and project>=old_issue_cursor),0)
     issue_selected=(issue_projects[issue_start:issue_start+MAX_ISSUE_CALLS]
@@ -1586,7 +1622,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
     security_eligible=[p for p in roster if _security_repo(roster[p]["source"])]
     prior_security={e["progetto_id"]:e for e in old.get("avvisi_repository",[])
                     if isinstance(e,dict) and e.get("progetto_id") in roster}
-    next_s=old.get("prossimo_security")
+    next_s=_eligible_cursor(cursors,"prossimo_security",security_eligible,successor=True)
     start_s=next((i for i,p in enumerate(security_eligible)
                   if isinstance(next_s,str) and p>=next_s),0)
     chosen_s=(security_eligible[start_s:start_s+1] if network_allowed else [])
@@ -1622,7 +1658,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
     series=MACRO_SERIES
     past_macro={x["id"]:x for x in old.get("indicatori_macro",[])
                 if isinstance(x,dict) and x.get("id") in [s[0] for s in series]}
-    macro_cursor=old.get("prossimo_indicatore")
+    macro_cursor=_eligible_cursor(cursors,"prossimo_indicatore",[s[0] for s in series])
     pick=next((i for i,s in enumerate(series) if s[0]==macro_cursor),0)
     spec=series[pick]
     url=_series_url(spec)
@@ -1675,7 +1711,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
     # in catalog data; never reconstruct a calendar from FDV or CoinGecko supply.
     schedules=[]
     schedule_candidates=[p for p in roster if _schedule_descriptor(roster[p]["source"])]
-    sch_cursor=old.get("prossimo_schedule")
+    sch_cursor=_eligible_cursor(cursors,"prossimo_schedule",schedule_candidates,successor=True)
     sch_first=next((i for i,p in enumerate(schedule_candidates)
                     if isinstance(sch_cursor,str) and p>=sch_cursor),0)
     sch_selected=schedule_candidates[sch_first:sch_first+MAX_SCHEDULE_CALLS] if network_allowed else []
@@ -1787,7 +1823,9 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
     # Two first-party Statuspage endpoints, one public GET per real refresh.
     # Do not invent a listing event from AssetPairs alone.
     cycle=KRAKEN_STATUS_FEEDS+FINANCIAL_FEEDS+MACRO_RELEASE_FEEDS
-    status_cursor=old.get("prossima_fonte_esterna",old.get("prossimo_kraken_status"))
+    status_names=[feed[0] for feed in cycle]
+    status_cursor=(_eligible_cursor(cursors,"prossima_fonte_esterna",status_names)
+                   or _eligible_cursor(cursors,"prossimo_kraken_status",status_names))
     kix=next((i for i,f in enumerate(cycle)
               if f[0]==status_cursor),0)
     selected_status=(cycle[kix]
