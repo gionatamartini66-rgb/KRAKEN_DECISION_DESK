@@ -1,0 +1,198 @@
+{
+  "schema": "kdd43_cp5bis_stimuli_v1",
+  "snapshot_utc": "2026-11-17T20:24:45Z",
+  "payload_contract": [
+    "01_BUNDLE_PATRIMONIALE_SOLO_SINTETICO.json",
+    "02_CONTESTO_RIVALIDATO_BRIDGE.json",
+    "06_MANIFEST_FONTI_E_PROVENIENZE.json"
+  ],
+  "notice": "All holdings, values, cash and candidate positions are synthetic; sources P1/P2 public and in packet, P3 attached separately, P4 macro legacy, P5 secondary checkpoint. Scoring criteria are NOT in this file.",
+  "cases": {
+    "P1": {
+      "target": "BTC",
+      "scope": "SYNTHETIC_HOLDING",
+      "evidence_ids": [
+        "E-BTC-REL-32-1"
+      ],
+      "question": "Quali fatti economici su BTC sono e non sono deducibili dalla pubblicazione di Bitcoin Core 32.1? Confronta interpretazioni possibili e condizioni di riesame."
+    },
+    "P2": {
+      "target": "SOL",
+      "scope": "SYNTHETIC_CANDIDATE",
+      "evidence_ids": [
+        "E-SOL-AGAVE-441"
+      ],
+      "question": "Valuta il significato della release Agave 4.4.1 per un candidato SOL. Quale distinzione fra pubblicazione, adozione e conseguenze economiche resta necessaria?"
+    },
+    "P3": {
+      "target": "STRK",
+      "scope": "SYNTHETIC_HOLDING_WITH_EXTERNAL_PRIMARY_APPENDIX",
+      "evidence_ids": [
+        "E-STRK-SCHEDULE"
+      ],
+      "source_appendix": {
+        "url": "https://raw.githubusercontent.com/starknet-io/starknet-docs/main/learn/protocol/strk.mdx",
+        "meaning": "Starknet documentation reports monthly scheduled unlocks of up to 127 million STRK through March 2027. Next 15th after test date is December 15, 2026.",
+        "not_in_kdd_evidence": true
+      },
+      "question": "Quanto è conoscibile del calendario e quali dati ulteriori servirebbero per valutare un effetto economico, senza confondere previsione con esecuzione?"
+    },
+    "P4": {
+      "target": "GENERAL_MACRO",
+      "evidence_ids": [
+        "E-FED-20261028",
+        "E-UE-20261116"
+      ],
+      "facts": [
+        {
+          "source": "E-FED-20261028",
+          "time": "2026-10-28T18:00:00Z",
+          "range_percent": [
+            3.75,
+            4
+          ],
+          "decision": "maintain"
+        },
+        {
+          "source": "E-UE-20261116",
+          "time": "2026-11-16T11:35:00Z",
+          "persons": 12,
+          "entities": 101
+        }
+      ],
+      "question": "Distingui notizia datata e recente, contesto generale, scenario e contro-scenario. Quale nesso con un token è attestato?"
+    },
+    "P5": {
+      "target": "GENERAL_REGIME",
+      "evidence_ids": [
+        "E-REGIME-CP4-20261117"
+      ],
+      "source_status": "SECONDARY_NOT_VALIDATED_AS_PUBLIC_ORIGINAL",
+      "secondary_report": {
+        "btc_4h": "up",
+        "btc_1d": "down",
+        "global_marketcap_24h_pct": -3.7442925,
+        "turnover_to_cap_pct": 3.5682
+      },
+      "question": "Che cosa si può e non si può giudicare senza le risposte HTTP originali, e che cosa indica la discordanza di timeframe?"
+    },
+    "C1": {
+      "target": "BTC",
+      "evidence_ids": [
+        "E-C1-SUPPLY-REMOVED"
+      ],
+      "baseline_files": [
+        "01_BUNDLE_PATRIMONIALE_SOLO_SINTETICO.json",
+        "02_CONTESTO_RIVALIDATO_BRIDGE.json"
+      ],
+      "variant_files": [
+        "08_C1_BUNDLE_SINTETICO.json",
+        "08_C1_CONTEXTO_BRIDGE.json"
+      ],
+      "change": "Only synthetic BTC supply market source removed; software rebuilt both packet and bridge",
+      "question": "Quali affermazioni sui fondamentali sopravvivono e quali decadono? Confronta esplicitamente i due input."
+    },
+    "C2": {
+      "target": "BTC",
+      "evidence_ids": [
+        "E-C2-SUPPLY-CONFLICT"
+      ],
+      "controlled_sources": [
+        {
+          "issuer": "FICTIONAL_TEST_AUTHORITY_A",
+          "metric": "circulating_supply",
+          "unit": "BTC",
+          "period_utc": "2026-11-17T20:24:45Z",
+          "value": 10
+        },
+        {
+          "issuer": "FICTIONAL_TEST_AUTHORITY_B",
+          "metric": "circulating_supply",
+          "unit": "BTC",
+          "period_utc": "2026-11-17T20:24:45Z",
+          "value": 12
+        }
+      ],
+      "not_in_kdd_packet": true,
+      "question": "Confronta il conflitto tra fonti simulate, esaminando compatibilità di definizione, unità e periodo."
+    },
+    "C3": {
+      "target": "BTC",
+      "evidence_ids": [
+        "E-C3-CROSSPROJECT"
+      ],
+      "baseline_files": [
+        "01_BUNDLE_PATRIMONIALE_SOLO_SINTETICO.json",
+        "02_CONTESTO_RIVALIDATO_BRIDGE.json"
+      ],
+      "variant_files": [
+        "10_C3_BUNDLE_SINTETICO.json",
+        "10_C3_CONTEXTO_BRIDGE.json"
+      ],
+      "change": "BTC release source replaced with original official Agave SOL release",
+      "question": "Qual è il risultato attribuito a BTC nel bridge variante e che cosa si può inferire su Bitcoin dalla release Agave?"
+    },
+    "C4": {
+      "target": "BTC",
+      "evidence_ids": [
+        "E-C4-REGIME-CHANGE"
+      ],
+      "fixture_only": true,
+      "fundamentals_fixed": "Identical baseline synthetic BTC fundamentals",
+      "variants": [
+        {
+          "name": "A",
+          "market_regime": "RIALZISTA",
+          "data_status": "fresh consistent fictional observations"
+        },
+        {
+          "name": "B",
+          "market_regime": "TRANSIZIONE",
+          "data_status": "fresh conflicting fictional observations"
+        }
+      ],
+      "question": "A parità di fondamentali, come cambiano e come non cambiano rischi, alternative e riesame?"
+    },
+    "C5": {
+      "target": "SOL",
+      "evidence_ids": [
+        "E-C5-HEADLINE",
+        "E-SOL-AGAVE-441"
+      ],
+      "fixture_only": true,
+      "headline": "Stable new software version recommended for adoption",
+      "not_supplied": [
+        "observed validator uptake",
+        "new revenue",
+        "token buy-side demand",
+        "evidence of favorable price consequence"
+      ],
+      "question": "Può essere un segnale favorevole? In quali condizioni, con quali spiegazioni alternative?"
+    },
+    "C6": {
+      "target": "SYNTHETIC_PORTFOLIO",
+      "evidence_ids": [
+        "E-C6-TWO-ALTERNATIVES"
+      ],
+      "fixture_only": true,
+      "tradeoff_facts": {
+        "reallocation_eur_fictional": 500,
+        "real_fees_known": false,
+        "spread_and_access_known": false
+      },
+      "variants": [
+        {
+          "name": "A",
+          "fictional_cost_eur": 2,
+          "fictional_common_exposure_pct": 70
+        },
+        {
+          "name": "B",
+          "fictional_cost_eur": 8,
+          "fictional_common_exposure_pct": 48
+        }
+      ],
+      "question": "Confronta A, B e rinvio senza presumere che commissioni inventate o esposizioni siano misurate nella realtà."
+    }
+  }
+}

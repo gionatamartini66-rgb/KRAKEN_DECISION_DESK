@@ -1,6 +1,7 @@
 """Synthetic economic evidence tests: no private wallet, no network."""
 import copy
 import datetime as dt
+import json
 import unittest
 import kdd_economics as e
 
@@ -80,6 +81,8 @@ class EconomicEvidenceTests(unittest.TestCase):
         phase = [0]
 
         def public_source(url, timeout=12):
+            if "/coins/markets?" in url:
+                raise OSError("Batch not in legacy fixture: exercise individual fallback")
             if "/releases/latest" in url:
                 repo = url.split("/repos/")[1].split("/releases/")[0]
                 return json.dumps({"html_url": "https://github.com/" + repo +
@@ -224,6 +227,181 @@ class EconomicEvidenceTests(unittest.TestCase):
         self.assertEqual(e.regime({"timeframe":frames},glob,T)["stato"],"RIALZISTA")
         frames["4H"]["stato"]="SCADUTO"
         self.assertEqual(e.regime({"timeframe":frames},glob,T)["stato"],"INDETERMINATO")
+
+    def test_kdd43_btc_e_regime_id_json_key_order_and_historical_material(self):
+        """BTC regime evidence must survive sort_keys JSON without weakening ids."""
+        frames={tf:{"stato":"AGGIORNATO","figure_candlestick":{
+            "stato":"AGGIORNATO","trend_precedente":direction}}
+            for tf,direction in (("4H","LATERALE"),("1D","DISCESA"))}
+        market={"fonte":"https://api.coingecko.com/api/v3/global",
+                "aggiornato_sorgente_utc":T.timestamp(),
+                "var_capitalizzazione_24h_pct":-3.7,
+                "capitalizzazione_totale_usd":2000000,
+                "volume_24h_usd":80000}
+        base=e.regime({"timeframe":frames},market,T)
+        core=e.regime_participation(base,None,{},T)
+        btc=next(row for row in core["famiglie_osservate"]
+                 if row["famiglia"]=="TREND_BTC")
+        original=e.regime_integrato(core,{},T)
+        ref=original["evidenze_indipendenti"][0]["evidence_id"]
+        self.assertIsNotNone(ref)
+        original_order=btc["osservazione"]
+        historical=e.evidence_ref("REGIME","BTC_4H_1D",core["acquisito_utc"],
+            str({"4H":original_order["4H"],"1D":original_order["1D"]}))
+        self.assertEqual(ref,historical)  # Retain genuine historical 4H/1D ids.
+        swapped=copy.deepcopy(core)
+        row=next(x for x in swapped["famiglie_osservate"]
+                 if x["famiglia"]=="TREND_BTC")
+        row["osservazione"]={"1D":original_order["1D"],
+                             "4H":original_order["4H"]}
+        self.assertEqual(list(row["osservazione"]),["1D","4H"])
+        self.assertEqual(e.regime_integrato(swapped,{},T),original)
+        reread=json.loads(json.dumps(core,ensure_ascii=False,sort_keys=True))
+        self.assertEqual(e.regime_integrato(reread,{},T),original)
+        altered=copy.deepcopy(swapped)
+        row=next(x for x in altered["famiglie_osservate"]
+                 if x["famiglia"]=="TREND_BTC")
+        row["osservazione"]["4H"]="SALITA"
+        self.assertNotEqual(e.regime_integrato(altered,{},T)[
+            "evidenze_indipendenti"][0]["evidence_id"],ref)
+
+    def test_cp4_all_five_regimes_with_explicit_invalidations_and_alternatives(self):
+        """Discriminating CLOSED BTC 4H/1D trends + dated public aggregate."""
+        now=T
+        macro={"stato":"CON_EVIDENZE_DATATE",
+               "scenari_condizionali":[
+                   {"famiglia":"POLITICA_MONETARIA",
+                    "stato":"FATTO_CORRENTE_DA_INTERPRETARE",
+                    "direzione_crypto":"NON_INFERIBILE",
+                    "ipotesi":"Interest rates may affect risk-taking",
+                    "controipotesi":"Already priced"}]}
+        def core(four,day,change,volume=300000,age=0):
+            frames={label:{"stato":"AGGIORNATO","figure_candlestick":{
+                "stato":"AGGIORNATO",
+                "trend_precedente":trend}}
+                for label,trend in (("4H",four),("1D",day))}
+            global_row={"fonte":"https://api.coingecko.com/api/v3/global",
+                        "aggiornato_sorgente_utc":(now-dt.timedelta(hours=age)).timestamp(),
+                        "var_capitalizzazione_24h_pct":change,
+                        "capitalizzazione_totale_usd":3000000,
+                        "volume_24h_usd":volume}
+            a=e.regime({"timeframe":frames},global_row,now)
+            return e.regime_participation(a,{},{"indicatori_macro":[],
+                                               "flussi_finanziari":[]},now)
+        for first,second,change,expected in (
+            ("SALITA","SALITA",2,"RIALZISTA"),
+            ("DISCESA","DISCESA",-2,"RIBASSISTA"),
+            ("LATERALE","LATERALE",.2,"LATERALE"),
+            ("SALITA","SALITA",-2,"TRANSIZIONE"),
+            ("SALITA","SALITA",0,"INDETERMINATO")):
+            with self.subTest(expected=expected):
+                base=core(first,second,change)
+                reviewed=e.regime_integrato(base,macro,now)
+                self.assertEqual(reviewed["stato"],expected)
+                self.assertEqual(reviewed["esito_previsione_prezzo"],"NON_INFERIBILE")
+                self.assertEqual(reviewed["ipotesi_macro"][0]["direzione_crypto"],
+                                 "NON_INFERIBILE")
+                self.assertTrue(reviewed["invalidazione"])
+                if expected!="INDETERMINATO":
+                    self.assertEqual(len(reviewed["famiglie_conferma"]),2)
+                    self.assertEqual(reviewed["qualita"],
+                                     "PARZIALE_CON_CONTRADDIZIONI" if expected=="TRANSIZIONE"
+                                     else "PARZIALE")
+        # Previously the core stopped at BTC frame disagreement, before
+        # the already available global capital and volume were ever read.
+        disagree=core("SALITA","DISCESA",-3)
+        self.assertEqual(disagree["stato"],"TRANSIZIONE")
+        self.assertIn("CAPITALIZZAZIONE_CRYPTO_AGGREGATA",
+                      [x["famiglia"] for x in disagree["famiglie_osservate"]])
+        self.assertIn("ATTIVITA_AGGREGATA",
+                      [x["famiglia"] for x in disagree["famiglie_osservate"]])
+        self.assertEqual(e.regime_integrato(disagree,macro,now)["stato"],
+                         "TRANSIZIONE")
+        insufficient=core("SALITA","DISCESA",-3,volume=None)
+        self.assertEqual(e.regime_integrato(insufficient,macro,now)["stato"],
+                         "INDETERMINATO")
+        missing_volume=e.regime_integrato(core("SALITA","SALITA",2,volume=None),macro,now)
+        self.assertEqual(missing_volume["stato"],"INDETERMINATO")
+        self.assertTrue(any("Volume" in x for x in missing_volume["informazioni_mancanti"]))
+        stale_global=e.regime_integrato(core("SALITA","SALITA",2,age=4),macro,now)
+        self.assertEqual(stale_global["stato"],"INDETERMINATO")
+        delayed=e.regime_integrato(core("SALITA","SALITA",2),macro,now+dt.timedelta(hours=3))
+        self.assertEqual(delayed["stato"],"INDETERMINATO")
+        suspicious=core("DISCESA","DISCESA",-2)
+        suspicious["stato"]="RIALZISTA"
+        self.assertEqual(e.regime_integrato(suspicious,macro,now)["stato"],"INDETERMINATO")
+        unrelated_macro=e.regime_integrato(core("DISCESA","DISCESA",-2),
+            {"scenari_condizionali":[{"stato":"FATTO_CORRENTE_DA_INTERPRETARE",
+                                     "direzione_crypto":"RIALZISTA"}]},now)
+        self.assertEqual(unrelated_macro["stato"],"RIBASSISTA")
+
+    def test_cp4_two_distinct_participation_conflicts_are_not_bullish_confirmation(self):
+        now=T
+        frames={tf:{"stato":"AGGIORNATO","figure_candlestick":{
+            "stato":"AGGIORNATO","trend_precedente":"SALITA"}}
+            for tf in ("4H","1D")}
+        aggregate={"fonte":"https://api.coingecko.com/api/v3/global",
+                   "aggiornato_sorgente_utc":now.timestamp(),
+                   "var_capitalizzazione_24h_pct":1.8,
+                   "capitalizzazione_totale_usd":5000000,"volume_24h_usd":650000}
+        initial=e.regime({"timeframe":frames},aggregate,now)
+        derivative={"open-interest":{
+            "ultimo_punto_utc":now.isoformat(),"ultimo_punto_provvisorio":False,
+            "ultimo_close":110,"close_4h_fa":100},
+            "cvd":{
+            "ultimo_punto_utc":now.isoformat(),"ultimo_punto_provvisorio":False,
+            "ultimo_cvd":-20,"cvd_4h_fa":-10}}
+        primary={"indicatori_macro":[],"flussi_finanziari":[
+            {"id":"ETF_BTC_FARSIDE","stato":"OSSERVATO",
+             "fonte":"https://farside.co.uk/btc/",
+             "acquisito_utc":now.isoformat(),
+             "dati":{"periodo":(now-dt.timedelta(days=1)).date().isoformat(),
+                     "valore":-220}}]}
+        both=e.regime_participation(initial,derivative,primary,now)
+        reviewed=e.regime_integrato(both,{},now)
+        self.assertEqual(both["stato"],"RIALZISTA") # prior, technical layer
+        self.assertEqual(reviewed["stato"],"TRANSIZIONE")
+        self.assertEqual(reviewed["qualita"],"PARZIALE_CON_CONTRADDIZIONI")
+        self.assertEqual(reviewed["famiglie_conferma"],
+                         ["TREND_BTC_4H_1D","CAPITALIZZAZIONE_E_ATTIVITA_AGGREGATA"])
+        self.assertTrue(any("due famiglie" in x.lower()
+                            for x in reviewed["segnali_contrari"]))
+        old=copy.deepcopy(primary)
+        old["flussi_finanziari"][0]["stato"]="STORICO_NON_AGGIORNATO"
+        historic=e.regime_participation(initial,derivative,old,now)
+        reviewed_historic=e.regime_integrato(historic,{},now)
+        self.assertEqual(reviewed_historic["stato"],"RIALZISTA")
+        self.assertEqual(reviewed_historic["qualita"],"PARZIALE_CON_CONTRADDIZIONI")
+
+    def test_cp4_gpt_consumer_rereads_and_downgrades_forged_or_expired_regime(self):
+        source,positions,shortlist=self.sample()
+        source["fonti_economiche"]=e.sources_matrix()
+        frames={tf:{"stato":"AGGIORNATO","figure_candlestick":{
+            "stato":"AGGIORNATO","trend_precedente":"SALITA"}}
+            for tf in ("4H","1D")}
+        global_market={"fonte":"https://api.coingecko.com/api/v3/global",
+            "aggiornato_sorgente_utc":T.timestamp(),
+            "var_capitalizzazione_24h_pct":2,
+            "capitalizzazione_totale_usd":3000000,"volume_24h_usd":240000}
+        source["regime"]=e.regime_participation(
+            e.regime({"timeframe":frames},global_market,T),
+            {},{"indicatori_macro":[],"flussi_finanziari":[]},T)
+        at_gpt=e.at_read(source,positions,shortlist,T)
+        self.assertEqual(at_gpt["regime_motivato"]["stato"],"RIALZISTA")
+        self.assertEqual(len(at_gpt["posizioni"]),2)
+        self.assertEqual(len(at_gpt["candidati"]),1)
+        self.assertTrue(at_gpt["regime_motivato"]["nessuna_raccomandazione_operativa"]
+                        if "nessuna_raccomandazione_operativa" in at_gpt["regime_motivato"]
+                        else at_gpt["regime_motivato"]["esito_previsione_prezzo"]==
+                        "NON_INFERIBILE")
+        reread=e.at_read(at_gpt,positions,shortlist,T)
+        self.assertEqual(reread["regime_motivato"],at_gpt["regime_motivato"])
+        late=e.at_read(at_gpt,positions,shortlist,T+dt.timedelta(hours=3))
+        self.assertEqual(late["regime_motivato"]["stato"],"INDETERMINATO")
+        forged=copy.deepcopy(at_gpt)
+        forged["regime_motivato"]["stato"]="RIBASSISTA"
+        with self.assertRaisesRegex(ValueError,"Regime motivated summary tampered"):
+            e.at_read(forged,positions,shortlist,T)
 
     def test_g2_primary_release_cases_and_supply_no_invented_unlock(self):
         """Real primary-release metadata checked 11 Nov 2026; synthetic CoinGecko amounts."""
@@ -483,6 +661,10 @@ class EconomicEvidenceTests(unittest.TestCase):
                     {"token":"ZEC","coppia_analisi":"ZEC/EUR",
                      "kraken_pair_key":"ZECEUR"}],T,
                 asset_pairs=pairs,previous=previous)
+        # The operational dossier does this after the first economy producer.
+        # Exercise the actual bounded participation layer before packet.
+        economics["regime"]=e.regime_participation(
+            economics["regime"],{},economics.get("monitor_fonti"),T)
         self.assertLessEqual(economics["richieste_effettuate"],9)
         self.assertEqual(len(economics["posizioni"]),10)
         self.assertEqual(len(economics["candidati"]),1)
@@ -513,6 +695,47 @@ class EconomicEvidenceTests(unittest.TestCase):
         rows=at_gpt["evidenze_economiche_alla_lettura"]
         self.assertEqual(len(rows["posizioni"]),10)
         self.assertEqual(len(rows["candidati"]),1)
+        self.assertEqual(rows["contesto_macro_primario"]["stato"],
+                         "NESSUN_DATO_VERIFICABILE_NEL_CAMPIONE")
+        self.assertIn("regime_motivato",rows)
+        self.assertEqual(rows["regime_motivato"]["stato"],"RIALZISTA")
+        self.assertEqual(rows["regime_motivato"]["qualita"],"PARZIALE")
+        self.assertEqual(rows["regime_motivato"]["famiglie_conferma"],
+                         ["TREND_BTC_4H_1D","CAPITALIZZAZIONE_E_ATTIVITA_AGGREGATA"])
+        self.assertEqual(rows["regime_motivato"]["esito_previsione_prezzo"],
+                         "NON_INFERIBILE")
+        self.assertTrue(all(x["nessuna_causalita_attestata"] for x in
+                            rows["contesto_macro_primario"]["scenari_condizionali"]))
+        self.assertEqual(rows["copertura_eventi"]["posizioni"]["totali"],10)
+        self.assertEqual(rows["copertura_eventi"]["candidati"]["totali"],1)
+        self.assertEqual(rows["posizioni"][tokens.index("BTC")]
+                         ["quadro_eventi"]["eventi"][0]["tipo"],"RELEASE_SOFTWARE")
+        self.assertIsNone(rows["posizioni"][tokens.index("BTC")]
+                          ["quadro_eventi"]["eventi"][0]["efficacia_confermata_utc"])
+        self.assertEqual(rows["candidati"][0]["quadro_eventi"]["progetto_id"],"zcash")
+        self.assertEqual(rows["copertura_integrazione"]["posizioni"]
+                         ["quattro_famiglie_esposte"],10)
+        self.assertEqual(rows["copertura_integrazione"]["candidati"]
+                         ["quattro_famiglie_esposte"],1)
+        self.assertEqual([r["giudizio_economico_integrato"]["token"]
+                          for r in rows["posizioni"]],tokens)
+        self.assertTrue(all(r["giudizio_economico_integrato"]["ordine"]==
+                            "NON_GENERATO" for r in rows["posizioni"]+rows["candidati"]))
+        self.assertTrue(all(len(r["giudizio_economico_integrato"]["componenti"])==4
+                            for r in rows["posizioni"]+rows["candidati"]))
+        self.assertEqual(rows["copertura_tokenomics"]["posizioni"]["totali"],10)
+        self.assertEqual(rows["copertura_tokenomics"]["candidati"]["totali"],1)
+        self.assertEqual(len([r for r in rows["posizioni"]
+                              if isinstance(r.get("quadro_tokenomics"),dict)]),10)
+        self.assertEqual(rows["posizioni"][tokens.index("BTC")]
+                         ["quadro_tokenomics"]["token"],"BTC")
+        self.assertTrue(rows["posizioni"][tokens.index("SOL")]
+                        ["quadro_tokenomics"]["controipotesi"])
+        self.assertEqual(rows["candidati"][0]["quadro_tokenomics"]["token"],"ZEC")
+        self.assertEqual(rows["candidati"][0]["quadro_tokenomics"]["calendario"]
+                         ["categoria"],"NON_VERIFICATO")
+        self.assertIsNone(rows["candidati"][0]["quadro_tokenomics"]
+                          ["supply"]["offerta_circolante"])
         self.assertEqual(rows["posizioni"][tokens.index("BTC")]["evento"]["tag"],"v32.1")
         self.assertEqual(rows["posizioni"][tokens.index("SOL")]["evento"]["tag"],"v4.4.1")
         self.assertIsNone(rows["candidati"][0]["fondamentali"]["prossimo_unlock_utc"])
@@ -525,11 +748,145 @@ class EconomicEvidenceTests(unittest.TestCase):
         self.assertNotEqual(old["mercato"]["stato"],"RECENTE")
         self.assertEqual(old["evidenze_economiche_alla_lettura"]["regime"]
                          ["qualita"],"SCADUTO")
+        self.assertEqual(old["evidenze_economiche_alla_lettura"]
+                         ["regime_motivato"]["stato"],"INDETERMINATO")
+        self.assertEqual(old["evidenze_economiche_alla_lettura"]
+                         ["copertura_tokenomics"]["posizioni"]["supply_attuale"],0)
+        self.assertTrue(all(r["quadro_tokenomics"]["supply"]["stato"]!="VERIFICATO"
+                            for r in old["evidenze_economiche_alla_lettura"]["posizioni"]))
+        self.assertEqual(old["evidenze_economiche_alla_lettura"]
+                         ["copertura_integrazione"]["posizioni"]
+                         ["quattro_famiglie_esposte"],10)
+        self.assertTrue(all(r["giudizio_economico_integrato"]["previsione_prezzo"]
+                            =="NON_INFERIBILE" for r in
+                            old["evidenze_economiche_alla_lettura"]["posizioni"]))
+
         changed=copy.deepcopy(bundle)
         changed["packet"]["evidenze_multifonte"]["economia"]["candidati"][0]["token"]="BTC"
         changed["packet_sha256"]=bridge.digest(changed["packet"])
         with self.assertRaises(bridge.BridgeError):
             bridge.read_context(changed,now=T)
+
+    def test_cp5_four_families_jointly_attributed_with_historical_release_and_stale_reads(self):
+        source,positions,shortlist=self.sample()
+        source["fonti_economiche"]=e.sources_matrix()
+        # Synthetic but real KDD-20 source validator, with publication earlier
+        # than its GET. A newly acquired OLD release is never a new event.
+        ident=source["posizioni"][0]["identita"]
+        repo=ident["repository_primario"]
+        published=T-dt.timedelta(days=24)
+        source["posizioni"][0]["evento"]=e.release_event(ident,{
+            "html_url":"https://github.com/"+repo+"/releases/tag/v1.0",
+            "tag_name":"v1.0","name":"Historical release",
+            "published_at":published.isoformat(),
+            "draft":False,"prerelease":False},T,T)
+        source["posizioni"][1]["fondamentali"]=e.fundamentals({},None,T,T)
+        frames={tf:{"stato":"AGGIORNATO","figure_candlestick":{
+            "stato":"AGGIORNATO","trend_precedente":trend}}
+            for tf,trend in (("4H","SALITA"),("1D","DISCESA"))}
+        global_row={"fonte":"https://api.coingecko.com/api/v3/global",
+            "aggiornato_sorgente_utc":T.timestamp(),
+            "var_capitalizzazione_24h_pct":-1.4,
+            "capitalizzazione_totale_usd":5_000_000,
+            "volume_24h_usd":400_000}
+        source["regime"]=e.regime_participation(
+            e.regime({"timeframe":frames},global_row,T),
+            {},{"indicatori_macro":[],"flussi_finanziari":[]},T)
+        read=e.at_read(source,positions,shortlist,T)
+        self.assertEqual((len(read["posizioni"]),len(read["candidati"])),(2,1))
+        self.assertEqual(read["copertura_integrazione"]["posizioni"]
+                         ["quattro_famiglie_esposte"],2)
+        for group in ("posizioni","candidati"):
+            for item in read[group]:
+                view=item["giudizio_economico_integrato"]
+                self.assertEqual(view["token"],item["token"])
+                self.assertEqual(view["progetto_id"],item["identita"]["coingecko_id"])
+                self.assertEqual(set(view["componenti"]),
+                    {"fondamentali","eventi","macroeconomia","regime"})
+                self.assertEqual({x["ambito"] for x in view["ipotesi_e_alternative"]},
+                    {"FONDAMENTALI","EVENTI","MACROECONOMIA","REGIME"})
+                self.assertEqual(view["previsione_prezzo"],"NON_INFERIBILE")
+                self.assertEqual(view["raccomandazione"],"NON_GENERATA")
+                self.assertEqual(view["ordine"],"NON_GENERATO")
+        btc=read["posizioni"][0]["giudizio_economico_integrato"]
+        sol=read["posizioni"][1]["giudizio_economico_integrato"]
+        self.assertEqual(btc["componenti"]["fondamentali"]["stato_informazione"],
+                         "RECENTE")
+        self.assertEqual(btc["componenti"]["eventi"]["stato_informazione"],
+                         "STORICA")
+        self.assertEqual(btc["componenti"]["eventi"]["riferimenti"][0]
+                         ["pubblicato_utc"],published.isoformat(timespec="seconds"))
+        self.assertEqual(btc["componenti"]["eventi"]["riferimenti"][0]
+                         ["acquisito_utc"],T.isoformat(timespec="seconds"))
+        self.assertEqual(btc["componenti"]["regime"]["stato_informazione"],
+                         "CONTRADDITTORIA")
+        self.assertEqual(btc["componenti"]["regime"]["stato"],"TRANSIZIONE")
+        self.assertEqual(btc["componenti"]["macroeconomia"]["stato_informazione"],
+                         "NON_DISPONIBILE")
+        self.assertEqual(sol["componenti"]["fondamentali"]["stato_informazione"],
+                         "NON_DISPONIBILE")
+        # Same-time second consumer cannot take ownership of a forged summary.
+        reread=e.at_read(read,positions,shortlist,T)
+        self.assertEqual(reread["posizioni"][0]["giudizio_economico_integrato"],btc)
+        forged=copy.deepcopy(read)
+        forged["posizioni"][0]["giudizio_economico_integrato"]["raccomandazione"]="BUY"
+        with self.assertRaisesRegex(ValueError,"Integrated economic GPT view altered"):
+            e.at_read(forged,positions,shortlist,T)
+        old=e.at_read(read,positions,shortlist,T+dt.timedelta(days=3))
+        old_btc=old["posizioni"][0]["giudizio_economico_integrato"]
+        self.assertEqual(old_btc["componenti"]["fondamentali"]["stato_informazione"],
+                         "SCADUTA")
+        self.assertEqual(old_btc["componenti"]["regime"]["stato_informazione"],
+                         "SCADUTA")
+        self.assertEqual(old_btc["componenti"]["eventi"]["stato_informazione"],
+                         "STORICA")
+        expired=e.at_read(read,positions,shortlist,T+dt.timedelta(days=8))
+        self.assertEqual(expired["posizioni"][0]["giudizio_economico_integrato"]
+                         ["componenti"]["eventi"]["stato_informazione"],"SCADUTA")
+        self.assertEqual(old_btc["previsione_prezzo"],"NON_INFERIBILE")
+
+    def test_cp5_distinguishes_macro_current_historic_expired_and_future_event(self):
+        source,positions,shortlist=self.sample()
+        row=e.at_read(source,positions,shortlist,T)["posizioni"][0]
+        row["quadro_eventi"]={"stato":"EVENTI_O_DOCUMENTI_RILEVANTI_NEL_CAMPIONE",
+             "eventi":[{
+                 "tipo":"UNLOCK_SOLO_PROGRAMMATO",
+                 "stato_prova":"PROGRAMMA_PRIMARIO",
+                 "fonte":"https://example.org/schedule",
+                 "efficacia_programmata_utc":(T+dt.timedelta(days=15)).isoformat(),
+                 "efficacia_confermata_utc":None,
+                 "acquisito_utc":T.isoformat(),
+                 "pubblicato_utc":(T-dt.timedelta(days=50)).isoformat()}]}
+        macro={"fatti":[
+             {"stato_prova":"PUBBLICAZIONE_RECENTE",
+              "fonte":"https://www.federalreserve.gov/newsevents/pressreleases/monetary20261028a.htm",
+              "pubblicato_utc":T.isoformat(),"acquisito_utc":T.isoformat()},
+             {"stato_prova":"PUBBLICAZIONE_DATATA_O_NON_RICONFERMATA",
+              "fonte":"https://www.federalreserve.gov/old",
+              "pubblicato_utc":(T-dt.timedelta(days=40)).isoformat()}],
+             "scenari_condizionali":[{"ipotesi":"Possibile rischio",
+                                      "controipotesi":"Effetto assente",
+                                      "condizione_di_riesame":"Verificare"}]}
+        regime={"stato":"INDETERMINATO","qualita":"INSUFFICIENTE",
+                "rilevazione_utc":T.isoformat(),"evidenze_indipendenti":[]}
+        view=e.integrated_asset_view(row,macro,regime,T)
+        self.assertEqual(view["componenti"]["eventi"]["stato_informazione"],
+                         "PROGRAMMATA")
+        self.assertEqual(view["componenti"]["eventi"]
+                         ["eventi_programmati_non_eseguiti"],1)
+        self.assertEqual(view["componenti"]["macroeconomia"]["stato_informazione"],
+                         "RECENTE")
+        self.assertEqual(view["componenti"]["macroeconomia"]["fatti_storici"],1)
+        self.assertEqual(view["componenti"]["regime"]["stato_informazione"],
+                         "NON_DISPONIBILE")
+        self.assertEqual(view["causalita_sul_prezzo"],"NON_ATTESTATA")
+        row["identita"]["stato"]="NON_VERIFICATO"
+        no_identity=e.integrated_asset_view(row,macro,regime,T)
+        self.assertIsNone(no_identity["progetto_id"])
+        self.assertEqual(no_identity["componenti"]["eventi"]["stato_informazione"],
+                         "NON_DISPONIBILE")
+        self.assertEqual(no_identity["componenti"]["fondamentali"]["stato_informazione"],
+                         "NON_DISPONIBILE")
 
     def sample(self):
         positions=[{"token":"BTC"},{"token":"SOL"}]
@@ -549,6 +906,515 @@ class EconomicEvidenceTests(unittest.TestCase):
                 "regime":{"stato":"RIALZISTA","qualita":"PARZIALE"},
                 "macro":e.macro([],T)}
         return source,positions,shortlist
+
+    def test_cp2_releases_rotate_all_projects_and_read_as_historical(self):
+        """Four curated real repositories, synthetic response bytes, two cycles."""
+        import json
+        import dossier_trade as producer
+        from unittest import mock
+        tokens=("BTC","ETH","SOL","ADA")
+        pairs={t+"EUR":{"wsname":t+"/EUR","status":"online"} for t in tokens}
+        wallet={"posizioni":[{"token":t} for t in tokens]}
+        four={"posizioni":[{"token":t,"coppia":t+"/EUR","pair_key":t+"EUR"}
+                            for t in tokens]}
+        releases=[]
+        phase=[0]
+        def fetch(url,timeout=12):
+            if "/releases/latest" in url:
+                repo=url.split("/repos/")[1].split("/releases/")[0]
+                releases.append((phase[0],repo))
+                return json.dumps({
+                    "html_url":"https://github.com/"+repo+"/releases/tag/v27.1",
+                    "tag_name":"v27.1","published_at":T.isoformat(),
+                    "name":"Release published on the project repository",
+                    "draft":False,"prerelease":False}).encode()
+            if "/coins/" in url:
+                coin_id=url.split("/coins/")[1].split("?")[0]
+                token=next(t for t in tokens if e.PROJECTS[t][0]==coin_id)
+                return json.dumps(self.market(self.ident(token))).encode()
+            raise OSError("Other primary source unavailable in isolated synthetic probe")
+        with mock.patch.object(producer.desk,"request",side_effect=fetch),\
+             mock.patch.object(producer.time,"sleep"):
+            first=producer.economic_evidence({"feed":[]},wallet,four,[],T,
+                                              asset_pairs=pairs)
+            phase[0]=1
+            second=producer.economic_evidence({"feed":[]},wallet,four,[],
+                T+dt.timedelta(minutes=10),asset_pairs=pairs,previous=first)
+        repositories=set(e.PROJECTS[t][2] for t in tokens)
+        self.assertEqual(first["richieste_release"],3)
+        self.assertEqual(second["richieste_release"],3)
+        self.assertEqual(len({repo for _,repo in releases}),4)
+        self.assertEqual(first["copertura_release"]["repository_associati"],4)
+        self.assertEqual(second["copertura_release"]["repository_associati"],4)
+        self.assertLessEqual(first["richieste_effettuate"],9)
+        self.assertLessEqual(second["richieste_effettuate"],9)
+        fresh_first={row["evento"].get("emittente") for row in first["posizioni"]
+                     if row["evento"]["stato"]=="VERIFICATO"}
+        self.assertEqual(len(fresh_first),3)
+        second_verified={repo for phaseid,repo in releases if phaseid==1}
+        historic=repositories-second_verified
+        self.assertEqual(len(historic),1)
+        historical_row=next(r for r in second["posizioni"]
+                             if r["identita"]["repository_primario"] in historic)
+        self.assertEqual(historical_row["evento"]["stato"],
+                         "STORICO_NON_AGGIORNATO")
+        self.assertEqual(historical_row["evento"]["acquisito_utc"],T.isoformat(timespec="seconds"))
+        read=e.at_read(second,wallet["posizioni"],[],T+dt.timedelta(minutes=10))
+        self.assertEqual(read["copertura_eventi"]["posizioni"]["totali"],4)
+        self.assertEqual(read["copertura_eventi"]["posizioni"]["con_documenti_o_avvisi"],4)
+        self.assertEqual(read["copertura_eventi"]["posizioni"]["release_storiche"],1)
+        self.assertEqual(read["copertura_eventi"]["posizioni"]["release_confermate_alla_lettura"],3)
+        for entry in read["posizioni"]:
+            event=entry["quadro_eventi"]["eventi"][0]
+            self.assertEqual(event["tipo"],"RELEASE_SOFTWARE")
+            self.assertEqual(event["fonte"],entry["evento"]["fonte"])
+            self.assertIsNone(event["efficacia_confermata_utc"])
+            self.assertTrue(event["controipotesi"])
+        later=e.at_read(read,wallet["posizioni"],[],T+dt.timedelta(days=8))
+        self.assertEqual(later["copertura_eventi"]["posizioni"]["release_confermate_alla_lettura"],0)
+        self.assertTrue(all(row["evento"]["stato"]=="SCADUTO" for row in later["posizioni"]))
+        tampered=copy.deepcopy(second)
+        tampered["posizioni"][0]["evento"]["tag"]="fabricated"
+        with self.assertRaisesRegex(ValueError,"Release attribution"):
+            e.at_read(tampered,wallet["posizioni"],[],T+dt.timedelta(minutes=10))
+        altered=copy.deepcopy(read)
+        altered["posizioni"][0]["quadro_eventi"]["eventi"][0][
+            "efficacia_confermata_utc"]=T.isoformat()
+        with self.assertRaisesRegex(ValueError,"Project events at read distorted"):
+            e.at_read(altered,wallet["posizioni"],[],T+dt.timedelta(minutes=10))
+
+    def test_cp2_published_repository_advisory_goes_to_gpt_without_fake_exploit(self):
+        import json
+        import kdd_economic_sources as primary
+        source,positions,shortlist=self.sample()
+        source["fonti_economiche"]=e.sources_matrix()
+        repo="bitcoin/bitcoin"
+        ghsa="GHSA-abcd-efgh-ijkl"
+        url="https://github.com/"+repo+"/security/advisories/"+ghsa
+        def fetch(endpoint):
+            if endpoint.endswith("/security-advisories?per_page=5"):
+                if endpoint=="https://api.github.com/repos/"+repo+"/security-advisories?per_page=5":
+                    return json.dumps([{"ghsa_id":ghsa,"html_url":url,
+                        "summary":"Repository advisory in synthetic fixture",
+                        "state":"published","published_at":T.isoformat(),
+                        "withdrawn_at":None}]).encode()
+            if "/pulls?" in endpoint or "/issues?" in endpoint:
+                return b"[]"
+            raise OSError("Other primary unavailable")
+        source["monitor_fonti"]=primary.collect(
+            T,source,{},fetch,network_allowed=True)
+        first=e.at_read(source,positions,shortlist,T)
+        btc=first["posizioni"][0]["quadro_eventi"]
+        advisories=[x for x in btc["eventi"]
+                    if x["tipo"]=="AVVISO_SICUREZZA_REPOSITORY"]
+        self.assertEqual(len(advisories),1)
+        self.assertEqual(advisories[0]["fonte"],url)
+        self.assertEqual(advisories[0]["categoria"],"ADVISORY_SICUREZZA_NON_EXPLOIT")
+        self.assertIsNone(advisories[0]["efficacia_confermata_utc"])
+        self.assertTrue(advisories[0]["controipotesi"])
+        self.assertEqual(first["posizioni"][1]["quadro_eventi"]["progetto_id"],"solana")
+        after=e.at_read(first,positions,shortlist,T+dt.timedelta(days=15))
+        self.assertFalse(any(x["tipo"]=="AVVISO_SICUREZZA_REPOSITORY"
+            for x in after["posizioni"][0]["quadro_eventi"]["eventi"]))
+        forged=copy.deepcopy(source)
+        btcrow=next(x for x in forged["monitor_fonti"]["avvisi_repository"]
+                    if x["progetto_id"]=="bitcoin")
+        btcrow["avvisi"][0]["fonte"]="https://github.com/unrelated/client/security/advisories/"+ghsa
+        with self.assertRaises(ValueError):
+            e.at_read(forged,positions,shortlist,T)
+
+    def test_cp2_completed_kraken_maintenance_and_old_proposals_are_not_current_news(self):
+        identity=self.ident("BTC")
+        old="2023-06-21T17:02:10+00:00"
+        row={"token":"BTC","identita":identity,"evento":e.release_event(identity,None,T,T),
+             "valutazione_fonti_primarie":{"fatti":[
+                 {"tipo":"ANNUNCIO_UFFICIALE_KRAKEN",
+                  "fonte":"https://status.kraken.com/incidents/maintenance",
+                  "stato_prova":"COMUNICAZIONE_CONCLUSA",
+                  "pubblicato_o_periodo_utc":T.isoformat(),
+                  "dettaglio":{"tipo":"EVENTO_SERVIZIO","stato":"resolved"},
+                  "acquisito_utc":T.isoformat(),"fatto":"Routine concluded"},
+                 {"tipo":"PROPOSTA_GOVERNANCE_DOCUMENTALE",
+                  "fonte":"https://github.com/bitcoin/bips/pull/101",
+                  "stato_prova":"PROPOSTA_DOCUMENTALE",
+                  "pubblicato_o_periodo_utc":old,
+                  "acquisito_utc":T.isoformat(),
+                  "dettaglio":{"stato_documento":"INCORPORATO_NEL_REPO"},
+                  "fatto":"Old documentation"},
+                 {"tipo":"ANNUNCIO_UFFICIALE_KRAKEN",
+                  "fonte":"https://status.kraken.com/incidents/delisting",
+                  "stato_prova":"COMUNICAZIONE_UFFICIALE",
+                  "pubblicato_o_periodo_utc":T.isoformat(),
+                  "acquisito_utc":T.isoformat(),
+                  "dettaglio":{"tipo":"DELISTING_COMUNICATO",
+                              "creato_fonte_utc":T.isoformat()},
+                  "fatto":"Documented delisting notice"}]}}
+        view=e.project_events_view(row,{"letto_utc":T.isoformat()})
+        self.assertEqual(view["notifiche_ordinarie_escluse"],1)
+        self.assertEqual(len(view["eventi"]),2)
+        old_doc=next(x for x in view["eventi"]
+                     if x["tipo"]=="PROPOSTA_GOVERNANCE_DOCUMENTALE")
+        self.assertEqual(old_doc["stato_prova"],
+                         "DOCUMENTO_DATATO_NON_RICONFERMA_DECISIONE")
+        self.assertEqual(old_doc["prova_documento_origine"],"PROPOSTA_DOCUMENTALE")
+        delisting=next(x for x in view["eventi"]
+                       if x["tipo"]=="ANNUNCIO_UFFICIALE_KRAKEN")
+        self.assertEqual(delisting["stato_prova"],"COMUNICAZIONE_UFFICIALE")
+        self.assertIsNone(delisting["efficacia_confermata_utc"])
+
+    def test_cp2_repository_event_types_do_not_claim_execution_or_price_causality(self):
+        ident=self.ident("BTC")
+        row={"token":"BTC","identita":ident,
+             "evento":e.release_event(ident,None,T,T),
+             "valutazione_fonti_primarie":{"fatti":[
+                {"tipo":"PROPOSTA_GOVERNANCE_DOCUMENTALE",
+                 "fonte":"https://github.com/bitcoin/bips/pull/101",
+                 "fatto":"Document PR","pubblicato_o_periodo_utc":T.isoformat(),
+                 "acquisito_utc":T.isoformat(),"stato_prova":"PROPOSTA_DOCUMENTALE",
+                 "dettaglio":{"stato_documento":"INCORPORATO_NEL_REPO"}},
+                {"tipo":"AVVISO_SICUREZZA_REPOSITORY",
+                 "fonte":"https://github.com/bitcoin/bitcoin/security/advisories/GHSA-abcd-efgh-ijkl",
+                 "fatto":"Repository advisory","pubblicato_o_periodo_utc":T.isoformat(),
+                 "acquisito_utc":T.isoformat(),"stato_prova":"DOCUMENTO_REPOSITORY",
+                 "dettaglio":{"stato":"PUBBLICATO"}},
+                {"tipo":"UNLOCK_MASSIMO_DATATO_PRIMARIO",
+                 "fonte":"https://example.com/primary-schedule",
+                 "fatto":"Documented maximum","pubblicato_o_periodo_utc":"2026-12-15",
+                 "acquisito_utc":T.isoformat(),"stato_prova":"MASSIMO_PRIMARIO_PROGRAMMATO"}],
+                 "non_mostrati_per_tipo":{}}}
+        view=e.project_events_view(row,{})
+        self.assertEqual(len(view["eventi"]),3)
+        self.assertTrue(view["nessuna_causalita_di_prezzo"])
+        self.assertTrue(all(x["efficacia_confermata_utc"] is None
+                            for x in view["eventi"]))
+        self.assertIsNone(view["eventi"][2]["pubblicato_utc"])
+        self.assertEqual(view["eventi"][2]["efficacia_programmata_utc"],"2026-12-15")
+        self.assertEqual(view["eventi"][0]["categoria"],"DOCUMENTO_NON_VOTO_DI_RETE")
+        self.assertEqual(view["eventi"][1]["categoria"],"ADVISORY_SICUREZZA_NON_EXPLOIT")
+        # A ticker alone cannot authorize a cached event of a different project.
+        unknown={"token":"BTC","identita":{"stato":"NON_VERIFICATO",
+                 "coppia":"BTC/EUR","coingecko_id":"bitcoin"},
+                 "evento":row["evento"],"valutazione_fonti_primarie":{"fatti":[]}}
+        result=e.project_events_view(unknown,{})
+        self.assertEqual(result["stato"],"IDENTITA_NON_VERIFICATA")
+        self.assertFalse(result["eventi"])
+
+    def test_cp3_duplicate_rss_and_numeric_macro_are_reconciled_without_trade_claim(self):
+        url=("https://www.federalreserve.gov/newsevents/pressreleases/"
+             "monetary20261108a.htm")
+        p={"letto_utc":T.isoformat(),
+           "eventi_macro_ufficiali":[
+               {"id":"FED_MONETARY_RSS","stato":"OSSERVATO",
+                "stato_alla_lettura":"OSSERVATO","acquisito_utc":T.isoformat(),
+                "eventi":[{"tipo":"FED_COMUNICATO_MONETARIO",
+                           "categoria":"POLITICA_MONETARIA_USA",
+                           "titolo":"Federal Reserve issues FOMC statement",
+                           "fonte":url,"pubblicato_utc":T.isoformat(),
+                           "precisione_pubblicazione":"ORARIO_RSS",
+                           "aggiornato_fonte_utc":None}]},
+               {"id":"EU_COUNCIL_RSS","stato":"RINVIATO_BUDGET","eventi":[]}
+           ],
+           "indicatori_macro":[{
+               "id":"ECB_DEPOSIT_RATE","stato":"OSSERVATO",
+               "periodo":"2026-11-08","valore":2.5,
+               "acquisito_utc":T.isoformat(),
+               "unita":"percentuale annua",
+               "fonte":"https://data-api.ecb.europa.eu/service/data/FM/example"}],
+           "flussi_finanziari":[{
+               "id":"ETF_BTC_FARSIDE","stato":"STORICO_NON_AGGIORNATO",
+               "stato_alla_lettura":"SCADUTO","acquisito_utc":T.isoformat(),
+               "fonte":"https://farside.co.uk/btc/",
+               "dati":{"periodo":"2026-10-01","valore":-10,
+                       "unita":"milioni USD"}}]}
+        feed=e.macro([{"fonte":"Fed — politica monetaria","link":url,
+                       "titolo":"Federal Reserve issues FOMC statement",
+                       "data":T.isoformat()}],T)
+        ctx=e.macro_primary_context(p,feed,T)
+        self.assertEqual(ctx["duplicati_rss_gia_contati"],1)
+        self.assertEqual(len([f for f in ctx["fatti"]
+                             if f["classe"]=="COMUNICATO_UFFICIALE"]),1)
+        self.assertEqual(ctx["numero_indicatori_attuali"],1)
+        self.assertEqual(ctx["numero_flussi_attuali"],0)
+        self.assertEqual(ctx["scenari_condizionali"][0]["stato"],
+                         "FATTO_CORRENTE_DA_INTERPRETARE")
+        self.assertEqual(ctx["scenari_condizionali"][1]["stato"],"NON_VALUTABILE")
+        self.assertTrue(all(x["direzione_crypto"]=="NON_INFERIBILE"
+                             for x in ctx["scenari_condizionali"]))
+        self.assertTrue(ctx["nessuna_raccomandazione_operativa"])
+
+    def test_cp1_current_supply_plus_independent_issuance_is_not_called_missing(self):
+        row={"token":"SOL","identita":self.ident("SOL"),
+             "fondamentali":e.fundamentals(
+                 self.ident("SOL"),self.market(self.ident("SOL")),T,T)}
+        primary={"politiche_emissioni":[{
+            "progetto_id":"solana","stato":"OSSERVATO",
+            "stato_alla_lettura":"OSSERVATO",
+            "fonte":"https://api.mainnet.solana.com",
+            "acquisito_utc":T.isoformat()}]}
+        view=e.tokenomics_view(row,primary)
+        self.assertEqual(view["stato"],"SUPPLY_E_POLITICA_EMISSIONE")
+        self.assertEqual(view["supply"]["stato"],"VERIFICATO")
+        self.assertEqual(view["politica_emissione"]["stato"],"OSSERVATO")
+        self.assertEqual(view["calendario"]["categoria"],"NON_VERIFICATO")
+        self.assertEqual(view["calendario"]["vendita"],"NON_ATTESTATA")
+
+    def test_cp1_single_public_batch_covers_ten_holdings_two_candidates_and_stale_reuse(self):
+        """Actual producer and GPT reader, public batch JSON fixture; no wallet."""
+        import json
+        import urllib.error
+        from urllib.parse import urlparse,parse_qs
+        import dossier_trade as producer
+        from unittest import mock
+        assets=["BNB","FET","JUP","NEAR","RENDER","SOL","SUI","ETH","BTC","XRP"]
+        selected=["ARB","STRK"]
+        all_tokens=assets+selected
+        pair_catalog={t+"EUR":{"wsname":t+"/EUR","status":"online"}
+                      for t in all_tokens}
+        wallet={"posizioni":[{"token":t} for t in assets]}
+        four={"posizioni":[{"token":t,"coppia":t+"/EUR",
+                            "pair_key":t+"EUR"} for t in assets]}
+        shortlist=[{"token":t,"coppia_analisi":t+"/EUR",
+                    "kraken_pair_key":t+"EUR"} for t in selected]
+        phase=[0]
+        requests=[]
+        def public_source(url,timeout=12):
+            requests.append(url)
+            if url.startswith(e.CG_MARKETS):
+                if phase[0]==1:
+                    raise urllib.error.HTTPError(url,429,"batch limited",{},None)
+                ids=parse_qs(urlparse(url).query)["ids"][0].split(",")
+                if phase[0]==2:
+                    ids=ids[:-1]  # one absent ID is NOT a zero-supply token
+                if phase[0]==3:
+                    ids.append("invalid-unknown-project")
+                rows=[]
+                for pid in ids:
+                    token=next((t for t in all_tokens if e.PROJECTS[t][0]==pid),None)
+                    if token is None:
+                        rows.append({"id":pid,"name":"Unknown","symbol":"unknown"})
+                        continue
+                    raw=self.market(self.ident(token),max_supply=100)
+                    md=raw["market_data"]
+                    rows.append({"id":pid,"symbol":raw["symbol"],
+                                 "name":raw["name"],
+                                 "last_updated":md["last_updated"],
+                                 "market_cap":md["market_cap"]["usd"],
+                                 "fully_diluted_valuation":md["fully_diluted_valuation"]["usd"],
+                                 "circulating_supply":md["circulating_supply"],
+                                 "total_supply":md["total_supply"],
+                                 "max_supply":md["max_supply"]})
+                return json.dumps(rows).encode()
+            raise OSError("Individual metadata/release provider unavailable")
+        with mock.patch.object(producer.desk,"request",side_effect=public_source),\
+             mock.patch.object(producer.time,"sleep"):
+            first=producer.economic_evidence(
+                {"feed":[]},wallet,four,shortlist,T,asset_pairs=pair_catalog)
+            direct=e.at_read(first,wallet["posizioni"],shortlist,T)
+            self.assertEqual(first["richieste_batch_coingecko"],1)
+            self.assertEqual(first["copertura_batch_fondamentali"]["id_restituiti"],12)
+            self.assertLessEqual(first["richieste_effettuate"],9)
+            self.assertEqual(direct["copertura_tokenomics"]["posizioni"]["supply_attuale"],10)
+            self.assertEqual(direct["copertura_tokenomics"]["candidati"]["supply_attuale"],2)
+            self.assertTrue(all(r["fondamentali"]["fonte"].startswith(e.CG_MARKETS)
+                                for r in direct["posizioni"]+direct["candidati"]))
+            # Source URLs are rechecked for the actual project in the reader.
+            forged=copy.deepcopy(first)
+            forged["posizioni"][0]["fondamentali"]["fonte"]=e.market_batch_url(["bitcoin"])
+            with self.assertRaises(ValueError):
+                e.at_read(forged,wallet["posizioni"],shortlist,T)
+            phase[0]=1
+            second=producer.economic_evidence(
+                {"feed":[]},wallet,four,shortlist,T+dt.timedelta(hours=1),
+                asset_pairs=pair_catalog,previous=first)
+            held=e.at_read(second,wallet["posizioni"],shortlist,T+dt.timedelta(hours=1))
+            self.assertEqual(second["richieste_batch_coingecko"],1)
+            self.assertEqual(second["richieste_coingecko"],0)
+            self.assertEqual(held["copertura_tokenomics"]["posizioni"]["supply_attuale"],10)
+            self.assertTrue(all(r["fondamentali"].get("origine")=="CACHE_LOCALE_FONTE_PUBBLICA"
+                                for r in held["posizioni"]))
+            older=e.at_read(held,wallet["posizioni"],shortlist,T+dt.timedelta(days=3))
+            self.assertEqual(older["copertura_tokenomics"]["posizioni"]["supply_attuale"],0)
+            phase[0]=2
+            absent=producer.economic_evidence({"feed":[]},wallet,four,shortlist,
+                               T+dt.timedelta(minutes=2),asset_pairs=pair_catalog)
+            self.assertEqual(absent["copertura_batch_fondamentali"]["id_restituiti"],11)
+            self.assertEqual(sum(r["fondamentali"]["stato"]=="VERIFICATO"
+                                 for r in absent["posizioni"]+absent["candidati"]),11)
+            phase[0]=3
+            ambiguous=producer.economic_evidence({"feed":[]},wallet,four,shortlist,
+                                  T+dt.timedelta(minutes=3),asset_pairs=pair_catalog)
+            self.assertEqual(ambiguous["copertura_batch_fondamentali"]["id_restituiti"],0)
+            self.assertEqual(sum(r["fondamentali"]["stato"]=="VERIFICATO"
+                                 for r in ambiguous["posizioni"]+ambiguous["candidati"]),0)
+
+    def test_cp1_coingecko_rate_limit_cannot_block_independent_primary_issuance(self):
+        import json
+        import urllib.error
+        import dossier_trade as producer
+        import kdd_network_defi
+        from unittest import mock
+        token="SOL"
+        source={"feed":[]}
+        portfolio={"posizioni":[{"token":token}]}
+        four={"posizioni":[{"token":token,"coppia":"SOL/EUR",
+                            "pair_key":"SOLEUR"}]}
+        pairs={"SOLEUR":{"wsname":"SOL/EUR","status":"online"}}
+        called=[]
+        def fetch(url,timeout=12):
+            called.append(url)
+            if "api.coingecko.com" in url:
+                raise urllib.error.HTTPError(url,429,"rate limited",{},None)
+            if "/pulls?" in url or "/issues?" in url or "security-advisories?" in url:
+                return b"[]"
+            raise OSError("Other public primary source not available in this test")
+        def rpc(url,payload=None):
+            self.assertEqual(url,"https://api.mainnet.solana.com")
+            self.assertEqual(payload["method"],"getInflationGovernor")
+            called.append(url+"#"+payload["method"])
+            return {"result":{"initial":.08,"taper":.15,"terminal":.015,
+                              "foundation":0.0,"foundationTerm":0}}
+        with mock.patch.object(producer.desk,"request",side_effect=fetch),\
+             mock.patch.object(kdd_network_defi,"_http",side_effect=rpc),\
+             mock.patch.object(producer.time,"sleep"):
+            with producer.primary_refresh_context():
+                output=producer.economic_evidence(
+                    source,portfolio,four,[],T,asset_pairs=pairs)
+        self.assertEqual(output["richieste_coingecko"],1)
+        self.assertEqual(len([v for v in called
+                              if v.startswith("https://api.coingecko.com")]),1)
+        self.assertGreater(output["monitor_fonti"]["richieste_pubbliche"],0)
+        issuance=output["monitor_fonti"]["politiche_emissioni"][0]
+        self.assertEqual(issuance["stato"],"OSSERVATO")
+        self.assertEqual(issuance["stato_unlock"],"NON_ATTESTATO")
+        self.assertEqual(output["posizioni"][0]["fondamentali"]["stato"],
+                         "NON_DISPONIBILE_FONTE")
+        reviewed=e.at_read(output,portfolio["posizioni"],[],T)
+        view=reviewed["posizioni"][0]["quadro_tokenomics"]
+        self.assertEqual(view["stato"],"FONTE_PRIMARIA_SENZA_SUPPLY_ATTUALE")
+        self.assertEqual(view["politica_emissione"]["stato"],"OSSERVATO")
+        self.assertIsNone(view["supply"]["offerta_circolante"])
+        self.assertEqual(reviewed["copertura_tokenomics"]["posizioni"]
+                         ["fonti_emissione_attuali"],1)
+
+    def test_cp1_supply_anomalies_are_not_verified_and_not_unlocks(self):
+        ident=self.ident("BTC")
+        for attribute,value,expected in (
+                ("total_supply",8,"CIRCOLANTE_SUPERIORE_AL_TOTALE"),
+                ("max_supply",5,"CIRCOLANTE_SUPERIORE_AL_MASSIMO"),
+                ("max_supply",0,"MASSIMO_ZERO")):
+            with self.subTest(attribute=attribute,value=value):
+                response=self.market(ident)
+                response["market_data"][attribute]=value
+                observed=e.fundamentals(ident,response,T,T)
+                self.assertEqual(observed["stato"],"ANOMALIA_SUPPLY")
+                self.assertIn(expected,observed["anomalie_supply"])
+                self.assertIsNone(observed["emissione_residua_massima_su_circolante_pct"])
+                self.assertEqual(observed["unlock"],"NON_VERIFICATO")
+                self.assertEqual(observed["vesting"],"NON_VERIFICATO")
+                e.verify_supply_at_read(observed)
+                source,positions,shortlist=self.sample()
+                source["posizioni"][0]["fondamentali"]=observed
+                current=e.at_read(source,positions,shortlist,T)
+                self.assertEqual(current["posizioni"][0]["fondamentali"]["stato"],
+                                 "ANOMALIA_SUPPLY")
+                expired=e.at_read(source,positions,shortlist,T+dt.timedelta(days=3))
+                self.assertEqual(expired["posizioni"][0]["fondamentali"]["stato"],
+                                 "SCADUTO")
+                self.assertEqual(expired["posizioni"][0]["quadro_tokenomics"]
+                                 ["supply"]["stato"],"SCADUTO")
+                self.assertIsNone(expired["posizioni"][0]["quadro_tokenomics"]
+                                  ["supply"]["offerta_massima"])
+        no_max=e.fundamentals(ident,self.market(ident,max_supply=None),T,T)
+        self.assertEqual(no_max["stato"],"VERIFICATO")
+        self.assertEqual(no_max["diluizione"],
+                         "MAX_NON_DICHIARATO_NON_EQUIVALE_A_ILLIMITATO")
+
+    def test_cp1_derived_supply_and_calendar_not_forged_at_gpt_read(self):
+        import kdd_economic_sources as sources
+        source,positions,shortlist=self.sample()
+        source["fonti_economiche"]=e.sources_matrix()
+        source["monitor_fonti"]=sources.collect(
+            T,source,{},lambda url: (_ for _ in ()).throw(
+                AssertionError("Public source not acquired outside refresh")),
+            network_allowed=False,skipped_reason="FUORI_REFRESH")
+        read=e.at_read(source,positions,shortlist,T)
+        self.assertEqual(read["copertura_tokenomics"]["posizioni"]["totali"],2)
+        self.assertEqual(read["copertura_tokenomics"]["posizioni"]["supply_attuale"],2)
+        self.assertEqual(read["copertura_tokenomics"]["candidati"]["totali"],1)
+        self.assertEqual(read["copertura_tokenomics"]["candidati"]["supply_attuale"],1)
+        for group in ("posizioni","candidati"):
+            for row in read[group]:
+                view=row["quadro_tokenomics"]
+                self.assertEqual(view["token"],row["token"])
+                self.assertEqual(view["supply"]["stato"],"VERIFICATO")
+                self.assertEqual(view["stato"],"SOLO_SUPPLY_AGGREGATA")
+                self.assertEqual(view["calendario"]["categoria"],"NON_VERIFICATO")
+                self.assertEqual(view["calendario"]["realizzazione"],"NON_ATTESTATA")
+                self.assertTrue(view["controipotesi"])
+        reread=e.at_read(read,positions,shortlist,T)
+        self.assertEqual(read["copertura_tokenomics"],reread["copertura_tokenomics"])
+        self.assertEqual(read["posizioni"][0]["quadro_tokenomics"],
+                         reread["posizioni"][0]["quadro_tokenomics"])
+        old=e.at_read(read,positions,shortlist,T+dt.timedelta(days=3))
+        self.assertEqual(old["copertura_tokenomics"]["posizioni"]["supply_attuale"],0)
+        self.assertEqual(old["posizioni"][0]["quadro_tokenomics"]["supply"]["stato"],
+                         "SCADUTO")
+        self.assertIsNone(old["posizioni"][0]["quadro_tokenomics"]["supply"]["capitalizzazione_usd"])
+        altered=copy.deepcopy(source)
+        altered["posizioni"][0]["fondamentali"][
+            "emissione_residua_massima_su_circolante_pct"]=999999
+        with self.assertRaisesRegex(ValueError,"supply inconsistency"):
+            e.at_read(altered,positions,shortlist,T)
+        altered=copy.deepcopy(source)
+        altered["posizioni"][0]["fondamentali"]["unlock"]="VERIFICATO"
+        with self.assertRaisesRegex(ValueError,"invented unlock"):
+            e.at_read(altered,positions,shortlist,T)
+        altered=copy.deepcopy(read)
+        altered["posizioni"][0]["quadro_tokenomics"]["supply"]["fdv_usd"]=12345
+        with self.assertRaisesRegex(ValueError,"Tokenomics at read distorted"):
+            e.at_read(altered,positions,shortlist,T)
+
+    def test_cp1_official_sui_forecast_reaches_correct_asset_view(self):
+        import kdd_economic_sources as sources
+        ident=self.ident("SUI")
+        position={"indice":0,"token":"SUI","identita":ident,
+            "fondamentali":e.fundamentals(ident,self.market(ident),T,T),
+            "evento":e.release_event(ident,None,T,T)}
+        source={"schema":e.VERSION,"acquisito_utc":T.isoformat(),
+                "posizioni":[position],"candidati":[],
+                "regime":{"stato":"INDETERMINATO","qualita":"INSUFFICIENTE"},
+                "macro":e.macro([],T),"fonti_economiche":e.sources_matrix()}
+        schedule=[
+            {"year":2026,"month":10,"circulatingSupplyValue":4100000000,
+             "circulatingSupplyPercentage":.41},
+            {"year":2026,"month":11,"circulatingSupplyValue":4139000000,
+             "circulatingSupplyPercentage":.4139},
+            {"year":2026,"month":12,"circulatingSupplyValue":4159000000,
+             "circulatingSupplyPercentage":.4159},
+            {"year":2027,"month":1,"circulatingSupplyValue":4200000000,
+             "circulatingSupplyPercentage":.42}]
+        def fetch(url):
+            if url==sources.SUI_CIRCULATION:
+                return __import__("json").dumps(schedule).encode()
+            raise OSError("No independent primary endpoint in fixture")
+        source["monitor_fonti"]=sources.collect(
+            T,source,{},fetch,network_allowed=True,
+            asset_pairs={"SUIEUR":{"status":"online","wsname":"SUI/EUR"}})
+        read=e.at_read(source,[{"token":"SUI"}],[],T)
+        view=read["posizioni"][0]["quadro_tokenomics"]
+        self.assertEqual(view["stato"],"SUPPLY_E_DOCUMENTO_PRIMARIO")
+        self.assertEqual(view["calendario"]["categoria"],
+                         "PROIEZIONE_CIRCOLAZIONE_NON_UNLOCK")
+        self.assertEqual(view["calendario"]["numero_eventi_documentati"],0)
+        self.assertEqual(view["calendario"]["fonte"],sources.SUI_CIRCULATION)
+        self.assertEqual(read["copertura_tokenomics"]["posizioni"]
+                         ["documenti_primari_attuali"],1)
+        # Same reader returns the observation as history, not future unlock.
+        old=e.at_read(read,[{"token":"SUI"}],[],T+dt.timedelta(days=36))
+        self.assertEqual(old["posizioni"][0]["quadro_tokenomics"]["calendario"]
+                         ["categoria"],"STORICO_NON_CONFERMATO")
+        self.assertEqual(old["copertura_tokenomics"]["posizioni"]
+                         ["documenti_primari_attuali"],0)
 
     def test_all_assets_remain_even_when_missing(self):
         source,positions,shortlist=self.sample()
@@ -628,6 +1494,8 @@ class EconomicEvidenceTests(unittest.TestCase):
                     "kraken_pair_key":"ADAEUR"}]
 
         def response(url, timeout=12):
+            if "/coins/markets?" in url:
+                raise OSError("Batch not in legacy fixture: exercise individual fallback")
             if "/releases/latest" in url:
                 repo=url.split("/repos/")[1].split("/releases/")[0]
                 return json.dumps({"html_url":"https://github.com/"+repo+"/releases/tag/v1",
@@ -777,6 +1645,8 @@ class AdaptivePortfolioTests(unittest.TestCase):
         seen = []
         def response(url, timeout=12):
             seen.append(url)
+            if "/coins/markets?" in url:
+                raise OSError("No batch in this legacy fixture")
             if "/search?query=ZEC" in url:
                 return json.dumps(self.search).encode()
             if "/tickers?exchange_ids=kraken" in url:
@@ -1063,6 +1933,8 @@ class AdaptivePortfolioTests(unittest.TestCase):
         seen = []
         def source(url, timeout=12):
             seen.append(url)
+            if "/coins/markets?" in url:
+                raise OSError("No batch in this legacy fixture")
             if url.endswith("/search?query=DOGE"):
                 return json.dumps({"coins": [
                     {"id": "dogecoin", "symbol": "doge", "name": "Dogecoin"},

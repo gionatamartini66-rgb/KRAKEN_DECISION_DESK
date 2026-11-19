@@ -613,8 +613,9 @@ class WalletPacketG0Tests(unittest.TestCase):
         self.assertIsNone(summary["concentrazione_top2_pct"])
         self.assertEqual(summary["liquidita_stato"],
                          "PRESENTE_PER_VALUTA_EQUIVALENZA_EUR_NON_ATTESTATA")
-        self.assertEqual(summary["esempio_150_finanziamento_stato"],
-                         "NON_DETERMINABILE_SENZA_CAMBIO_SPREAD_E_COSTI")
+        self.assertEqual(summary["costi_di_negoziazione"],"NON_VERIFICATI_PER_IL_CONTO")
+        self.assertEqual(summary["disponibilita_lorda_spot"]["n_posizioni"],3)
+        self.assertNotIn("alternative_liberazione_150_lordi",summary)
         self.assertIn("non è proposta", summary["vincoli"][0])
 
     def test_economic_context_exact_arithmetic_no_cross_currency_fx(self):
@@ -626,16 +627,15 @@ class WalletPacketG0Tests(unittest.TestCase):
         self.assertEqual([x["quota_pct"] for x in result["quote_posizioni"]],
                          ["75.00", "25.00"])
         self.assertEqual(result["concentrazione_top2_pct"], "100.00")
-        self.assertEqual(result["esempio_150_eur_sul_patrimonio_pct"], "37.50")
+        self.assertIsNone(result["disponibilita_lorda_spot"]["obiettivo_monetario_prefissato"])
         self.assertEqual(result["liquidita_stato"], "ZERO_RILEVATO_NELLE_QUATTRO_VALUTE")
-        self.assertEqual(result["esempio_150_finanziamento_stato"],
-                         "NESSUNA_LIQUIDITA_SULLE_QUATTRO_VALUTE_VERIFICARE_FONTI")
+        self.assertEqual(result["liquidita_spot_per_valuta"]["USDC"],"0")
+        self.assertEqual(result["costi_di_negoziazione"],"NON_VERIFICATI_PER_IL_CONTO")
         cash = {**zero_cash, "USDC": {"disponibile": "3"}}
         result = p.quadro_economico_per_gpt(positions, cash, "400")
         self.assertEqual(result["liquidita_stato"],
                          "PRESENTE_PER_VALUTA_EQUIVALENZA_EUR_NON_ATTESTATA")
-        self.assertEqual(result["esempio_150_finanziamento_stato"],
-                         "NON_DETERMINABILE_SENZA_CAMBIO_SPREAD_E_COSTI")
+        self.assertEqual(result["liquidita_spot_per_valuta"]["USDC"],"3")
 
     def test_economic_context_fails_closed_on_forged_total_duplicate_invalid_values(self):
         p1 = [{"token": "BTC", "valore_eur": "100"},
@@ -661,14 +661,15 @@ class WalletPacketG0Tests(unittest.TestCase):
         self.assertEqual(p.quadro_economico_per_gpt(row, {}, "0")["stato"],
                          "NON_CALCOLABILE_INTEGRALMENTE")
         self.assertIsNone(p.quadro_economico_per_gpt(row, {}, "0")
-                          ["esempio_150_eur_sul_patrimonio_pct"])
+                          ["disponibilita_lorda_spot"]["obiettivo_monetario_prefissato"])
         self.assertEqual(p.quadro_economico_per_gpt(row, {}, None)["stato"],
                          "NON_CALCOLABILE_INTEGRALMENTE")
 
     def test_book_packet_missing_legacy_field_is_explicit(self):
         packet = self.pack()
-        self.assertEqual(packet["patrimonio"]["book_pubblico_150"]["stato"],
+        self.assertEqual(packet["patrimonio"]["profondita_book_pubblica"]["stato"],
                          "NON_ATTESTATO")
+        self.assertNotIn("book_pubblico_150",packet["patrimonio"])
 
     def test_real_funding_alternatives_150_use_available_not_owned(self):
         positions = [
@@ -724,11 +725,13 @@ class WalletPacketG0Tests(unittest.TestCase):
 
     def test_funding_150_packet_includes_all_rows_even_with_unknown_quote(self):
         packet = self.pack()
-        result = packet["patrimonio"]["quadro_economico_per_gpt"]["alternative_liberazione_150_lordi"]
-        self.assertEqual(result["n_posizioni_esaminate"], 3)
-        self.assertEqual([x["token"] for x in result["alternative"]], ["ADA", "ETH", "SXT"])
-        self.assertEqual(result["alternative"][2]["esito"], "NON_VERIFICABILE")
-        self.assertEqual(result["n_fonti_potenziali_lorde"], 1)
+        result = packet["patrimonio"]["quadro_economico_per_gpt"]["disponibilita_lorda_spot"]
+        self.assertEqual(result["n_posizioni"],3)
+        self.assertEqual([x["token"] for x in result["posizioni"]],["ADA","ETH","SXT"])
+        self.assertEqual(result["posizioni"][2]["stato"],"NON_VERIFICABILE")
+        self.assertEqual(result["posizioni"][1]["stato"],"CAPACITA_LORDA_INDICATIVA")
+        self.assertNotIn("alternative_liberazione_150_lordi",
+                         packet["patrimonio"]["quadro_economico_per_gpt"])
 
     def test_wallet_first_all_assets_even_if_quote_missing(self):
         obj=self.pack()

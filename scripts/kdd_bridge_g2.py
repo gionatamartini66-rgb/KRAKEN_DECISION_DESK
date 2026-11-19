@@ -550,8 +550,11 @@ def prepare(root=None, *, now=None, _fixture=False):
 def stato_book_150_alla_lettura(packet, now, *, mercato_stato=None, saldo_stato=None):
     """Ricalcola l'eta del book a OGNI lettura, non riusa la freschezza storica."""
     pp = packet.get("patrimonio") if isinstance(packet, dict) else None
-    book = pp.get("book_pubblico_150") if isinstance(pp, dict) else None
-    if not isinstance(book, dict) or book.get("stato") != "STIMA_BOOK_CON_FEE_IPOTETICA":
+    book = (pp.get("profondita_book_pubblica",pp.get("book_pubblico_150"))
+            if isinstance(pp,dict) else None)
+    if not isinstance(book,dict) or book.get("stato") not in (
+            "STIMA_BOOK_CON_FEE_IPOTETICA",
+            "STIMA_BOOK_DISPONIBILITA_CON_FEE_IPOTETICA"):
         return {"stato": "NON_ATTESTATO", "book_recenti": 0, "book_scaduti": 0}
     rows = book.get("righe")
     if not isinstance(rows, list):
@@ -1061,7 +1064,7 @@ def read_context(bundle, *, now=None, expected_sha256=None):
             "circolazione_capitale_vs_spot": capital_market_context(
                 network_at_read, rows, observations),
             "totale_parziale": bool(section.get("totale_parziale")) or partial,
-            "book_150_alla_lettura": stato_book_150_alla_lettura(
+            "book_alla_lettura": stato_book_150_alla_lettura(
                 pkt, moment, mercato_stato=market_status["stato"],
                 saldo_stato=bal_status["stato"]),
             "origine": "COERENZA_INTERNA_SOLTANTO" if expected_sha256 is None else "DIGEST_ESTERNAMENTE_CONFRONTATO_NON_AUTENTICATO",

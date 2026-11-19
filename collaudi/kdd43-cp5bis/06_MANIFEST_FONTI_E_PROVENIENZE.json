@@ -1,0 +1,98 @@
+{
+  "schema": "kdd43_cp5bis_sources_v1",
+  "cutoff_utc": "2026-11-17T20:24:45Z",
+  "code_baseline": "38ebf2bee30a3542b3220889f050482b22a63b13",
+  "original_archive": "Four full raw public source files saved outside Git in isolated Termux cp5bis_sources/*.original. GitHub carries source URLs, frozen SHA256, dates and factual excerpts; raw copyrighted third-party documents are not republished.",
+  "sources": [
+    {
+      "id": "E-BTC-REL-32-1",
+      "project": "bitcoin",
+      "kind": "official GitHub release",
+      "url": "https://api.github.com/repos/bitcoin/bitcoin/releases/tags/v32.1",
+      "published_utc": "2026-10-28T14:23:53Z",
+      "captured_utc": "2026-11-17T20:24:34.172004Z",
+      "bytes": 2323,
+      "sha256": "c4d4659abfb8ef13e8fb197184f449eb4bd9d0eb9b33cf343902b8a22529ccfd",
+      "status": "PRIMARY_ARCHIVED_LOCALLY",
+      "economic_fact": "Bitcoin Core 32.1 available; network adoption and price effect not evidenced",
+      "in_kdd_fixture": "BTC position release, VERIFICATO"
+    },
+    {
+      "id": "E-SOL-AGAVE-441",
+      "project": "solana",
+      "kind": "official GitHub release",
+      "url": "https://api.github.com/repos/anza-xyz/agave/releases/tags/v4.4.1",
+      "published_utc": "2026-11-05T18:33:50Z",
+      "captured_utc": "2026-11-17T20:24:34.226083Z",
+      "bytes": 16879,
+      "sha256": "432bd67a8c476854a378b10d0bd61174759a278d000d8340142f4d2d0d1c5232",
+      "status": "PRIMARY_ARCHIVED_LOCALLY",
+      "economic_fact": "Agave 4.4.1 release recommended as stable; validator adoption not evidenced",
+      "in_kdd_fixture": "SOL candidate release, VERIFICATO"
+    },
+    {
+      "id": "E-STRK-SCHEDULE",
+      "project": "starknet",
+      "kind": "official Starknet token documentation",
+      "url": "https://raw.githubusercontent.com/starknet-io/starknet-docs/main/learn/protocol/strk.mdx",
+      "published_utc": null,
+      "captured_utc": "2026-11-17T20:24:34.163051Z",
+      "bytes": 16698,
+      "sha256": "ea0eb3fda7a088a1d858a082d0c054f4492391c57e88108020b634491cd2c189",
+      "status": "PRIMARY_ARCHIVED_LOCALLY_PUBLICATION_TIME_UNVERIFIED",
+      "economic_fact": "Document indicates up to 127 million STRK on the 15th of each month through March 2027; no proof of actual distribution or sale",
+      "in_kdd_fixture": "PUBLIC_APPENDIX_ONLY, not acquired by economic producer"
+    },
+    {
+      "id": "E-FED-20261028",
+      "project": null,
+      "kind": "official Fed monetary statement",
+      "url": "https://www.federalreserve.gov/newsevents/pressreleases/monetary20261028a.htm",
+      "published_utc": "2026-10-28T18:00:00Z",
+      "captured_utc": "2026-11-17T20:24:34.181404Z",
+      "bytes": 85033,
+      "sha256": "b0e2ad15b06bc0ade3a5ccc8d0c10b2aeb940014ec5324203a30ff80648fdc18",
+      "status": "PRIMARY_ARCHIVED_LOCALLY",
+      "economic_fact": "FOMC maintained 3.75%–4.00% target range; crypto direction or consensus surprise not evidenced",
+      "in_kdd_fixture": "macro legacy historical, not primary macro context"
+    },
+    {
+      "id": "E-UE-20261116",
+      "project": null,
+      "kind": "Council of EU release",
+      "url": "https://www.consilium.europa.eu/en/press/press-releases/2026/11/16/ukraine-eu-lists-113-individuals-and-entities-to-further-restrict-russia-s-ability-to-finance-its-war-of-aggression/",
+      "published_utc": "2026-11-16T11:35:00Z",
+      "captured_utc": null,
+      "sha256": null,
+      "status": "OFFICIAL_PUBLIC_PAGE_WEB_VERIFIED_RAW_GET_TERMUX_HTTP_403",
+      "economic_fact": "Council lists 12 persons and 101 entities; impact on specific token unproved",
+      "in_kdd_fixture": "macro legacy recent, not primary macro context"
+    },
+    {
+      "id": "E-REGIME-CP4-20261117",
+      "project": null,
+      "kind": "CP4 report, secondary checkpoint",
+      "url": "https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/issues/43#issuecomment-6957689321",
+      "published_utc": "2026-11-17T18:39:14Z",
+      "captured_utc": null,
+      "sha256": null,
+      "status": "NO_ARCHIVED_ORIGINAL_MARKET_API_RESPONSES_P5_NON_VALUTABILE_AS_PRIMARY",
+      "economic_fact": "CP4 reports BTC 4h/1d divergence, global cap -3.7442925%, vol/cap 3.5682%, but raw original missing",
+      "in_kdd_fixture": "not present"
+    }
+  ],
+  "synthetic_evidence_ids": [
+    "E-C1-SUPPLY-REMOVED",
+    "E-C2-SUPPLY-CONFLICT",
+    "E-C3-CROSSPROJECT",
+    "E-C4-REGIME-CHANGE",
+    "E-C5-HEADLINE",
+    "E-C6-TWO-ALTERNATIVES"
+  ],
+  "warnings": [
+    "BTC fundamental values in fixture are completely invented: even if the packet prints VERIFICATO, no actual CoinGecko acquisition underlies them",
+    "All wallet numbers and candidate membership in bundle are invented; price 40000 EUR for BTC is not a current quote",
+    "The synthetic packet is only a 3-position subset not the real 10-position wallet",
+    "P3 public source is not present in the KDD event ledger; P4 primary macro facts empty; P5 cannot support primary-source PASS"
+  ]
+}

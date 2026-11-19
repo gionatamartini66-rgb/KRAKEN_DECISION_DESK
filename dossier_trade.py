@@ -232,7 +232,7 @@ def global_context():
 
 
 def finanziamento_150_book(source, portfolio, *, saldo_recente, kraken_client=None,
-                             max_calls=4):
+                             max_calls=4, target_eur="150"):
     """KDD-05/12: pubblica profondita bid su asset posseduti, fee solo ipotetica.
 
     Usa la fotografia Kraken; non controlla negoziabilita/fee del conto e non ordina.
@@ -317,8 +317,10 @@ def finanziamento_150_book(source, portfolio, *, saldo_recente, kraken_client=No
             depth = raw[pair_key]
             if not isinstance(depth, dict):
                 raise ValueError("Book Kraken non strutturato")
-            estimate = costi_spot.stima_vendita_book_150(
-                depth.get("bids"), available, target_eur="150", fee_ipotesi="0.008")
+            estimate = (costi_spot.stima_vendita_book_disponibile(
+                depth.get("bids"), available, fee_ipotesi="0.008")
+                if target_eur is None else costi_spot.stima_vendita_book_150(
+                    depth.get("bids"), available, target_eur=target_eur, fee_ipotesi="0.008"))
             result[i] = {"indice": i, "token": token, "stato": "BOOK_PUBBLICO_OSSERVATO",
                          "pair": pair, "pair_key": pair_key,
                          "osservato_utc": desk.NOW().isoformat(timespec="seconds"),
@@ -495,10 +497,22 @@ def economic_evidence(source, wallet, four, candidates, now, *,
     discovery_problem = None
     resolved = None
 
+    acquired_http = {}
     def public_json(url, *, timeout=12):
         nonlocal rate_limited
         try:
-            return json.loads(desk.request(url, timeout=timeout).decode("utf-8")), None
+            # Capture the actual bytes obtained in this request path; do not
+            # interpret a plausible JSON document as proof of HTTP origin.
+            raw = desk.request(url, timeout=timeout)
+            decoded = json.loads(raw.decode("utf-8"))
+            import hashlib
+            acquired_http[url] = {"url_richiesto": url,
+                "sha256_corpo_risposta": hashlib.sha256(raw).hexdigest(),
+                "acquisito_utc": now.isoformat(timespec="seconds"),
+                "canale": "REQUEST_PUBBLICA_DEL_PRODUTTORE",
+                "limite": "Hash e URL documentano il percorso di acquisizione locale; "
+                          "non attestano da soli autenticita esterna o veridicita dei dati."}
+            return decoded, None
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
                 rate_limited = True
@@ -583,8 +597,11 @@ def economic_evidence(source, wallet, four, candidates, now, *,
             if (data.get("stato") != "VERIFICATO" or not observed or not acquired
                     or acquired > now or not dt.timedelta(0) <= now-observed <= dt.timedelta(days=1)
                     or ident.get("stato") != "IDENTITA_VERIFICATA_DA_CATALOGO"
-                    or data.get("fonte") != econ.CG + str(ident.get("coingecko_id"))):
+                    or not econ.fundamental_source_valid(
+                        data.get("fonte"),ident.get("coingecko_id"))):
                 continue
+            try: econ.verify_supply_at_read(data)
+            except ValueError: continue
             cache_key = (ident.get("token"), ident.get("coppia"),
                          ident.get("pair_key"), ident.get("coingecko_id"))
             previous_cache[cache_key] = {"identita": ident, "fondamentali": data,
@@ -592,11 +609,42 @@ def economic_evidence(source, wallet, four, candidates, now, *,
 
     unique_ids = sorted({row["identita"]["coingecko_id"] for group in items.values()
                          for row in group if row["identita"].get("coingecko_id")})
+    # KDD-18: one public batch of verified CoinGecko project IDs can cover
+    # the entire current portfolio/shortlist without one /coins GET per asset.
+    # Individual /coins responses still run, separately, for KDD-17 contract
+    # and network metadata: the markets endpoint cannot replace those facts.
+    batch_requested=[]
+    batch_rows={}
+    batch_url=None
+    batch_calls=0
+    batch_error=None
+    batch_returned=0
+    batch_cursor=prior.get("prossimo_id_batch_fondamentali")
+    batch_start=next((i for i,c in enumerate(unique_ids)
+        if isinstance(batch_cursor,str) and c>=batch_cursor),0)
+    if len(unique_ids)>=7 and not rate_limited and discovery_calls<9:
+        batch_requested=[unique_ids[(batch_start+i)%len(unique_ids)]
+            for i in range(min(len(unique_ids),econ.MAX_CG_BATCH_IDS))]
+        batch_url=econ.market_batch_url(batch_requested)
+        batch_calls=1
+        batch_payload,batch_error=public_json(batch_url)
+        if isinstance(batch_payload,list) and len(batch_payload)<=len(batch_requested):
+            ids=[r.get("id") if isinstance(r,dict) else None for r in batch_payload]
+            if (len(set(ids))==len(ids) and
+                    all(isinstance(cid,str) and cid in batch_requested for cid in ids)):
+                batch_rows={item["id"]:item for item in batch_payload}
+                batch_returned=len(batch_rows)
+            else:
+                batch_error="BATCH_IDENTITA_AMBIGUA_O_NON_RICHIESTA"
+        elif batch_error is None:
+            batch_error="BATCH_FORMATO_NON_VERIFICATO"
+    next_batch=(unique_ids[(batch_start+len(batch_requested))%len(unique_ids)]
+                if unique_ids else None)
     previous_next = prior.get("prossimo_id_fondamentali")
     start_at = next((i for i, cg in enumerate(unique_ids)
                      if isinstance(previous_next, str) and cg >= previous_next), 0)
     # Max 6 acquisitions of fundamentals, reduced when discovery used API calls.
-    capacity = min(6, max(0, 9-discovery_calls))
+    capacity = min(6, max(0, 9-discovery_calls-batch_calls))
     selected = [unique_ids[(start_at+i) % len(unique_ids)]
                 for i in range(min(capacity, len(unique_ids)))]
     selected_ids = set(selected)
@@ -614,17 +662,66 @@ def economic_evidence(source, wallet, four, candidates, now, *,
         cache[cg], failures[cg] = public_json(url)
         time.sleep(.35)
 
+    # KDD-20: rotate official project releases over ALL eligible repositories.
+    # Previously projects[:3] permanently excluded the fourth repository.
+    # Keep the existing shared 9-request ceiling (including CoinGecko).
     release_cache, release_calls = {}, 0
     projects = sorted({row["identita"]["repository_primario"]
                        for group in items.values() for row in group
-                       if row["identita"].get("repository_primario")})
-    for project_repo in projects[:min(3, max(0, 9-discovery_calls-cg_calls))]:
-        release_calls += 1
+                       if row["identita"].get("stato")=="IDENTITA_VERIFICATA_DA_CATALOGO"
+                       and row["identita"].get("repository_primario")})
+    release_cursor=prior.get("prossimo_repository_release") if allowed_history else None
+    release_start=next((i for i,repo in enumerate(projects)
+                        if isinstance(release_cursor,str) and repo>=release_cursor),0)
+    release_capacity=min(3,max(0,9-discovery_calls-batch_calls-cg_calls))
+    release_selected=[projects[(release_start+i)%len(projects)]
+                      for i in range(min(release_capacity,len(projects)))]
+    next_release=(projects[(release_start+len(release_selected))%len(projects)]
+                  if projects else None)
+    release_failures={}
+    for project_repo in release_selected:
+        release_calls+=1
         try:
-            url = "https://api.github.com/repos/" + project_repo + "/releases/latest"
-            release_cache[project_repo] = json.loads(desk.request(url, timeout=10).decode("utf-8"))
-        except (ValueError, OSError, RuntimeError, KeyError, TypeError):
-            release_cache[project_repo] = None
+            url="https://api.github.com/repos/"+project_repo+"/releases/latest"
+            release_cache[project_repo]=json.loads(desk.request(url,timeout=10).decode("utf-8"))
+        except (ValueError,OSError,RuntimeError,KeyError,TypeError) as exc:
+            release_cache[project_repo]=None
+            release_failures[project_repo]=(
+                "HTTP_"+str(exc.code) if getattr(exc,"code",None)
+                in (403,404,429,500,502,503) else "ERRORE_"+type(exc).__name__)
+    # A released version is observable through its official repo even after
+    # it rotates out of the request budget. Preserve it ONLY as historical,
+    # with its original acquisition date, project and exact Kraken pair.
+    previous_releases={}
+    if allowed_history:
+        for group in ("posizioni","candidati","richiesti"):
+            for old in prior.get(group,[]):
+                if not isinstance(old,dict):
+                    continue
+                ident,event=old.get("identita"),old.get("evento")
+                if (not isinstance(ident,dict) or
+                        ident.get("stato")!="IDENTITA_VERIFICATA_DA_CATALOGO" or
+                        not isinstance(event,dict) or
+                        event.get("stato") not in ("VERIFICATO","STORICO_NON_AGGIORNATO")):
+                    continue
+                acquired=econ.stamp(event.get("acquisito_utc"))
+                if not acquired or not dt.timedelta(0)<=now-acquired<=dt.timedelta(days=7):
+                    continue
+                reconstructed=econ.release_event(ident,{
+                    "html_url":event.get("fonte"),"tag_name":event.get("tag"),
+                    "published_at":event.get("pubblicato_utc"),
+                    "name":event.get("sintesi"),
+                    "draft":False,"prerelease":event.get("pre_release") is True},
+                    now,acquired)
+                if reconstructed.get("stato")!="VERIFICATO":
+                    continue
+                keys=("fonte","emittente","tag","pubblicato_utc","evento_utc",
+                      "sintesi","pre_release","adozione_rete","impatto_economico")
+                if any(reconstructed.get(key)!=event.get(key) for key in keys):
+                    continue
+                key=(ident.get("token"),ident.get("coppia"),
+                     ident.get("pair_key"),ident.get("coingecko_id"))
+                previous_releases[key]=event
 
     for group in ("posizioni", "candidati", "richiesti"):
         for row in items[group]:
@@ -635,7 +732,16 @@ def economic_evidence(source, wallet, four, candidates, now, *,
                             stato="NON_VERIFICATO_IDENTITA",
                             motivo=identity.get("motivo"))
             else:
-                fresh = econ.fundamentals(identity, cache.get(cg), now, now)
+                individual_url=(econ.CG + cg
+                    + "?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false")
+                individual = econ.fundamentals(identity, cache.get(cg), now, now,
+                    acquisition=acquired_http.get(individual_url))
+                batched=(econ.market_batch_fundamentals(
+                    identity,batch_rows[cg],now,now,batch_url,
+                    acquisition=acquired_http.get(batch_url))
+                    if cg in batch_rows and batch_url else None)
+                fresh=(batched if batched and batched["stato"] in
+                    ("VERIFICATO","ANOMALIA_SUPPLY","SCADUTO") else individual)
                 cache_key = (identity.get("token"), identity.get("coppia"),
                              identity.get("pair_key"), cg)
                 if fresh["stato"] == "VERIFICATO":
@@ -646,6 +752,14 @@ def economic_evidence(source, wallet, four, candidates, now, *,
                     fund = dict(previous_cache[cache_key]["fondamentali"],
                                 origine="CACHE_LOCALE_FONTE_PUBBLICA",
                                 riutilizzato_utc=now.isoformat(timespec="seconds"))
+                elif fresh["stato"]=="ANOMALIA_SUPPLY":
+                    fund=fresh
+                elif cg in batch_requested and batch_returned and cg not in batch_rows and cg not in selected_ids:
+                    fund=dict(fresh,stato="NON_DISPONIBILE_FONTE",
+                              motivo="COINGECKO_ID_NON_RESTITUITO_BATCH")
+                elif cg in batch_rows and batched and batched["stato"]=="NON_VERIFICATO" and cg not in selected_ids:
+                    fund=dict(fresh,stato="NON_VERIFICATO_IDENTITA",
+                              motivo="RISPOSTA_BATCH_PROGETTO_DISCORDANTE")
                 elif cg not in selected_ids:
                     fund = dict(fresh, stato="NON_ACQUISITO_PER_BUDGET")
                 elif cache.get(cg) is None:
@@ -662,7 +776,24 @@ def economic_evidence(source, wallet, four, candidates, now, *,
             row["network_metadata"] = metadata
             row["fondamentali"] = fund
             repo_name = identity.get("repository_primario")
-            row["evento"] = econ.release_event(identity, release_cache.get(repo_name), now, now)
+            release=econ.release_event(identity,release_cache.get(repo_name),now,now)
+            if release["stato"]=="VERIFICATO":
+                release["origine"]="ACQUISIZIONE_REPOSITORY_PUBBLICO"
+            else:
+                previous_key=(identity.get("token"),identity.get("coppia"),
+                              identity.get("pair_key"),identity.get("coingecko_id"))
+                old_release=previous_releases.get(previous_key)
+                if old_release and repo_name==old_release.get("emittente"):
+                    release=dict(old_release,stato="STORICO_NON_AGGIORNATO",
+                        origine="CACHE_LOCALE_RELEASE_PUBBLICA",
+                        motivo_rinvio=("RINVIATO_BUDGET" if repo_name not in release_selected
+                                      else release_failures.get(repo_name,"FONTE_NON_CONFORME")))
+                elif repo_name and identity.get("stato")=="IDENTITA_VERIFICATA_DA_CATALOGO":
+                    release["stato"]=("RINVIATO_BUDGET" if repo_name not in release_selected
+                                     else "FONTE_NON_DISPONIBILE")
+                    release["motivo"]=release_failures.get(repo_name,
+                                                         "RELEASE_NON_ATTESTATA")
+            row["evento"]=release
             # A curated primary monetary-policy URL is a research reference,
             # NOT a newly acquired unlock/vesting schedule.
             row["politica_monetaria_primaria"] = econ.monetary_reference(identity)
@@ -688,8 +819,12 @@ def economic_evidence(source, wallet, four, candidates, now, *,
     monitoring = primary.collect(
         now, items, prior.get("monitor_fonti"),
         lambda url: desk.request(url, timeout=10),
-        network_allowed=not rate_limited and _PRIMARY_REAL_REFRESH.get(),
-        skipped_reason=("FUORI_REFRESH" if not _PRIMARY_REAL_REFRESH.get() else "RATE_LIMIT"),
+        # CoinGecko HTTP 429 stops only requests to CoinGecko. Official
+        # schedules, repository documents and the Solana RPC have their own
+        # independent bounded budget: suppressing them would turn a single
+        # aggregator outage into loss of ALL primary tokenomics evidence.
+        network_allowed=_PRIMARY_REAL_REFRESH.get(),
+        skipped_reason="FUORI_REFRESH",
         asset_pairs=asset_pairs,
         rpc_fetch=onchain._http,collect_project_issues=True,
         collect_kraken_status=_PRIMARY_REAL_REFRESH.get())
@@ -705,10 +840,30 @@ def economic_evidence(source, wallet, four, candidates, now, *,
             "prossimo_token_identita": next_token,
             "cache_fondamentali": list(public_cache.values())[:100],
             "prossimo_id_fondamentali": next_id,
+            "prossimo_id_batch_fondamentali":next_batch,
+            "copertura_batch_fondamentali":{
+                "stato":("OSSERVATO" if batch_returned else
+                         batch_error or "NON_RICHIESTO"),
+                "id_richiesti":len(batch_requested),"id_restituiti":batch_returned,
+                "fonte":batch_url if batch_calls else None,
+                "limite":"Aggregatore CoinGecko, non source schedule primario; dati assenti restano assenti"},
             "richieste_identificazione": discovery_calls,
-            "richieste_coingecko": cg_calls, "richieste_release": release_calls,
+            "richieste_coingecko": cg_calls,
+            "richieste_batch_coingecko":batch_calls,
+            "richieste_release": release_calls,
+            "prossimo_repository_release":next_release,
+            "copertura_release":{
+                "repository_associati":len(projects),
+                "repository_richiesti":len(release_selected),
+                "repository_con_release_confermata":len({
+                    row["evento"]["emittente"]
+                    for group in items.values() for row in group
+                    if row["evento"].get("stato")=="VERIFICATO"
+                    and row["evento"].get("origine")=="ACQUISIZIONE_REPOSITORY_PUBBLICO"
+                    and row["evento"].get("emittente") in release_selected}),
+                "limite":"Release software ufficiale non equivale a attivazione del protocollo"},
             "richieste_esterne_massime": 9,
-            "richieste_effettuate": discovery_calls+cg_calls+release_calls,
+            "richieste_effettuate": discovery_calls+batch_calls+cg_calls+release_calls,
             "limite": "Risoluzione pubblica incrociata, non prova chain/contract, unlock, acquisti o ordini"}
 
 def collect(source=None, *, asset_pairs=None):
@@ -835,7 +990,7 @@ def collect(source=None, *, asset_pairs=None):
         now=now, old_4h=quattro_ore)
     finanziamento_book = finanziamento_150_book(
         dict(source, _verified_asset_pairs=asset_pairs), portafoglio,
-        saldo_recente=qualita.get("saldo_recente_verificato", False))
+        saldo_recente=qualita.get("saldo_recente_verificato", False), target_eur=None)
     config=desk.load("config.json",{})
     requested=(config.get("analisi_asset_richiesti") if isinstance(config,dict) else None)
     economic = economic_evidence(source, portafoglio, analisi_patrimonio, candidates, now,
@@ -850,6 +1005,13 @@ def collect(source=None, *, asset_pairs=None):
         derivatives, economic.get("monitor_fonti"), now,
         previous=(previous_economic or {}).get("regime")
                  if isinstance(previous_economic,dict) else None)
+    # Expose the motivated regime in the EXISTING dossier; the packet/bridge
+    # separately recomputes it from time-validated sources at the moment of
+    # consumption. No duplicate data fetch or second regime detector.
+    context_for_regime=econ.macro_primary_context(
+        economic.get("monitor_fonti") or {},economic.get("macro") or {},now)
+    economic["regime_motivato"]=econ.regime_integrato(
+        economic["regime"],context_for_regime,now)
     # One additional public-only evidence family. No private balances, amounts,
     # addresses or the on-chain prototypes #9-14 ever enter these requests.
     # Manual/legacy dossier creation without a real refresh has no new-source
@@ -880,7 +1042,7 @@ def collect(source=None, *, asset_pairs=None):
             for r in economic.get("richiesti",[])],
         "evidenze_rete_defi": network_defi,
         "patrimonio_4tf":analisi_patrimonio,
-        "finanziamento_150_book_pubblico":finanziamento_book,
+        "profondita_book_pubblica":finanziamento_book,
         "ricerca_setup":source.get("ricerca_setup",{}),
         "approfondimento_candidati_4tf":{
             "fonte":cand_4tf["fonte"],"richieste_ohlc":cand_4tf["richieste_ohlc"],
