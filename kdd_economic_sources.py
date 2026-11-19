@@ -1407,6 +1407,32 @@ def _eligible_cursor(cursors, name, eligible, *, successor=False):
         return next((key for key in eligible if key>value),None)
     return None
 
+
+def _cursor_after_attempt(cursors, name, next_cursor, attempted, eligible, *, project=False):
+    """Never consume a valid pending turn when this family made no request.
+
+    Off-roster project identifiers are preserved only if the curated catalog
+    still binds that ID to THIS source family. When requests resume, selection
+    rechecks the live roster before any GET; no stale observation is restored.
+    """
+    if attempted:
+        return next_cursor
+    pending=cursors.get(name)
+    if isinstance(pending,str):
+        if pending in eligible:
+            return pending
+        if project and COIN.fullmatch(pending):
+            import kdd_economics as econ
+            getter={"prossimo_progetto":_source_repo,
+                    "prossima_emissione":_emission_descriptor,
+                    "prossima_issue":_issue_repo,
+                    "prossimo_security":_security_repo,
+                    "prossimo_schedule":_schedule_descriptor}.get(name)
+            if getter and any(x.get("id")==pending and getter(x)
+                              for x in econ._CURATED.values()):
+                return pending
+    return next_cursor
+
 def _supply_samples(roster, old, now):
     samples = {}
     for row in old.get("storico_supply", [])[:MAX_SAMPLES]:
@@ -1989,23 +2015,29 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
     history,changes=_supply_samples(roster,old,now)
     retained_events=sorted(event_history.values(),key=lambda r:(r["acquisito_utc"],r["progetto_id"],r["documento_id"]),reverse=True)[:MAX_SAMPLES]
     kraken_status=_spot_status(now,items,asset_pairs,old)
+    next_status=_cursor_after_attempt(cursors,"prossima_fonte_esterna",
+        cycle[(kix+(1 if selected_status else 0))%len(cycle)][0],
+        bool(selected_status),status_names)
+    if not selected_status and next_status not in status_names:
+        next_status=_cursor_after_attempt(cursors,"prossimo_kraken_status",
+            status_names[0],False,status_names)
     return {"schema":SCHEMA,"acquisito_utc":_iso(now),"progetti":projects,
             "stati_coppie_kraken":kraken_status,
-            "avvisi_repository":advisories,"prossimo_security":sec_cursor,
-            "segnalazioni_repo":issues,"prossima_issue":next_issue,
-            "politiche_emissioni":emissions,"prossima_emissione":emission_next,
+            "avvisi_repository":advisories,"prossimo_security":_cursor_after_attempt(cursors,"prossimo_security",sec_cursor, bool(chosen_s),security_eligible,project=True),
+            "segnalazioni_repo":issues,"prossima_issue":_cursor_after_attempt(cursors,"prossima_issue",next_issue,bool(issue_selected),issue_projects,project=True),
+            "politiche_emissioni":emissions,"prossima_emissione":_cursor_after_attempt(cursors,"prossima_emissione",emission_next,bool(emission_selected),emission_eligible,project=True),
             "indicatori_macro":macro,"calendari":schedules,
             "comunicazioni_kraken":market_notices,
-            "prossimo_kraken_status":cycle[(kix+(1 if selected_status else 0))%len(cycle)][0],
-            "prossima_fonte_esterna":cycle[(kix+(1 if selected_status else 0))%len(cycle)][0],
+            "prossimo_kraken_status":next_status,
+            "prossima_fonte_esterna":next_status,
             "flussi_finanziari":financial,
             "eventi_macro_ufficiali":macro_releases,
             "revisioni_piani":changes_calendar,
             "storico_supply":history,"variazioni_supply":changes,
             "storico_eventi":retained_events,
-            "prossimo_progetto":next_project,
-            "prossimo_indicatore":series[(pick+(1 if network_allowed else 0))%len(series)][0],
-            "prossimo_schedule":sch_next,
+            "prossimo_progetto":_cursor_after_attempt(cursors,"prossimo_progetto",next_project,bool(selected),eligible,project=True),
+            "prossimo_indicatore":_cursor_after_attempt(cursors,"prossimo_indicatore",series[(pick+(1 if network_allowed else 0))%len(series)][0],network_allowed,[s[0] for s in series]),
+            "prossimo_schedule":_cursor_after_attempt(cursors,"prossimo_schedule",sch_next,bool(sch_selected),schedule_candidates,project=True),
             "richieste_pubbliche":used,"limite_richieste":MAX_GOVERNANCE_CALLS+MAX_MACRO_CALLS+MAX_SCHEDULE_CALLS+MAX_SECURITY_CALLS+MAX_EMISSION_CALLS+MAX_ISSUE_CALLS+MAX_STATUS_CALLS,
             "limite":"Campioni pubblici: proposal != approvazione; unlock != circolazione != vendita; nessuna direzione di mercato inferita"}
 

@@ -115,6 +115,102 @@ class RotationContinuityG2(unittest.TestCase):
         self.assertEqual(src._rotation_cursors(observed,T+dt.timedelta(days=31))
                          ["prossimo_schedule"],"starknet")
 
+    def test_rt75_paused_removed_strk_preserves_exact_pending_turn(self):
+        """The real collect must NOT consume STRK when no requests were made."""
+        full=roster(("ARB","STRK","SUI"))
+        removed=roster(("ARB","SUI"))
+        first,_,_=cycle(full,{},T)
+        self.assertEqual(first["prossimo_schedule"],"starknet")
+        paused,urls,rpcs=cycle(removed,first,T+dt.timedelta(days=31),network=False)
+        self.assertFalse(urls or rpcs)
+        self.assertEqual(paused["richieste_pubbliche"],0)
+        self.assertEqual(paused["prossimo_schedule"],"starknet")
+        self.assertNotIn("starknet",[x["progetto_id"] for x in paused["calendari"]])
+        restored,urls,_=cycle(full,paused,T+dt.timedelta(days=62))
+        self.assertIn(src.STRK_URL,urls)
+        self.assertNotIn(src.SUI_CIRCULATION,urls)
+        self.assertEqual(restored["prossimo_schedule"],"sui")
+
+    def test_rt75_paused_roster_change_does_not_shift_any_cursor_family(self):
+        full=roster()
+        initial,_,_=cycle(full,{},T)
+        reduced=roster(("BTC","ARB"))
+        paused,urls,rpcs=cycle(reduced,initial,T+dt.timedelta(days=31),network=False)
+        self.assertEqual((urls,rpcs),([],[]))
+        self.assertEqual(paused["richieste_pubbliche"],0)
+        self.assertEqual(tuple(paused[k] for k in FIELDS),
+                         tuple(initial[k] for k in FIELDS))
+        resumed,urls,rpcs=cycle(full,paused,T+dt.timedelta(days=62))
+        self.assertEqual(resumed["richieste_pubbliche"],8)
+        self.assertIn(src.STRK_URL,urls)
+        self.assertNotIn(src.SUI_CIRCULATION,urls)
+
+    def test_rt75_repeated_pauses_preserve_removed_strk_and_expired_evidence(self):
+        """No number of zero-request cycles can use up a pending source turn."""
+        full=roster(("ARB","STRK","SUI"))
+        reduced=roster(("ARB","SUI"))
+        prev,_,_=cycle(full,{},T)
+        for i in range(1,5):
+            paused,urls,rpcs=cycle(reduced,prev,T+dt.timedelta(days=31*i),network=False)
+            self.assertEqual(paused["prossimo_schedule"],"starknet")
+            self.assertEqual(paused["richieste_pubbliche"],0)
+            self.assertFalse(urls or rpcs)
+            self.assertNotIn("starknet",[r["progetto_id"] for r in paused["calendari"]])
+            self.assertTrue(all(not r.get("eventi") for r in paused["calendari"]))
+            prev=paused
+        resumed,urls,rpcs=cycle(full,prev,T+dt.timedelta(days=155))
+        self.assertIn(src.STRK_URL,urls)
+        self.assertNotIn(src.SUI_CIRCULATION,urls)
+        self.assertEqual(resumed["prossimo_schedule"],"sui")
+        self.assertLessEqual(resumed["richieste_pubbliche"],8)
+        self.assertGreater(resumed["richieste_pubbliche"],0)
+
+    def test_rt75_idle_wrong_family_project_id_does_not_survive(self):
+        """A known project is not evidence of a source in an unrelated family."""
+        full=roster(("ARB","STRK","SUI","SOL"))
+        first,_,_=cycle(full,{},T)
+        invalid=copy.deepcopy(first)
+        invalid["prossimo_schedule"]="solana"  # curated, but no schedule adapter
+        paused,urls,rpcs=cycle(roster(("ARB","SUI")),invalid,
+            T+dt.timedelta(days=31),network=False)
+        self.assertFalse(urls or rpcs)
+        self.assertNotEqual(paused["prossimo_schedule"],"solana")
+        resumed,urls,_=cycle(full,paused,T+dt.timedelta(days=62))
+        self.assertTrue(any(u in (src.ARB_VESTING_URL,src.SUI_CIRCULATION)
+                            for u in urls))
+        self.assertLessEqual(resumed["richieste_pubbliche"],8)
+
+    def test_rt75_invalid_idle_cursor_not_promoted_when_project_removed(self):
+        full=roster(("ARB","STRK","SUI"))
+        reduced=roster(("ARB","SUI"))
+        first,_,_=cycle(full,{},T)
+        for bad in (None,"BAD?","imaginaryproject",10,{}):
+            with self.subTest(bad=repr(bad)):
+                forged=copy.deepcopy(first)
+                forged["prossimo_schedule"]=bad
+                paused,urls,rpcs=cycle(reduced,forged,T+dt.timedelta(days=31),network=False)
+                self.assertFalse(urls or rpcs)
+                self.assertIn(paused["prossimo_schedule"],("arbitrum","sui"))
+                self.assertNotEqual(paused["prossimo_schedule"],bad)
+
+    def test_rt75_disabled_optional_rotations_preserve_turn(self):
+        full=roster()
+        first,_,_=cycle(full,{},T)
+        urls=[]
+        def no_http(url):
+            urls.append(url)
+            raise OSError("offline public mock")
+        following=src.collect(T+dt.timedelta(days=31),full,first,no_http,
+            rpc_fetch=None,network_allowed=True,
+            collect_project_issues=False,collect_kraken_status=False)
+        self.assertEqual(following["prossima_issue"],first["prossima_issue"])
+        self.assertEqual(following["prossima_emissione"],first["prossima_emissione"])
+        self.assertEqual(following["prossima_fonte_esterna"],first["prossima_fonte_esterna"])
+        self.assertEqual(following["prossimo_kraken_status"],first["prossimo_kraken_status"])
+        self.assertEqual(following["richieste_pubbliche"],len(urls))
+        self.assertLessEqual(following["richieste_pubbliche"],8)
+        src.at_read(following,full,T+dt.timedelta(days=31))
+
     def test_removed_project_uses_valid_successor_and_reenters_without_misattribution(self):
         items=roster()
         first,_,_=cycle(items,{},T)
