@@ -43,3 +43,13 @@ OAuth non autorizzato. drive.file non garantisce visibilità di dossier FolderSy
 4. Collaudo indipendente Red Team, poi decisione della Supervisione; KDD-24 NON chiuso e nessun merge/deploy consentito.
 
 STOP alla consegna G2-A.
+
+
+## Esito CI sintetica sul checkout originale — prova eseguita
+
+GitHub Actions: https://github.com/gionatamartini66-rgb/KRAKEN_DECISION_DESK/actions/runs/44774244735
+Run ID: 44774244735; job: synthetic-only, ID 136419670344; commit di prova 3c8e59c9a77b9ff3feb4a9ec2a3fff06689f16c4; conclusione: SUCCESS.
+
+Log letti direttamente: 20 test scoperti, 19 passati, 1 skipped. Il confronto **sul vero codice KDD** OriginalBridgeDifferentialTests.test_original_read_context_matches_retriever_fresh_and_stale risulta **ok**: contesto recuperato identico al bridge.read_context() originale, alle due date della fixture. Lo skip riguarda soltanto test_missing_real_bridge_fails_closed_no_partial_validation, previsto per l'ambiente privo di bridge; nel checkout CI il bridge originale è presente ed è esercitato dalla prova differenziale.
+
+Questo sostituisce il precedente stato di prova differenziale non eseguita localmente, senza riqualificare le prove come Red Team o come test live Drive. Tutta la CI rimane solo sintetica. Sites, OAuth, collegamento GPT automatico e Drive reale NON verificati, non autorizzati né attivati.
