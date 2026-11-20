@@ -1,6 +1,7 @@
 """Real bridge + user-interface handoff tests; no Drive/network/phone involved."""
 import copy
 import datetime as dt
+import hashlib
 import html
 import json
 from pathlib import Path
@@ -10,6 +11,7 @@ from unittest import mock
 
 from scripts import kdd_drive_exchange as exchange
 from scripts import kdd_bridge_g2 as bridge
+from scripts import kdd_drive_index as index
 from scripts import test_kdd_bridge_g2 as fixtures
 
 
@@ -33,10 +35,16 @@ class DriveUIHandoffTests(unittest.TestCase):
     def test_gpt_drive_roundtrip_with_persisted_original_and_manual_consent(self):
         with mock.patch.object(bridge,"prepare",return_value=self.original.bundle):
             exported=exchange.prepare_export()
-        self.assertRegex(exported,r"kdd_handoff_[0-9a-f]{64}\.json")
+        self.assertRegex(exported, index.DOSSIER)
         out=(self.sync/exported)
         self.assertTrue(out.is_file())
         self.assertEqual(out.read_bytes(),bridge.canonical(self.original.bundle)+b"\n")
+        stamp, digest = index.DOSSIER.fullmatch(exported).groups()
+        _, index_name = index.names(stamp, digest)
+        index_body = json.loads((self.sync / index_name).read_bytes())
+        index.check_index(index_body, stamp, digest)
+        self.assertEqual(index_body["snapshot_id"], self.original.bundle["packet_sha256"])
+        self.assertEqual(index_body["sha256_byte"], hashlib.sha256(out.read_bytes()).hexdigest())
         self.assertEqual(bridge.verify_local_origin(self.original.bundle),
                          bridge.digest(self.original.bundle))
         self.assertIn("Nessuna proposta",exchange.render_page("TOKEN"))
@@ -80,7 +88,7 @@ class DriveUIHandoffTests(unittest.TestCase):
              mock.patch.object(bridge, 'read_context', return_value={
                  'mercato': {'stato': 'DA_AGGIORNARE'},
                  'saldo': {'stato': 'RECENTE'}}), \
-             mock.patch.object(exchange, 'export_bundle') as write:
+             mock.patch.object(exchange, '_export_bundle') as write:
             with self.assertRaisesRegex(bridge.BridgeError, 'non recenti'):
                 exchange.prepare_export(require_recent=True)
             write.assert_not_called()
@@ -94,6 +102,57 @@ class DriveUIHandoffTests(unittest.TestCase):
         # Original persisted, but no shared Drive delivery was claimed.
         self.assertEqual(bridge.verify_local_origin(self.original.bundle),
                          bridge.digest(self.original.bundle))
+
+    def test_interrupted_export_retries_original_and_leaves_history_untouched(self):
+        bundle = self.original.bundle
+        raw = bridge.canonical(bundle) + b"\n"
+        dossier, manifest, body = index.publication(bundle, raw)
+        legacy = self.sync / f"kdd_handoff_{bridge.digest(bundle)}.json"
+        legacy.write_bytes(raw)
+        original_legacy = legacy.stat()
+        publish = exchange._publish_export_file
+
+        def interrupt(folder, name, data):
+            if name == manifest:
+                raise KeyboardInterrupt
+            publish(folder, name, data)
+
+        with (mock.patch.object(bridge, "prepare", return_value=bundle),
+              mock.patch.object(exchange, "_publish_export_file", side_effect=interrupt)):
+            with self.assertRaises(KeyboardInterrupt):
+                exchange.prepare_export()
+        self.assertFalse((self.sync / manifest).exists())
+        self.assertEqual((self.sync / dossier).read_bytes(), raw)
+        first_dossier = (self.sync / dossier).stat()
+        self.assertIn("incompleta", exchange.latest_export())
+        with mock.patch.object(bridge, "prepare") as prepare:
+            self.assertEqual(exchange.prepare_export(), dossier)
+            prepare.assert_not_called()
+        self.assertEqual((self.sync / manifest).read_bytes(), bridge.canonical(body)+b"\n")
+        self.assertEqual(set(p.name for p in self.sync.iterdir()), {legacy.name, dossier, manifest})
+        self.assertEqual((self.sync / dossier).stat().st_ino, first_dossier.st_ino)
+        self.assertEqual((self.sync / dossier).stat().st_mtime_ns, first_dossier.st_mtime_ns)
+        self.assertEqual(legacy.stat().st_mtime_ns, original_legacy.st_mtime_ns)
+        self.assertEqual(legacy.read_bytes(), raw)
+        self.assertEqual(bridge.verify_local_origin(bundle), bridge.digest(bundle))
+        self.assertFalse((bridge.PRIVATE_ROOT / "drive-export" / exchange._PENDING_EXPORT).exists())
+
+    def test_export_retry_preserves_and_rejects_conflicting_existing_index(self):
+        bundle = self.original.bundle
+        raw = bridge.canonical(bundle)+b"\n"
+        dossier, manifest, _ = index.publication(bundle, raw)
+        collision = self.sync / manifest
+        collision.write_bytes(b"existing-different-index")
+        with mock.patch.object(bridge, "prepare", return_value=bundle):
+            with self.assertRaisesRegex(bridge.BridgeError, "presente ma differente"):
+                exchange.prepare_export()
+        with mock.patch.object(bridge, "prepare") as prepare:
+            with self.assertRaisesRegex(bridge.BridgeError, "presente ma differente"):
+                exchange.prepare_export()
+            prepare.assert_not_called()
+        self.assertEqual(collision.read_bytes(), b"existing-different-index")
+        self.assertEqual((self.sync / dossier).read_bytes(), raw)
+        self.assertEqual(bridge.verify_local_origin(bundle), bridge.digest(bundle))
 
     def test_bad_json_cannot_replace_valid_pending(self):
         self.original.persist_origin()

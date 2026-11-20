@@ -1,4 +1,4 @@
-"""KDD G2-B: bounded read-only Drive dossier recovery, isolated prototype.
+"""KDD G2-C: bounded read-only Drive dossier recovery, isolated prototype.
 
 No Google credentials, private KDD filesystem, network calls, files written, orders,
 plugin registration or deploy. A Drive adapter and bridge validator are injected.
@@ -18,8 +18,11 @@ import time
 from typing import Callable, Protocol
 from urllib.parse import quote
 
+from scripts import kdd_drive_index as index
+from scripts.kdd_drive_index import canonical
+
 UTC = dt.timezone.utc
-MAX_BYTES = 8_000_000  # The canonical bridge's maximum
+MAX_BYTES = index.MAX_DOSSIER_BYTES
 MAX_LIST_PAGES = 80  # Per scan
 MAX_INVENTORY_FILES = 10_000  # Per scan, including unrelated rows
 MAX_METADATA_BYTES = 512 * 1024  # Per response, enforced by the transport
@@ -27,14 +30,13 @@ MAX_DOWNLOADS = 4
 MAX_TOTAL_BYTES = 16_000_000
 MAX_SECONDS = 30
 MAX_REQUEST_SECONDS = 5
+VALIDATION_WINDOW = dt.timedelta(seconds=2)
 FILE_FIELDS = ("id,name,mimeType,parents,size,createdTime,modifiedTime,"
                "sha256Checksum,md5Checksum,trashed,version,headRevisionId")
 DRIVE_TIMESTAMP = re.compile(
-    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
-    r"(?:\.[0-9]{1,6})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])\Z"
+    r"([0-9]{4}-[0-9]{2}-[0-9]{2})[Tt]([0-9]{2}:[0-9]{2}):([0-5][0-9]|60)"
+    r"(?:\.([0-9]+))?([Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])\Z"
 )
-HANDOFF = re.compile(r"kdd_handoff_([0-9a-f]{64})\.json\Z")
-SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 SCHEMA = "kdd_private_handoff_v001"
 
 RECOVERED = "DOSSIER_RECUPERATO"
@@ -82,12 +84,6 @@ class Dossier:
     provider_sha_checked: bool
 
 
-def canonical(obj: object) -> bytes:
-    """Exactly the existing bridge.canonical() JSON serialization."""
-    return json.dumps(obj, ensure_ascii=False, sort_keys=True,
-                      separators=(",", ":"), allow_nan=False).encode("utf-8")
-
-
 def _strict_object(pairs: list[tuple[str, object]]) -> dict:
     result = {}
     for key, val in pairs:
@@ -101,13 +97,13 @@ def _reject_constant(value: str) -> None:
     raise EvidenceFailure("JSON_NONFINITE_NUMBER")
 
 
-def parse_handoff(raw: bytes) -> dict:
+def _canonical_object(raw: bytes) -> dict:
     try:
         obj = json.loads(raw.decode("utf-8"), object_pairs_hook=_strict_object,
                          parse_constant=_reject_constant)
     except (UnicodeError, ValueError, TypeError, RecursionError, OverflowError) as exc:
         raise EvidenceFailure("JSON_INVALIDO") from exc
-    if not isinstance(obj, dict) or obj.get("schema") != SCHEMA:
+    if not isinstance(obj, dict):
         raise EvidenceFailure("SCHEMA_TRASPORTO_INVALIDO")
     try:
         expected = canonical(obj) + b"\n"
@@ -116,18 +112,6 @@ def parse_handoff(raw: bytes) -> dict:
     if raw != expected:
         raise EvidenceFailure("BYTE_NON_CANONICI")
     return obj
-
-
-def _timestamp(value: object) -> dt.datetime:
-    if not isinstance(value, str):
-        raise EvidenceFailure("TIMESTAMP_ASSENTE")
-    try:
-        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (ValueError, OverflowError) as exc:
-        raise EvidenceFailure("TIMESTAMP_INVALIDO") from exc
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise EvidenceFailure("TIMESTAMP_SENZA_FUSO")
-    return parsed.astimezone(UTC)
 
 
 def _now(value: dt.datetime | None) -> dt.datetime:
@@ -145,12 +129,13 @@ def _remaining(deadline: float) -> float:
     return min(remaining, MAX_REQUEST_SECONDS)
 
 
-def _inventory(reader: DriveReader, folder_id: str, deadline: float) -> tuple[list[dict], int, int]:
+def _inventory(reader: DriveReader, folder_id: str, deadline: float) -> tuple[list[dict], dict]:
     cursor: str | None = None
     used_tokens: set[str] = set()
     seen_ids: set[str] = set()
     items: list[dict] = []
-    unrelated = suspicious = 0
+    audit = {"file_estranei": 0, "nomi_fuori_schema_con_prefisso_kdd": 0,
+             "dossier_storici_senza_indice": 0, "numero_dossier": 0}
     for _ in range(MAX_LIST_PAGES):
         page = reader.list_page(cursor, timeout=_remaining(deadline))
         _remaining(deadline)
@@ -169,10 +154,22 @@ def _inventory(reader: DriveReader, folder_id: str, deadline: float) -> tuple[li
             name = file.get("name")
             if not isinstance(name, str) or not name:
                 raise EvidenceFailure("NOME_FILE_MANCANTE")
-            if HANDOFF.fullmatch(name) is None:
-                unrelated += 1
-                suspicious += name.startswith("kdd_handoff_")
+            if index.LEGACY.fullmatch(name) is not None:
+                audit["dossier_storici_senza_indice"] += 1
+                audit["numero_dossier"] += 1
                 continue
+            dossier_match = index.DOSSIER.fullmatch(name)
+            match = dossier_match or index.INDEX.fullmatch(name)
+            if match is None:
+                if name.startswith((index.INDEX_PREFIX, index.DOSSIER_PREFIX)):
+                    raise EvidenceFailure("NOME_PUBBLICAZIONE_KDD_INVALIDO")
+                audit["file_estranei"] += 1
+                audit["nomi_fuori_schema_con_prefisso_kdd"] += name.startswith("kdd_handoff_")
+                continue
+            try:
+                index.prepared_from_stamp(match[1])
+            except ValueError as exc:
+                raise EvidenceFailure("DATA_PUBBLICAZIONE_KDD_INVALIDA") from exc
             if file.get("trashed") is True:
                 raise EvidenceFailure("ELEMENTO_CESTINATO_NELLA_RISPOSTA")
             if file.get("trashed") is not False:
@@ -180,9 +177,11 @@ def _inventory(reader: DriveReader, folder_id: str, deadline: float) -> tuple[li
             if not isinstance(file.get("parents"), list) or file["parents"] != [folder_id]:
                 raise EvidenceFailure("CARTELLA_ORIGINE_NON_ATTESTATA")
             items.append(_file_metadata(file))
+            if dossier_match:
+                audit["numero_dossier"] += 1
         token = page.get("nextPageToken")
         if token is None:
-            return items, unrelated, suspicious
+            return items, audit
         if not isinstance(token, str) or not token or token in used_tokens:
             raise EvidenceFailure("PAGINAZIONE_INCOERENTE")
         used_tokens.add(token)
@@ -194,44 +193,52 @@ def _file_metadata(file: dict) -> dict:
     return {key: file.get(key) for key in FILE_FIELDS.split(",")}
 
 
-def _ranking_inventory(items: list[dict]) -> dict:
-    # A mutation to an older blob's checksum or version cannot change its rank.
-    return {f["id"]: (f["name"], f["createdTime"]) for f in items}
-
-
-def _drive_timestamp(value: object) -> dt.datetime | None:
+def _drive_timestamp(value: object) -> tuple[dt.datetime, bool, str] | None:
     if value is None:
         return None
-    if not isinstance(value, str) or not DRIVE_TIMESTAMP.fullmatch(value):
+    match = DRIVE_TIMESTAMP.fullmatch(value) if isinstance(value, str) else None
+    if match is None:
         raise EvidenceFailure("TIMESTAMP_DRIVE_INVALIDO")
+    date, hour_minute, seconds, fraction, zone = match.groups()
+    leap = seconds == "60"
     try:
-        return _timestamp(value)
-    except (EvidenceFailure, ValueError, OverflowError) as exc:
+        ordinary_seconds = "59" if leap else seconds
+        whole = index.utc(f"{date}T{hour_minute}:{ordinary_seconds}{zone.upper()}")
+        if leap:
+            following = whole + dt.timedelta(seconds=1)
+            if following.day != 1 or following.time() != dt.time():
+                raise ValueError("Leap second outside the end of a UTC month")
+    except (ValueError, OverflowError) as exc:
         raise EvidenceFailure("TIMESTAMP_DRIVE_INVALIDO") from exc
+    # Compare exact fractions, including digits beyond datetime's precision.
+    return whole, leap, (fraction or "").rstrip("0")
 
 
-def _select_candidates(files: list[dict]) -> tuple[str, list[dict]]:
+def _select_candidates(files: list[dict]) -> tuple[str, str, list[dict], list[dict]]:
     if not files:
-        raise EvidenceFailure("NESSUN_DOSSIER")
-    if len(files) == 1:
-        return "UNICO_DOSSIER_VISIBILE", files
-
-    ranked = []
+        raise EvidenceFailure("INDICE_CORRENTE_ASSENTE")
+    named = {}
     for file in files:
-        created = _drive_timestamp(file["createdTime"])
-        if created is None:
-            raise EvidenceFailure("ORDINE_DRIVE_INDETERMINATO")
-        ranked.append((created, file))
-    newest = max(created for created, _ in ranked)
-    tied = [f for created, f in ranked if created == newest]
-    if len({f["name"] for f in tied}) != 1:
-        raise EvidenceFailure("DUPLICATI_TEMPORALI_INCOMPATIBILI")
-    if len(tied) > MAX_DOWNLOADS:
+        named.setdefault(file["name"], []).append(file)
+    keys = [(index.INDEX.fullmatch(name) or index.DOSSIER.fullmatch(name)).groups()
+            for name in named]
+    stamp = max(stamp for stamp, _ in keys)
+    digests = {digest for key, digest in keys if key == stamp}
+    if len(digests) != 1:
+        raise EvidenceFailure("PUBBLICAZIONE_CORRENTE_AMBIGUA")
+    digest = digests.pop()
+    dossier_name, index_name = index.names(stamp, digest)
+    indices, dossiers = named.get(index_name, []), named.get(dossier_name, [])
+    if not indices:
+        raise EvidenceFailure("INDICE_CORRENTE_ASSENTE")
+    if not dossiers:
+        raise EvidenceFailure("DOSSIER_INDICIZZATO_NON_ARRIVATO")
+    if len(indices) + len(dossiers) > MAX_DOWNLOADS:
         raise EvidenceFailure("LIMITE_CANDIDATI_CORRENTI")
-    return "MASSIMO_CREATED_TIME_DRIVE", sorted(tied, key=lambda f: f["id"])
+    return stamp, digest, sorted(indices, key=lambda f: f["id"]), sorted(dossiers, key=lambda f: f["id"])
 
 
-def _candidate_size(file: dict) -> int:
+def _candidate_size(file: dict, limit: int) -> int:
     if file["mimeType"] not in ("application/json", "application/octet-stream", "text/plain"):
         raise EvidenceFailure("TIPO_FILE_NON_BINARY")
     created = _drive_timestamp(file["createdTime"])
@@ -246,7 +253,7 @@ def _candidate_size(file: dict) -> int:
         raise EvidenceFailure("REVISIONE_DRIVE_INVALIDA")
     size = file["size"]
     if (type(size) not in (str, int) or not re.fullmatch(r"[0-9]{1,7}", str(size))
-            or not 2 <= int(size) <= MAX_BYTES):
+            or not 2 <= int(size) <= limit):
         raise EvidenceFailure("DIMENSIONE_NON_VALIDA")
     return int(size)
 
@@ -259,7 +266,7 @@ def _checked_download(reader: DriveReader, file: dict, size: int, deadline: floa
     raw_sha = hashlib.sha256(raw).hexdigest()
     source_sha = file.get("sha256Checksum")
     if source_sha is not None:
-        if not isinstance(source_sha, str) or not SHA256.fullmatch(source_sha.lower()) or raw_sha != source_sha.lower():
+        if not isinstance(source_sha, str) or not index.SHA256.fullmatch(source_sha.lower()) or raw_sha != source_sha.lower():
             raise EvidenceFailure("CHECKSUM_DRIVE_DISCORDANTE")
     md5 = file.get("md5Checksum")
     if md5 is not None:
@@ -268,27 +275,51 @@ def _checked_download(reader: DriveReader, file: dict, size: int, deadline: floa
     return raw, raw_sha
 
 
-def _read_current(reader: DriveReader, candidates: list[dict], deadline: float) -> Dossier:
-    sizes = [_candidate_size(file) for file in candidates]
-    if sum(sizes) > MAX_TOTAL_BYTES:
-        raise EvidenceFailure("LIMITE_BYTE_RECUPERO")
-    file = candidates[0]
-    raw, raw_sha = _checked_download(reader, file, sizes[0], deadline)
+def _read_identical(reader: DriveReader, candidates: list[dict], sizes: list[int],
+                    deadline: float) -> tuple[bytes, str]:
+    raw, raw_sha = _checked_download(reader, candidates[0], sizes[0], deadline)
     for duplicate, size in zip(candidates[1:], sizes[1:]):
         other, _ = _checked_download(reader, duplicate, size, deadline)
         if raw != other:
             raise EvidenceFailure("DUPLICATO_CORRENTE_DISCORDANTE")
-    handoff = parse_handoff(raw)
-    logical_sha = hashlib.sha256(canonical(handoff)).hexdigest()
-    if logical_sha != HANDOFF.fullmatch(file["name"])[1]:
+    return raw, raw_sha
+
+
+def _read_current(reader: DriveReader, stamp: str, digest: str, indices: list[dict],
+                  dossiers: list[dict], deadline: float) -> tuple[Dossier, str]:
+    index_sizes = [_candidate_size(file, index.MAX_INDEX_BYTES) for file in indices]
+    dossier_sizes = [_candidate_size(file, MAX_BYTES) for file in dossiers]
+    if sum(index_sizes) + sum(dossier_sizes) > MAX_TOTAL_BYTES:
+        raise EvidenceFailure("LIMITE_BYTE_RECUPERO")
+
+    index_raw, index_sha = _read_identical(reader, indices, index_sizes, deadline)
+    try:
+        manifest = _canonical_object(index_raw)
+        index.check_index(manifest, stamp, digest)
+    except (EvidenceFailure, ValueError, OverflowError) as exc:
+        raise EvidenceFailure("INDICE_CORRENTE_INVALIDO") from exc
+
+    if any(size != manifest["dimensione_byte"] for size in dossier_sizes):
+        raise EvidenceFailure("DIMENSIONE_DOSSIER_DISCORDE_DA_INDICE")
+    raw, raw_sha = _read_identical(reader, dossiers, dossier_sizes, deadline)
+    if raw_sha != manifest["sha256_byte"]:
+        raise EvidenceFailure("BYTE_DOSSIER_DISCORDI_DA_INDICE")
+    handoff = _canonical_object(raw)
+    if handoff.get("schema") != SCHEMA:
+        raise EvidenceFailure("SCHEMA_TRASPORTO_INVALIDO")
+    if hashlib.sha256(raw[:-1]).hexdigest() != digest:
         raise EvidenceFailure("IDENTITA_LOGICA_DISCORDANTE")
-    packet = handoff.get("packet")
-    if not isinstance(packet, dict):
-        raise EvidenceFailure("PACCHETTO_ASSENTE")
-    prepared = _timestamp(handoff.get("preparato_utc"))
-    snapshot = _timestamp(packet.get("rilevazione_kdd_utc"))
-    return Dossier(file["id"], file["name"], logical_sha, raw_sha, prepared, snapshot,
-                   handoff, file["sha256Checksum"] is not None)
+    try:
+        _, _, expected_index = index.publication(handoff, raw)
+    except (ValueError, TypeError, KeyError, OverflowError) as exc:
+        raise EvidenceFailure("SCHEMA_TRASPORTO_INVALIDO") from exc
+    if expected_index != manifest:
+        raise EvidenceFailure("INDICE_E_DOSSIER_DISCORDANTI")
+    file = dossiers[0]
+    selected = Dossier(file["id"], file["name"], digest, raw_sha,
+                       index.utc(manifest["preparato_utc"]), index.utc(manifest["snapshot_utc"]),
+                       handoff, file["sha256Checksum"] is not None)
+    return selected, index_sha
 
 
 def _check_current_versions(reader: DriveReader, candidates: list[dict], deadline: float) -> int:
@@ -396,43 +427,39 @@ def _analytical_evidence(dossier: Dossier, context: dict) -> dict:
     return evidence
 
 
-def kdd_get_latest_verified_dossier(reader: DriveReader, folder_id: str, *,
-                                   validator: BridgeReader | None = None,
-                                   now: dt.datetime | None = None,
-                                   clock: Callable[[], dt.datetime] | None = None) -> dict:
-    """Recover the current visible Drive candidate without historical fallback.
+def _without_read_clock(context: dict) -> dict:
+    comparable = dict(context)
+    comparable.pop("letto_utc", None)
+    for key in ("mercato", "saldo", "evidenze_economiche_alla_lettura"):
+        value = comparable.get(key)
+        if isinstance(value, dict):
+            comparable[key] = {k: v for k, v in value.items()
+                               if k not in ("letto_utc", "eta_minuti")}
+    network_key = "rete_defi_alla_lettura"
+    network = comparable.get(network_key)
+    if isinstance(network, dict) and network.get("stato") == "NON_ACQUISITO":
+        network = dict(network)
+        comparable[network_key] = network
+        # The bridge inserts the read time into empty DeFi rows in this case.
+        # When observations exist, their acquisition times stay in the comparison.
+        for group in ("posizioni", "candidati"):
+            if isinstance(network.get(group), list):
+                network[group] = [
+                    dict(row, defi={k: v for k, v in row["defi"].items() if k != "acquisito_utc"})
+                    for row in network[group]
+                ]
+    return comparable
 
-    Selection uses Drive creation metadata. The two scans and version checks
-    detect reported changes. They do not provide a transactional snapshot.
-    A fixed `now` allows historical fixture replay, while `clock` can simulate
-    elapsed acquisition time. By default UTC is sampled once, after all Drive calls.
-    """
-    audit = {}
-    try:
-        deadline = time.monotonic() + MAX_SECONDS
-        if now is not None and clock is not None:
-            raise EvidenceFailure("OROLOGIO_LETTURA_AMBIGUO")
-        if not isinstance(folder_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{6,128}", folder_id):
-            raise EvidenceFailure("CARTELLA_NON_CONFIGURATA")
-        validator = validator if validator is not None else OriginalKddBridge()
-        first, unrelated, suspicious = _inventory(reader, folder_id, deadline)
-        audit = {"numero_dossier": len(first), "file_estranei": unrelated,
-                 "nomi_fuori_schema_con_prefisso_kdd": suspicious,
-                 "massimo_preparato_utc_verificato": False}
-        criterion, candidates = _select_candidates(first)
-        audit.update(criterio_selezione=criterion, numero_candidati_correnti=len(candidates),
-                     dossier_fuori_selezione_non_validati=len(first) - len(candidates))
-        selected = _read_current(reader, candidates, deadline)
-        second, _, _ = _inventory(reader, folder_id, deadline)
-        second_by_id = {file["id"]: file for file in second}
-        if (_ranking_inventory(first) != _ranking_inventory(second)
-                or any(second_by_id.get(file["id"]) != file for file in candidates)):
-            raise EvidenceFailure("INVENTARIO_CAMBIATO_DURANTE_LA_LETTURA")
-        checked = _check_current_versions(reader, candidates, deadline)
-        audit.update(inventario_stabile_su_due_scansioni=True, numero_controlli_versione=checked,
-                     atomicita_inventario=False)
+
+def _validated_answer(selected: Dossier, validator: BridgeReader,
+                      read_clock: Callable[[], dt.datetime | None], deadline: float,
+                      audit: dict) -> dict:
+    # The original bridge has both source start times and expiry cutoffs.
+    # Compare both ends of a small window and deliver only inside that window.
+    # One retry lets a cutoff already crossed during the first pass settle.
+    moment = _now(read_clock())
+    for _ in range(2):
         _remaining(deadline)
-        moment = _now(clock() if clock is not None else now)
         context = _final_context(selected, validator, moment)
         sources = _base_sources(selected, context)
         state, code = _base_outcome(sources)
@@ -442,8 +469,65 @@ def kdd_get_latest_verified_dossier(reader: DriveReader, folder_id: str, *,
                                    "copertura": "STATI_PER_FONTE_E_POSIZIONE_NEL_CONTESTO_KDD",
                                    "lacune_da_verificare": context.get("lacune_da_verificare", []),
                                })
+        finished = _now(read_clock())
         _remaining(deadline)
-        return answer
+        if finished < moment:
+            raise EvidenceFailure("OROLOGIO_ARRETRATO_DURANTE_VALIDAZIONE")
+        if finished == moment:
+            answer["validita_controllata_utc"] = finished.isoformat()
+            return answer
+
+        horizon = moment + VALIDATION_WINDOW
+        if finished <= horizon:
+            probe = _final_context(selected, validator, horizon)
+            stable = _without_read_clock(context) == _without_read_clock(probe)
+            conclusion = _now(read_clock())
+            _remaining(deadline)
+            if conclusion < finished:
+                raise EvidenceFailure("OROLOGIO_ARRETRATO_DURANTE_VALIDAZIONE")
+            if stable and conclusion <= horizon:
+                answer["validita_controllata_utc"] = conclusion.isoformat()
+                return answer
+            finished = conclusion
+        moment = finished
+    raise EvidenceFailure("FRESCHEZZA_FINALE_NON_GARANTITA")
+
+
+def kdd_get_latest_verified_dossier(reader: DriveReader, folder_id: str, *,
+                                   validator: BridgeReader | None = None,
+                                   now: dt.datetime | None = None,
+                                   clock: Callable[[], dt.datetime] | None = None) -> dict:
+    """Recover the current visible Drive candidate without historical fallback.
+
+    The newest dated publication must have both a valid index and matching
+    dossier. Drive scans/version checks only detect reported changes.
+    A fixed `now` allows deterministic fixture replay; `clock` can advance.
+    """
+    audit = {}
+    try:
+        deadline = time.monotonic() + MAX_SECONDS
+        if now is not None and clock is not None:
+            raise EvidenceFailure("OROLOGIO_LETTURA_AMBIGUO")
+        if not isinstance(folder_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{6,128}", folder_id):
+            raise EvidenceFailure("CARTELLA_NON_CONFIGURATA")
+        validator = validator if validator is not None else OriginalKddBridge()
+        first, audit = _inventory(reader, folder_id, deadline)
+        audit.update(numero_file_indicizzazione=len(first), massimo_preparato_utc_verificato=False)
+        stamp, digest, indices, dossiers = current = _select_candidates(first)
+        candidates = indices + dossiers
+        audit.update(criterio_selezione="MASSIMO_PREPARATO_UTC_INDICIZZATO",
+                     numero_file_correnti=len(candidates), numero_candidati_correnti=len(dossiers),
+                     dossier_fuori_selezione_non_validati=audit["numero_dossier"] - len(dossiers))
+        selected, index_sha = _read_current(reader, stamp, digest, indices, dossiers, deadline)
+        second, _ = _inventory(reader, folder_id, deadline)
+        if _select_candidates(second) != current:
+            raise EvidenceFailure("INVENTARIO_CAMBIATO_DURANTE_LA_LETTURA")
+        checked = _check_current_versions(reader, candidates, deadline)
+        audit.update(inventario_stabile_su_due_scansioni=True, numero_controlli_versione=checked,
+                     atomicita_inventario=False)
+        return _validated_answer(selected, validator, clock or (lambda: now), deadline,
+                                 dict(audit, massimo_preparato_utc_verificato=True,
+                                      nome_indice=indices[0]["name"], sha256_indice=index_sha))
     except (AccessUnavailable, PermissionError):
         return _presentation(ACCESS, "AUTORIZZAZIONE_O_LETTURA_ASSENTE", **audit)
     except EvidenceFailure as exc:

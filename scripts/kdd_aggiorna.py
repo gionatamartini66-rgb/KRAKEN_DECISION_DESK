@@ -39,7 +39,7 @@ PY_FILES = (
 )
 PACKET_FILES = (
     'scripts/kdd_wallet_packet_g0.py',
-    'scripts/kdd_bridge_g2.py', 'scripts/kdd_drive_exchange.py',
+    'scripts/kdd_bridge_g2.py', 'scripts/kdd_drive_exchange.py', 'scripts/kdd_drive_index.py',
     'scripts/test_kdd_drive_exchange.py', 'scripts/test_kdd_bridge_g2.py',
     'scripts/test_kdd_android_transaction_g2.py',
     'scripts/kdd_android_regressions.py',

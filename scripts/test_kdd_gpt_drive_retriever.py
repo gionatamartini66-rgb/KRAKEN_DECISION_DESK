@@ -1,13 +1,15 @@
-"""KDD G2-B synthetic-only, deterministic recovery and original-bridge comparisons."""
+"""KDD G2-C synthetic-only, deterministic recovery and original-bridge comparisons."""
 from __future__ import annotations
 import builtins
 import copy
 import datetime as dt
 import hashlib
 import importlib.util
+import json
 import unittest
 from unittest import mock
 
+from scripts import kdd_drive_index as index
 from scripts import kdd_gpt_drive_retriever as r
 
 T = dt.datetime(2026, 11, 20, 12, 0, tzinfo=dt.timezone.utc)
@@ -44,17 +46,22 @@ def synth_handoff(*, when=T, marker="A"):
             "preparato_utc": timestamp}
 
 
-def file_and_bytes(*, when=T, marker="A"):
-    bundle = synth_handoff(when=when, marker=marker)
-    logical_sha = hashlib.sha256(r.canonical(bundle)).hexdigest()
-    raw = r.canonical(bundle) + b"\n"
-    fid = f"synthetic-{marker}-{when.hour}"
-    file = {"id": fid, "name": f"kdd_handoff_{logical_sha}.json", "parents": [FOLDER],
+def file_metadata(name, file_id, raw, when=T):
+    return {"id": file_id, "name": name, "parents": [FOLDER],
             "size": str(len(raw)), "mimeType": "application/json", "trashed": False,
             "sha256Checksum": hashlib.sha256(raw).hexdigest(),
             "md5Checksum": hashlib.md5(raw).hexdigest(),
             "createdTime": when.isoformat(), "modifiedTime": when.isoformat()}
-    return file, raw
+
+
+def publication_files(bundle, file_id, *, raw=None, drive_when=T):
+    if raw is None:
+        raw = r.canonical(bundle) + b"\n"
+    dossier, manifest, obj = index.publication(bundle, raw)
+    raw_index = r.canonical(obj) + b"\n"
+    files = [file_metadata(manifest, file_id+"-index", raw_index, drive_when),
+             file_metadata(dossier, file_id, raw, drive_when)]
+    return files, {file_id: raw, file_id+"-index": raw_index}
 
 
 class FakeDrive:
@@ -76,9 +83,10 @@ class FakeDrive:
         if token is None:
             self.scan_number += 1
         self.requests.append(token)
-        pages = self.alter_second_scan if self.scan_number >= 2 and self.alter_second_scan is not None else self.pages
-        index = 0 if token is None else int(token)
-        return copy.deepcopy(pages[index])
+        pages = self.pages
+        if self.scan_number >= 2 and self.alter_second_scan is not None:
+            pages = self.alter_second_scan
+        return copy.deepcopy(pages[0 if token is None else int(token)])
 
     def file_metadata(self, file_id, *, timeout):
         self.metadata_requests.append(file_id)
@@ -87,310 +95,260 @@ class FakeDrive:
                                   if file["id"] == file_id))
 
     def download(self, file_id, *, max_bytes, timeout):
-        self.downloads.append((file_id, max_bytes))
+        self.downloads.append(file_id)
         if self.deny_download:
             raise r.AccessUnavailable("download forbidden")
         return self.blobs[file_id]
 
 
 def pages_from(files, page_size=999):
-    parts = [files[i:i+page_size] for i in range(0, len(files), page_size)]
-    if not parts:
-        parts = [[]]
+    parts = [files[i:i+page_size] for i in range(0, len(files), page_size)] or [[]]
     return [{"files": part, "incompleteSearch": False,
              "nextPageToken": str(i+1) if i+1 < len(parts) else None}
             for i, part in enumerate(parts)]
 
 
-class RecoveryG2BTests(unittest.TestCase):
-    def recover(self, files, blobs, **kwargs):
-        driver = FakeDrive(pages_from(files), blobs, **kwargs)
-        return r.kdd_get_latest_verified_dossier(driver, FOLDER,
-                                                  validator=SyntheticBridge(), now=T), driver
+class RecoveryG2CTests(unittest.TestCase):
+    def setUp(self):
+        self.files, self.blobs = publication_files(synth_handoff(), "current")
+        self.manifest, self.dossier = self.files
+        self.validator = mock.Mock(wraps=SyntheticBridge())
 
-    def test_multipage_selection_follows_created_time_independent_of_page_order(self):
-        a, ba = file_and_bytes(when=T-dt.timedelta(minutes=20), marker="OLD")
-        b, bb = file_and_bytes(when=T-dt.timedelta(minutes=5), marker="NEW")
-        c, bc = file_and_bytes(when=T-dt.timedelta(minutes=12), marker="MID")
-        # Files deliberately unordered by timestamp; one folder non-handoff item.
-        extra = {"id": "unrelated", "name": "notes.md", "parents": [FOLDER]}
-        driver = FakeDrive(pages_from([a, extra, b, c], page_size=2),
-                           {a["id"]: ba, b["id"]: bb, c["id"]: bc})
-        answer = r.kdd_get_latest_verified_dossier(driver, FOLDER, validator=SyntheticBridge(), now=T)
-        self.assertEqual(answer["stato"], r.RECOVERED)
-        self.assertEqual(answer["file_id"], b["id"])
-        self.assertEqual(answer["numero_dossier"], 3)
-        self.assertEqual(driver.requests, [None, "1", None, "1"])
-        self.assertEqual(driver.downloads, [(b["id"], len(bb))])
-        self.assertEqual(answer["criterio_selezione"], "MASSIMO_CREATED_TIME_DRIVE")
-        self.assertFalse(answer["massimo_preparato_utc_verificato"])
-        self.assertTrue(answer["sha256_drive_confrontato"])
-        self.assertNotEqual(answer["digest_logico"], answer["sha256_byte"])
+    def recover(self, files, blobs=None, *, page_size=999, **driver_kwargs):
+        driver = FakeDrive(pages_from(files, page_size), self.blobs if blobs is None else blobs,
+                           **driver_kwargs)
+        result = r.kdd_get_latest_verified_dossier(driver, FOLDER, validator=self.validator, now=T)
+        return result, driver
 
-    def test_corrupted_newest_never_falls_back_to_old(self):
-        a, ba = file_and_bytes(when=T-dt.timedelta(minutes=10), marker="OLD")
-        b, bb = file_and_bytes(when=T-dt.timedelta(minutes=1), marker="NEW")
-        bb = bb.replace(b'"NEW"', b'"BAD"')
-        outcome, drive = self.recover([a, b], {a["id"]: ba, b["id"]: bb})
-        self.assertEqual(outcome["stato"], r.UNVERIFIABLE)
-        self.assertEqual(outcome["codice"], "CHECKSUM_DRIVE_DISCORDANTE")
-        self.assertEqual(drive.downloads, [(b["id"], len(bb))])
-        self.assertNotIn("file_id", outcome)
-
-    def test_two_incompatible_candidates_same_timestamp(self):
-        a, ba = file_and_bytes(marker="ADA")
-        b, bb = file_and_bytes(marker="ETH")
-        outcome, _ = self.recover([a, b], {a["id"]: ba, b["id"]: bb})
-        self.assertEqual(outcome["codice"], "DUPLICATI_TEMPORALI_INCOMPATIBILI")
-
-    def test_duplicated_filename_incompatible_bytes(self):
-        a, ba = file_and_bytes(marker="AAA")
-        b, bb = file_and_bytes(marker="BBB")
-        b["name"] = a["name"]
-        outcome, _ = self.recover([a, b], {a["id"]: ba, b["id"]: bb})
-        self.assertEqual(outcome["stato"], r.UNVERIFIABLE)
-
-    def test_integral_but_stale_recalculates_freshness(self):
-        a, ba = file_and_bytes(when=T-dt.timedelta(hours=4))
-        outcome, _ = self.recover([a], {a["id"]: ba})
-        self.assertEqual(outcome["stato"], r.STALE)
-        self.assertEqual(outcome["contesto_kdd"]["mercato"]["stato"], "DA_AGGIORNARE")
-        self.assertEqual(outcome["contesto_kdd"]["saldo"]["stato"], "DA_AGGIORNARE")
-
-    def test_access_revoked_during_list(self):
-        result, _ = self.recover([], {}, deny_list=True)
-        self.assertEqual(result["stato"], r.ACCESS)
-
-    def test_access_revoked_during_download(self):
-        a, raw = file_and_bytes()
-        result, _ = self.recover([a], {a["id"]: raw}, deny_download=True)
-        self.assertEqual(result["stato"], r.ACCESS)
-
-    def test_incomplete_search_blocks_result(self):
-        a, raw = file_and_bytes()
-        driver = FakeDrive([{"files": [a], "nextPageToken": None, "incompleteSearch": True}], {a["id"]: raw})
-        outcome = r.kdd_get_latest_verified_dossier(driver, FOLDER, validator=SyntheticBridge(), now=T)
-        self.assertEqual(outcome["codice"], "INVENTARIO_NON_COMPLETO")
-        self.assertEqual(outcome["stato"], r.UNVERIFIABLE)
-
-    def test_missing_incompleteSearch_flag_blocks_result(self):
-        a, raw = file_and_bytes()
-        driver = FakeDrive([{"files": [a]}], {a["id"]: raw})
-        outcome = r.kdd_get_latest_verified_dossier(driver, FOLDER, validator=SyntheticBridge(), now=T)
-        self.assertEqual(outcome["stato"], r.UNVERIFIABLE)
-
-    def test_page_token_cycle(self):
-        a, raw = file_and_bytes()
-        driver = FakeDrive([{"files": [a], "nextPageToken": "1", "incompleteSearch": False},
-                            {"files": [], "nextPageToken": "1", "incompleteSearch": False}],
-                           {a["id"]: raw})
-        outcome = r.kdd_get_latest_verified_dossier(driver, FOLDER, validator=SyntheticBridge(), now=T)
-        self.assertEqual(outcome["codice"], "PAGINAZIONE_INCOERENTE")
-
-    def test_duplicate_drive_id_different_pages(self):
-        a, raw = file_and_bytes()
-        driver = FakeDrive(pages_from([a, a], page_size=1), {a["id"]: raw})
-        outcome = r.kdd_get_latest_verified_dossier(driver, FOLDER, validator=SyntheticBridge(), now=T)
-        self.assertEqual(outcome["codice"], "IDENTIFICATIVO_DRIVE_DUPLICATO")
-
-    def test_inventory_race_between_scans(self):
-        a, raw = file_and_bytes()
-        b, new_raw = file_and_bytes(when=T-dt.timedelta(minutes=1), marker="NEW")
-        driver = FakeDrive(pages_from([a]), {a["id"]: raw, b["id"]: new_raw},
-                           alter_second_scan=pages_from([a, b]))
-        outcome = r.kdd_get_latest_verified_dossier(driver, FOLDER, validator=SyntheticBridge(), now=T)
-        self.assertEqual(outcome["codice"], "INVENTARIO_CAMBIATO_DURANTE_LA_LETTURA")
-
-    def test_corrupt_history_does_not_block_intact_current_candidate(self):
-        old, old_raw = file_and_bytes(when=T-dt.timedelta(hours=4), marker="OLD")
-        current, current_raw = file_and_bytes(when=T-dt.timedelta(minutes=1), marker="NEW")
-        old["sha256Checksum"] = "0" * 64
-        old["modifiedTime"] = T.isoformat()  # Editing history does not promote it.
-        result, driver = self.recover([old, current], {old["id"]: old_raw, current["id"]: current_raw})
+    def test_kdd_order_survives_inverted_drive_times_and_delayed_reuploads(self):
+        old, _ = publication_files(synth_handoff(when=T-dt.timedelta(hours=4)), "old",
+                                   drive_when=T+dt.timedelta(days=1))
+        for stored in old:
+            stored["sha256Checksum"] = "corrupted history, never downloaded"
+        reuploaded = [dict(file, id=file["id"]+"-copy") for file in old]
+        extras = {"id": "unrelated", "name": "kdd_handoff_notes.md", "parents": ["elsewhere"],
+                  "trashed": True}
+        result, drive = self.recover([*old, self.manifest, extras, *reuploaded, self.dossier],
+                                     page_size=2)
         self.assertEqual(result["stato"], r.RECOVERED)
-        self.assertEqual(driver.downloads, [(current["id"], len(current_raw))])
-        self.assertEqual(result["dossier_fuori_selezione_non_validati"], 1)
+        self.assertEqual(result["file_id"], "current")
+        self.assertEqual(result["criterio_selezione"], "MASSIMO_PREPARATO_UTC_INDICIZZATO")
+        self.assertTrue(result["massimo_preparato_utc_verificato"])
+        self.assertEqual(result["nomi_fuori_schema_con_prefisso_kdd"], 1)
+        self.assertEqual(drive.downloads, ["current-index", "current"])
+        self.validator.validate.assert_called_once()
 
-    def test_reuploaded_history_demonstrates_metadata_cannot_prove_latest_internal_time(self):
-        old, old_raw = file_and_bytes(when=T-dt.timedelta(hours=4), marker="REUPLOAD")
-        new, new_raw = file_and_bytes(when=T-dt.timedelta(minutes=1), marker="NEW")
-        old["createdTime"] = old["modifiedTime"] = T.isoformat()
-        result, drive = self.recover([new, old], {old["id"]: old_raw, new["id"]: new_raw})
-        self.assertEqual(result["file_id"], old["id"])
-        self.assertEqual(result["stato"], r.STALE)
-        self.assertFalse(result["massimo_preparato_utc_verificato"])
-        self.assertEqual(drive.downloads, [(old["id"], len(old_raw))])
-        self.assertEqual(result["integrita_origine"], "NON_AUTENTICATA")
-
-    def test_equal_current_copies_are_all_checked_and_validated_once(self):
-        a, raw = file_and_bytes()
-        duplicate = dict(a, id="z-copy")
-        drive = FakeDrive(pages_from([duplicate, a]), {a["id"]: raw, duplicate["id"]: raw})
-        validator = mock.Mock(wraps=SyntheticBridge())
-        result = r.kdd_get_latest_verified_dossier(drive, FOLDER, validator=validator, now=T)
-        self.assertEqual(result["file_id"], a["id"])
-        self.assertEqual(drive.downloads, [(a["id"], len(raw)), (duplicate["id"], len(raw))])
-        validator.validate.assert_called_once()
-
-    def test_large_history_downloads_and_validates_only_current(self):
-        old = [file_and_bytes(when=T-dt.timedelta(minutes=i+1), marker=f"OLD{i}")
-               for i in range(1200)]
-        current, raw = file_and_bytes(marker="CURRENT")
-        files = [row[0] for row in old] + [current]
-        drive = FakeDrive(pages_from(files, page_size=31), {current["id"]: raw})
-        validator = mock.Mock(wraps=SyntheticBridge())
-        result = r.kdd_get_latest_verified_dossier(drive, FOLDER, validator=validator, now=T)
-        self.assertEqual(result["stato"], r.RECOVERED)
-        self.assertEqual(result["dossier_fuori_selezione_non_validati"], 1200)
-        self.assertEqual((len(drive.requests), len(drive.downloads), validator.validate.call_count),
-                         (78, 1, 1))
-        print("RT13: 1200 storici + 1 corrente, 78 richieste lista, 1 download, 1 validazione",
-              flush=True)
-
-    def test_resource_caps_stop_before_download_or_validation(self):
-        a, raw = file_and_bytes()
-        duplicates = [dict(a, id=f"copy-{i}") for i in range(r.MAX_DOWNLOADS+1)]
-        large = [dict(duplicate, size=r.MAX_BYTES) for duplicate in duplicates[:3]]
-        for files, code in ((large, "LIMITE_BYTE_RECUPERO"),
-                            (duplicates, "LIMITE_CANDIDATI_CORRENTI")):
-            with self.subTest(code=code):
-                result, drive = self.recover(files, {a["id"]: raw})
+    def test_current_publication_incomplete_never_falls_back(self):
+        old, _ = publication_files(synth_handoff(when=T-dt.timedelta(hours=4)), "old")
+        legacy = dict(self.dossier, id="legacy", name="kdd_handoff_"+"a"*64+".json")
+        cases = (
+            ([self.dossier, *old, legacy], "INDICE_CORRENTE_ASSENTE"),
+            ([self.manifest, *old, legacy], "DOSSIER_INDICIZZATO_NON_ARRIVATO"),
+            ([legacy], "INDICE_CORRENTE_ASSENTE"),
+        )
+        for files, code in cases:
+            with self.subTest(code=code, count=len(files)):
+                result, drive = self.recover(files)
+                self.assertEqual(result["stato"], r.UNVERIFIABLE)
                 self.assertEqual(result["codice"], code)
                 self.assertFalse(drive.downloads)
-        with mock.patch.object(r, "MAX_INVENTORY_FILES", 1):
-            result, drive = self.recover(duplicates, {a["id"]: raw})
-            self.assertEqual(result["codice"], "LIMITE_INVENTARIO")
-            self.assertFalse(drive.downloads)
-        with mock.patch.object(r, "MAX_LIST_PAGES", 1):
-            drive = FakeDrive(pages_from([a, duplicates[0]], page_size=1), {a["id"]: raw})
-            result = r.kdd_get_latest_verified_dossier(drive, FOLDER, validator=SyntheticBridge(), now=T)
-            self.assertEqual(result["codice"], "LIMITE_PAGINE")
-            self.assertFalse(drive.downloads)
+                self.assertEqual(result["dossier_storici_senza_indice"], 1)
+        self.validator.validate.assert_not_called()
 
-    def test_operation_outliving_monotonic_deadline_cannot_report_success(self):
-        a, raw = file_and_bytes()
-        drive = FakeDrive(pages_from([a]), {a["id"]: raw})
-        validator = mock.Mock(wraps=SyntheticBridge())
+    def test_same_timestamp_distinct_index_digests_are_ambiguous(self):
+        another, _ = publication_files(synth_handoff(marker="B"), "another")
+        result, drive = self.recover([*self.files, another[0]])
+        self.assertEqual(result["codice"], "PUBBLICAZIONE_CORRENTE_AMBIGUA")
+        self.assertFalse(drive.downloads)
+
+    def test_current_index_matches_filename_date_and_dossier_identity(self):
+        manifest = json.loads(self.blobs["current-index"])
+        for key, value, code in (
+            ("preparato_utc", (T-dt.timedelta(minutes=1)).isoformat(timespec="microseconds"),
+             "INDICE_CORRENTE_INVALIDO"),
+            ("snapshot_id", "a"*64, "INDICE_E_DOSSIER_DISCORDANTI"),
+            ("snapshot_utc", T.replace(microsecond=1).isoformat(timespec="microseconds"),
+             "INDICE_E_DOSSIER_DISCORDANTI"),
+            ("dossier", "another.json", "INDICE_CORRENTE_INVALIDO"),
+            ("dimensione_byte", manifest["dimensione_byte"]+1, "DIMENSIONE_DOSSIER_DISCORDE_DA_INDICE"),
+        ):
+            with self.subTest(key=key):
+                raw = r.canonical(dict(manifest, **{key: value}))+b"\n"
+                files = [file_metadata(self.manifest["name"], "current-index", raw), self.dossier]
+                result, _ = self.recover(files, dict(self.blobs, **{"current-index": raw}))
+                self.assertEqual(result["codice"], code)
+        self.validator.validate.assert_not_called()
+
+    def test_current_index_noncanonical_or_corrupt_blocks_old(self):
+        old, _ = publication_files(synth_handoff(when=T-dt.timedelta(hours=4)), "old")
+        for raw in (b"broken-json\n", self.blobs["current-index"]+b"\n"):
+            with self.subTest(raw_size=len(raw)):
+                metadata = file_metadata(self.manifest["name"], "current-index", raw)
+                result, drive = self.recover([*old, metadata, self.dossier],
+                                             dict(self.blobs, **{"current-index": raw}))
+                self.assertEqual(result["stato"], r.UNVERIFIABLE)
+                self.assertEqual(result["codice"], "INDICE_CORRENTE_INVALIDO")
+                self.assertEqual(drive.downloads, ["current-index"])
+
+    def test_corrupted_current_dossier_rejected_even_with_updated_drive_checksums(self):
+        old, _ = publication_files(synth_handoff(when=T-dt.timedelta(hours=4)), "old")
+        raw = self.blobs["current"].replace(b'"token":"A"', b'"token":"B"')
+        meta = file_metadata(self.dossier["name"], "current", raw)
+        result, drive = self.recover([*old, self.manifest, meta], dict(self.blobs, current=raw))
+        self.assertEqual(result["codice"], "BYTE_DOSSIER_DISCORDI_DA_INDICE")
+        self.assertEqual(drive.downloads, ["current-index", "current"])
+        self.validator.validate.assert_not_called()
+
+    def test_identical_copies_share_one_validation_disagreeing_copy_blocks(self):
+        copy = dict(self.dossier, id="z-copy")
+        result, drive = self.recover([copy, *self.files],
+                                     dict(self.blobs, **{"z-copy": self.blobs["current"]}))
+        self.assertEqual(result["stato"], r.RECOVERED)
+        self.assertEqual(result["file_id"], "current")
+        self.assertEqual(drive.downloads, ["current-index", "current", "z-copy"])
+        self.validator.validate.assert_called_once()
+        other = self.blobs["current"].replace(b'"token":"A"', b'"token":"B"')
+        copy = file_metadata(self.dossier["name"], "z-copy", other)
+        result, _ = self.recover([copy, *self.files], dict(self.blobs, **{"z-copy": other}))
+        self.assertEqual(result["codice"], "DUPLICATO_CORRENTE_DISCORDANTE")
+
+    def test_large_archive_downloads_only_current_index_and_dossier(self):
+        files = []
+        for i in range(1200):
+            bundle = synth_handoff(when=T-dt.timedelta(minutes=i+1), marker=f"old{i}")
+            pair, _ = publication_files(bundle, f"old-{i}")
+            files.extend(pair)
+        result, drive = self.recover([*files, *self.files], page_size=31)
+        self.assertEqual(result["stato"], r.RECOVERED)
+        self.assertEqual(result["numero_file_indicizzazione"], 2402)
+        self.assertEqual((len(drive.requests), len(drive.downloads), self.validator.validate.call_count),
+                         (156, 2, 1))
+        print("G2-C: 1200 coppie storiche + 1 corrente, 156 richieste lista, 2 download, 1 validazione",
+              flush=True)
+
+    def test_access_unavailable_and_inventory_ambiguities(self):
+        for kwargs in ({"deny_list": True}, {"deny_download": True}):
+            result, _ = self.recover(self.files, **kwargs)
+            self.assertEqual(result["stato"], r.ACCESS)
+        result, _ = self.recover([*self.files, dict(self.dossier, name="notes")])
+        self.assertEqual(result["codice"], "IDENTIFICATIVO_DRIVE_DUPLICATO")
+        cases = (
+            ([{"files": self.files}], "INVENTARIO_NON_COMPLETO"),
+            ([{"files": self.files, "incompleteSearch": True}], "INVENTARIO_NON_COMPLETO"),
+            ([{"files": [], "nextPageToken": "1", "incompleteSearch": False}]*2,
+             "PAGINAZIONE_INCOERENTE"),
+        )
+        for pages, code in cases:
+            with self.subTest(code=code):
+                drive = FakeDrive(pages, self.blobs)
+                result = r.kdd_get_latest_verified_dossier(drive, FOLDER, now=T)
+                self.assertEqual(result["codice"], code)
+                self.assertFalse(drive.downloads)
+
+    def test_race_with_newer_complete_or_incomplete_pair_stops(self):
+        earlier, blobs = publication_files(synth_handoff(when=T-dt.timedelta(minutes=1)), "before")
+        for files, code in (
+            ([*earlier, *self.files], "INVENTARIO_CAMBIATO_DURANTE_LA_LETTURA"),
+            ([*earlier, self.dossier], "INDICE_CORRENTE_ASSENTE"),
+            ([*earlier, self.manifest], "DOSSIER_INDICIZZATO_NON_ARRIVATO"),
+        ):
+            with self.subTest(code=code):
+                result, _ = self.recover(earlier, blobs, alter_second_scan=pages_from(files))
+                self.assertEqual(result["codice"], code)
+                self.validator.validate.assert_not_called()
+
+    def test_limits_bound_inventory_and_selected_bytes(self):
+        more = [dict(self.dossier, id=f"copy-{i}") for i in range(4)]
+        large = [dict(self.dossier, size=r.MAX_BYTES), dict(more[0], size=r.MAX_BYTES)]
+        for files, code in (([self.manifest, *large], "LIMITE_BYTE_RECUPERO"),
+                            ([self.manifest, *more], "LIMITE_CANDIDATI_CORRENTI")):
+            result, drive = self.recover(files)
+            self.assertEqual(result["codice"], code)
+            self.assertFalse(drive.downloads)
+        with mock.patch.object(r, "MAX_INVENTORY_FILES", 1):
+            result, _ = self.recover(self.files)
+            self.assertEqual(result["codice"], "LIMITE_INVENTARIO")
+        with mock.patch.object(r, "MAX_LIST_PAGES", 1):
+            result, _ = self.recover(self.files, page_size=1)
+            self.assertEqual(result["codice"], "LIMITE_PAGINE")
         with mock.patch.object(r.time, "monotonic", side_effect=[0, 0, 31]):
-            result = r.kdd_get_latest_verified_dossier(drive, FOLDER, validator=validator, now=T)
+            result, drive = self.recover(self.files)
         self.assertEqual(result["codice"], "LIMITE_DURATA_RECUPERO")
         self.assertFalse(drive.downloads)
-        validator.validate.assert_not_called()
 
-    def test_incoherent_or_invalid_provider_dates(self):
-        a, raw = file_and_bytes()
-        for changed, code in (
-            ({"modifiedTime": "2010-01-01T00:00:00Z"}, "TEMPI_DRIVE_INCOERENTI"),
-            ({"modifiedTime": "2010-01-01"}, "TIMESTAMP_DRIVE_INVALIDO"),
-            ({"createdTime": "2026-11-20T12:00:00+03:70"}, "TIMESTAMP_DRIVE_INVALIDO"),
+    def test_rfc3339_drive_dates_support_nanoseconds_and_offsets(self):
+        for created, modified, code in (
+            ("2026-11-20T12:00:00.123456789Z", "2026-11-20t13:00:00.12345678900+01:00",
+             "FONTI_BASE_RECENTI"),
+            ("2026-11-20T12:00:00.123456789Z", "2026-11-20T12:00:00.123456788Z",
+             "TEMPI_DRIVE_INCOERENTI"),
+            ("2026-11-20T12:00:00Z", "2010-01-01", "TIMESTAMP_DRIVE_INVALIDO"),
+            ("2026-11-20T12:00:00+03:70", None, "TIMESTAMP_DRIVE_INVALIDO"),
+            ("2016-12-31T23:59:60.9Z", "2017-01-01T00:00:00Z", "FONTI_BASE_RECENTI"),
+            ("2016-12-30T23:59:60Z", None, "TIMESTAMP_DRIVE_INVALIDO"),
         ):
-            with self.subTest(changed=changed):
-                result, driver = self.recover([dict(a, **changed)], {a["id"]: raw})
+            with self.subTest(created=created, modified=modified):
+                changed = dict(self.dossier, createdTime=created, modifiedTime=modified)
+                result, _ = self.recover([self.manifest, changed])
                 self.assertEqual(result["codice"], code)
-                self.assertFalse(driver.downloads)
-        old, old_raw = file_and_bytes(when=T-dt.timedelta(hours=1), marker="old")
-        del old["createdTime"]
-        result, driver = self.recover([a, old], {a["id"]: raw, old["id"]: old_raw})
-        self.assertEqual(result["codice"], "ORDINE_DRIVE_INDETERMINATO")
-        self.assertFalse(driver.downloads)
 
-    def test_unrelated_rows_independent_of_parent_but_candidate_errors_block(self):
-        a, raw = file_and_bytes()
-        notes = {"id": "notes", "name": "kdd_handoff_notes.txt", "parents": ["OTHER"], "trashed": True}
-        unrelated = {"id": "other", "name": "manual.json", "parents": ["OTHER"]}
-        later = pages_from([a, dict(notes, name="notes-renamed.txt")])
-        result, drive = self.recover([a, notes, unrelated], {a["id"]: raw}, alter_second_scan=later)
-        self.assertEqual(result["stato"], r.RECOVERED)
-        self.assertEqual(result["file_estranei"], 2)
-        self.assertEqual(result["nomi_fuori_schema_con_prefisso_kdd"], 1)
-        self.assertEqual(drive.downloads, [(a["id"], len(raw))])
+    def test_invalid_candidate_metadata_fails_closed(self):
         for changed, code in (
             ({"parents": ["OTHER"]}, "CARTELLA_ORIGINE_NON_ATTESTATA"),
             ({"trashed": True}, "ELEMENTO_CESTINATO_NELLA_RISPOSTA"),
             ({"mimeType": "application/vnd.google-apps.shortcut"}, "TIPO_FILE_NON_BINARY"),
+            ({"name": index.INDEX_PREFIX+"incorrect.json"}, "NOME_PUBBLICAZIONE_KDD_INVALIDO"),
         ):
-            with self.subTest(changed=changed):
-                result, drive = self.recover([dict(a, **changed), notes], {a["id"]: raw})
+            with self.subTest(code=code):
+                result, driver = self.recover([self.manifest, dict(self.dossier, **changed)])
                 self.assertEqual(result["codice"], code)
-                self.assertFalse(drive.downloads)
+                self.assertFalse(driver.downloads)
 
-    def test_duplicate_ids_remain_an_inventory_error_even_for_unrelated_rows(self):
-        a, raw = file_and_bytes()
-        result, _ = self.recover([a, {"id": a["id"], "name": "notes.txt"}], {a["id"]: raw})
-        self.assertEqual(result["codice"], "IDENTIFICATIVO_DRIVE_DUPLICATO")
+    def test_versions_include_both_files_and_detect_changes_at_either_check(self):
+        pair = [dict(file, version="1", headRevisionId="revision-1") for file in self.files]
+        for changed_position, field in ((0, "headRevisionId"), (1, "version")):
+            candidate = pair[changed_position]
+            changed = dict(candidate, **{field: "2"})
+            second = pair.copy()
+            second[changed_position] = changed
+            result, _ = self.recover(pair, alter_second_scan=pages_from(second))
+            self.assertEqual(result["codice"], "INVENTARIO_CAMBIATO_DURANTE_LA_LETTURA")
+            drive = FakeDrive(pages_from(pair), self.blobs)
+            original = drive.file_metadata
 
-    def test_versions_detect_reported_changes_on_either_followup_check(self):
-        a, raw = file_and_bytes()
-        a.update(version="1", headRevisionId="revision-1")
-        for key, value in (("version", "2"), ("headRevisionId", "revision-2"),
-                           ("headRevisionId", None)):
-            with self.subTest(key=key, value=value):
-                changed = dict(a, **{key: value})
-                result, _ = self.recover([a], {a["id"]: raw}, alter_second_scan=pages_from([changed]))
-                self.assertEqual(result["codice"], "INVENTARIO_CAMBIATO_DURANTE_LA_LETTURA")
-                drive = FakeDrive(pages_from([a]), {a["id"]: raw})
-                validator = mock.Mock(wraps=SyntheticBridge())
-                with mock.patch.object(drive, "file_metadata", return_value=changed) as get_metadata:
-                    result = r.kdd_get_latest_verified_dossier(drive, FOLDER, validator=validator, now=T)
-                self.assertEqual(get_metadata.call_args.args, (a["id"],))
-                self.assertEqual(result["codice"], "VERSIONE_CORRENTE_CAMBIATA_DURANTE_LA_LETTURA")
-                validator.validate.assert_not_called()
-        result, drive = self.recover([a], {a["id"]: raw})
-        self.assertEqual(drive.metadata_requests, [a["id"]])
-        self.assertEqual(result["numero_controlli_versione"], 1)
+            def point(file_id, *, timeout):
+                return changed if file_id == changed["id"] else original(file_id, timeout=timeout)
+
+            with mock.patch.object(drive, "file_metadata", side_effect=point):
+                result = r.kdd_get_latest_verified_dossier(drive, FOLDER, validator=self.validator, now=T)
+            self.assertEqual(result["codice"], "VERSIONE_CORRENTE_CAMBIATA_DURANTE_LA_LETTURA")
+        self.validator.validate.assert_not_called()
+        result, drive = self.recover(pair)
+        self.assertEqual(drive.metadata_requests, ["current-index", "current"])
+        self.assertEqual(result["numero_controlli_versione"], 2)
         self.assertFalse(result["atomicita_inventario"])
 
-    def test_unchanged_provider_metadata_cannot_attest_atomicity(self):
-        a, raw = file_and_bytes()
-        a.update(version="1", headRevisionId="revision-1")
-        drive = FakeDrive(pages_from([a]), {a["id"]: raw})
-
-        def download(file_id, *, max_bytes, timeout):
-            downloaded = drive.blobs[file_id]
-            drive.blobs[file_id] = b"replacement-with-no-metadata-change"
-            return downloaded
-
-        with mock.patch.object(drive, "download", side_effect=download):
-            result = r.kdd_get_latest_verified_dossier(drive, FOLDER, validator=SyntheticBridge(), now=T)
-        self.assertEqual(result["stato"], r.RECOVERED)
-        self.assertFalse(result["atomicita_inventario"])
-        self.assertEqual(result["integrita_origine"], "NON_AUTENTICATA")
-
-    def test_provider_sha_mismatch(self):
-        a, ba = file_and_bytes()
-        a["sha256Checksum"] = "0" * 64
-        result, _ = self.recover([a], {a["id"]: ba})
+    def test_provider_checksums_augmented_by_index(self):
+        result, _ = self.recover([self.manifest, dict(self.dossier, sha256Checksum="0"*64)])
         self.assertEqual(result["codice"], "CHECKSUM_DRIVE_DISCORDANTE")
-
-    def test_provider_sha_absent_not_spuriously_attested(self):
-        a, ba = file_and_bytes()
-        del a["sha256Checksum"]
-        result, _ = self.recover([a], {a["id"]: ba})
+        result, drive = self.recover([self.manifest, dict(self.dossier, sha256Checksum=None)])
         self.assertEqual(result["stato"], r.RECOVERED)
         self.assertFalse(result["sha256_drive_confrontato"])
         self.assertEqual(result["integrita_origine"], "NON_AUTENTICATA")
+        self.assertEqual(drive.downloads, ["current-index", "current"])
 
-    def test_noncanonical_bytes_rejected_even_if_provider_hash_matches(self):
-        a, ba = file_and_bytes()
-        alt = ba.rstrip(b"\n") + b"\n\n"
-        a["size"] = str(len(alt))
-        a["sha256Checksum"] = hashlib.sha256(alt).hexdigest()
-        a["md5Checksum"] = hashlib.md5(alt).hexdigest()
-        result, _ = self.recover([a], {a["id"]: alt})
-        self.assertEqual(result["codice"], "BYTE_NON_CANONICI")
+    def test_canonical_and_unique_keys_still_required_for_dossier(self):
+        raw = self.blobs["current"]
+        for changed, code in (
+            (raw+b"\n", "BYTE_NON_CANONICI"),
+            (raw[:-2]+b',"schema":"kdd_private_handoff_v001"}\n', "JSON_DUPLICATE_KEYS"),
+        ):
+            files, blobs = publication_files(synth_handoff(), "malformed", raw=changed)
+            result, _ = self.recover(files, blobs)
+            self.assertEqual(result["codice"], code)
 
-    def test_duplicate_json_keys_rejected(self):
-        a, ba = file_and_bytes()
-        content = ba[:-2] + b',"schema":"kdd_private_handoff_v001"}\n'
-        a["size"] = str(len(content))
-        a["sha256Checksum"] = hashlib.sha256(content).hexdigest()
-        a["md5Checksum"] = hashlib.md5(content).hexdigest()
-        result, _ = self.recover([a], {a["id"]: content})
-        self.assertEqual(result["stato"], r.UNVERIFIABLE)
-
-    def test_missing_real_bridge_fails_closed_no_partial_validation(self):
-        a, raw = file_and_bytes()
-        driver = FakeDrive(pages_from([a]), {a["id"]: raw})
+    def test_missing_real_bridge_fails_closed(self):
+        driver = FakeDrive(pages_from(self.files), self.blobs)
         original_import = builtins.__import__
 
         def unavailable_import(name, globals=None, locals=None, fromlist=(), level=0):
@@ -400,33 +358,25 @@ class RecoveryG2BTests(unittest.TestCase):
 
         with mock.patch("builtins.__import__", side_effect=unavailable_import):
             result = r.kdd_get_latest_verified_dossier(driver, FOLDER, now=T)
-        self.assertEqual(result["stato"], r.UNVERIFIABLE)
         self.assertEqual(result["codice"], "VALIDATORE_KDD_NON_SUPERATO")
 
-    def test_read_only_rest_adapter_constructs_scoped_drive_v3_calls(self):
-        seen = []
+    def test_rest_adapter_scopes_queries_and_enforces_transport_contract(self):
         def json_get(url, params, **bounds):
-            seen.append((url, params, bounds))
-            return {"files": [], "nextPageToken": None, "incompleteSearch": False}
-        def bytes_get(url, params, **bounds):
-            seen.append((url, params, bounds))
-            return b"sample"
-        d = r.DriveV3ReadOnlyAdapter(FOLDER, json_get, bytes_get)
-        d.list_page("opaque", timeout=5)
-        d.download("file-3", max_bytes=10, timeout=3)
-        d.file_metadata("file-3", timeout=1)
-        self.assertIn(FOLDER, seen[0][1]["q"])
-        self.assertEqual(seen[0][1]["pageToken"], "opaque")
-        self.assertIn("incompleteSearch", seen[0][1]["fields"])
-        self.assertIn("sha256Checksum", seen[0][1]["fields"])
-        self.assertEqual(seen[1][1]["alt"], "media")
-        self.assertEqual(seen[1][2], {"max_bytes": 10, "timeout": 3})
-        self.assertEqual(seen[0][2]["max_bytes"], r.MAX_METADATA_BYTES)
-        self.assertIn("headRevisionId", seen[0][1]["fields"])
-        self.assertIn("version", seen[2][1]["fields"].split(","))
-        self.assertEqual(seen[2][2]["timeout"], 1)
-        self.assertTrue(seen[2][0].endswith("/file-3"))
-        self.assertEqual(len(seen), 3)
+            return {}
+        with mock.patch.object(r.DriveV3ReadOnlyAdapter, "ROOT", "https://example.test/files"):
+            rows = mock.Mock(side_effect=json_get)
+            bytes_get = mock.Mock(return_value=b"sample")
+            drive = r.DriveV3ReadOnlyAdapter(FOLDER, rows, bytes_get)
+            drive.list_page("opaque", timeout=5)
+            drive.download("file/a", timeout=2, max_bytes=8)
+            drive.file_metadata("file/a", timeout=1)
+        self.assertIn(FOLDER, rows.call_args_list[0].args[1]["q"])
+        self.assertIn("headRevisionId", rows.call_args_list[0].args[1]["fields"])
+        self.assertEqual(rows.call_args_list[0].args[1]["pageToken"], "opaque")
+        self.assertEqual(rows.call_args_list[0].kwargs["max_bytes"], r.MAX_METADATA_BYTES)
+        self.assertEqual(rows.call_args_list[1].args[0], "https://example.test/files/file%2Fa")
+        self.assertEqual(bytes_get.call_args.args[1]["alt"], "media")
+        self.assertEqual(bytes_get.call_args.kwargs, {"timeout": 2, "max_bytes": 8})
 
 
 class OriginalBridgeDifferentialTests(unittest.TestCase):
@@ -442,14 +392,30 @@ class OriginalBridgeDifferentialTests(unittest.TestCase):
         self.addCleanup(self.fixture.doCleanups)
 
     def drive_for(self, bundle):
-        logical_sha = self.bridge.digest(bundle)
-        raw = self.bridge.canonical(bundle) + b"\n"
-        file = {"id": "original-bridge-synthetic", "name": f"kdd_handoff_{logical_sha}.json",
-                "parents": [FOLDER], "mimeType": "application/json", "size": str(len(raw)),
-                "sha256Checksum": hashlib.sha256(raw).hexdigest(),
-                "md5Checksum": hashlib.md5(raw).hexdigest(), "trashed": False,
-                "version": "1", "headRevisionId": "rev-original"}
-        return FakeDrive(pages_from([file]), {file["id"]: raw})
+        files, blobs = publication_files(bundle, "real-bridge")
+        for file in files:
+            file.update(version="1", headRevisionId="rev-original")
+        return FakeDrive(pages_from(files), blobs)
+
+    def test_actual_export_files_recover_through_original_bridge(self):
+        from scripts import kdd_drive_exchange as exchange
+        from scripts import test_kdd_bridge_g2 as fixtures
+
+        fixture = fixtures.BridgeG2Tests("test_02_freshness_reevaluated_at_read")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        sync = fixture.home / "synthetic-sync"
+        sync.mkdir()
+        with (mock.patch.object(exchange, "EXCHANGE_ROOT", sync),
+              mock.patch.object(self.bridge, "prepare", return_value=fixture.bundle)):
+            exported = exchange.prepare_export()
+        blobs = {path.name: path.read_bytes() for path in sync.iterdir()}
+        drive = FakeDrive(pages_from([file_metadata(name, name, raw) for name, raw in blobs.items()]), blobs)
+        result = r.kdd_get_latest_verified_dossier(drive, FOLDER, now=self.t)
+        self.assertEqual(result["nome"], exported)
+        self.assertEqual(drive.downloads, [result["nome_indice"], exported])
+        self.assertEqual(result["contesto_kdd"], self.bridge.read_context(
+            fixture.bundle, now=self.t, expected_sha256=self.bridge.digest(fixture.bundle)))
 
     def test_original_read_context_matches_fresh_stale_and_missing_balance(self):
         normal = self.bridge.prepare(self.fixture.root, now=self.t, _fixture=True)
@@ -524,20 +490,85 @@ class OriginalBridgeDifferentialTests(unittest.TestCase):
 
         def file_metadata(file_id, *, timeout):
             nonlocal current
-            current += dt.timedelta(minutes=2)
+            current += dt.timedelta(minutes=1)
             return original_metadata(file_id, timeout=timeout)
 
         clock = mock.Mock(side_effect=lambda: current)
         with (mock.patch.object(drive, "file_metadata", side_effect=file_metadata),
               mock.patch.object(self.bridge, "read_context", wraps=self.bridge.read_context) as validated):
             result = r.kdd_get_latest_verified_dossier(drive, FOLDER, clock=clock)
-        clock.assert_called_once()
+        self.assertEqual(clock.call_count, 2)
         validated.assert_called_once_with(bundle, now=current, expected_sha256=self.bridge.digest(bundle))
         self.assertEqual(result["stato"], r.STALE)
         self.assertEqual(result["fonti_base"]["mercato"]["stato"], "SCADUTA")
         self.assertEqual(result["fonti_base"]["saldo"]["stato"], "SCADUTA")
         self.assertEqual(result["contesto_kdd"], self.bridge.read_context(
             bundle, now=current, expected_sha256=self.bridge.digest(bundle)))
+
+    def test_real_bridge_revalidates_when_sources_expire_during_bridge_or_presentation(self):
+        bundle = self.bridge.prepare(self.fixture.root, now=self.t, _fixture=True)
+        first = self.t + dt.timedelta(minutes=30, milliseconds=-500)
+        read_context = self.bridge.read_context
+        present = r._presentation
+        for phase in ("bridge", "presentation"):
+            with self.subTest(phase=phase):
+                current = first
+
+                def advance():
+                    nonlocal current
+                    if current == first:
+                        current += dt.timedelta(seconds=1)
+
+                def validation(*args, **kwargs):
+                    result = read_context(*args, **kwargs)
+                    if phase == "bridge":
+                        advance()
+                    return result
+
+                def presentation(*args, **kwargs):
+                    result = present(*args, **kwargs)
+                    if phase == "presentation":
+                        advance()
+                    return result
+
+                with (mock.patch.object(self.bridge, "read_context", side_effect=validation) as validated,
+                      mock.patch.object(r, "_presentation", side_effect=presentation)):
+                    result = r.kdd_get_latest_verified_dossier(
+                        self.drive_for(bundle), FOLDER, clock=lambda: current)
+                self.assertEqual([call.kwargs["now"] for call in validated.call_args_list],
+                                 [first, first+r.VALIDATION_WINDOW, current])
+                self.assertEqual(result["stato"], r.STALE)
+                self.assertEqual(result["validita_controllata_utc"], current.isoformat())
+                self.assertEqual(result["contesto_kdd"], read_context(
+                    bundle, now=current, expected_sha256=self.bridge.digest(bundle)))
+
+    def test_real_bridge_freshness_window_stable_or_explicit_stop(self):
+        bundle = self.bridge.prepare(self.fixture.root, now=self.t, _fixture=True)
+        read_context = self.bridge.read_context
+        for remaining, outcome in ((5, r.RECOVERED), (0.5, r.UNVERIFIABLE)):
+            with self.subTest(remaining=remaining):
+                started = self.t + dt.timedelta(minutes=30, seconds=-remaining)
+                current = started
+
+                def validation(*args, **kwargs):
+                    nonlocal current
+                    result = read_context(*args, **kwargs)
+                    current += dt.timedelta(milliseconds=50)
+                    return result
+
+                with mock.patch.object(self.bridge, "read_context", side_effect=validation) as checked:
+                    result = r.kdd_get_latest_verified_dossier(
+                        self.drive_for(bundle), FOLDER, clock=lambda: current)
+                self.assertEqual(result["stato"], outcome)
+                if outcome == r.RECOVERED:
+                    self.assertEqual(checked.call_count, 2)
+                    self.assertEqual(result["validita_controllata_utc"], current.isoformat())
+                    self.assertEqual(result["contesto_kdd"], read_context(
+                        bundle, now=started, expected_sha256=self.bridge.digest(bundle)))
+                else:
+                    self.assertEqual(checked.call_count, 4)
+                    self.assertEqual(result["codice"], "FRESCHEZZA_FINALE_NON_GARANTITA")
+                    self.assertNotIn("contesto_kdd", result)
 
 
 if __name__ == "__main__":
