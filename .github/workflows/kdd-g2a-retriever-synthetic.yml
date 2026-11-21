@@ -1,0 +1,20 @@
+name: KDD G2-C Drive publication and retrieval synthetic-only
+on:
+  push:
+    branches:
+      - experiments/kdd-gpt-drive-retriever-g2a-20261120
+permissions:
+  contents: read
+jobs:
+  synthetic-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Isolated retrieval tests plus original KDD bridge differential
+        run: PYTHONPATH=.:scripts python -B -m unittest -v scripts.test_kdd_gpt_drive_retriever
+      - name: Original producer and local export regressions
+        run: PYTHONPATH=.:scripts python -B -m unittest -v scripts.test_kdd_wallet_packet_g0 scripts.test_kdd_drive_exchange

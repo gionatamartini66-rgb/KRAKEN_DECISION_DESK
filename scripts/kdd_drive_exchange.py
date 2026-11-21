@@ -15,10 +15,11 @@ import stat
 import tempfile
 import threading
 from scripts import kdd_bridge_g2 as bridge
+from scripts import kdd_drive_index as index
 
 EXCHANGE_ROOT = Path("/storage/emulated/0/KDD_TEST_SAMSUNG")
 INCOMING_NAME = "proposta_portafoglio.json"
-EXPORT_NAME = re.compile(r"kdd_handoff_[0-9a-f]{64}\.json\Z")
+_PENDING_EXPORT = "in-corso.json"
 _DECISION_LOCK = threading.RLock()  # coordinates threads; flock coordinates processes
 
 
@@ -327,36 +328,50 @@ def _decision_writer():
             yield
 
 
-def export_bundle(bundle):
-    """Only write the finished KDD-origin envelope to the existing sync source."""
-    root = EXCHANGE_ROOT
-    if root.is_symlink() or not root.is_dir():
-        raise bridge.BridgeError("Cartella Kraken condivisa non disponibile")
-    name = "kdd_handoff_" + bridge.digest(bundle) + ".json"
+def _publish_export_file(root, name, raw):
+    """Immutable final name under the cooperative private export lock."""
     final = root / name
-    raw = bridge.canonical(bundle) + b"\n"
-    if final.is_symlink():
-        raise bridge.BridgeError("Percorso condiviso non regolare")
-    if final.exists():
-        if final.is_file() and final.read_bytes() == raw:
-            return name
+    if bridge._path_present(final):
+        fd = os.open(final, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if (stat.S_ISREG(info.st_mode) and info.st_size == len(raw)
+                    and stream.read(len(raw) + 1) == raw):
+                return
         raise bridge.BridgeError("Esportazione gia presente ma differente")
     stage = None
     try:
         with tempfile.NamedTemporaryFile(prefix=".kdd-handoff-", suffix=".tmp",
-                                         dir=root, delete=False) as f:
-            stage = Path(f.name)
-            f.write(raw)
-            f.flush()
-            os.fsync(f.fileno())
-        if final.exists() or final.is_symlink():
+                                         dir=root, delete=False) as stream:
+            stage = Path(stream.name)
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if bridge._path_present(final):
             raise bridge.BridgeError("Collisione prima della pubblicazione")
         os.rename(stage, final)
         stage = None
     finally:
         if stage is not None:
             stage.unlink(missing_ok=True)
-    return name
+
+
+def _export_bundle(bundle):
+    root = EXCHANGE_ROOT
+    if root.is_symlink() or not root.is_dir():
+        raise bridge.BridgeError("Cartella Kraken condivisa non disponibile")
+    raw = bridge.canonical(bundle) + b"\n"
+    dossier, name, body = index.publication(bundle, raw)
+    stamp, digest = index.INDEX.fullmatch(name).groups()
+    index.check_index(body, stamp, digest)
+    _publish_export_file(root, dossier, raw)
+    _publish_export_file(root, name, bridge.canonical(body) + b"\n")
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return dossier
 
 
 def _prepare_private_origin():
@@ -377,16 +392,46 @@ def prepare_chat():
     return path, bridge.digest(original), original["packet_sha256"]
 
 
+def _require_recent_export(bundle):
+    context = bridge.read_context(bundle)
+    if (context["mercato"]["stato"] != "RECENTE" or context["saldo"]["stato"] != "RECENTE"):
+        raise bridge.BridgeError("Saldo o mercato non recenti: handoff automatico non preparato")
+
+
 def prepare_export(*, require_recent=False):
-    original, _ = _prepare_private_origin()
-    if require_recent:
-        # Per l'handoff automatico evitare fotografie gia vecchie alla pubblicazione.
-        # Il salvataggio privato resta intatto anche se il trasferimento e rifiutato.
-        context = bridge.read_context(original)
-        if (context["mercato"]["stato"] != "RECENTE"
-                or context["saldo"]["stato"] != "RECENTE"):
-            raise bridge.BridgeError("Saldo o mercato non recenti: handoff automatico non preparato")
-    return export_bundle(original)
+    outgoing = bridge.private_directory(bridge.OUTBOX, create=True)
+    journal = bridge.ensure_dir(bridge.PRIVATE_ROOT / "drive-export")
+    pending = journal / _PENDING_EXPORT
+    with bridge._archive_write_lock(journal):
+        retry = bridge._path_present(pending)
+        if retry:
+            raw = bridge.read_regular(pending, expected_parent=journal)
+            record = bridge.strict_json(raw)
+            digest = record.get("dossier_sha256")
+            if (set(record) != {"dossier_sha256"} or not isinstance(digest, str)
+                    or not bridge.HEX.fullmatch(digest)):
+                raise bridge.BridgeError("Esportazione in corso non verificabile")
+            original = bridge.strict_json(bridge.read_regular(
+                outgoing / (digest + ".json"), expected_parent=outgoing))
+            if bridge.verify_local_origin(original) != digest:
+                raise bridge.BridgeError("Origine esportazione in corso discordante")
+        else:
+            original, _ = _prepare_private_origin()
+            if require_recent:
+                _require_recent_export(original)
+            raw = bridge.canonical({"dossier_sha256": bridge.digest(original)}) + b"\n"
+            _publish_export_file(journal, _PENDING_EXPORT, raw)
+
+        bridge._sync_dir(journal)
+        bridge._sync_dir(journal.parent)
+        dossier = _export_bundle(original)
+        pending.unlink()
+        bridge._sync_dir(journal)
+        if retry and require_recent:
+            # Complete the previously authorised pair, but report it as current
+            # for the automatic path only if it still satisfies that path's gate.
+            _require_recent_export(original)
+        return dossier
 
 
 def find_origin(proposal):
@@ -703,11 +748,20 @@ def latest_export():
     try:
         if EXCHANGE_ROOT.is_symlink() or not EXCHANGE_ROOT.is_dir():
             return "Cartella di FolderSync non accessibile."
-        files = [p for p in EXCHANGE_ROOT.iterdir()
-                 if EXPORT_NAME.fullmatch(p.name) and p.is_file() and not p.is_symlink()]
-        if not files:
-            return "Nessun dossier pronto per FolderSync."
-        return "Ultimo dossier pronto: " + max(files, key=lambda p: p.stat().st_mtime).name
+        names = {p.name for p in EXCHANGE_ROOT.iterdir() if p.is_file() and not p.is_symlink()}
+        dated = [match.groups() for name in names
+                 if (match := index.DOSSIER.fullmatch(name) or index.INDEX.fullmatch(name))]
+        if dated:
+            newest = max(stamp for stamp, _ in dated)
+            digests = {digest for stamp, digest in dated if stamp == newest}
+            if len(digests) == 1:
+                dossier, manifest = index.names(newest, digests.pop())
+                if dossier in names and manifest in names:
+                    return "Ultima coppia locale di esportazione: " + dossier
+            return "STOP FolderSync: esportazione corrente incompleta o ambigua."
+        if any(index.LEGACY.fullmatch(name) for name in names):
+            return "Dossier storici senza indice presenti per FolderSync."
+        return "Nessun dossier pronto per FolderSync."
     except OSError:
         # Optional legacy status must not take the private proposal view down.
         return "STOP FolderSync: archivio condiviso non leggibile."
