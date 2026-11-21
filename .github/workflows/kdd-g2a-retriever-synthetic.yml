@@ -1,8 +1,9 @@
-name: KDD G2-C Drive publication and retrieval synthetic-only
+name: KDD Drive publication and retrieval synthetic-only
 on:
   push:
     branches:
       - experiments/kdd-gpt-drive-retriever-g2a-20261120
+      - experiments/kdd24-g2d-20261121
 permissions:
   contents: read
 jobs:
