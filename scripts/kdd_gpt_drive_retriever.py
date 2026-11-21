@@ -241,10 +241,10 @@ def _select_candidates(files: list[dict]) -> tuple[str, str, list[dict], list[di
 def _candidate_size(file: dict, limit: int) -> int:
     if file["mimeType"] not in ("application/json", "application/octet-stream", "text/plain"):
         raise EvidenceFailure("TIPO_FILE_NON_BINARY")
-    created = _drive_timestamp(file["createdTime"])
-    modified = _drive_timestamp(file["modifiedTime"])
-    if created is not None and modified is not None and modified < created:
-        raise EvidenceFailure("TEMPI_DRIVE_INCOERENTI")
+    # Drive creation and source modification describe different events.
+    # FolderSync can preserve a modification timestamp older than the upload.
+    _drive_timestamp(file["createdTime"])
+    _drive_timestamp(file["modifiedTime"])
     version, revision = file["version"], file["headRevisionId"]
     if version is not None and (not isinstance(version, str)
                                 or not re.fullmatch(r"[1-9][0-9]{0,18}", version)):
@@ -285,13 +285,17 @@ def _read_identical(reader: DriveReader, candidates: list[dict], sizes: list[int
     return raw, raw_sha
 
 
-def _read_current(reader: DriveReader, stamp: str, digest: str, indices: list[dict],
-                  dossiers: list[dict], deadline: float) -> tuple[Dossier, str]:
+def _current_sizes(indices: list[dict], dossiers: list[dict]) -> tuple[list[int], list[int]]:
     index_sizes = [_candidate_size(file, index.MAX_INDEX_BYTES) for file in indices]
     dossier_sizes = [_candidate_size(file, MAX_BYTES) for file in dossiers]
     if sum(index_sizes) + sum(dossier_sizes) > MAX_TOTAL_BYTES:
         raise EvidenceFailure("LIMITE_BYTE_RECUPERO")
+    return index_sizes, dossier_sizes
 
+
+def _read_current(reader: DriveReader, stamp: str, digest: str, indices: list[dict],
+                  dossiers: list[dict], deadline: float) -> tuple[Dossier, str]:
+    index_sizes, dossier_sizes = _current_sizes(indices, dossiers)
     index_raw, index_sha = _read_identical(reader, indices, index_sizes, deadline)
     try:
         manifest = _canonical_object(index_raw)
@@ -340,9 +344,10 @@ def _final_context(dossier: Dossier, validator: BridgeReader, when: dt.datetime)
     # packet digest, wallet identities, prices, timestamps, evidence and freshness.
     try:
         context = validator.validate(dossier.handoff, when, dossier.logical_sha)
+    except ImportError as exc:
+        raise EvidenceFailure("VALIDATORE_KDD_INDISPONIBILE") from exc
     except Exception as exc:
-        # Fail closed even for missing import/bridge dependencies. Do not
-        # expose untrusted payload text or internal exception messages.
+        # Do not expose untrusted payload text or internal exception messages.
         raise EvidenceFailure("VALIDATORE_KDD_NON_SUPERATO") from exc
     if not isinstance(context, dict) or context.get("schema") != "kdd_gpt_read_context_v001":
         raise EvidenceFailure("RISULTATO_VALIDATORE_INVALIDO")

@@ -6,10 +6,13 @@ import datetime as dt
 import hashlib
 import importlib.util
 import json
+import subprocess
+import sys
 import unittest
 from unittest import mock
 
 from scripts import kdd_drive_index as index
+from scripts import kdd_drive_connector as connector
 from scripts import kdd_gpt_drive_retriever as r
 
 T = dt.datetime(2026, 11, 20, 12, 0, tzinfo=dt.timezone.utc)
@@ -281,7 +284,7 @@ class RecoveryG2CTests(unittest.TestCase):
             ("2026-11-20T12:00:00.123456789Z", "2026-11-20t13:00:00.12345678900+01:00",
              "FONTI_BASE_RECENTI"),
             ("2026-11-20T12:00:00.123456789Z", "2026-11-20T12:00:00.123456788Z",
-             "TEMPI_DRIVE_INCOERENTI"),
+             "FONTI_BASE_RECENTI"),
             ("2026-11-20T12:00:00Z", "2010-01-01", "TIMESTAMP_DRIVE_INVALIDO"),
             ("2026-11-20T12:00:00+03:70", None, "TIMESTAMP_DRIVE_INVALIDO"),
             ("2016-12-31T23:59:60.9Z", "2017-01-01T00:00:00Z", "FONTI_BASE_RECENTI"),
@@ -358,7 +361,7 @@ class RecoveryG2CTests(unittest.TestCase):
 
         with mock.patch("builtins.__import__", side_effect=unavailable_import):
             result = r.kdd_get_latest_verified_dossier(driver, FOLDER, now=T)
-        self.assertEqual(result["codice"], "VALIDATORE_KDD_NON_SUPERATO")
+        self.assertEqual(result["codice"], "VALIDATORE_KDD_INDISPONIBILE")
 
     def test_rest_adapter_scopes_queries_and_enforces_transport_contract(self):
         def json_get(url, params, **bounds):
@@ -569,6 +572,148 @@ class OriginalBridgeDifferentialTests(unittest.TestCase):
                     self.assertEqual(checked.call_count, 4)
                     self.assertEqual(result["codice"], "FRESCHEZZA_FINALE_NON_GARANTITA")
                     self.assertNotIn("contesto_kdd", result)
+
+
+class ConnectorCaptureTests(unittest.TestCase):
+    def setUp(self):
+        from scripts import kdd_bridge_g2 as bridge
+        from scripts import test_kdd_wallet_packet_g0 as fixtures
+
+        self.bridge = bridge
+        self.when = fixtures.T
+        fixture = fixtures.WalletPacketG0Tests("test_wallet_first_all_assets_even_if_quote_missing")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        self.bundle = bridge.prepare(fixture.root, now=self.when, _fixture=True)
+        self.capture = fixture.root / "capture"
+        self.capture.mkdir()
+        (self.capture / "blobs").mkdir()
+        (self.capture / "metadati").mkdir()
+        self.files, self.blobs = publication_files(self.bundle, "captured")
+        for file, (created, modified) in zip(self.files, (
+                ("07:35:04.727", "07:34:05.155"), ("07:35:05.209", "07:34:05.091"))):
+            file.update(createdTime="2026-11-21T"+created+"Z",
+                        modifiedTime="2026-11-21T"+modified+"Z", version="3")
+        self.write_capture()
+
+    def write_capture(self, *, after=None):
+        def normalized(row):
+            names = {
+                "id": "id", "name": "title", "mimeType": "mime_type", "parents": "parent_ids",
+                "createdTime": "created_time", "modifiedTime": "modified_time",
+                "headRevisionId": "head_revision_id", "sha256Checksum": "sha256_checksum",
+                "md5Checksum": "md5_checksum", "size": "size_bytes",
+            }
+            return {names.get(key, key): value for key, value in row.items()}
+
+        older, _ = publication_files(synth_handoff(
+            when=self.when-dt.timedelta(hours=1)), "older")
+        for filename, files in (("prima.json", self.files),
+                                ("dopo.json", self.files if after is None else after)):
+            scan = {
+                "folder_id": FOLDER,
+                "pages": [
+                    {"requested_page_token": None,
+                     "response": {"files": list(map(normalized, older)), "next_page_token": "opaque"}},
+                    {"requested_page_token": "opaque",
+                     "response": {"files": list(map(normalized, files))}},
+                ],
+            }
+            (self.capture / filename).write_bytes(r.canonical(scan))
+        for file in self.files:
+            (self.capture / "metadati" / (file["id"]+".json")).write_bytes(r.canonical(normalized(file)))
+        for file_id, raw in self.blobs.items():
+            (self.capture / "blobs" / file_id).write_bytes(raw)
+
+    def recover(self, when=None):
+        reader = connector.ConnectorCaptureReader(FOLDER, self.capture)
+        return r.kdd_get_latest_verified_dossier(reader, FOLDER, now=when or self.when)
+
+    def test_observed_foldersync_timestamps_on_current_pair_with_real_bridge(self):
+        plan = connector.plan_downloads(connector.ConnectorCaptureReader(FOLDER, self.capture))
+        self.assertEqual([item["id"] for item in plan["file"]], ["captured-index", "captured"])
+        for when, expected, status in (
+            (self.when, r.RECOVERED, "RECENTE"),
+            (self.when+dt.timedelta(hours=2), r.STALE, "SCADUTA"),
+        ):
+            with self.subTest(when=when):
+                result = self.recover(when)
+                self.assertEqual(result["stato"], expected)
+                self.assertEqual(result["integrita_documento"], "VERIFICATA")
+                self.assertEqual(result["integrita_origine"], "NON_AUTENTICATA")
+                self.assertEqual(result["numero_controlli_versione"], 2)
+                self.assertEqual(result["contesto_kdd"], self.bridge.read_context(
+                    self.bundle, now=when, expected_sha256=self.bridge.digest(self.bundle)))
+                self.assertTrue(result["limiti_analitici"]["lacune_da_verificare"])
+                for label in ("mercato", "saldo"):
+                    self.assertEqual(result["fonti_base"][label]["stato"], status)
+
+    def test_bad_timestamp_and_metadata_change_still_stop(self):
+        valid = self.files
+        self.files = [dict(valid[0], createdTime="2026-11-21T07:35:04.727"), valid[1]]
+        self.write_capture()
+        self.assertEqual(self.recover()["codice"], "TIMESTAMP_DRIVE_INVALIDO")
+        self.files = valid
+        changed = [dict(valid[0], modifiedTime="2026-11-21T07:34:04Z"), valid[1]]
+        self.write_capture(after=changed)
+        self.assertEqual(self.recover()["codice"], "INVENTARIO_CAMBIATO_DURANTE_LA_LETTURA")
+        self.write_capture()
+        point = self.capture / "metadati/captured-index.json"
+        metadata = json.loads(point.read_bytes())
+        point.write_bytes(r.canonical(dict(metadata, version="4")))
+        self.assertEqual(self.recover()["codice"], "VERSIONE_CORRENTE_CAMBIATA_DURANTE_LA_LETTURA")
+
+    def test_partial_publication_and_missing_raw_bytes_never_fall_back(self):
+        files = self.files
+        for row, code in ((files[1], "INDICE_CORRENTE_ASSENTE"),
+                          (files[0], "DOSSIER_INDICIZZATO_NON_ARRIVATO")):
+            with self.subTest(code=code):
+                self.files = [row]
+                self.write_capture()
+                self.assertEqual(self.recover()["codice"], code)
+        self.files = files
+        self.write_capture()
+        (self.capture / "blobs/captured").unlink()
+        self.assertEqual(self.recover()["codice"], "BYTE_CONNETTORE_ASSENTI")
+
+    def test_invalid_payload_rejected_even_with_preserved_modified_time(self):
+        raw = self.blobs["captured"]
+        altered = raw.replace(b'"ADA"', b'"XYZ"', 1)
+        self.assertNotEqual(altered, raw)
+        self.blobs["captured"] = altered
+        # Even provider checksums for the altered version cannot supersede the index.
+        provider = file_metadata(self.files[1]["name"], "captured", altered)
+        self.files[1].update(sha256Checksum=provider["sha256Checksum"],
+                             md5Checksum=provider["md5Checksum"])
+        self.write_capture()
+        result = self.recover()
+        self.assertEqual(result["codice"], "BYTE_DOSSIER_DISCORDI_DA_INDICE")
+        self.assertNotIn("contesto_kdd", result)
+
+    def test_connector_cannot_invent_trash_state_or_skip_pages(self):
+        path = self.capture / "prima.json"
+        original = json.loads(path.read_bytes())
+        incomplete = copy.deepcopy(original)
+        incomplete["pages"].pop()
+        path.write_bytes(r.canonical(incomplete))
+        self.assertEqual(self.recover()["codice"], "PAGINA_CONNETTORE_ASSENTE")
+        original["pages"][1]["response"]["files"][0].pop("trashed")
+        path.write_bytes(r.canonical(original))
+        self.assertEqual(self.recover()["codice"], "STATO_CESTINO_DOSSIER_NON_ATTESTATO")
+
+    def test_checkout_module_entry_point_runs_as_separate_python_process(self):
+        command = [sys.executable, "-B", "-m", "scripts.kdd_drive_connector"]
+        for action in ("plan", "validate"):
+            with self.subTest(action=action):
+                process = subprocess.run([*command, action, FOLDER, str(self.capture)],
+                                         capture_output=True, text=True, timeout=10)
+                self.assertEqual(process.returncode, 0, process.stderr)
+                result = json.loads(process.stdout)
+                if action == "plan":
+                    self.assertEqual(result["stato"], "PIANO_DOWNLOAD")
+                else:
+                    self.assertEqual(result["integrita_documento"], "VERIFICATA")
+                    self.assertEqual(result["contesto_kdd"]["schema"], "kdd_gpt_read_context_v001")
 
 
 if __name__ == "__main__":
