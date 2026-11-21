@@ -129,7 +129,8 @@ def _remaining(deadline: float) -> float:
     return min(remaining, MAX_REQUEST_SECONDS)
 
 
-def _inventory(reader: DriveReader, folder_id: str, deadline: float) -> tuple[list[dict], dict]:
+def _inventory(reader: DriveReader, folder_id: str, deadline: float, *,
+               attest_current: bool = False) -> tuple[list[dict], dict]:
     cursor: str | None = None
     used_tokens: set[str] = set()
     seen_ids: set[str] = set()
@@ -170,12 +171,13 @@ def _inventory(reader: DriveReader, folder_id: str, deadline: float) -> tuple[li
                 index.prepared_from_stamp(match[1])
             except ValueError as exc:
                 raise EvidenceFailure("DATA_PUBBLICAZIONE_KDD_INVALIDA") from exc
-            if file.get("trashed") is True:
-                raise EvidenceFailure("ELEMENTO_CESTINATO_NELLA_RISPOSTA")
-            if file.get("trashed") is not False:
-                raise EvidenceFailure("STATO_CESTINO_DOSSIER_NON_ATTESTATO")
-            if not isinstance(file.get("parents"), list) or file["parents"] != [folder_id]:
-                raise EvidenceFailure("CARTELLA_ORIGINE_NON_ATTESTATA")
+            if not attest_current:
+                if file.get("trashed") is True:
+                    raise EvidenceFailure("ELEMENTO_CESTINATO_NELLA_RISPOSTA")
+                if file.get("trashed") is not False:
+                    raise EvidenceFailure("STATO_CESTINO_DOSSIER_NON_ATTESTATO")
+                if file.get("parents") != [folder_id]:
+                    raise EvidenceFailure("CARTELLA_ORIGINE_NON_ATTESTATA")
             items.append(_file_metadata(file))
             if dossier_match:
                 audit["numero_dossier"] += 1
@@ -337,6 +339,15 @@ def _check_current_versions(reader: DriveReader, candidates: list[dict], deadlin
             raise EvidenceFailure("VERSIONE_CORRENTE_CAMBIATA_DURANTE_LA_LETTURA")
         checked += 1
     return checked
+
+
+def _attest_current(current, attest, deadline):
+    stamp, digest, indices, dossiers = current
+    rows = [attest(file, timeout=_remaining(deadline)) for file in indices + dossiers]
+    _remaining(deadline)
+    files = [file for file, _ in rows]
+    return (stamp, digest, files[:len(indices)], files[len(indices):]), dict(
+        (file["id"], evidence) for file, evidence in rows)
 
 
 def _final_context(dossier: Dossier, validator: BridgeReader, when: dt.datetime) -> dict:
@@ -516,19 +527,36 @@ def kdd_get_latest_verified_dossier(reader: DriveReader, folder_id: str, *,
         if not isinstance(folder_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{6,128}", folder_id):
             raise EvidenceFailure("CARTELLA_NON_CONFIGURATA")
         validator = validator if validator is not None else OriginalKddBridge()
-        first, audit = _inventory(reader, folder_id, deadline)
+        attest = getattr(reader, "attest_candidate", None)
+        first, audit = _inventory(reader, folder_id, deadline, attest_current=attest is not None)
         audit.update(numero_file_indicizzazione=len(first), massimo_preparato_utc_verificato=False)
-        stamp, digest, indices, dossiers = current = _select_candidates(first)
+        inventoried = current = _select_candidates(first)
+        if attest is not None:
+            current, _ = _attest_current(current, attest, deadline)
+        stamp, digest, indices, dossiers = current
         candidates = indices + dossiers
         audit.update(criterio_selezione="MASSIMO_PREPARATO_UTC_INDICIZZATO",
                      numero_file_correnti=len(candidates), numero_candidati_correnti=len(dossiers),
                      dossier_fuori_selezione_non_validati=audit["numero_dossier"] - len(dossiers))
         selected, index_sha = _read_current(reader, stamp, digest, indices, dossiers, deadline)
-        second, _ = _inventory(reader, folder_id, deadline)
-        if _select_candidates(second) != current:
+        second, _ = _inventory(reader, folder_id, deadline, attest_current=attest is not None)
+        observed = _select_candidates(second)
+        if (observed != inventoried
+                or (attest is not None and {file["id"]: file for file in first}
+                    != {file["id"]: file for file in second})):
             raise EvidenceFailure("INVENTARIO_CAMBIATO_DURANTE_LA_LETTURA")
-        checked = _check_current_versions(reader, candidates, deadline)
+        if attest is None:
+            checked = _check_current_versions(reader, candidates, deadline)
+        else:
+            observed, evidence = _attest_current(observed, attest, deadline)
+            if observed != current:
+                raise EvidenceFailure("METADATI_PUNTUALI_CAMBIATI_DURANTE_LA_LETTURA")
+            checked = sum(file["version"] is not None or file["headRevisionId"] is not None
+                          for file in candidates)
+            audit["attestazioni_drive"] = evidence
         audit.update(inventario_stabile_su_due_scansioni=True, numero_controlli_versione=checked,
+                     stabilita_versioni_drive=("ATTESTATA_PER_TUTTI_I_CANDIDATI" if checked == len(candidates)
+                                              else "PARZIALE" if checked else "NON_ATTESTATA"),
                      atomicita_inventario=False)
         return _validated_answer(selected, validator, clock or (lambda: now), deadline,
                                  dict(audit, massimo_preparato_utc_verificato=True,

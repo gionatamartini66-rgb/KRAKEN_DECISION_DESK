@@ -588,7 +588,8 @@ class ConnectorCaptureTests(unittest.TestCase):
         self.capture = fixture.root / "capture"
         self.capture.mkdir()
         (self.capture / "blobs").mkdir()
-        (self.capture / "metadati").mkdir()
+        (self.capture / "prima-prove").mkdir()
+        (self.capture / "dopo-prove").mkdir()
         self.files, self.blobs = publication_files(self.bundle, "captured")
         for file, (created, modified) in zip(self.files, (
                 ("07:35:04.727", "07:34:05.155"), ("07:35:05.209", "07:34:05.091"))):
@@ -620,8 +621,10 @@ class ConnectorCaptureTests(unittest.TestCase):
                 ],
             }
             (self.capture / filename).write_bytes(r.canonical(scan))
-        for file in self.files:
-            (self.capture / "metadati" / (file["id"]+".json")).write_bytes(r.canonical(normalized(file)))
+        for folder in ("prima-prove", "dopo-prove"):
+            for file in self.files:
+                (self.capture / folder / (file["id"]+".json")).write_bytes(
+                    r.canonical({"metadata": normalized(file)}))
         for file_id, raw in self.blobs.items():
             (self.capture / "blobs" / file_id).write_bytes(raw)
 
@@ -658,10 +661,11 @@ class ConnectorCaptureTests(unittest.TestCase):
         self.write_capture(after=changed)
         self.assertEqual(self.recover()["codice"], "INVENTARIO_CAMBIATO_DURANTE_LA_LETTURA")
         self.write_capture()
-        point = self.capture / "metadati/captured-index.json"
-        metadata = json.loads(point.read_bytes())
-        point.write_bytes(r.canonical(dict(metadata, version="4")))
-        self.assertEqual(self.recover()["codice"], "VERSIONE_CORRENTE_CAMBIATA_DURANTE_LA_LETTURA")
+        point = self.capture / "dopo-prove/captured-index.json"
+        receipt = json.loads(point.read_bytes())
+        receipt["metadata"]["version"] = "4"
+        point.write_bytes(r.canonical(receipt))
+        self.assertEqual(self.recover()["codice"], "METADATI_PUNTUALI_DISCORDI_DA_INVENTARIO")
 
     def test_partial_publication_and_missing_raw_bytes_never_fall_back(self):
         files = self.files
@@ -699,7 +703,42 @@ class ConnectorCaptureTests(unittest.TestCase):
         self.assertEqual(self.recover()["codice"], "PAGINA_CONNETTORE_ASSENTE")
         original["pages"][1]["response"]["files"][0].pop("trashed")
         path.write_bytes(r.canonical(original))
-        self.assertEqual(self.recover()["codice"], "STATO_CESTINO_DOSSIER_NON_ATTESTATO")
+        point = self.capture / "prima-prove/captured-index.json"
+        receipt = json.loads(point.read_bytes())
+        receipt["metadata"].pop("trashed")
+        point.write_bytes(r.canonical(receipt))
+        self.assertEqual(self.recover()["codice"], "FILTRO_CANDIDATO_CONNETTORE_NON_DOCUMENTATO")
+
+    def test_observed_normalization_requires_positive_evidence_for_exact_id(self):
+        for phase in ("prima", "dopo"):
+            path = self.capture / (phase + ".json")
+            scan = json.loads(path.read_bytes())
+            for row in scan["pages"][1]["response"]["files"]:
+                row["parent_ids"] = None
+                row.pop("trashed")
+                row.pop("version")
+                receipt_path = self.capture / (phase + "-prove") / (row["id"]+".json")
+                receipt = json.loads(receipt_path.read_bytes())
+                receipt["metadata"].pop("trashed")
+                receipt["metadata"].pop("version")
+                query = f"'{FOLDER}' in parents and trashed = false and name = '{row['title']}'"
+                receipt["search"] = {"query": query, "results": [
+                    {"id": "different-id", "title": row["title"]}]}
+                receipt_path.write_bytes(r.canonical(receipt))
+            path.write_bytes(r.canonical(scan))
+        self.assertEqual(self.recover()["codice"], "STATO_CESTINO_NON_ATTESTATO_DAL_CONNETTORE")
+        for phase in ("prima", "dopo"):
+            for path in (self.capture / (phase + "-prove")).iterdir():
+                receipt = json.loads(path.read_bytes())
+                receipt["search"]["results"][0]["id"] = receipt["metadata"]["id"]
+                path.write_bytes(r.canonical(receipt))
+        answer = self.recover()
+        self.assertEqual(answer["stato"], r.RECOVERED)
+        self.assertEqual(answer["stabilita_versioni_drive"], "NON_ATTESTATA")
+        self.assertEqual(answer["numero_controlli_versione"], 0)
+        self.assertEqual(answer["attestazioni_drive"]["captured"],
+                         {"cartella": "METADATI_PROVIDER", "cestino": "FILTRO_PROVIDER"})
+        self.assertFalse(answer["atomicita_inventario"])
 
     def test_checkout_module_entry_point_runs_as_separate_python_process(self):
         command = [sys.executable, "-B", "-m", "scripts.kdd_drive_connector"]

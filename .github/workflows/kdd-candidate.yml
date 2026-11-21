@@ -33,7 +33,6 @@ jobs:
       - name: Existing safe updater tests
         run: python -B scripts/test_kdd_aggiorna.py
       - name: Authentic public primary-source smoke (never private wallet)
-        if: github.head_ref != 'experiments/kdd24-g2d-20261121'
         run: PYTHONPATH=. python -B -u scripts/kdd_primary_live_smoke.py
 
   r5-historical-reference:
