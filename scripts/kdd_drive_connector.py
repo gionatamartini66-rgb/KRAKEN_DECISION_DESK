@@ -82,6 +82,10 @@ def _normalize_metadata(row: dict) -> dict:
     return normalized
 
 
+def _size_value(value):
+    return str(value) if type(value) is int else value
+
+
 def _candidate_query(folder_id: str, name: str) -> str:
     # A selected canonical KDD name and the validated folder ID have no quotes.
     return f"'{folder_id}' in parents and trashed = false and name = '{name}'"
@@ -163,32 +167,39 @@ class ConnectorCaptureReader:
         for key, value in point.items():
             if value is None:
                 continue
-            if key == "size" and type(value) is int:
-                value = str(value)
             previous = resolved.get(key)
-            if key == "size" and type(previous) is int:
-                previous = str(previous)
+            if key == "size":
+                previous, value = _size_value(previous), _size_value(value)
             if previous is not None and (previous != value or type(previous) is not type(value)):
                 raise retriever.EvidenceFailure("METADATI_PUNTUALI_DISCORDI_DA_INVENTARIO")
             resolved[key] = value
         evidence = _known_provenance(resolved, self.folder_id)
-        if len(evidence) < 2:
-            search = receipt.get("search")
-            query = _candidate_query(self.folder_id, file["name"])
-            if (not isinstance(search, dict) or search.get("query") != query
-                    or not isinstance(search.get("results"), list)):
-                raise retriever.EvidenceFailure("FILTRO_CANDIDATO_CONNETTORE_NON_DOCUMENTATO")
-            exact = [row for row in map(_normalize_metadata, search["results"])
-                     if row["id"] == file["id"] and row.get("name") == file["name"]]
-            if len(exact) != 1:
-                code = ("STATO_CESTINO_NON_ATTESTATO_DAL_CONNETTORE" if "cestino" not in evidence
-                        else "CARTELLA_NON_ATTESTATA_DAL_CONNETTORE")
-                raise retriever.EvidenceFailure(code)
-            # A positive exact-ID result is evidence from the raw q predicate.
-            # An empty search never proves anything about the missing candidate.
-            _known_provenance(exact[0], self.folder_id)
+        search = receipt.get("search")
+        if search is None and len(evidence) == 2:
+            return resolved, evidence
+        query = _candidate_query(self.folder_id, file["name"])
+        if (not isinstance(search, dict) or search.get("query") != query
+                or not isinstance(search.get("results"), list)):
+            raise retriever.EvidenceFailure("FILTRO_CANDIDATO_CONNETTORE_NON_DOCUMENTATO")
+        matches = [row for row in map(_normalize_metadata, search["results"])
+                   if row["id"] == file["id"]]
+        if len(matches) > 1 or (matches and matches[0].get("name") != file["name"]):
+            raise retriever.EvidenceFailure("IDENTITA_FILTRO_CONNETTORE_DISCORDE")
+        if matches:
+            match = matches[0]
+            filtered_size = _size_value(match.get("size"))
+            resolved_size = _size_value(resolved.get("size"))
+            if (filtered_size is not None and resolved_size is not None
+                    and (filtered_size != resolved_size or type(filtered_size) is not type(resolved_size))):
+                raise retriever.EvidenceFailure("DIMENSIONE_FILTRO_CONNETTORE_DISCORDE")
+            _known_provenance(match, self.folder_id)
             for label in ("cartella", "cestino"):
                 evidence.setdefault(label, "FILTRO_PROVIDER")
+        elif len(evidence) < 2:
+            # An empty search never proves anything about the missing candidate.
+            code = ("STATO_CESTINO_NON_ATTESTATO_DAL_CONNETTORE" if "cestino" not in evidence
+                    else "CARTELLA_NON_ATTESTATA_DAL_CONNETTORE")
+            raise retriever.EvidenceFailure(code)
         return resolved, evidence
 
 

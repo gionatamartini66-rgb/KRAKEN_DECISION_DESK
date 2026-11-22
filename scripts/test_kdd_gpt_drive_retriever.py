@@ -731,6 +731,8 @@ class ConnectorCaptureTests(unittest.TestCase):
             for path in (self.capture / (phase + "-prove")).iterdir():
                 receipt = json.loads(path.read_bytes())
                 receipt["search"]["results"][0]["id"] = receipt["metadata"]["id"]
+                if receipt["metadata"]["id"] == "captured":
+                    receipt["search"]["results"][0]["size_bytes"] = int(receipt["metadata"]["size_bytes"])
                 path.write_bytes(r.canonical(receipt))
         answer = self.recover()
         self.assertEqual(answer["stato"], r.RECOVERED)
@@ -739,6 +741,50 @@ class ConnectorCaptureTests(unittest.TestCase):
         self.assertEqual(answer["attestazioni_drive"]["captured"],
                          {"cartella": "METADATI_PROVIDER", "cestino": "FILTRO_PROVIDER"})
         self.assertFalse(answer["atomicita_inventario"])
+
+    def assert_filter_rejected_before_download(self, rows, expected):
+        for phase in ("prima", "dopo"):
+            path = self.capture / (phase + ".json")
+            scan = json.loads(path.read_bytes())
+            for row in scan["pages"][1]["response"]["files"]:
+                row.pop("trashed")
+                receipt_path = self.capture / (phase + "-prove") / (row["id"] + ".json")
+                receipt = json.loads(receipt_path.read_bytes())
+                receipt["metadata"].pop("trashed")
+                receipt["search"] = {
+                    "query": connector._candidate_query(FOLDER, row["title"]),
+                    "results": rows(row) if row["id"] == "captured" else [
+                        {"id": row["id"], "title": row["title"]}],
+                }
+                receipt_path.write_bytes(r.canonical(receipt))
+            path.write_bytes(r.canonical(scan))
+
+        reader = connector.ConnectorCaptureReader(FOLDER, self.capture)
+        with mock.patch.object(reader, "download", wraps=reader.download) as download:
+            result = r.kdd_get_latest_verified_dossier(reader, FOLDER, now=self.when)
+        self.assertEqual((result["stato"], download.call_count), (r.UNVERIFIABLE, 0))
+        self.assertEqual(result["codice"], expected)
+        self.assertNotIn("contesto_kdd", result)
+
+        process = subprocess.run([sys.executable, "-S", "-B", "-m", "scripts.kdd_drive_connector",
+                                  "plan", FOLDER, str(self.capture)],
+                                 capture_output=True, text=True, timeout=10)
+        plan = json.loads(process.stdout)
+        self.assertEqual((process.returncode, plan["stato"], plan["codice"]),
+                         (2, r.UNVERIFIABLE, expected))
+        self.assertNotIn("file", plan)
+
+    def test_filter_rejects_conflicting_size_before_any_download(self):
+        self.assert_filter_rejected_before_download(
+            lambda row: [{"id": row["id"], "title": row["title"],
+                          "size_bytes": int(row["size_bytes"]) + 1}],
+            "DIMENSIONE_FILTRO_CONNETTORE_DISCORDE")
+
+    def test_filter_rejects_two_names_for_same_id_before_any_download(self):
+        self.assert_filter_rejected_before_download(
+            lambda row: [{"id": row["id"], "title": row["title"]},
+                         {"id": row["id"], "title": "altro-nome.json"}],
+            "IDENTITA_FILTRO_CONNETTORE_DISCORDE")
 
     def test_checkout_module_entry_point_runs_as_separate_python_process(self):
         command = [sys.executable, "-B", "-m", "scripts.kdd_drive_connector"]
