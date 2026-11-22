@@ -362,8 +362,13 @@ def _export_bundle(bundle):
         raise bridge.BridgeError("Cartella Kraken condivisa non disponibile")
     raw = bridge.canonical(bundle) + b"\n"
     dossier, name, body = index.publication(bundle, raw)
-    stamp, digest = index.INDEX.fullmatch(name).groups()
-    index.check_index(body, stamp, digest)
+    publication = index.parse_name(name)
+    old_dossier, old_index = index.names(publication.stamp, publication.digest, labelled=False)
+    # Complete or reuse an existing pre-label publication without renaming it.
+    labelled = not any(bridge._path_present(root / old) for old in (old_dossier, old_index))
+    if not labelled:
+        dossier, name, body = index.publication(bundle, raw, labelled=False)
+    index.check_index(body, publication.stamp, publication.digest, labelled=labelled)
     _publish_export_file(root, dossier, raw)
     _publish_export_file(root, name, bridge.canonical(body) + b"\n")
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -749,19 +754,22 @@ def latest_export():
         if EXCHANGE_ROOT.is_symlink() or not EXCHANGE_ROOT.is_dir():
             return "Cartella di FolderSync non accessibile."
         names = {p.name for p in EXCHANGE_ROOT.iterdir() if p.is_file() and not p.is_symlink()}
-        dated = [match.groups() for name in names
-                 if (match := index.DOSSIER.fullmatch(name) or index.INDEX.fullmatch(name))]
+        dated = [publication for name in names if (publication := index.parse_name(name))]
         if dated:
-            newest = max(stamp for stamp, _ in dated)
-            digests = {digest for stamp, digest in dated if stamp == newest}
-            if len(digests) == 1:
-                dossier, manifest = index.names(newest, digests.pop())
+            newest = max(publication.stamp for publication in dated)
+            keys = {(publication.digest, publication.labelled) for publication in dated
+                    if publication.stamp == newest}
+            if len(keys) == 1:
+                digest, labelled = keys.pop()
+                dossier, manifest = index.names(newest, digest, labelled=labelled)
                 if dossier in names and manifest in names:
                     return "Ultima coppia locale di esportazione: " + dossier
             return "STOP FolderSync: esportazione corrente incompleta o ambigua."
         if any(index.LEGACY.fullmatch(name) for name in names):
             return "Dossier storici senza indice presenti per FolderSync."
         return "Nessun dossier pronto per FolderSync."
+    except ValueError:
+        return "STOP FolderSync: nome di esportazione non verificabile."
     except OSError:
         # Optional legacy status must not take the private proposal view down.
         return "STOP FolderSync: archivio condiviso non leggibile."

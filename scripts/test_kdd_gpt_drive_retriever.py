@@ -57,10 +57,10 @@ def file_metadata(name, file_id, raw, when=T):
             "createdTime": when.isoformat(), "modifiedTime": when.isoformat()}
 
 
-def publication_files(bundle, file_id, *, raw=None, drive_when=T):
+def publication_files(bundle, file_id, *, raw=None, drive_when=T, labelled=True):
     if raw is None:
         raw = r.canonical(bundle) + b"\n"
-    dossier, manifest, obj = index.publication(bundle, raw)
+    dossier, manifest, obj = index.publication(bundle, raw, labelled=labelled)
     raw_index = r.canonical(obj) + b"\n"
     files = [file_metadata(manifest, file_id+"-index", raw_index, drive_when),
              file_metadata(dossier, file_id, raw, drive_when)]
@@ -140,6 +140,52 @@ class RecoveryG2CTests(unittest.TestCase):
         self.assertEqual(result["nomi_fuori_schema_con_prefisso_kdd"], 1)
         self.assertEqual(drive.downloads, ["current-index", "current"])
         self.validator.validate.assert_called_once()
+
+    def test_mixed_naming_selects_by_utc_across_year_boundary(self):
+        later = dt.datetime(2027, 1, 1, 0, 0, tzinfo=dt.timezone.utc)
+        earlier = later - dt.timedelta(microseconds=1)
+        for current_labelled in (True, False):
+            with self.subTest(current_labelled=current_labelled):
+                old, old_blobs = publication_files(synth_handoff(when=earlier), "older",
+                                                   drive_when=later + dt.timedelta(days=1),
+                                                   labelled=not current_labelled)
+                current, current_blobs = publication_files(synth_handoff(when=later), "latest",
+                                                           drive_when=earlier, labelled=current_labelled)
+                drive = FakeDrive(pages_from([*old, *current], 2), {**old_blobs, **current_blobs})
+                result = r.kdd_get_latest_verified_dossier(
+                    drive, FOLDER, validator=SyntheticBridge(), now=later)
+                self.assertEqual(result["stato"], r.RECOVERED)
+                self.assertEqual(result["nome"], current[1]["name"])
+                self.assertEqual(drive.downloads, ["latest-index", "latest"])
+
+    def test_readable_prefix_distinguishes_kind_and_suffix_preserves_uniqueness(self):
+        instant = dt.datetime(2026, 11, 22, 14, 30, 15, 1, tzinfo=dt.timezone.utc)
+        before, before_blobs = publication_files(synth_handoff(when=instant), "before")
+        after, after_blobs = publication_files(
+            synth_handoff(when=instant + dt.timedelta(microseconds=1)), "after")
+        different, _ = publication_files(synth_handoff(when=instant, marker="B"), "other")
+        for pair in (before, after, different):
+            self.assertTrue(pair[0]["name"].startswith("22NOV-143015-INDICE_"))
+            self.assertTrue(pair[1]["name"].startswith("22NOV-143015-DOSSIER_"))
+        self.assertEqual(len({row["name"] for row in before + after + different}), 6)
+
+        drive = FakeDrive(pages_from([*after, *before], 2), {**before_blobs, **after_blobs})
+        result = r.kdd_get_latest_verified_dossier(
+            drive, FOLDER, validator=SyntheticBridge(), now=instant + dt.timedelta(seconds=1))
+        self.assertEqual(result["stato"], r.RECOVERED)
+        self.assertEqual(drive.downloads, ["after-index", "after"])
+
+    def test_wrong_label_or_cross_format_pair_is_not_accepted(self):
+        wrong = dict(self.dossier, name=self.dossier["name"].replace("20NOV-", "21NOV-", 1))
+        legacy, _ = publication_files(synth_handoff(), "pre-label", labelled=False)
+        for rows, code in (
+            ([self.manifest, wrong], "NOME_PUBBLICAZIONE_KDD_INVALIDO"),
+            ([self.manifest, legacy[1]], "PUBBLICAZIONE_CORRENTE_AMBIGUA"),
+        ):
+            with self.subTest(code=code):
+                result, drive = self.recover(rows)
+                self.assertEqual(result["codice"], code)
+                self.assertFalse(drive.downloads)
 
     def test_current_publication_incomplete_never_falls_back(self):
         old, _ = publication_files(synth_handoff(when=T-dt.timedelta(hours=4)), "old")
@@ -419,6 +465,17 @@ class OriginalBridgeDifferentialTests(unittest.TestCase):
         self.assertEqual(drive.downloads, [result["nome_indice"], exported])
         self.assertEqual(result["contesto_kdd"], self.bridge.read_context(
             fixture.bundle, now=self.t, expected_sha256=self.bridge.digest(fixture.bundle)))
+
+    def test_pre_label_index_and_dossier_still_recover_with_original_bridge(self):
+        bundle = self.bridge.prepare(self.fixture.root, now=self.t, _fixture=True)
+        files, blobs = publication_files(bundle, "pre-label", labelled=False)
+        self.assertTrue(files[0]["name"].startswith("kdd_handoff_index_v001_"))
+        self.assertTrue(files[1]["name"].startswith("kdd_handoff_v001_"))
+        drive = FakeDrive(pages_from(files), blobs)
+        result = r.kdd_get_latest_verified_dossier(drive, FOLDER, now=self.t)
+        self.assertEqual(result["stato"], r.RECOVERED)
+        self.assertEqual(result["contesto_kdd"], self.bridge.read_context(
+            bundle, now=self.t, expected_sha256=self.bridge.digest(bundle)))
 
     def test_original_read_context_matches_fresh_stale_and_missing_balance(self):
         normal = self.bridge.prepare(self.fixture.root, now=self.t, _fixture=True)

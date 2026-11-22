@@ -35,14 +35,17 @@ class DriveUIHandoffTests(unittest.TestCase):
     def test_gpt_drive_roundtrip_with_persisted_original_and_manual_consent(self):
         with mock.patch.object(bridge,"prepare",return_value=self.original.bundle):
             exported=exchange.prepare_export()
-        self.assertRegex(exported, index.DOSSIER)
+        name = index.parse_name(exported)
+        self.assertFalse(name.is_index)
+        self.assertTrue(name.labelled)
         out=(self.sync/exported)
         self.assertTrue(out.is_file())
         self.assertEqual(out.read_bytes(),bridge.canonical(self.original.bundle)+b"\n")
-        stamp, digest = index.DOSSIER.fullmatch(exported).groups()
-        _, index_name = index.names(stamp, digest)
+        _, index_name = index.names(name.stamp, name.digest)
         index_body = json.loads((self.sync / index_name).read_bytes())
-        index.check_index(index_body, stamp, digest)
+        index.check_index(index_body, name.stamp, name.digest)
+        self.assertEqual(index_body["dossier"], exported)
+        self.assertIn(exported, exchange.latest_export())
         self.assertEqual(index_body["snapshot_id"], self.original.bundle["packet_sha256"])
         self.assertEqual(index_body["sha256_byte"], hashlib.sha256(out.read_bytes()).hexdigest())
         self.assertEqual(bridge.verify_local_origin(self.original.bundle),
@@ -136,6 +139,30 @@ class DriveUIHandoffTests(unittest.TestCase):
         self.assertEqual(legacy.read_bytes(), raw)
         self.assertEqual(bridge.verify_local_origin(bundle), bridge.digest(bundle))
         self.assertFalse((bridge.PRIVATE_ROOT / "drive-export" / exchange._PENDING_EXPORT).exists())
+
+    def test_retry_completes_pre_label_publication_without_moving_it(self):
+        bundle = self.original.bundle
+        self.original.persist_origin()
+        raw = bridge.canonical(bundle) + b"\n"
+        dossier, manifest, body = index.publication(bundle, raw, labelled=False)
+        previous = self.sync / dossier
+        previous.write_bytes(raw)
+        original_stat = previous.stat()
+        journal = bridge.ensure_dir(bridge.PRIVATE_ROOT / "drive-export")
+        pending = journal / exchange._PENDING_EXPORT
+        exchange._publish_export_file(journal, pending.name,
+                                      bridge.canonical({"dossier_sha256": bridge.digest(bundle)}) + b"\n")
+
+        with mock.patch.object(bridge, "prepare") as prepare:
+            self.assertEqual(exchange.prepare_export(), dossier)
+            prepare.assert_not_called()
+        self.assertEqual({file.name for file in self.sync.iterdir()}, {dossier, manifest})
+        self.assertEqual(previous.read_bytes(), raw)
+        self.assertEqual(previous.stat().st_ino, original_stat.st_ino)
+        self.assertEqual(previous.stat().st_mtime_ns, original_stat.st_mtime_ns)
+        self.assertEqual((self.sync / manifest).read_bytes(), bridge.canonical(body) + b"\n")
+        self.assertIn(dossier, exchange.latest_export())
+        self.assertFalse(pending.exists())
 
     def test_export_retry_preserves_and_rejects_conflicting_existing_index(self):
         bundle = self.original.bundle

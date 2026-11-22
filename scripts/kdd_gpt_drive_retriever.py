@@ -159,18 +159,16 @@ def _inventory(reader: DriveReader, folder_id: str, deadline: float, *,
                 audit["dossier_storici_senza_indice"] += 1
                 audit["numero_dossier"] += 1
                 continue
-            dossier_match = index.DOSSIER.fullmatch(name)
-            match = dossier_match or index.INDEX.fullmatch(name)
-            if match is None:
-                if name.startswith((index.INDEX_PREFIX, index.DOSSIER_PREFIX)):
-                    raise EvidenceFailure("NOME_PUBBLICAZIONE_KDD_INVALIDO")
+            try:
+                publication = index.parse_name(name)
+            except index.InvalidPublicationName as exc:
+                raise EvidenceFailure("NOME_PUBBLICAZIONE_KDD_INVALIDO") from exc
+            except ValueError as exc:
+                raise EvidenceFailure("DATA_PUBBLICAZIONE_KDD_INVALIDA") from exc
+            if publication is None:
                 audit["file_estranei"] += 1
                 audit["nomi_fuori_schema_con_prefisso_kdd"] += name.startswith("kdd_handoff_")
                 continue
-            try:
-                index.prepared_from_stamp(match[1])
-            except ValueError as exc:
-                raise EvidenceFailure("DATA_PUBBLICAZIONE_KDD_INVALIDA") from exc
             if not attest_current:
                 if file.get("trashed") is True:
                     raise EvidenceFailure("ELEMENTO_CESTINATO_NELLA_RISPOSTA")
@@ -179,7 +177,7 @@ def _inventory(reader: DriveReader, folder_id: str, deadline: float, *,
                 if file.get("parents") != [folder_id]:
                     raise EvidenceFailure("CARTELLA_ORIGINE_NON_ATTESTATA")
             items.append(_file_metadata(file))
-            if dossier_match:
+            if not publication.is_index:
                 audit["numero_dossier"] += 1
         token = page.get("nextPageToken")
         if token is None:
@@ -222,14 +220,14 @@ def _select_candidates(files: list[dict]) -> tuple[str, str, list[dict], list[di
     named = {}
     for file in files:
         named.setdefault(file["name"], []).append(file)
-    keys = [(index.INDEX.fullmatch(name) or index.DOSSIER.fullmatch(name)).groups()
-            for name in named]
-    stamp = max(stamp for stamp, _ in keys)
-    digests = {digest for key, digest in keys if key == stamp}
-    if len(digests) != 1:
+    publications = [index.parse_name(name) for name in named]
+    stamp = max(publication.stamp for publication in publications)
+    keys = {(publication.digest, publication.labelled) for publication in publications
+            if publication.stamp == stamp}
+    if len(keys) != 1:
         raise EvidenceFailure("PUBBLICAZIONE_CORRENTE_AMBIGUA")
-    digest = digests.pop()
-    dossier_name, index_name = index.names(stamp, digest)
+    digest, labelled = keys.pop()
+    dossier_name, index_name = index.names(stamp, digest, labelled=labelled)
     indices, dossiers = named.get(index_name, []), named.get(dossier_name, [])
     if not indices:
         raise EvidenceFailure("INDICE_CORRENTE_ASSENTE")
@@ -299,9 +297,10 @@ def _read_current(reader: DriveReader, stamp: str, digest: str, indices: list[di
                   dossiers: list[dict], deadline: float) -> tuple[Dossier, str]:
     index_sizes, dossier_sizes = _current_sizes(indices, dossiers)
     index_raw, index_sha = _read_identical(reader, indices, index_sizes, deadline)
+    labelled = index.parse_name(indices[0]["name"]).labelled
     try:
         manifest = _canonical_object(index_raw)
-        index.check_index(manifest, stamp, digest)
+        index.check_index(manifest, stamp, digest, labelled=labelled)
     except (EvidenceFailure, ValueError, OverflowError) as exc:
         raise EvidenceFailure("INDICE_CORRENTE_INVALIDO") from exc
 
@@ -316,7 +315,7 @@ def _read_current(reader: DriveReader, stamp: str, digest: str, indices: list[di
     if hashlib.sha256(raw[:-1]).hexdigest() != digest:
         raise EvidenceFailure("IDENTITA_LOGICA_DISCORDANTE")
     try:
-        _, _, expected_index = index.publication(handoff, raw)
+        _, _, expected_index = index.publication(handoff, raw, labelled=labelled)
     except (ValueError, TypeError, KeyError, OverflowError) as exc:
         raise EvidenceFailure("SCHEMA_TRASPORTO_INVALIDO") from exc
     if expected_index != manifest:
