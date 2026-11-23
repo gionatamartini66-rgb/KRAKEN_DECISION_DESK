@@ -180,6 +180,77 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.db.dossier_status("manual001")[0]["status"],"PRONTO_LOCALE")
 
 
+
+class DossierProducerTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.db = k27.Store(Path(self.tmp.name))
+
+    def test_actual_producer_reuses_deep_sources_and_local_handoff_for_twenty_requests(self):
+        # Source modules are real; only external effects and JSON files are stubbed.
+        import decision_desk as desk
+        from scripts import kdd_drive_exchange as exchange
+        now = dt.datetime.now(UTC)
+        old_snapshot={"rilevazione_utc":k27.iso(now-dt.timedelta(hours=2))}
+        current={"rilevazione_utc":k27.iso(now),"ricerca_setup":{"ciclo":2}}
+        dossier={"kraken_istantanea_utc":current["rilevazione_utc"],
+                 "creato_utc":k27.iso(now),"schema":3}
+        state={"ultima_rilevazione.json":old_snapshot,
+               "dossier_multifonte.json":{}}
+        counts={"refresh":0,"deep":0,"export":0}
+        def refresh(*,prepare_dossier=False):
+            self.assertFalse(prepare_dossier)
+            counts["refresh"]+=1
+            state["ultima_rilevazione.json"]=current
+            return current
+        def deepen(snapshot):
+            self.assertEqual(snapshot,current)
+            counts["deep"]+=1
+            state["dossier_multifonte.json"]=dossier
+            return {"stato":"PRONTO_PER_ESAME_GPT_CON_LIMITI"}
+        def export(*,require_recent=False):
+            self.assertTrue(require_recent)
+            counts["export"]+=1
+            path=Path(self.tmp.name)/"handoff.json"
+            path.write_bytes(b'{}')
+            return path
+        with mock.patch.object(desk,"load",side_effect=lambda name,default=None:
+                                  state.get(name,default)), \
+             mock.patch.object(desk,"refresh",side_effect=refresh), \
+             mock.patch.object(desk,"prepara_dossier_aggiornamento",
+                               side_effect=deepen), \
+             mock.patch.object(exchange,"EXCHANGE_ROOT",Path(self.tmp.name)), \
+             mock.patch.object(exchange,"prepare_export",side_effect=export), \
+             mock.patch.object(exchange.bridge,"strict_json",
+                               return_value={"packet":{},"schema":3}), \
+             mock.patch.object(exchange.bridge,"read_context",
+                               return_value={"mercato":{"stato":"RECENTE"},
+                                             "saldo":{"stato":"RECENTE"}}):
+            for n in range(20):
+                self.db.enqueue_dossier(f"request{n:04}",now)
+            for n in range(20):
+                result=self.db.process_queue(k27.real_dossier_producer,now,limit=1)
+                self.assertEqual(result,[(f"request{n:04}","PRONTO_LOCALE")])
+        self.assertEqual(counts,{"refresh":1,"deep":1,"export":1})
+        self.assertEqual(self.db.status()["observations"],1)
+        self.assertEqual(self.db.status()["dossiers"]["PRONTO_LOCALE"],20)
+        self.assertEqual(self.db.status()["jobs"],[])
+
+    def test_new_request_never_renews_stale_source_by_paper_timestamp(self):
+        import decision_desk as desk
+        from scripts import kdd_drive_exchange as exchange
+        now=dt.datetime.now(UTC)
+        bad={"rilevazione_utc":k27.iso(now-dt.timedelta(hours=1))}
+        with mock.patch.object(desk,"load",return_value=bad), \
+             mock.patch.object(desk,"refresh",side_effect=OSError("network down")), \
+             mock.patch.object(exchange,"prepare_export") as export:
+            self.db.enqueue_dossier("stale001",now)
+            result=self.db.process_queue(k27.real_dossier_producer,now,limit=1)
+        self.assertEqual(result,[("stale001","ERRORE")])
+        self.assertEqual(self.db.dossier_status("stale001")[0]["error"],"OSError")
+        export.assert_not_called()
+
 class TelemetryTests(unittest.TestCase):
     def test_http_byte_count_and_no_url_leak(self):
         class Remote:
