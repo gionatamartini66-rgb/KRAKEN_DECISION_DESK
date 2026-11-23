@@ -29,6 +29,9 @@ MAX_BATCH = 40  # Work per invocation, NEVER an admission or daily dossier cap.
 
 class BudgetDeferred(RuntimeError):
     """A source refresh is deferred, never reported as current."""
+    def __init__(self, reason, retry_at=None):
+        super().__init__(reason)
+        self.retry_at=retry_at
 CACHE_SECONDS = 300
 SNAPSHOT_MAX_AGE_SECONDS = 600
 
@@ -103,6 +106,9 @@ class Store:
                 ON dossier_requests(status,requested_at);
             """)
         with self.connection() as c:
+            c.execute("""CREATE TABLE IF NOT EXISTS provider_pauses(
+                provider TEXT PRIMARY KEY, until_utc TEXT NOT NULL,
+                last_429_utc TEXT NOT NULL, attempts INTEGER NOT NULL)""")
             columns={row[1] for row in c.execute("PRAGMA table_info(dossier_requests)")}
             for name in ("snapshot_id","manifest_sha","source_observation_id",
                          "publication_state","quality_json","next_attempt_at"):
@@ -135,6 +141,39 @@ class Store:
                 yield
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+    def active_pauses(self, now=None):
+        checked=iso(instant(now))
+        with self.connection() as c:
+            return {provider:until for provider,until in
+                c.execute("SELECT provider,until_utc FROM provider_pauses"
+                          " WHERE until_utc>?",(checked,))}
+
+    def record_throttles(self, entries, now=None):
+        """Persist observed provider 429, never a guessed daily request quota."""
+        if not entries:
+            return
+        moment=instant(now)
+        with self.connection() as c:
+            c.execute("BEGIN IMMEDIATE")
+            for entry in entries:
+                provider=entry.get("provider")
+                if not isinstance(provider,str) or not 1<=len(provider)<=64:
+                    continue
+                row=c.execute("SELECT attempts FROM provider_pauses"
+                              " WHERE provider=?",(provider,)).fetchone()
+                attempts=(row[0]+1) if row else 1
+                retry=entry.get("retry_after_s")
+                if type(retry) is not int or not 1<=retry<=86400:
+                    retry=min(3600,60*(2**min(attempts,5)))
+                until=iso(moment+dt.timedelta(seconds=retry))
+                c.execute("INSERT INTO provider_pauses VALUES(?,?,?,?)"
+                          " ON CONFLICT(provider) DO UPDATE SET"
+                          " until_utc=excluded.until_utc,"
+                          " last_429_utc=excluded.last_429_utc,"
+                          " attempts=excluded.attempts",
+                          (provider,until,iso(moment),attempts))
+            c.commit()
 
     def setup_families(self, profile, now, *, enable=False):
         """Experimental per-source schedules; no Android enrollment.
@@ -443,8 +482,9 @@ class Store:
                     state = ('RINVIATO_PROVIDER' if isinstance(exc,BudgetDeferred)
                              else 'RINVIATO_RETE' if isinstance(exc, (OSError,ConnectionError))
                              else 'ERRORE')
-                    due=(instant(now)+dt.timedelta(minutes=5)).isoformat() if (
-                        state.startswith("RINVIATO_")) else None
+                    due=(getattr(exc,"retry_at",None) or
+                         iso(instant(now)+dt.timedelta(minutes=5))) if (
+                         state.startswith("RINVIATO_")) else None
                     with self.connection() as c:
                         c.execute("UPDATE dossier_requests SET status=?,"
                                   "completed_at=?,error=?,next_attempt_at=?"
