@@ -607,6 +607,43 @@ class TemporalRegressionTests(unittest.TestCase):
         self.assertEqual(freeze.get(self.store,uid)["snapshot_id"],frozen["snapshot_id"])
 
 
+    def test_time01_queue_delayed_request_clock_remains_durable(self):
+        """A processing timestamp must never overwrite the user's enqueue time."""
+        import decision_desk as desk
+        from scripts import kdd27_freeze as freeze
+        from scripts import kdd_drive_exchange as exchange
+        acquired=dt.datetime.now(UTC)
+        requested=acquired-dt.timedelta(minutes=15)
+        uid="queued_for_15_minutes"
+        source={"rilevazione_utc":k27.iso(acquired),"market":1}
+        wallet={"posizioni":[]}
+        dossier={"schema":3,"kraken_istantanea_utc":source["rilevazione_utc"],
+                 "fotografia_portafoglio_sha256":desk.fotografia_portafoglio_sha256(wallet)}
+        self.store.enqueue_dossier(uid,requested)
+        record=self.store.record_dossier_snapshot(uid,source,source["rilevazione_utc"])
+        freeze.freeze(self.store,uid,now=acquired,source=source,
+                      source_observation_id=record["observation_id"],wallet=wallet)
+        files={"portafoglio.json":wallet,"ultima_rilevazione.json":source,
+               "dossier_multifonte.json":{}}
+        def build(actual,**kwargs):
+            self.assertEqual(actual,source)
+            files["dossier_multifonte.json"]=dossier
+            return {"stato":"PARZIALE","idoneita_analisi_patrimoniale":"NON_IDONEA"}
+        with mock.patch.object(desk,"load",side_effect=lambda name,default=None:
+                               files.get(name,default)), \
+             mock.patch.object(desk,"prepara_dossier_aggiornamento",
+                               side_effect=build), \
+             mock.patch.object(exchange,"prepare_export") as publisher:
+            result=self.store.process_queue(k27.real_dossier_producer,now=acquired,limit=1)
+        self.assertEqual(result,[(uid,"PARZIALE_LOCALE")])
+        publisher.assert_not_called()
+        quality=json.loads(self.store.dossier_status(uid)[0]["quality_json"])
+        self.assertEqual(quality["richiesto_utc"],k27.iso(requested))
+        self.assertGreaterEqual(quality["consumato_utc"],source["rilevazione_utc"])
+        self.assertGreaterEqual(quality["controllato_pubblicazione_utc"],
+                                quality["consumato_utc"])
+
+
 class DossierHTTPTests(unittest.TestCase):
     def test_real_localhost_handler_request_id_idempotence_and_status(self):
         import http.client
