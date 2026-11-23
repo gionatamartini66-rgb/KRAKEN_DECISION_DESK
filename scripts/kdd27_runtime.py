@@ -225,6 +225,45 @@ class Store:
                                     "error": type(exc).__name__, "missed": missed})
             return results
 
+    def run_manual_monitor(self, worker, now=None):
+        """An explicit desk refresh is also archived, without shifting A deadlines."""
+        moment = instant(now)
+        run_id = uuid.uuid4().hex
+        with self.exclusive():
+            with self.connection() as c:
+                c.execute("INSERT INTO runs(run_id,name,due_s,start_s,status)"
+                          " VALUES(?,?,?,?,?)", (run_id,MONITOR_JOB,
+                            int(moment.timestamp()),time.time(),"IN_CORSO"))
+            try:
+                produced=worker(MONITOR_JOB,run_id,int(moment.timestamp()))
+                raw=encode(produced["payload"])
+                digest=sha(raw)
+                observed=produced.get("observed_at") or iso()
+                with self.connection() as c:
+                    c.execute("BEGIN IMMEDIATE")
+                    c.execute("INSERT INTO observations VALUES(?,?,?,?,?,?,?,?,?)",
+                              (sha(encode([run_id,MONITOR_JOB,observed,digest])),run_id,
+                               MONITOR_JOB,observed,iso(),digest,
+                               sqlite3.Binary(zlib.compress(raw)),len(raw),"OSSERVATO"))
+                    if produced.get("cursor") is not None:
+                        c.execute("INSERT INTO cursors VALUES(?,?,?) ON CONFLICT(family)"
+                                  " DO UPDATE SET data_json=excluded.data_json,"
+                                  "updated_at=excluded.updated_at",
+                                  (MONITOR_JOB,encode(produced["cursor"]).decode(),iso()))
+                    c.execute("UPDATE runs SET status='MANUALE',finish_s=?,"
+                              "metrics_json=?,snapshot_sha=? WHERE run_id=?",
+                              (time.time(),encode(produced.get("metrics") or {}).decode(),
+                               digest,run_id))
+                    c.commit()
+                return {"run_id":run_id,"snapshot_sha":digest,
+                        "observed_at":observed,"status":"MANUALE"}
+            except BaseException as exc:
+                with self.connection() as c:
+                    c.execute("UPDATE runs SET status='ERRORE',finish_s=?,error=?"
+                              " WHERE run_id=?",
+                              (time.time(),type(exc).__name__,run_id))
+                raise
+
     def record_dossier_snapshot(self, request_id, snapshot, observed_at):
         """Append an independently acquired B snapshot, never alter A calendar."""
         raw = encode(snapshot)
@@ -287,10 +326,10 @@ class Store:
             keys = [item[1] for item in c.execute("PRAGMA table_info(dossier_requests)")]
         return [dict(zip(keys, row)) for row in rows]
 
-    def process_queue(self, producer, now=None, limit=40):
+    def process_queue(self, producer, now=None, limit=40, *, wait=False):
         """Serialize dossier runs with monitor runs, without modifying job dates."""
         results = []
-        with self.exclusive(nonblocking=True):
+        with self.exclusive(nonblocking=not wait):
             with self.connection() as c:
                 c.execute("BEGIN IMMEDIATE")
                 self._recover(c)
