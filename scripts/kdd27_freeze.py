@@ -87,15 +87,19 @@ def _manifest(c, now):
     from scripts.kdd27_families import SPECS, stamped
     observations=[]
     for family,spec in SPECS.items():
+        attempt=c.execute("""SELECT observed_at,state FROM observations
+                             WHERE family=? ORDER BY observed_at DESC,received_at DESC
+                             LIMIT 1""",(family,)).fetchone()
         row=c.execute("""SELECT observation_id,sha256,observed_at,state
-                         FROM observations WHERE family=?
+                         FROM observations WHERE family=? AND state='OSSERVATO'
                          ORDER BY observed_at DESC,received_at DESC LIMIT 1""",
                       (family,)).fetchone()
         if row is None:
             observations.append({"family":family,"stato":"NON_ACQUISITO",
                                  "observation_id":None,"sha256":None,
                                  "osservato_utc":None,"eta_s":None,
-                                 "ttl_s":spec["ttl_s"]})
+                                 "ttl_s":spec["ttl_s"],
+                                 "ultimo_tentativo_stato":attempt[1] if attempt else None})
             continue
         observed=stamped(row[2])
         age=(now-observed).total_seconds() if observed else None
@@ -106,7 +110,8 @@ def _manifest(c, now):
                                 if row[3]=="OSSERVATO" else row[3],
                              "observation_id":row[0],"sha256":row[1],
                              "osservato_utc":row[2],"eta_s":age,
-                             "ttl_s":spec["ttl_s"]})
+                             "ttl_s":spec["ttl_s"],
+                             "ultimo_tentativo_stato":attempt[1] if attempt else None})
     return {"schema":"kdd27_frozen_manifest_v001",
             "produced_at":core.iso(now),"families":observations,
             "missing":sorted(row["family"] for row in observations
