@@ -525,7 +525,10 @@ class TemporalRegressionTests(unittest.TestCase):
         row=self.store.dossier_status("time_market_catalog")[0]
         quality=json.loads(row["quality_json"])
         self.assertIn("FONTE_SCADUTA_AL_CONSUMO:market_catalog",quality["lacune"])
-        self.assertEqual(quality["idoneita"],"NON_IDONEA_FONTE_SCADUTA")
+        # At +35m BOTH the catalog TTL (30m) and the market image (10m)
+        # have elapsed. Market-image invalidity has stricter precedence.
+        self.assertEqual(quality["idoneita"],"NON_IDONEA_FOTOGRAFIA_SCADUTA")
+        self.assertIn("FOTOGRAFIA_SCADUTA_ALLA_PUBBLICAZIONE",quality["lacune"])
         self.assertEqual(row["publication_state"],"NON_PREPARATO_DATI_NON_IDONEI")
         self.assertEqual(freeze.get(self.store,"time_market_catalog")["manifest_sha256"],
                          fixed["manifest_sha256"])
