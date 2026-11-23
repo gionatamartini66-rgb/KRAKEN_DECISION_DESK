@@ -580,7 +580,16 @@ def real_dossier_producer(store, request_id, now):
 def _real_dossier_producer(store, request_id, now):
     # now supplied by the queue is the REQUEST instant, not a clock for
     # samples acquired later. Re-read the physical clock at every gate.
-    requested_at=instant(now)
+    with store.connection() as conn:
+        requested_row=conn.execute(
+            "SELECT requested_at FROM dossier_requests WHERE request_id=?",
+            (request_id,)).fetchone()
+    if requested_row is None:
+        raise ValueError("RICHIESTA_NON_REGISTRATA")
+    requested_at=dt.datetime.fromisoformat(requested_row[0])
+    if requested_at.tzinfo is None:
+        raise ValueError("OROLOGIO_RICHIESTA_NON_VERIFICABILE")
+    requested_at=requested_at.astimezone(UTC)
     now=instant()
     import decision_desk as desk
     from scripts import kdd_drive_exchange as exchange
