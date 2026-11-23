@@ -307,6 +307,7 @@ class DeskTests(unittest.TestCase):
             self.assertFalse(prepare_dossier)
             started.set()
             release.wait(2.0)
+            return {'rilevazione_utc':serve.desk.NOW().isoformat()}
         try:
             # Il test isola la coda refresh: la pubblicazione del dossier
             # viene provata separatamente, senza dipendere dal filesystem Termux.
@@ -339,7 +340,7 @@ class DeskTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual(serve.job_snapshot()['stato'],'errore')
         # La richiesta successiva può essere avviata dopo un errore.
-        with unittest.mock.patch.object(serve.desk,'refresh',return_value=None), \
+        with unittest.mock.patch.object(serve.desk,'refresh',return_value={'rilevazione_utc':serve.desk.NOW().isoformat()}), \
              unittest.mock.patch('scripts.kdd_drive_exchange.prepare_export',
                                  return_value='kdd_handoff_fixture.json'):
             self.assertTrue(serve.start_refresh())
@@ -351,7 +352,7 @@ class DeskTests(unittest.TestCase):
 
     def test_monitor_refresh_does_not_auto_prepare_handoff(self):
         import time
-        with unittest.mock.patch.object(serve.desk, 'refresh', return_value=None) as refresh, \
+        with unittest.mock.patch.object(serve.desk, 'refresh', return_value={'rilevazione_utc':serve.desk.NOW().isoformat()}) as refresh, \
              unittest.mock.patch('scripts.kdd_drive_exchange.prepare_export',
                                  return_value='kdd_handoff_test.json') as export:
             self.assertTrue(serve.start_refresh())
@@ -370,7 +371,7 @@ class DeskTests(unittest.TestCase):
 
     def test_monitor_not_affected_by_exporter_failure(self):
         import time
-        with unittest.mock.patch.object(serve.desk, 'refresh', return_value=None), \
+        with unittest.mock.patch.object(serve.desk, 'refresh', return_value={'rilevazione_utc':serve.desk.NOW().isoformat()}), \
              unittest.mock.patch('scripts.kdd_drive_exchange.prepare_export',
                                  side_effect=OSError('cartella non disponibile')) as export:
             self.assertTrue(serve.start_refresh())
