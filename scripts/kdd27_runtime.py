@@ -798,7 +798,9 @@ def _real_dossier_producer(store, request_id, now):
     # Source quality is evaluated at THIS request's actual consumption
     # point; a formerly verified producer result cannot extend expired TTLs.
     valid_at_consumption=(not expired_consumed and not expired_before_publish)
-    idoneita_consumer=(eligible if valid_at_consumption
+    idoneita_consumer=("NON_IDONEA_FOTOGRAFIA_SCADUTA"
+                       if not 0<=publication_age<=SNAPSHOT_MAX_AGE_SECONDS
+                       else eligible if valid_at_consumption
                        else "NON_IDONEA_FONTE_SCADUTA")
     completezza_consumer=(completeness if valid_at_consumption
                           else "PARZIALE_FONTE_SCADUTA")
