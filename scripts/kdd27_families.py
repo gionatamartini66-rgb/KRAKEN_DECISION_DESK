@@ -160,15 +160,8 @@ def collect(store, family, now=None, *, overrides=None):
                     continue
                 if count.calls>=count.ceiling:
                     break
-                # Existing fetch uses KDD Kraken alias. Limit through adapter
-                # and restore it after this bounded scoped collection.
-                original=flusso_spot.desk.kraken
-                try:
-                    flusso_spot.desk.kraken=count
-                    outcome=flusso_spot.fetch(row["pair"],row["pair_key"],
-                                              now=now.timestamp())
-                finally:
-                    flusso_spot.desk.kraken=original
+                outcome=flusso_spot.fetch(row["pair"],row["pair_key"],
+                                          now=now.timestamp(),fetcher=count)
                 observations.append(outcome)
         else:
             for row in rows:
