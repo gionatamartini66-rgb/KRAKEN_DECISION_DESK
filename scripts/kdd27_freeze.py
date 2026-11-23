@@ -227,3 +227,41 @@ def family_inputs(store, frozen, now):
                             "observation_id":row["observation_id"],
                             "sha256":row["sha256"]}
     return result
+
+
+def artifact_for_request(store, request_id):
+    """Retrieve the exact immutable partial or complete dossier for local UI.
+
+    Does not interpret age as current, initiate an API read, or publish to Drive.
+    """
+    frozen=get(store,request_id)
+    if frozen is None:
+        return None
+    with store.connection() as c:
+        ref=c.execute("SELECT dossier_sha,status,quality_json,publication_state"
+                      " FROM dossier_requests WHERE request_id=?",
+                      (request_id,)).fetchone()
+        if not ref or not ref[0]:
+            return None
+        row=c.execute("SELECT dossier_z,source_sha256,wallet_sha256,"
+                      "source_status_json,snapshot_id FROM dossier_artifacts"
+                      " WHERE dossier_sha256=?",(ref[0],)).fetchone()
+    if not row:
+        raise FrozenMismatch("ARTEFATTO_MANCANTE")
+    if row[1]!=frozen["source_sha256"] or row[2]!=frozen["wallet_sha256"]:
+        raise FrozenMismatch("ARTEFATTO_SORGENTE_WALLET_DISCORDANTE")
+    dossier=_decode(row[0],ref[0])
+    return {"schema":"kdd27_saved_dossier_v001",
+            "request_id":request_id,
+            "snapshot_id":frozen["snapshot_id"],
+            "source_observation_id":frozen["source_observation_id"],
+            "market_sha256":frozen["source_sha256"],
+            "wallet_sha256":frozen["wallet_sha256"],
+            "dossier_sha256":ref[0],
+            "stato_disponibilita":ref[1],
+            "stato_pubblicazione":ref[3] or "NON_PREPARATO",
+            "qualita":json.loads(ref[2]) if ref[2] else {},
+            "evidenze_produttore":json.loads(row[3]),
+            "manifest":frozen["manifest"],
+            "dossier":dossier,
+            "nota":"Storico, non prova di attualita; consumer GPT rivalida fonti e tempi."}
