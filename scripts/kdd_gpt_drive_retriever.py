@@ -220,8 +220,14 @@ def _select_candidates(files: list[dict]) -> tuple[str, str, list[dict], list[di
     named = {}
     for file in files:
         named.setdefault(file["name"], []).append(file)
-    keys = [(index.INDEX.fullmatch(name) or index.DOSSIER.fullmatch(name)).groups()
-            for name in named]
+    # Publication is committed by its INDEX, never by an orphan DOSSIER.
+    # Incomplete newer dossiers may be visible after a crash or failed gate;
+    # they cannot shadow the most recent indexed publication. Conversely,
+    # a newest INDEX without its matching dossier is a blocking failure.
+    keys = [index.INDEX.fullmatch(name).groups()
+            for name in named if index.INDEX.fullmatch(name) is not None]
+    if not keys:
+        raise EvidenceFailure("INDICE_CORRENTE_ASSENTE")
     stamp = max(stamp for stamp, _ in keys)
     digests = {digest for key, digest in keys if key == stamp}
     if len(digests) != 1:
