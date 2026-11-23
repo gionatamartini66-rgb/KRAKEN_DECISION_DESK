@@ -95,7 +95,7 @@ class Store:
                 status TEXT NOT NULL, started_at TEXT, completed_at TEXT,
                 snapshot_sha TEXT, snapshot_time TEXT, dossier_sha TEXT,
                 handoff_file TEXT, source_run_id TEXT,
-                reused_from TEXT, error TEXT);
+                reused_from TEXT, error TEXT, metrics_json TEXT);
               CREATE INDEX IF NOT EXISTS dossier_pending
                 ON dossier_requests(status,requested_at);
             """)
@@ -230,7 +230,7 @@ class Store:
             return None
         raw = zlib.decompress(row[3])
         if sha(raw) != row[2]:
-            raise ValueError("CORRUZIONE_OS SERVAZIONE".replace(" ", ""))
+            raise ValueError("CORRUZIONE_OSSERVAZIONE")
         return {"run_id": row[0], "observed_at": row[1],
                 "sha256": row[2], "payload": json.loads(raw)}
 
@@ -298,10 +298,10 @@ class Store:
                         c.execute("UPDATE dossier_requests SET status='PRONTO_LOCALE',"
                                   "completed_at=?,snapshot_sha=?,snapshot_time=?,"
                                   "dossier_sha=?,handoff_file=?,source_run_id=?,"
-                                  "reused_from=? WHERE request_id=?",
+                                  "reused_from=?,metrics_json=? WHERE request_id=?",
                                   (iso(), *(produced[k] for k in required),
                                    produced.get("source_run_id"),produced.get("reused_from"),
-                                   request_id))
+                                   encode(produced.get("metrics") or {}).decode(),request_id))
                     results.append((request_id,"PRONTO_LOCALE"))
                 except Exception as exc:
                     with self.connection() as c:
@@ -317,8 +317,9 @@ def real_monitor_worker(name, run_id, due):
     if name != MONITOR_JOB:
         raise ValueError("Unexpected job")
     import decision_desk as desk
-    before = time.monotonic()
-    data = desk.refresh(prepare_dossier=False)
+    from scripts.kdd27_telemetry import Telemetry
+    with Telemetry() as meter:
+        data = desk.refresh(prepare_dossier=False)
     payload = {
         "schema": "kdd27_monitor_observation_v001",
         "monitor_run_id": run_id, "scheduled_utc": iso(due),
@@ -329,12 +330,10 @@ def real_monitor_worker(name, run_id, due):
     }
     return {"payload": payload, "observed_at": data["rilevazione_utc"],
             "cursor": data.get("ricerca_setup", {}),
-            "metrics": {"seconds": round(time.monotonic()-before, 3),
-                        "scope": "CORE_LEGACY_SENZA_DOSSIER",
-                        "calls": None, "bytes": None,
-                        "calls_measured": False, "bytes_measured": False,
-                        "scanner_requests": (data.get("ricerca_setup") or {})
-                          .get("richieste_ohlc_1h")}}
+            "metrics": dict(meter.report(),
+                        scope="CORE_LEGACY_SENZA_DOSSIER",
+                        scanner_requests=(data.get("ricerca_setup") or {})
+                          .get("richieste_ohlc_1h"))}
 
 
 def real_dossier_producer(store, request_id, now):
@@ -347,6 +346,14 @@ def real_dossier_producer(store, request_id, now):
         age = (now - dt.datetime.fromisoformat(observed)).total_seconds()
     except (TypeError, ValueError, OverflowError):
         age = float("inf")
+    from scripts.kdd27_telemetry import Telemetry
+    with Telemetry() as meter:
+        return _produce_dossier_measured(store, request_id, now, desk, exchange,
+                                        current, age, meter)
+
+
+def _produce_dossier_measured(store, request_id, now, desk, exchange,
+                              current, age, meter):
     if not (0 <= age <= SNAPSHOT_MAX_AGE_SECONDS):
         current = desk.refresh(prepare_dossier=False)
     observed = current["rilevazione_utc"]
@@ -375,8 +382,9 @@ def real_dossier_producer(store, request_id, now):
     recent = store.latest()
     return {"snapshot_sha": sha(encode(current)), "snapshot_time": observed,
             "dossier_sha": sha(encode(old)), "handoff_file": str(local_handoff),
-            "source_run_id": (recent or {}).get("run_id"), 
-            "reused_from": prev[0] if prev and reuse else None}
+            "source_run_id": (recent or {}).get("run_id"),
+            "reused_from": prev[0] if prev and reuse else None,
+            "metrics": meter.report()}
 
 
 def main(argv=None):
