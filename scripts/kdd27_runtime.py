@@ -769,8 +769,56 @@ def _real_dossier_producer(store, request_id, now):
                 and 0<=publication_age<=SNAPSHOT_MAX_AGE_SECONDS)
     if can_export:
         try:
-            # Existing validated packet and two-file FolderSync preparation.
-            local_handoff=exchange.prepare_export(require_recent=True)
+            def frozen_export_gate(bundle,dossier_name,dossier_raw,index_name,index_raw):
+                """Fail closed at BOTH public renames, especially index commit.
+
+                The private original and immutable frozen archive are kept on
+                rejection; FolderSync only sees a publication when the final
+                index is committed after this check.
+                """
+                from scripts import kdd_bridge_g2 as bridge
+                from scripts import kdd_drive_index as index
+                verified=frozen_archive.get(store,request_id)
+                if (verified is None or verified["snapshot_id"]!=frozen["snapshot_id"]
+                        or verified["manifest_sha256"]!=frozen["manifest_sha256"]
+                        or verified["source_sha256"]!=snapshot_sha
+                        or verified["wallet_sha256"]!=wallet_sha):
+                    raise bridge.BridgeError("KDD27_FOTOGRAFIA_CONGELATA_DIVERGENTE")
+                packet=bundle.get("packet") if isinstance(bundle,dict) else None
+                portfolio_packet=packet.get("patrimonio") if isinstance(packet,dict) else None
+                if (not isinstance(portfolio_packet,dict)
+                        or packet.get("rilevazione_kdd_utc")!=frozen["source_observed_at"]
+                        or portfolio_packet.get("fotografia_portafoglio_sha256")!=wallet_sha):
+                    raise bridge.BridgeError("KDD27_IDENTITA_PACKET_DIVERGENTE")
+                expected_d,expected_i,metadata=index.publication(bundle,dossier_raw)
+                if (dossier_name!=expected_d or index_name!=expected_i
+                        or index_raw!=bridge.canonical(metadata)+b"\n"
+                        or metadata["sha256_byte"]!=sha(dossier_raw)
+                        or metadata["dimensione_byte"]!=len(dossier_raw)):
+                    raise bridge.BridgeError("KDD27_BYTE_PUBLICAZIONE_DIVERGENTI")
+                tick=instant()
+                source_age=(tick-instant_source).total_seconds()
+                if not 0<=source_age<=SNAPSHOT_MAX_AGE_SECONDS:
+                    raise bridge.BridgeError("KDD27_FOTOGRAFIA_SCADUTA_AL_COMMIT")
+                current=frozen_archive.family_inputs(store,verified,tick)
+                invalid=[family for family in was_recent
+                         if current.get(family,{}).get("stato")!="RECENTE"]
+                if invalid:
+                    raise bridge.BridgeError("KDD27_FONTE_SCADUTA_AL_COMMIT")
+                if (desk.fotografia_portafoglio_sha256(
+                       desk.load("portafoglio.json",{}))!=wallet_sha
+                    or sha(encode(desk.load("ultima_rilevazione.json",{})))!=snapshot_sha
+                    or sha(encode(desk.load("dossier_multifonte.json",{})))!=dossier_digest):
+                    raise bridge.BridgeError("KDD27_FILE_ORIGINE_MUTATI_AL_COMMIT")
+                read=bridge.read_context(bundle,now=tick)
+                if (read["mercato"]["stato"]!="RECENTE"
+                        or read["saldo"]["stato"]!="RECENTE"):
+                    raise bridge.BridgeError("KDD27_PACKET_SCADUTO_AL_COMMIT")
+
+            # The export writer gates immediately BEFORE the dossier and
+            # again BEFORE the final index rename, not after publication.
+            local_handoff=exchange.prepare_export(
+                require_recent=True,precommit=frozen_export_gate)
             # Check no producer replaced its current inputs during export.
             stable=(desk.fotografia_portafoglio_sha256(
                         desk.load("portafoglio.json",{}))==wallet_sha and
