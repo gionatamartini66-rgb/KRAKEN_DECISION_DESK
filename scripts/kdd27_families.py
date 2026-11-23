@@ -68,7 +68,7 @@ def stamped(value):
 def source(store, family, now, *, require_fresh=True):
     if family not in SPECS:
         raise ValueError("Unknown family")
-    previous=store.latest(family)
+    previous=store.latest(family,observed_only=True)
     if previous is None:
         raise MissingSource("FONTE_ASSENTE:"+family)
     observed=stamped(previous["observed_at"])
@@ -145,8 +145,10 @@ def collect(store, family, now=None, *, overrides=None):
         markets,rates=multi.assemble(catalog["pairs"],catalog["tickers"],
            min_vol=desk.num(conf.get("volume_24h_min_eur",500000)),
            max_spread=desk.num(conf.get("spread_massimo_pct",0.8)))
-        old=store.latest("scanner")
-        previous=(old["payload"].get("ricerca") if old else None)
+        previous=store.get_cursor("scanner")
+        if not previous:
+            old=store.latest("scanner",observed_only=True)
+            previous=(old["payload"].get("ricerca") if old else None)
         chosen,report,_=ricerca_setup.scan(markets,conf,count,now.timestamp(),
                                   max_requests=spec["producer_budget_calls"],
                                   previous=previous)
@@ -208,9 +210,9 @@ def collect(store, family, now=None, *, overrides=None):
         cat=deps["market_catalog"]
         wallet=deps["wallet_spot"]["wallet"]
         four=deps["portfolio_4tf"]
-        prev=store.latest("fundamentals")
+        prev=store.latest("fundamentals",observed_only=True)
         prior=prev["payload"] if prev else None
-        previous_scanner=store.latest("scanner")
+        previous_scanner=store.latest("scanner",observed_only=True)
         scan=previous_scanner["payload"].get("shortlist",[]) if previous_scanner else []
         candidates=[{"token":row.get("token"),"coppia_analisi":row.get("pair"),
                      "kraken_pair_key":row.get("pair_key")} for row in scan[:4]]
@@ -226,7 +228,7 @@ def collect(store, family, now=None, *, overrides=None):
     elif family=="primary_events":
         import kdd_economic_sources
         items=deps["fundamentals"]
-        old=store.latest("primary_events")
+        old=store.latest("primary_events",observed_only=True)
         previous=old["payload"] if old else None
         http=overrides.get("public_fetch",lambda url:desk.request(url,timeout=10))
         result=kdd_economic_sources.collect(
@@ -242,11 +244,11 @@ def collect(store, family, now=None, *, overrides=None):
         wallet=deps["wallet_spot"]["wallet"]
         owned=[{"token":row.get("token")} for row in wallet.get("posizioni",[])
                if isinstance(row,dict)]
-        previous=store.latest("network_defi")
+        previous=store.latest("network_defi",observed_only=True)
         prior=previous["payload"] if previous else None
-        econ=store.latest("fundamentals")
+        econ=store.latest("fundamentals",observed_only=True)
         economic=econ["payload"] if econ else None
-        scan=store.latest("scanner")
+        scan=store.latest("scanner",observed_only=True)
         candidates=[{"token":row.get("token"),"coppia_analisi":row.get("pair")}
                     for row in (scan["payload"].get("shortlist",[]) if scan else [])]
         result=kdd_network_defi.collect(
