@@ -498,8 +498,21 @@ def real_family_worker(store, name, run_id, due):
     """Execute ONE existing source producer in its own due window."""
     from scripts import kdd27_families as families
     from scripts.kdd27_telemetry import Telemetry
-    with Telemetry() as meter:
-        result=families.collect(store,name)
+    paused=store.active_pauses()
+    blocked={p:paused[p] for p in families.FAMILY_PROVIDERS[name] if p in paused}
+    if blocked:
+        return {"payload":{"family":name,"stato":"RINVIATO_PROVIDER",
+                           "provider_ripresa_utc":blocked},
+                "observed_at":iso(),"state":"RINVIATO_BUDGET",
+                "metrics":{"source_calls":0,"provider_paused":blocked},
+                "cursor":None}
+    meter=Telemetry()
+    try:
+        with meter:
+            result=families.collect(store,name)
+    finally:
+        if hasattr(meter,"ended_utc"):
+            store.record_throttles(meter.report().get("rate_limited",[]))
     measured=meter.report()
     measured.update(result.get("metrics") or {})
     return {"payload":result["payload"],
@@ -535,8 +548,13 @@ def real_monitor_worker(name, run_id, due):
 def real_dossier_producer(store, request_id, now):
     """Use immutable historical snapshot; never replace it on retry."""
     from scripts.kdd27_telemetry import Telemetry
-    with Telemetry() as meter:
-        outcome=_real_dossier_producer(store,request_id,instant(now))
+    meter=Telemetry()
+    try:
+        with meter:
+            outcome=_real_dossier_producer(store,request_id,instant(now))
+    finally:
+        if hasattr(meter,"ended_utc"):
+            store.record_throttles(meter.report().get("rate_limited",[]))
     outcome["metrics"]=meter.report()
     return outcome
 
@@ -578,6 +596,9 @@ def _real_dossier_producer(store, request_id, now):
             except (ValueError,TypeError,OverflowError):
                 pass
         if chosen is None:
+            pause=store.active_pauses(now).get("kraken")
+            if pause:
+                raise BudgetDeferred("KRAKEN_HTTP_429",retry_at=pause)
             chosen=desk.refresh(prepare_dossier=False)
             # Wallet may have changed during the refresh; save only the
             # post-refresh exact private image, never silently use an older one.
@@ -635,6 +656,12 @@ def _real_dossier_producer(store, request_id, now):
         reused_from=old[0] if old else None
         dossier_digest=cached_artifact["dossier_sha"]
     else:
+        paused=store.active_pauses(now)
+        affected={p:paused[p] for p in ("kraken","coingecko","github")
+                  if p in paused}
+        if affected:
+            raise BudgetDeferred("PROVIDER_HTTP_429",
+                                 retry_at=max(affected.values()))
         options={"wallet_override":portfolio,
                  "previous_dossier_override":previous_dossier}
         if asset_pairs is not None:
