@@ -16,6 +16,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import urllib.error
 
 ACTIVE = contextvars.ContextVar("kdd27_active_meter", default=None)
 PATCH_LOCK = threading.RLock()
@@ -98,9 +99,12 @@ def traced_urlopen(*args, **kwargs):
     start = time.monotonic()
     try:
         res = ORIGINAL(*args, **kwargs)
-    except BaseException:
+    except BaseException as exc:
         meter.count(owner, requested=True, failed=True, connect_ms=(
             time.monotonic()-start)*1000)
+        if isinstance(exc, urllib.error.HTTPError) and exc.code == 429:
+            retry = (exc.headers.get("Retry-After") if exc.headers else None)
+            meter.throttle(source,retry)
         raise
     meter.count(owner, requested=True, connect_ms=(time.monotonic()-start)*1000)
     return ResponseMeter(res, owner, meter)
@@ -110,7 +114,19 @@ class Telemetry:
     def __init__(self):
         self.rows = {}
         self.total = {"calls": 0, "bytes": 0, "errors": 0}
+        self.rate_limits = {}
         self.token = None
+
+    def throttle(self, provider, retry_after):
+        # A provider Retry-After takes precedence; without it the local
+        # coordinator applies bounded backoff. No secret/URL is stored.
+        seconds=None
+        if isinstance(retry_after,str) and retry_after.strip().isdigit():
+            seconds=int(retry_after.strip())
+            if not 1<=seconds<=86400:
+                seconds=None
+        self.rate_limits[provider]=seconds
+
 
     def count(self, owner, *, requested=False, bytes_received=0,
               failed=False, connect_ms=0, read_ms=0):
@@ -158,6 +174,8 @@ class Telemetry:
             "rss_hwm_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
             "total": self.total,
             "sources": sorted(self.rows.values(),key=lambda row:(row["module"],row["provider"])),
+            "rate_limited":[{"provider":name,"retry_after_s":value}
+                            for name,value in sorted(self.rate_limits.items())],
             "coverage": "HTTP urllib only; calls made by other libraries are not counted; "
                         "RSS is process high-water, not interval delta",
         }
