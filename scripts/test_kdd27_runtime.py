@@ -316,6 +316,62 @@ class DossierProducerTests(unittest.TestCase):
         with self.assertRaises(freeze.FrozenMismatch):
             freeze.get(self.db,uid)
 
+    def test_original_frozen_request_survives_crash_and_files_changing(self):
+        """Real B producer sees the pre-crash frozen market+wallet, not local files."""
+        import decision_desk as desk
+        from scripts import kdd27_freeze as freeze
+        from scripts import kdd_drive_exchange as exchange
+        now=dt.datetime.now(UTC)
+        uid="crash001"
+        original={"rilevazione_utc":k27.iso(now),"markets":{"BTC":1}}
+        changed={"rilevazione_utc":k27.iso(now),"markets":{"BTC":999}}
+        wallet={"posizioni":[]}
+        new_wallet={"posizioni":[{"token":"XBT","quantita":"42"}]}
+        digest=desk.fotografia_portafoglio_sha256(wallet)
+        dossier={"kraken_istantanea_utc":original["rilevazione_utc"],
+                 "fotografia_portafoglio_sha256":digest,
+                 "schema":3,"creato_utc":k27.iso(now)}
+        state={"ultima_rilevazione.json":changed,
+               "portafoglio.json":new_wallet,
+               "dossier_multifonte.json":{}}
+        self.db.enqueue_dossier(uid,now)
+        source=self.db.record_dossier_snapshot(uid,original,original["rilevazione_utc"])
+        frozen=freeze.freeze(self.db,uid,now=now,source=original,
+                             source_observation_id=source["observation_id"],
+                             wallet=wallet)
+        with self.db.connection() as c:
+            c.execute("UPDATE dossier_requests SET status='IN_CORSO' WHERE request_id=?",
+                      (uid,))
+        invoked=[]
+        def deep(snapshot,**kwargs):
+            invoked.append((snapshot,kwargs))
+            state["dossier_multifonte.json"]=dossier
+            return {"stato":"PARZIALE","stato_fonti_mercato":"PARZIALE",
+                    "idoneita_analisi_patrimoniale":"NON_IDONEA"}
+        reboot=k27.Store(Path(self.tmp.name))
+        with mock.patch.object(desk,"load",side_effect=lambda name,default=None:
+                                  state.get(name,default)), \
+             mock.patch.object(desk,"refresh") as refresh, \
+             mock.patch.object(desk,"prepara_dossier_aggiornamento",
+                               side_effect=deep), \
+             mock.patch.object(exchange,"prepare_export") as export:
+            result=reboot.process_queue(k27.real_dossier_producer,now,limit=1)
+        self.assertEqual(result,[(uid,"PARZIALE_LOCALE")])
+        refresh.assert_not_called()
+        export.assert_not_called()
+        self.assertEqual(invoked[0][0],original)
+        self.assertEqual(invoked[0][1]["wallet_override"],wallet)
+        self.assertEqual(freeze.get(reboot,uid)["snapshot_id"],frozen["snapshot_id"])
+        self.assertEqual(freeze.get(reboot,uid)["source"]["markets"]["BTC"],1)
+        row=reboot.dossier_status(uid)[0]
+        self.assertIn("FILE_WALLET_MUTATO",row["quality_json"])
+        self.assertIn("FILE_MERCATO_MUTATO",row["quality_json"])
+        self.assertEqual(row["publication_state"],"NON_PREPARATO_DATI_NON_IDONEI")
+        result=freeze.artifact_for_request(reboot,uid)
+        self.assertEqual(result["dossier_sha256"],row["dossier_sha"])
+        self.assertEqual(result["dossier"]["kraken_istantanea_utc"],
+                         original["rilevazione_utc"])
+
     def test_stale_source_never_relabelled_current_when_upstream_is_offline(self):
         import decision_desk as desk
         from scripts import kdd_drive_exchange as exchange
