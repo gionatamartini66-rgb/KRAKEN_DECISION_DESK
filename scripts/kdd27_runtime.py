@@ -443,7 +443,7 @@ class Store:
                     state = ('RINVIATO_PROVIDER' if isinstance(exc,BudgetDeferred)
                              else 'RINVIATO_RETE' if isinstance(exc, (OSError,ConnectionError))
                              else 'ERRORE')
-                    due=(instant(now)+dt.timedelta(minutes=5)).iso() if (
+                    due=(instant(now)+dt.timedelta(minutes=5)).isoformat() if (
                         state.startswith("RINVIATO_")) else None
                     with self.connection() as c:
                         c.execute("UPDATE dossier_requests SET status=?,"
