@@ -39,7 +39,8 @@ class ExportCommitRaceTests(unittest.TestCase):
         self.real_read=bridge.read_context
 
     def _read_at(self,when):
-        return lambda bundle: self.real_read(bundle,now=when[0])
+        return lambda bundle,**kwargs: self.real_read(
+            bundle,now=kwargs.get("now") or when[0])
 
     def _names(self):
         raw=bridge.canonical(self.bundle)+b"\n"
