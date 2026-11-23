@@ -957,7 +957,8 @@ def render(report):
 <h2>3 · Macroeconomia e geopolitica</h2><p>Un contesto non verificato è un'informazione mancante, non equivale a uno scenario neutrale o ribassista.</p>{context}
 <h2>4 · Fonti e limiti</h2><details><summary>Apri titoli di Fed, BCE e Consiglio UE</summary><p>Raccolta automatica di titoli, nessuna interpretazione causale.</p><ul>{feed or '<li>Nessun feed acquisito.</li>'}</ul></details><details><summary>Apri limiti tecnici e avvertenze</summary><ul>{warnings}</ul></details><p class="muted">Strumento sperimentale per supporto alle decisioni. Nessuna previsione o consulenza personalizzata automatica.</p></body></html>'''
 
-def prepara_dossier_aggiornamento(data, *, asset_pairs=None, wallet_override=None):
+def prepara_dossier_aggiornamento(data, *, asset_pairs=None, wallet_override=None,
+                                  previous_dossier_override=None):
     """Produce un dossier sullo stesso snapshot Kraken. API pubbliche soltanto.
 
     Se una fonte secondaria fallisce non scambia dati vecchi per aggiornati:
@@ -973,6 +974,8 @@ def prepara_dossier_aggiornamento(data, *, asset_pairs=None, wallet_override=Non
             dossier=dossier_trade.collect(
                 source=data,
                 **({'portfolio_override': wallet_override} if wallet_override is not None else {}),
+                **({'previous_dossier_override': previous_dossier_override}
+                   if previous_dossier_override is not None else {}),
                 **({'asset_pairs': asset_pairs} if asset_pairs is not None else {}))
         if dossier['kraken_istantanea_utc']!=data['rilevazione_utc']:
             raise ValueError("Dossier riferito ad altro snapshot")
