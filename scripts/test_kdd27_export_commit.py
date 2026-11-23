@@ -91,6 +91,74 @@ class ExportCommitRaceTests(unittest.TestCase):
         self.assertFalse((self.folder/index_name).exists(),
                          "Retry committed an expired publication before checking age")
 
+    def test_true_kdd27_freeze_gate_blocks_book_expiry_during_index_commit(self):
+        """Actual B -> exchange -> original bridge, family TTL expires AFTER dossier."""
+        import json
+        import sqlite3
+        import zlib
+        import decision_desk as desk
+        from scripts import kdd27_runtime as k27
+        from scripts import kdd27_freeze as freeze
+        base=self.T
+        source=copy.deepcopy(self.fixture.fixture.snapshot)
+        wallet=copy.deepcopy(self.fixture.fixture.portfolio)
+        # Keep a genuinely built original packet and a matching frozen wallet.
+        packet=self.bundle["packet"]
+        wallet_sha=desk.fotografia_portafoglio_sha256(wallet)
+        self.assertEqual(packet["rilevazione_kdd_utc"],source["rilevazione_utc"])
+        self.assertEqual(packet["patrimonio"]["fotografia_portafoglio_sha256"],wallet_sha)
+        uid="SYNTHETIC_KDD27_TTL"
+        store=k27.Store(self.folder/"private_sqlite")
+        store.enqueue_dossier(uid,base)
+        book={"bid":100,"ask":101,"synthetic":True}
+        raw=k27.encode(book)
+        digest=k27.sha(raw)
+        oid=k27.sha(k27.encode(["spot_book",k27.iso(base),digest]))
+        with store.connection() as c:
+            c.execute("INSERT INTO observations VALUES(?,?,?,?,?,?,?,?,?)",
+                      (oid,"fixture","spot_book",k27.iso(base),k27.iso(base),
+                       digest,sqlite3.Binary(zlib.compress(raw)),len(raw),"OSSERVATO"))
+        observed=store.record_dossier_snapshot(uid,source,source["rilevazione_utc"])
+        frozen=freeze.freeze(store,uid,now=base,source=source,
+                             source_observation_id=observed["observation_id"],wallet=wallet)
+        self.assertEqual(next(x for x in frozen["manifest"]["families"]
+                              if x["family"]=="spot_book")["stato"],"RECENTE")
+        dossier={"schema":3,"kraken_istantanea_utc":source["rilevazione_utc"],
+                 "fotografia_portafoglio_sha256":wallet_sha,"sample":"synthetic"}
+        docs={"portafoglio.json":wallet,"ultima_rilevazione.json":source,
+              "dossier_multifonte.json":{}}
+        def build(snapshot,**kwargs):
+            self.assertEqual(snapshot,source)
+            docs["dossier_multifonte.json"]=dossier
+            return {"stato":"PRONTO_PER_ESAME_GPT_CON_LIMITI",
+                    "stato_fonti_mercato":"VERIFICATA",
+                    "idoneita_analisi_patrimoniale":"IDONEA"}
+        watch=[base]
+        genuine_instant=k27.instant
+        def clock(value=None):
+            return watch[0] if value is None else genuine_instant(value)
+        publisher=exchange._publish_export_file
+        def publishing(root,name,data,**kwargs):
+            result=publisher(root,name,data,**kwargs)
+            if index.DOSSIER.fullmatch(name):
+                watch[0]=base+dt.timedelta(seconds=301)
+            return result
+        with mock.patch.object(k27,"instant",side_effect=clock), \
+             mock.patch.object(desk,"load",side_effect=lambda name,default=None:
+                               docs.get(name,default)), \
+             mock.patch.object(desk,"prepara_dossier_aggiornamento",side_effect=build), \
+             mock.patch.object(bridge,"prepare",return_value=self.bundle), \
+             mock.patch.object(bridge,"read_context",side_effect=self._read_at(watch)), \
+             mock.patch.object(exchange,"_publish_export_file",side_effect=publishing):
+            outcome=store.process_queue(k27.real_dossier_producer,now=base,limit=1)
+        self.assertEqual(outcome,[(uid,"PARZIALE_LOCALE")])
+        exports=[p.name for p in self.folder.iterdir() if p.is_file()]
+        self.assertFalse(any(index.INDEX.fullmatch(name) for name in exports))
+        row=store.dossier_status(uid)[0]
+        self.assertIn("ExportGateRejected",row["publication_state"])
+        self.assertIsNotNone(freeze.get(store,uid))
+        self.assertEqual(store.status()["dossiers"]["PARZIALE_LOCALE"],1)
+
     def test_red_gpt_original_recovers_last_indexed_pair_despite_newer_orphan(self):
         """A newer dossier without index must not shadow valid indexed pair."""
         old_files,old_blobs=retrieval_fixture.publication_files(
