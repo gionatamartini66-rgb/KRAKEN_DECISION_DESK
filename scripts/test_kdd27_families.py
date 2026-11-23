@@ -99,6 +99,22 @@ class FamilyJobTests(unittest.TestCase):
         self.assertEqual(report["market_catalog"]["stato"],"SCADUTO")
         self.assertEqual(self.store.status()["observations"],1)
 
+    def test_recent_valid_sample_remains_usable_after_failed_provider_cycle(self):
+        self.insert("market_catalog",{"pairs":{"X":1},"tickers":{}},START)
+        self.insert("market_catalog",{"stato":"NON_ACQUISITO"},
+                    START+dt.timedelta(minutes=9),state="NON_ACQUISITO")
+        selected=families.source(self.store,"market_catalog",
+                                 START+dt.timedelta(minutes=10))
+        self.assertEqual(selected["pairs"],{"X":1})
+        report=self.store.family_coverage(START+dt.timedelta(minutes=10))
+        self.assertEqual(report["market_catalog"]["stato"],"RECENTE")
+        self.assertEqual(report["market_catalog"]["ultimo_tentativo_stato"],
+                         "NON_ACQUISITO")
+        self.assertEqual(report["market_catalog"]["eta_s"],600)
+        with self.assertRaises(families.MissingSource):
+            families.source(self.store,"market_catalog",
+                             START+dt.timedelta(hours=2))
+
     def test_missing_scanner_input_yields_zero_external_calls_not_fake_market(self):
         with mock.patch("decision_desk.kraken") as api:
             out=families.collect(self.store,"scanner",START)
