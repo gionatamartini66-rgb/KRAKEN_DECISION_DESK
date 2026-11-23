@@ -498,6 +498,9 @@ def real_family_worker(store, name, run_id, due):
     """Execute ONE existing source producer in its own due window."""
     from scripts import kdd27_families as families
     from scripts.kdd27_telemetry import Telemetry
+    if name==MONITOR_JOB:
+        # Existing experimental DBs may still contain the legacy aggregate.
+        return real_monitor_worker(name,run_id,due)
     paused=store.active_pauses()
     blocked={p:paused[p] for p in families.FAMILY_PROVIDERS[name] if p in paused}
     if blocked:
