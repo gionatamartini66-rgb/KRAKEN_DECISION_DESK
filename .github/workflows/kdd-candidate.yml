@@ -23,7 +23,7 @@ jobs:
       - name: Core KDD regressions
         run: python -B -m unittest -q test_decision_desk
       - name: KDD-27 first tranche deterministic scheduler / dossier / crash / telemetry
-        run: PYTHONPATH=.:scripts python -B -m unittest -v scripts.test_kdd27_runtime
+        run: PYTHONPATH=.:scripts python -B -m unittest -v scripts.test_kdd27_runtime scripts.test_kdd27_families
       - name: KDD-18 economic producer to original GPT consumer regression after KDD-27 orchestration change
         run: PYTHONPATH=.:scripts python -B -m unittest -v test_kdd_g2_economic_functional
       - name: Private packet, market age and portfolio 4TF synthetic tests
