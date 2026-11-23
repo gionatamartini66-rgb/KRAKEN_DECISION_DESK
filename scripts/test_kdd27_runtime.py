@@ -10,6 +10,7 @@ import threading
 import unittest
 from unittest import mock
 import urllib.request
+import json
 
 from scripts import kdd27_runtime as k27
 from scripts import kdd27_telemetry as meter
@@ -270,6 +271,52 @@ class DossierProducerTests(unittest.TestCase):
         self.assertEqual(result,[("stale001","ERRORE")])
         self.assertEqual(self.db.dossier_status("stale001")[0]["error"],"OSError")
         export.assert_not_called()
+
+
+class DossierHTTPTests(unittest.TestCase):
+    def test_real_localhost_handler_request_id_idempotence_and_status(self):
+        import http.client
+        from http.server import ThreadingHTTPServer
+        import urllib.parse
+        import serve
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(k27,"private_root",return_value=Path(folder)), \
+             mock.patch.object(serve,"kick_dossier_queue") as kick:
+            server=ThreadingHTTPServer(("127.0.0.1",0),serve.Handler)
+            server.daemon_threads=True
+            with mock.patch.object(serve,"PORT",server.server_address[1]):
+                thread=threading.Thread(target=server.serve_forever,daemon=True)
+                thread.start()
+                try:
+                    port=server.server_address[1]
+                    def post(token, uid):
+                        conn=http.client.HTTPConnection("127.0.0.1",port,timeout=3)
+                        body=urllib.parse.urlencode({"token":token,"request_id":uid})
+                        conn.request("POST","/dossier/richiedi",body,
+                                     {"Content-Type":"application/x-www-form-urlencoded"})
+                        response=conn.getresponse()
+                        code=response.status
+                        response.read()
+                        conn.close()
+                        return code
+                    identifier="a"*32
+                    self.assertEqual(post(serve.TOKEN,identifier),303)
+                    self.assertEqual(post(serve.TOKEN,identifier),303)
+                    self.assertEqual(post("invalid-token","b"*32),403)
+                    conn=http.client.HTTPConnection("127.0.0.1",port,timeout=3)
+                    conn.request("GET","/dossier/stato")
+                    response=conn.getresponse()
+                    self.assertEqual(response.status,200)
+                    rows=json.loads(response.read())
+                    conn.close()
+                    self.assertEqual(len(rows),1)
+                    self.assertEqual(rows[0]["request_id"],identifier)
+                    self.assertEqual(rows[0]["status"],"IN_ATTESA")
+                    self.assertTrue(kick.called)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(3)
 
 class TelemetryTests(unittest.TestCase):
     def test_http_byte_count_and_no_url_leak(self):
