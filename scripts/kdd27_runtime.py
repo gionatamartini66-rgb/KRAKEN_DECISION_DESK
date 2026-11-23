@@ -198,20 +198,30 @@ class Store:
                          (name,period,epoch,epoch+period,int(enable),profile))
             c.commit()
 
+    def get_cursor(self, family):
+        with self.connection() as c:
+            row=c.execute("SELECT data_json FROM cursors WHERE family=?",
+                          (family,)).fetchone()
+        return json.loads(row[0]) if row else None
+
     def family_coverage(self, now=None):
         from scripts.kdd27_families import SPECS, stamped
         moment=instant(now)
         report={}
         with self.connection() as c:
             for name,spec in SPECS.items():
+                attempt=c.execute("SELECT observed_at,state FROM observations"
+                                  " WHERE family=? ORDER BY observed_at DESC,received_at DESC"
+                                  " LIMIT 1",(name,)).fetchone()
                 row=c.execute("SELECT observed_at,state FROM observations"
-                              " WHERE family=? ORDER BY observed_at DESC LIMIT 1",
+                              " WHERE family=? AND state='OSSERVATO'"
+                              " ORDER BY observed_at DESC,received_at DESC LIMIT 1",
                               (name,)).fetchone()
                 job=c.execute("SELECT interval_s,next_due_s,enabled FROM jobs"
                               " WHERE name=?",(name,)).fetchone()
                 observed=stamped(row[0]) if row else None
                 age=(moment-observed).total_seconds() if observed else None
-                state=("NON_ACQUISITO" if row is None or row[1]!="OSSERVATO"
+                state=("NON_ACQUISITO" if row is None
                        else "FUTURO" if age < -120
                        else "SCADUTO" if age > spec["ttl_s"]
                        else "RECENTE")
@@ -219,6 +229,8 @@ class Store:
                               "ttl_s":spec["ttl_s"],
                               "eta_s":age,
                               "osservato_utc":row[0] if row else None,
+                              "ultimo_tentativo_stato":attempt[1] if attempt else None,
+                              "ultimo_tentativo_utc":attempt[0] if attempt else None,
                               "periodo_s":job[0] if job else None,
                               "prossima_scadenza_s":job[1] if job else None,
                               "attivo":bool(job[2]) if job else False,
@@ -381,12 +393,15 @@ class Store:
             c.commit()
         return {'sha256':digest,'observation_id':uid}
 
-    def latest(self, family=MONITOR_JOB):
+    def latest(self, family=MONITOR_JOB, *, observed_only=False):
         with self.connection() as c:
-            row = c.execute("SELECT run_id,observed_at,sha256,payload_z,"
-                            "observation_id,state,received_at"
-                            " FROM observations WHERE family=?"
-                            " ORDER BY observed_at DESC LIMIT 1", (family,)).fetchone()
+            sql=("SELECT run_id,observed_at,sha256,payload_z,"
+                 "observation_id,state,received_at"
+                 " FROM observations WHERE family=?")
+            if observed_only:
+                sql+=" AND state='OSSERVATO'"
+            row = c.execute(sql+" ORDER BY observed_at DESC,received_at DESC LIMIT 1",
+                            (family,)).fetchone()
         if not row:
             return None
         raw = zlib.decompress(row[3])
