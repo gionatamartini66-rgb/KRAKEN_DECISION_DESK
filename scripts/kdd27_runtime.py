@@ -131,6 +131,57 @@ class Store:
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
+    def setup_families(self, profile, now, *, enable=False):
+        """Experimental per-source schedules; no Android enrollment.
+
+        The caller must explicitly enable the local schedules; imports and
+        status requests never create jobs or infer author approval of rates.
+        """
+        from scripts.kdd27_families import SPECS
+        if profile not in PROFILES:
+            raise ValueError("Unknown experimental profile")
+        timestamp=int(instant(now).timestamp())
+        with self.connection() as c:
+            c.execute("BEGIN IMMEDIATE")
+            for name,spec in SPECS.items():
+                period=spec["intervals"][profile]
+                epoch=timestamp-timestamp%period
+                old=c.execute("SELECT name FROM jobs WHERE name=?",(name,)).fetchone()
+                if old is not None:
+                    c.rollback()
+                    raise ValueError("Existing family schedule: "+name)
+                c.execute("INSERT INTO jobs VALUES(?,?,?,?,?,?)",
+                         (name,period,epoch,epoch+period,int(enable),profile))
+            c.commit()
+
+    def family_coverage(self, now=None):
+        from scripts.kdd27_families import SPECS, stamped
+        moment=instant(now)
+        report={}
+        with self.connection() as c:
+            for name,spec in SPECS.items():
+                row=c.execute("SELECT observed_at,state FROM observations"
+                              " WHERE family=? ORDER BY observed_at DESC LIMIT 1",
+                              (name,)).fetchone()
+                job=c.execute("SELECT interval_s,next_due_s,enabled FROM jobs"
+                              " WHERE name=?",(name,)).fetchone()
+                observed=stamped(row[0]) if row else None
+                age=(moment-observed).total_seconds() if observed else None
+                state=("NON_ACQUISITO" if row is None or row[1]!="OSSERVATO"
+                       else "FUTURO" if age < -120
+                       else "SCADUTO" if age > spec["ttl_s"]
+                       else "RECENTE")
+                report[name]={"stato":state,
+                              "ttl_s":spec["ttl_s"],
+                              "eta_s":age,
+                              "osservato_utc":row[0] if row else None,
+                              "periodo_s":job[0] if job else None,
+                              "prossima_scadenza_s":job[1] if job else None,
+                              "attivo":bool(job[2]) if job else False,
+                              "limite_chiamate_produttore":spec["producer_budget_calls"],
+                              "budget_provider_attestato":False}
+        return report
+
     def setup(self, profile, now, *, enable=False):
         if profile not in PROFILES:
             raise ValueError("Unknown experimental profile")
@@ -199,24 +250,30 @@ class Store:
                     measured_at = measurement.get("observed_at") or iso()
                     metrics = measurement.get("metrics") or {}
                     cursor = measurement.get("cursor")
+                    state = measurement.get("state", "OSSERVATO")
+                    if state not in ("OSSERVATO","NON_ACQUISITO","NON_DISPONIBILE",
+                                     "RINVIATO_BUDGET"):
+                        raise ValueError("Invalid producer observation state")
                     observation_id = sha(encode([run_id, name, measured_at, digest]))
                     with self.connection() as c:
                         c.execute("BEGIN IMMEDIATE")
                         c.execute("INSERT OR IGNORE INTO observations VALUES(?,?,?,?,?,?,?,?,?)",
                                   (observation_id, run_id, name, measured_at, iso(),
                                    digest, sqlite3.Binary(zlib.compress(serialized)),
-                                   len(serialized), "OSSERVATO"))
+                                   len(serialized), state))
                         if cursor is not None:
                             c.execute("INSERT INTO cursors VALUES(?,?,?)"
                                       " ON CONFLICT(family) DO UPDATE SET "
                                       "data_json=excluded.data_json,updated_at=excluded.updated_at",
                                       (name, encode(cursor).decode(), iso()))
-                        c.execute("UPDATE runs SET status='RIUSCITO',finish_s=?,"
+                        c.execute("UPDATE runs SET status=?,finish_s=?,"
                                   "metrics_json=?,snapshot_sha=? WHERE run_id=?",
-                                  (time.time(), encode(metrics).decode(), digest, run_id))
+                                  ("RIUSCITO" if state=="OSSERVATO" else state,
+                                   time.time(), encode(metrics).decode(), digest, run_id))
                         c.commit()
-                    results.append({"run_id": run_id, "status": "RIUSCITO",
-                                    "missed": missed, "sha256": digest})
+                    results.append({"run_id": run_id,
+                                    "status": "RIUSCITO" if state=="OSSERVATO" else state,
+                                    "missed": missed,"family":name,"sha256": digest})
                 except Exception as exc:
                     with self.connection() as c:
                         c.execute("UPDATE runs SET status='ERRORE',finish_s=?,error=?"
@@ -282,7 +339,8 @@ class Store:
 
     def latest(self, family=MONITOR_JOB):
         with self.connection() as c:
-            row = c.execute("SELECT run_id,observed_at,sha256,payload_z"
+            row = c.execute("SELECT run_id,observed_at,sha256,payload_z,"
+                            "observation_id,state,received_at"
                             " FROM observations WHERE family=?"
                             " ORDER BY observed_at DESC LIMIT 1", (family,)).fetchone()
         if not row:
@@ -291,7 +349,9 @@ class Store:
         if sha(raw) != row[2]:
             raise ValueError("CORRUZIONE_OSSERVAZIONE")
         return {"run_id": row[0], "observed_at": row[1],
-                "sha256": row[2], "payload": json.loads(raw)}
+                "sha256": row[2], "payload": json.loads(raw),
+                "observation_id":row[4],"state":row[5],
+                "received_at":row[6]}
 
     def enqueue_dossier(self, request_id=None, now=None):
         request_id = request_id or uuid.uuid4().hex
@@ -371,6 +431,20 @@ class Store:
                                   (state, iso(), type(exc).__name__, request_id))
                     results.append((request_id,state))
         return results
+
+
+def real_family_worker(store, name, run_id, due):
+    """Execute ONE existing source producer in its own due window."""
+    from scripts import kdd27_families as families
+    from scripts.kdd27_telemetry import Telemetry
+    with Telemetry() as meter:
+        result=families.collect(store,name)
+    measured=meter.report()
+    measured.update(result.get("metrics") or {})
+    return {"payload":result["payload"],
+            "observed_at":result.get("observed_at") or iso(),
+            "state":result.get("state","OSSERVATO"),
+            "cursor":result.get("cursor"),"metrics":measured}
 
 
 def real_monitor_worker(name, run_id, due):
@@ -502,7 +576,7 @@ def main(argv=None):
     if args.command=="status":
         print(json.dumps(store.status(),ensure_ascii=False))
     elif args.command=="run-due":
-        print(json.dumps(store.run_due(real_monitor_worker),ensure_ascii=False))
+        print(json.dumps(store.run_due(lambda n,i,d: real_family_worker(store,n,i,d)),ensure_ascii=False))
     else:
         print(json.dumps(store.process_queue(real_dossier_producer),ensure_ascii=False))
 
