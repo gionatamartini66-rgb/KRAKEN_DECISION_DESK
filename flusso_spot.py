@@ -100,14 +100,14 @@ def analyze(trades, now, pair, chiusura_15m_utc=None):
     return outcome
 
 
-def fetch(pair, pair_key, now=None, chiusura_15m_utc=None):
+def fetch(pair, pair_key, now=None, chiusura_15m_utc=None, *, fetcher=None):
     """Una chiamata pubblica. Timestamp acquisito DOPO la risposta HTTP.
 
     Il ciclo multifonte può impiegare diversi secondi: usare il timestamp
     dello snapshot iniziale qui farebbe apparire futuri trade autentici.
     """
     try:
-        result=desk.kraken('Trades',pair=pair_key,count=MAX_ROWS)
+        result=(fetcher or desk.kraken)('Trades',pair=pair_key,count=MAX_ROWS)
         observed=desk.NOW().timestamp() if now is None else now
         trades=next(v for k,v in result.items() if k!='last')
         outcome=analyze(trades,observed,pair,chiusura_15m_utc=chiusura_15m_utc)
