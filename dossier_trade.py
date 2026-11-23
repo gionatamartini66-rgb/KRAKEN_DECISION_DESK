@@ -866,7 +866,7 @@ def economic_evidence(source, wallet, four, candidates, now, *,
             "richieste_effettuate": discovery_calls+batch_calls+cg_calls+release_calls,
             "limite": "Risoluzione pubblica incrociata, non prova chain/contract, unlock, acquisti o ordini"}
 
-def collect(source=None, *, asset_pairs=None):
+def collect(source=None, *, asset_pairs=None, portfolio_override=None):
     """Prepara il dossier sullo snapshot appena acquisito, senza iniziare un'analisi GPT."""
     now=desk.NOW()
     if source is None:
@@ -969,7 +969,8 @@ def collect(source=None, *, asset_pairs=None):
     derivatives=derivatives_context(now.timestamp())
     # Same D1/D2 validation as dashboard, applied to this actual wallet read.
     # A market snapshot time is not proof of wallet identity or freshness.
-    portafoglio = desk.load('portafoglio.json', {})
+    portafoglio = (portfolio_override if portfolio_override is not None
+                   else desk.load('portafoglio.json', {}))
     qualita = desk.qualita_portafoglio(source, portafoglio)
     saldo = qualita["stato_saldo"]
     fonte = portafoglio.get("fonte_quantita") if isinstance(portafoglio, dict) else None
