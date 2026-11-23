@@ -139,10 +139,21 @@ class RecoveryG2CTests(unittest.TestCase):
         self.validator.validate.assert_called_once()
 
     def test_current_publication_incomplete_never_falls_back(self):
-        old, _ = publication_files(synth_handoff(when=T-dt.timedelta(hours=4)), "old")
+        old, old_blobs = publication_files(synth_handoff(when=T-dt.timedelta(hours=4)), "old")
         legacy = dict(self.dossier, id="legacy", name="kdd_handoff_"+"a"*64+".json")
+        # An unindexed NEWER dossier is a precommit orphan, not a publication:
+        # the older indexed pair is selected and its actual stale age reported.
+        result, drive = self.recover([self.dossier, *old, legacy],
+                                     dict(self.blobs, **old_blobs))
+        self.assertEqual(result["stato"], r.STALE)
+        self.assertEqual(result["codice"], "FONTI_BASE_SCADUTE")
+        self.assertEqual(result["file_id"], "old")
+        self.assertEqual(drive.downloads, ["old-index", "old"])
+        self.assertEqual(result["dossier_storici_senza_indice"], 1)
+        self.validator.reset_mock()
+        # A newer INDEX is already a commit claim; missing its dossier MUST
+        # remain a blocking failure, with no fallback to an older pair.
         cases = (
-            ([self.dossier, *old, legacy], "INDICE_CORRENTE_ASSENTE"),
             ([self.manifest, *old, legacy], "DOSSIER_INDICIZZATO_NON_ARRIVATO"),
             ([legacy], "INDICE_CORRENTE_ASSENTE"),
         )
