@@ -432,6 +432,59 @@ class DossierHTTPTests(unittest.TestCase):
                     server.server_close()
                     thread.join(3)
 
+    def test_localhost_http_reads_immutable_partial_artifact(self):
+        import http.client
+        from http.server import ThreadingHTTPServer
+        import serve
+        import decision_desk as desk
+        from scripts import kdd27_freeze as freeze
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(k27,"private_root",return_value=Path(folder)):
+            store=k27.Store(Path(folder))
+            now=dt.datetime.now(UTC)
+            uid="a"*32
+            source={"rilevazione_utc":k27.iso(now),"trends":{"BTC":"test"}}
+            wallet={"posizioni":[]}
+            store.enqueue_dossier(uid,now)
+            record=store.record_dossier_snapshot(uid,source,source["rilevazione_utc"])
+            frozen=freeze.freeze(store,uid,now=now,source=source,
+                                 source_observation_id=record["observation_id"],wallet=wallet)
+            dossier={"kraken_istantanea_utc":source["rilevazione_utc"],
+                     "fotografia_portafoglio_sha256":
+                        desk.fotografia_portafoglio_sha256(wallet),
+                     "schema":3,"evidenze_economiche":{"stato":"PARZIALE"}}
+            quality={"stato":"PARZIALE","stato_fonti_mercato":"PARZIALE",
+                     "idoneita_analisi_patrimoniale":"NON_IDONEA"}
+            digest=freeze.persist_artifact(store,frozen,dossier,quality)
+            with store.connection() as c:
+                c.execute("UPDATE dossier_requests SET status='PARZIALE_LOCALE',"
+                          "dossier_sha=?,quality_json=?,publication_state='NON_PREPARATO'"
+                          " WHERE request_id=?",
+                          (digest,k27.encode(quality).decode(),uid))
+            server=ThreadingHTTPServer(("127.0.0.1",0),serve.Handler)
+            server.daemon_threads=True
+            with mock.patch.object(serve,"PORT",server.server_address[1]):
+                thread=threading.Thread(target=server.serve_forever,daemon=True)
+                thread.start()
+                try:
+                    conn=http.client.HTTPConnection("127.0.0.1",
+                                                    server.server_address[1],timeout=4)
+                    conn.request("GET","/dossier/archivio?request_id="+uid)
+                    resp=conn.getresponse()
+                    self.assertEqual(resp.status,200)
+                    payload=json.loads(resp.read())
+                    conn.close()
+                    self.assertEqual(payload["stato_disponibilita"],"PARZIALE_LOCALE")
+                    self.assertEqual(payload["dossier_sha256"],digest)
+                    self.assertEqual(payload["dossier"],dossier)
+                    self.assertEqual(payload["qualita"]["idoneita_analisi_patrimoniale"],"NON_IDONEA")
+                    self.assertEqual(payload["snapshot_id"],frozen["snapshot_id"])
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(3)
+
+
 class TelemetryTests(unittest.TestCase):
     def test_http_byte_count_and_no_url_leak(self):
         class Remote:
