@@ -971,7 +971,8 @@ def prepara_dossier_aggiornamento(data, *, asset_pairs=None, wallet_override=Non
         import dossier_trade
         with dossier_trade.primary_refresh_context():
             dossier=dossier_trade.collect(
-                source=data, portfolio_override=wallet_override,
+                source=data,
+                **({'portfolio_override': wallet_override} if wallet_override is not None else {}),
                 **({'asset_pairs': asset_pairs} if asset_pairs is not None else {}))
         if dossier['kraken_istantanea_utc']!=data['rilevazione_utc']:
             raise ValueError("Dossier riferito ad altro snapshot")
