@@ -51,8 +51,8 @@ class ExportCommitRaceTests(unittest.TestCase):
         watch=[self.T]
         dossier,index_name=self._names()
         publisher=exchange._publish_export_file
-        def step(root,name,raw):
-            publisher(root,name,raw)
+        def step(root,name,raw,**kwargs):
+            publisher(root,name,raw,**kwargs)
             if name==dossier:
                 watch[0]=self.T+dt.timedelta(seconds=1801)
         with mock.patch.object(bridge,"prepare",return_value=self.bundle), \
@@ -71,10 +71,10 @@ class ExportCommitRaceTests(unittest.TestCase):
         watch=[self.T]
         dossier,index_name=self._names()
         original=exchange._publish_export_file
-        def interrupt(root,name,raw):
+        def interrupt(root,name,raw,**kwargs):
             if name==index_name:
                 raise KeyboardInterrupt("fixture simulated crash after dossier")
-            return original(root,name,raw)
+            return original(root,name,raw,**kwargs)
         with mock.patch.object(bridge,"prepare",return_value=self.bundle), \
              mock.patch.object(bridge,"read_context",side_effect=self._read_at(watch)), \
              mock.patch.object(exchange,"_publish_export_file",side_effect=interrupt):
