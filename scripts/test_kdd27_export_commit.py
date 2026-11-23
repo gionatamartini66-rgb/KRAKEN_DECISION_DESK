@@ -249,6 +249,105 @@ class ExportCommitRaceTests(unittest.TestCase):
         self.assertEqual(answer["file_id"],selected[b_d])
         self.assertEqual(drive.downloads,[selected[b_i],selected[b_d]])
 
+    def test_recovery04_corrupt_pending_is_never_quarantined_to_admit_B(self):
+        """Malformed recovery journal is blocking, even when B would be fresh."""
+        a_d,a_i=self._crash_A_after_dossier()
+        journal=bridge.PRIVATE_ROOT/"drive-export"
+        pending=journal/exchange._PENDING_EXPORT
+        corrupt=bridge.canonical({"dossier_sha256":"f"*64})+b"\n"
+        pending.write_bytes(corrupt)
+        when=self.T+dt.timedelta(seconds=1861)
+        fresh=self._fresh_rebuilt_bundle(when)
+        raw=bridge.canonical(fresh)+b"\n"
+        b_d,b_i,_=index.publication(fresh,raw)
+        clock=[when]
+        with mock.patch.object(bridge,"prepare",return_value=fresh) as producer, \
+             mock.patch.object(bridge,"read_context",side_effect=self._read_at(clock)):
+            with self.assertRaises(bridge.BridgeError):
+                exchange.prepare_export(require_recent=True)
+        producer.assert_not_called()
+        self.assertEqual(pending.read_bytes(),corrupt)
+        self.assertFalse((self.folder/a_i).exists())
+        self.assertFalse((self.folder/b_i).exists())
+        self.assertFalse((self.folder/b_d).exists())
+        self.assertFalse((journal/"rejected").exists())
+        self.assertEqual(bridge.verify_local_origin(self.bundle),
+                         bridge.digest(self.bundle))
+
+    def test_recovery04_fresh_pending_A_with_foreign_B_identity_blocks(self):
+        """No silent quarantine or replacement of a *fresh* A on B mismatch."""
+        a_d,a_i=self._crash_A_after_dossier()
+        pending=bridge.PRIVATE_ROOT/"drive-export"/exchange._PENDING_EXPORT
+        saved=pending.read_bytes()
+        later=self.T+dt.timedelta(seconds=1)
+        B=self._fresh_rebuilt_bundle(later)
+        raw=bridge.canonical(B)+b"\n"
+        b_d,b_i,_=index.publication(B,raw)
+        clock=[later]
+        def require_B(actual,*_):
+            if bridge.digest(actual)!=bridge.digest(B):
+                raise bridge.BridgeError("RECOVERY04 foreign frozen snapshot")
+        with mock.patch.object(bridge,"prepare",return_value=B) as producer, \
+             mock.patch.object(bridge,"read_context",side_effect=self._read_at(clock)):
+            with self.assertRaises(exchange.ExportGateRejected):
+                exchange.prepare_export(require_recent=True,precommit=require_B)
+        producer.assert_not_called()
+        self.assertEqual(pending.read_bytes(),saved)
+        self.assertFalse((self.folder/a_i).exists())
+        self.assertFalse((self.folder/b_i).exists())
+        self.assertFalse((self.folder/b_d).exists())
+        self.assertFalse((bridge.PRIVATE_ROOT/"drive-export"/"rejected").exists())
+
+    def test_recovery04_verified_stale_A_cannot_publish_also_stale_B(self):
+        """Old A may retire; B is still subject to the exact fresh-source gate."""
+        a_d,a_i=self._crash_A_after_dossier()
+        # B was created later than A, but now it too has expired.
+        b_built_at=self.T+dt.timedelta(seconds=1000)
+        B=self._fresh_rebuilt_bundle(b_built_at)
+        b_raw=bridge.canonical(B)+b"\n"
+        b_d,b_i,_=index.publication(B,b_raw)
+        clock=[b_built_at+dt.timedelta(seconds=1861)]
+        with mock.patch.object(bridge,"prepare",return_value=B) as producer, \
+             mock.patch.object(bridge,"read_context",side_effect=self._read_at(clock)):
+            with self.assertRaises(bridge.BridgeError):
+                exchange.prepare_export(require_recent=True)
+        producer.assert_called_once()
+        journal=bridge.PRIVATE_ROOT/"drive-export"
+        self.assertFalse((journal/exchange._PENDING_EXPORT).exists())
+        self.assertTrue((journal/"rejected"/(bridge.digest(self.bundle)+".json")).exists())
+        self.assertTrue((self.folder/a_d).exists())
+        self.assertFalse((self.folder/a_i).exists())
+        self.assertFalse((self.folder/b_i).exists())
+        self.assertFalse((self.folder/b_d).exists())
+        self.assertEqual(bridge.verify_local_origin(B),bridge.digest(B))
+
+    def test_recovery04_crash_after_archiving_A_can_recover_B_next_time(self):
+        """After valid A quarantine, a crash before B creation preserves progress."""
+        a_d,a_i=self._crash_A_after_dossier()
+        when=self.T+dt.timedelta(seconds=1861)
+        B=self._fresh_rebuilt_bundle(when)
+        b_raw=bridge.canonical(B)+b"\n"
+        b_d,b_i,_=index.publication(B,b_raw)
+        clock=[when]
+        with mock.patch.object(bridge,"prepare",
+                               side_effect=KeyboardInterrupt("after A quarantined")), \
+             mock.patch.object(bridge,"read_context",side_effect=self._read_at(clock)):
+            with self.assertRaises(KeyboardInterrupt):
+                exchange.prepare_export(require_recent=True)
+        journal=bridge.PRIVATE_ROOT/"drive-export"
+        archived=journal/"rejected"/(bridge.digest(self.bundle)+".json")
+        self.assertTrue(archived.exists())
+        original_journal=archived.read_bytes()
+        self.assertFalse((journal/exchange._PENDING_EXPORT).exists())
+        with mock.patch.object(bridge,"prepare",return_value=B), \
+             mock.patch.object(bridge,"read_context",side_effect=self._read_at(clock)):
+            self.assertEqual(exchange.prepare_export(require_recent=True),b_d)
+        self.assertTrue((self.folder/b_d).is_file())
+        self.assertTrue((self.folder/b_i).is_file())
+        self.assertTrue((self.folder/a_d).is_file())
+        self.assertFalse((self.folder/a_i).exists())
+        self.assertEqual(archived.read_bytes(),original_journal)
+
     def test_true_kdd27_freeze_gate_blocks_book_expiry_during_index_commit(self):
         """Actual B -> exchange -> original bridge, family TTL expires AFTER dossier."""
         import json
