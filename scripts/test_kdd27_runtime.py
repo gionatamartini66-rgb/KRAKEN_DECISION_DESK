@@ -490,6 +490,80 @@ class TemporalRegressionTests(unittest.TestCase):
                                  fixed["manifest_sha256"])
 
 
+    def test_time02_actual_B_consumer_reports_stale_catalog_35m_and_does_not_export(self):
+        import decision_desk as desk
+        from scripts import kdd27_freeze as freeze
+        from scripts import kdd_drive_exchange as exchange
+        frozen_at=dt.datetime.now(UTC)-dt.timedelta(minutes=35)
+        fixed=self._frozen("market_catalog",frozen_at)
+        wallet={"posizioni":[]}
+        source=fixed["source"]
+        now=dt.datetime.now(UTC)
+        dossier={"schema":3,"creato_utc":k27.iso(now),
+                 "kraken_istantanea_utc":source["rilevazione_utc"],
+                 "fotografia_portafoglio_sha256":desk.fotografia_portafoglio_sha256(wallet)}
+        files={"portafoglio.json":wallet,"ultima_rilevazione.json":source,
+               "dossier_multifonte.json":{}}
+        def build(data,**options):
+            self.assertEqual(data,source)
+            self.assertNotIn("asset_pairs",options)
+            self.assertEqual(options["previous_dossier_override"],{})
+            files["dossier_multifonte.json"]=dossier
+            return {"stato":"PRONTO_PER_ESAME_GPT_CON_LIMITI",
+                    "stato_fonti_mercato":"VERIFICATA",
+                    "idoneita_analisi_patrimoniale":"IDONEA"}
+        with mock.patch.object(desk,"load",side_effect=lambda name,default=None:
+                               files.get(name,default)), \
+             mock.patch.object(desk,"prepara_dossier_aggiornamento",
+                               side_effect=build), \
+             mock.patch.object(desk,"refresh") as refresh, \
+             mock.patch.object(exchange,"prepare_export") as exporter:
+            outcome=self.store.process_queue(k27.real_dossier_producer,now=now,limit=1)
+        self.assertEqual(outcome,[("time_market_catalog","PARZIALE_LOCALE")])
+        refresh.assert_not_called()
+        exporter.assert_not_called()
+        row=self.store.dossier_status("time_market_catalog")[0]
+        quality=json.loads(row["quality_json"])
+        self.assertIn("FONTE_SCADUTA_AL_CONSUMO:market_catalog",quality["lacune"])
+        self.assertEqual(quality["idoneita"],"NON_IDONEA_FONTE_SCADUTA")
+        self.assertEqual(row["publication_state"],"NON_PREPARATO_DATI_NON_IDONEI")
+        self.assertEqual(freeze.get(self.store,"time_market_catalog")["manifest_sha256"],
+                         fixed["manifest_sha256"])
+
+    def test_cache_cannot_reuse_artifact_after_family_observation_rotates(self):
+        import sqlite3,zlib
+        from scripts import kdd27_freeze as freeze
+        at=dt.datetime.now(UTC)
+        source={"rilevazione_utc":k27.iso(at),"market":1}
+        wallet={"posizioni":[]}
+        def insert_catalog(tag,observed):
+            raw=k27.encode({"pairs":{tag:{}}})
+            digest=k27.sha(raw)
+            oid=k27.sha(k27.encode(["market_catalog",k27.iso(observed),digest]))
+            with self.store.connection() as c:
+                c.execute("INSERT INTO observations VALUES(?,?,?,?,?,?,?,?,?)",
+                          (oid,"fixture","market_catalog",k27.iso(observed),
+                           k27.iso(observed),digest,
+                           sqlite3.Binary(zlib.compress(raw)),len(raw),"OSSERVATO"))
+        insert_catalog("one",at)
+        self.store.enqueue_dossier("first",at)
+        rec1=self.store.record_dossier_snapshot("first",source,source["rilevazione_utc"])
+        f1=freeze.freeze(self.store,"first",now=at,source=source,
+                          source_observation_id=rec1["observation_id"],wallet=wallet)
+        dossier={"kraken_istantanea_utc":source["rilevazione_utc"],
+                 "fotografia_portafoglio_sha256":f1["wallet_sha256"],
+                 "schema":3}
+        freeze.persist_artifact(self.store,f1,dossier,{"stato":"PARZIALE"})
+        insert_catalog("two",at+dt.timedelta(seconds=1))
+        self.store.enqueue_dossier("second",at)
+        rec2=self.store.record_dossier_snapshot("second",source,source["rilevazione_utc"])
+        f2=freeze.freeze(self.store,"second",now=at+dt.timedelta(seconds=1),
+                           source=source,
+                           source_observation_id=rec2["observation_id"],wallet=wallet)
+        self.assertNotEqual(f1["manifest_sha256"],f2["manifest_sha256"])
+        self.assertIsNone(freeze.recent_artifact(self.store,f2,dt.datetime.now(UTC),300))
+
+
 class DossierHTTPTests(unittest.TestCase):
     def test_real_localhost_handler_request_id_idempotence_and_status(self):
         import http.client
