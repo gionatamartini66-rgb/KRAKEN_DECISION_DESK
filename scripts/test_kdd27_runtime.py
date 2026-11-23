@@ -564,6 +564,46 @@ class TemporalRegressionTests(unittest.TestCase):
         self.assertIsNone(freeze.recent_artifact(self.store,f2,dt.datetime.now(UTC),300))
 
 
+    def test_time01_frozen_market_older_than_600s_is_retained_but_not_published(self):
+        import decision_desk as desk
+        from scripts import kdd27_freeze as freeze
+        from scripts import kdd_drive_exchange as exchange
+        now=dt.datetime.now(UTC)
+        old=now-dt.timedelta(seconds=601)
+        uid="stale_frozen_601"
+        snapshot={"rilevazione_utc":k27.iso(old),"market":1}
+        wallet={"posizioni":[]}
+        self.store.enqueue_dossier(uid,old)
+        original=self.store.record_dossier_snapshot(uid,snapshot,snapshot["rilevazione_utc"])
+        frozen=freeze.freeze(self.store,uid,now=old,source=snapshot,
+                     source_observation_id=original["observation_id"],wallet=wallet)
+        dossier={"kraken_istantanea_utc":snapshot["rilevazione_utc"],
+                 "fotografia_portafoglio_sha256":desk.fotografia_portafoglio_sha256(wallet),
+                 "schema":3}
+        files={"portafoglio.json":wallet,
+               "ultima_rilevazione.json":snapshot,
+               "dossier_multifonte.json":{}}
+        def deepen(source,**kwargs):
+            self.assertEqual(source,snapshot)
+            files["dossier_multifonte.json"]=dossier
+            return {"stato":"PRONTO_PER_ESAME_GPT_CON_LIMITI",
+                    "stato_fonti_mercato":"VERIFICATA",
+                    "idoneita_analisi_patrimoniale":"IDONEA"}
+        with mock.patch.object(desk,"load",side_effect=lambda name,default=None:
+                               files.get(name,default)), \
+             mock.patch.object(desk,"prepara_dossier_aggiornamento",side_effect=deepen), \
+             mock.patch.object(exchange,"prepare_export") as published:
+            out=self.store.process_queue(k27.real_dossier_producer,now=now,limit=1)
+        self.assertEqual(out,[(uid,"PARZIALE_LOCALE")])
+        published.assert_not_called()
+        row=self.store.dossier_status(uid)[0]
+        self.assertEqual(row["publication_state"],"NON_PREPARATO_DATI_NON_IDONEI")
+        detail=json.loads(row["quality_json"])
+        self.assertEqual(detail["idoneita"],"NON_IDONEA_FOTOGRAFIA_SCADUTA")
+        self.assertIn("FOTOGRAFIA_SCADUTA_ALLA_PUBBLICAZIONE",detail["lacune"])
+        self.assertEqual(freeze.get(self.store,uid)["snapshot_id"],frozen["snapshot_id"])
+
+
 class DossierHTTPTests(unittest.TestCase):
     def test_real_localhost_handler_request_id_idempotence_and_status(self):
         import http.client
