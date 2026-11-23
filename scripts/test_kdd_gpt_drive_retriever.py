@@ -261,7 +261,7 @@ class RecoveryG2CTests(unittest.TestCase):
         for files, code in (
             ([*earlier, *self.files], "INVENTARIO_CAMBIATO_DURANTE_LA_LETTURA"),
             ([*earlier, self.dossier], None),  # uncommitted orphan, ignored
-            ([*earlier, self.manifest], "INVENTARIO_CAMBIATO_DURANTE_LA_LETTURA"),
+            ([*earlier, self.manifest], "DOSSIER_INDICIZZATO_NON_ARRIVATO"),
         ):
             with self.subTest(expected=code):
                 self.validator.reset_mock()
