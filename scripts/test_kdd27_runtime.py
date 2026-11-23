@@ -486,6 +486,62 @@ class DossierHTTPTests(unittest.TestCase):
 
 
 class TelemetryTests(unittest.TestCase):
+    def test_actual_http_429_retry_after_blocks_only_affected_provider(self):
+        import urllib.error
+        now=dt.datetime.now(UTC)
+        error=urllib.error.HTTPError(
+            "https://api.kraken.com/0/public/Ticker",429,"rate limited",
+            {"Retry-After":"187"},None)
+        with mock.patch.object(meter,"ORIGINAL",side_effect=error):
+            with meter.Telemetry() as met:
+                with self.assertRaises(urllib.error.HTTPError):
+                    urllib.request.urlopen(
+                        "https://api.kraken.com/0/public/Ticker?pair=PRIVATE")
+        report=met.report()
+        self.assertEqual(report["total"]["errors"],1)
+        self.assertEqual(report["rate_limited"],
+                         [{"provider":"kraken","retry_after_s":187}])
+        self.assertNotIn("PRIVATE",str(report))
+        with tempfile.TemporaryDirectory() as folder:
+            store=k27.Store(Path(folder))
+            store.record_throttles(report["rate_limited"],now)
+            self.assertIn("kraken",store.active_pauses(now+dt.timedelta(seconds=186)))
+            self.assertNotIn("binance",store.active_pauses(now))
+            self.assertNotIn("kraken",store.active_pauses(now+dt.timedelta(seconds=188)))
+            with mock.patch.object(store,"active_pauses",
+                                   return_value={"kraken":k27.iso(now+dt.timedelta(minutes=2))}), \
+                 mock.patch("scripts.kdd27_families.collect") as collect:
+                result=k27.real_family_worker(store,"market_catalog","id",int(now.timestamp()))
+            self.assertEqual(result["state"],"RINVIATO_BUDGET")
+            self.assertEqual(result["metrics"]["source_calls"],0)
+            collect.assert_not_called()
+
+    def test_frozen_dossier_provider_pause_retains_snapshot_id_for_retry(self):
+        from scripts import kdd27_freeze as freeze
+        import decision_desk as desk
+        now=dt.datetime.now(UTC)
+        with tempfile.TemporaryDirectory() as folder:
+            store=k27.Store(Path(folder))
+            uid="pause_001"
+            source={"rilevazione_utc":k27.iso(now),"mock":1}
+            wallet={"posizioni":[]}
+            store.enqueue_dossier(uid,now)
+            record=store.record_dossier_snapshot(uid,source,source["rilevazione_utc"])
+            item=freeze.freeze(store,uid,now=now,source=source,
+                               source_observation_id=record["observation_id"],
+                               wallet=wallet)
+            next_try=k27.iso(now+dt.timedelta(minutes=17))
+            with mock.patch.object(store,"active_pauses",
+                                   return_value={"coingecko":next_try}), \
+                 mock.patch.object(desk,"refresh") as refresh, \
+                 mock.patch.object(desk,"prepara_dossier_aggiornamento") as deep:
+                result=store.process_queue(k27.real_dossier_producer,now,limit=1)
+            self.assertEqual(result,[(uid,"RINVIATO_PROVIDER")])
+            deep.assert_not_called()
+            refresh.assert_not_called()
+            self.assertEqual(store.dossier_status(uid)[0]["next_attempt_at"],next_try)
+            self.assertEqual(freeze.get(store,uid)["snapshot_id"],item["snapshot_id"])
+
     def test_http_byte_count_and_no_url_leak(self):
         class Remote:
             def __enter__(self): return self
