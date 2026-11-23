@@ -84,11 +84,14 @@ class ExportCommitRaceTests(unittest.TestCase):
         self.assertTrue((self.folder/dossier).exists())
         self.assertFalse((self.folder/index_name).exists())
         watch[0]=self.T+dt.timedelta(seconds=1801)
-        with mock.patch.object(bridge,"prepare") as new_prepare, \
+        with mock.patch.object(bridge,"prepare",
+                               side_effect=bridge.BridgeError("Synthetic B unavailable")) as new_prepare, \
              mock.patch.object(bridge,"read_context",side_effect=self._read_at(watch)):
             with self.assertRaises(bridge.BridgeError):
                 exchange.prepare_export(require_recent=True)
-            new_prepare.assert_not_called()
+            # RECOVERY-04 releases the old journal and does attempt the
+            # current request, even when this fixture supplies no new B.
+            new_prepare.assert_called_once()
         self.assertFalse((self.folder/index_name).exists(),
                          "Retry committed an expired publication before checking age")
         journal=bridge.PRIVATE_ROOT/"drive-export"
