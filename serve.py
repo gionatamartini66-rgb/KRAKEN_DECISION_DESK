@@ -18,6 +18,7 @@ import grafico_4h
 HOST, PORT = "127.0.0.1", 8765
 TOKEN = secrets.token_urlsafe(28)
 REFRESH_LOCK = threading.Lock()
+DOSSIER_LOCK = threading.Lock()
 REQUEST_LOCK = threading.Lock()
 STATE_LOCK = threading.Lock()
 JOB_STATE = {"stato": "mai_avviato", "avvio_utc": None,
@@ -35,23 +36,13 @@ def _refresh_worker():
     outcome = "riuscito"
     handoff_stato, handoff_file = "non_eseguito", None
     try:
-        desk.refresh()
+        desk.refresh(prepare_dossier=False)
     except Exception as exc:
         outcome = "errore"
         print("Aggiornamento fallito:", type(exc).__name__, str(exc), flush=True)
     else:
-        # A refresh riuscito, prepara l'handoff con il produttore canonico.
-        # FolderSync lo trasferira secondo la propria pianificazione: qui NON
-        # attestiamo ricezione su Drive e NON tocchiamo files gia esportati.
-        try:
-            from scripts import kdd_drive_exchange as exchange
-            handoff_file = exchange.prepare_export(require_recent=True)
-            handoff_stato = "pronto_per_foldersync"
-        except Exception as exc:
-            # Un errore di esportazione non cancella il refresh gia riuscito.
-            handoff_stato = "non_preparato"
-            print("Dossier automatico non preparato:", type(exc).__name__,
-                  str(exc), flush=True)
+        # KDD-27: a monitoring refresh MUST NOT publish a deep dossier.
+        handoff_stato = "non_eseguito"
     finally:
         with STATE_LOCK:
             JOB_STATE.update(stato=outcome, handoff_stato=handoff_stato,
@@ -59,6 +50,40 @@ def _refresh_worker():
                              fine_utc=dt.datetime.now(dt.timezone.utc).isoformat(),
                              durata_secondi=round(time.monotonic() - started, 1))
         REFRESH_LOCK.release()
+        # A queued explicit dossier may have waited for the monitor lock.
+        kick_dossier_queue()
+
+
+def _dossier_worker():
+    try:
+        from scripts import kdd27_runtime as k27
+        store = k27.Store()
+        # Release shared filesystem lock after every request: monitoring due
+        # between two manual requests can run without shifting its schedule.
+        for _ in range(k27.MAX_QUEUE):
+            try:
+                processed = store.process_queue(k27.real_dossier_producer, limit=1)
+            except RuntimeError as exc:
+                if str(exc) == 'KDD27_BUSY':
+                    break  # another producer will trigger queue resumption
+                raise
+            if not processed:
+                break
+    except Exception as exc:
+        print('Dossier KDD-27 queue:', type(exc).__name__, flush=True)
+    finally:
+        DOSSIER_LOCK.release()
+
+
+def kick_dossier_queue():
+    if not DOSSIER_LOCK.acquire(blocking=False):
+        return
+    try:
+        threading.Thread(target=_dossier_worker, daemon=True,
+                         name='kdd27-dossier-explicito').start()
+    except Exception:
+        DOSSIER_LOCK.release()
+        raise
 
 
 def start_refresh():
@@ -765,6 +790,15 @@ def with_controls(page: str, result: str = "") -> str:
         elif handoff["handoff_stato"] == "non_preparato":
             message += " Dossier NON preparato: nessun nuovo invio attestato. Apri /gpt per verificare."
     disabled = " disabled" if running else ""
+    try:
+        from scripts import kdd27_runtime as k27
+        latest_requests = k27.Store().dossier_status(limit=1)
+        last_request = latest_requests[0] if latest_requests else None
+        dossier_info = ('Ultimo dossier: ' + html.escape(last_request['status']) +
+                        ' (' + html.escape(last_request['request_id'][:12]) + ')' if last_request
+                        else 'Nessun dossier esplicito richiesto')
+    except Exception:
+        dossier_info = 'Registro richieste dossier temporaneamente non disponibile'
     toolbar = (
         "<section style='margin:18px 0;padding:16px;background:#22334e;border-radius:12px'>"
         "<form method='post' action='/aggiorna' id='kdd-refresh-form'>"
@@ -772,7 +806,14 @@ def with_controls(page: str, result: str = "") -> str:
         "<button id='kdd-refresh-button' style='font:inherit;padding:12px 18px;border:0;"
         "border-radius:9px;background:#80cbff;color:#06162b;font-weight:700' "
         f"type='submit'{disabled}>↻ Aggiorna dati ora</button>"
-        "</form><p><a style='font-weight:700;color:#8aceff' href='/mercati/spot'>"
+        "</form>"
+        "<form method='post' action='/dossier/richiedi' id='kdd-dossier-form'>"
+        f"<input type='hidden' name='token' value='{html.escape(TOKEN, quote=True)}'>"
+        f"<input type='hidden' name='request_id' value='{secrets.token_hex(16)}'>"
+        "<button type='submit'>Prepara dossier approfondito su richiesta</button>"
+        "</form><p role='status'>" + dossier_info + "</p>"
+        "<p><a href='/dossier/stato'>Stato delle richieste dossier</a></p>"
+        "<p><a style='font-weight:700;color:#8aceff' href='/mercati/spot'>"
         "🌐 Seleziona coppia Kraken Spot · grafici 15m / 1H / 4H / 1D</a></p>"
         "<p><a href='/gpt'>📄 Proposte GPT nel KDD</a></p>"
         + asset_request_panel() +
@@ -1445,6 +1486,16 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, RuntimeError, KeyError, TypeError, IndexError):
                 self.send_html(503, "<h1>Kraken pubblico non disponibile</h1>")
             return
+        if url.path == "/dossier/stato":
+            try:
+                from scripts import kdd27_runtime as k27
+                kick_dossier_queue()
+                self.send_body(200, json.dumps(k27.Store().dossier_status(),
+                    ensure_ascii=False), 'application/json; charset=utf-8')
+            except Exception:
+                self.send_body(503, '{"stato":"NON_DISPONIBILE"}',
+                               'application/json; charset=utf-8')
+            return
         if url.path == "/stato":
             self.send_body(200, json.dumps(job_snapshot(), ensure_ascii=False),
                            "application/json; charset=utf-8")
@@ -1517,7 +1568,7 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, OSError) as exc:
                 self.send_body(422, str(exc)[:180], "text/plain; charset=utf-8")
             return
-        if path not in ("/aggiorna","/richiedi-asset"):
+        if path not in ("/aggiorna","/richiedi-asset","/dossier/richiedi"):
             self.send_error(404)
             return
         # Chrome Traduttore può inviare Origin:null: restano obbligatori Host e token.
@@ -1533,7 +1584,22 @@ class Handler(BaseHTTPRequestHandler):
         if not hmac.compare_digest(received, TOKEN):
             self.send_error(403, "Verifica richiesta non riuscita")
             return
-        if path=="/richiedi-asset":
+        if path=="/dossier/richiedi":
+            try:
+                from scripts import kdd27_runtime as k27
+                supplied = params.get('request_id', [])
+                if len(supplied) != 1 or not re.fullmatch(r'[a-f0-9]{32}',supplied[0]):
+                    raise ValueError('Identificativo richiesta mancante')
+                k27.Store().enqueue_dossier(supplied[0])
+                kick_dossier_queue()
+                status='dossier-richiesto'
+            except ValueError:
+                self.send_error(422, 'Richiesta dossier non valida')
+                return
+            except (OSError, RuntimeError):
+                self.send_error(503, 'Archivio dossier non disponibile')
+                return
+        elif path=="/richiedi-asset":
             candidates=params.get("asset",[])
             if len(candidates)!=1 or not re.fullmatch(r"[A-Za-z0-9]{2,20}",candidates[0]):
                 self.send_error(400,"Simbolo asset non valido")
