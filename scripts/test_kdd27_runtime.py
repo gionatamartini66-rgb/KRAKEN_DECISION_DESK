@@ -166,7 +166,10 @@ class StoreTests(unittest.TestCase):
             if not cache:
                 expensive[0]+=1
                 cache.update({"snapshot_sha":"a"*64,"snapshot_time":k27.iso(START),
+                              "snapshot_id":"c"*64,"manifest_sha":"d"*64,
+                              "source_observation_id":"e"*64,
                               "dossier_sha":"b"*64,"handoff_file":"handoff.json",
+                              "dossier_status":"PRONTO_LOCALE",
                               "metrics":{"calls":20,"bytes":2000}})
             return dict(cache)
         results=[]
@@ -195,7 +198,10 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(done[0]["status"],"RIUSCITO")
         self.db.process_queue(lambda *_: {"snapshot_sha":"a"*64,
                             "snapshot_time":k27.iso(START),
-                            "dossier_sha":"b"*64,"handoff_file":"outbox.json"},
+                            "snapshot_id":"c"*64,"manifest_sha":"d"*64,
+                            "source_observation_id":"e"*64,
+                            "dossier_sha":"b"*64,"handoff_file":"outbox.json",
+                            "dossier_status":"PRONTO_LOCALE"},
                             START,limit=1)
         self.assertEqual(self.db.status()["observations"],1)
         self.assertEqual(self.db.dossier_status("manual001")[0]["status"],"PRONTO_LOCALE")
@@ -208,57 +214,106 @@ class DossierProducerTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.db = k27.Store(Path(self.tmp.name))
 
-    def test_actual_producer_reuses_deep_sources_and_local_handoff_for_twenty_requests(self):
-        # Source modules are real; only external effects and JSON files are stubbed.
+    def test_real_producer_51_requests_reuse_one_partial_and_expose_lacuna(self):
+        """Actual KDD producer entry, mocked IO; not a hand-written queue-only fake."""
         import decision_desk as desk
         from scripts import kdd_drive_exchange as exchange
         now = dt.datetime.now(UTC)
-        old_snapshot={"rilevazione_utc":k27.iso(now-dt.timedelta(hours=2))}
+        old={"rilevazione_utc":k27.iso(now-dt.timedelta(hours=2))}
         current={"rilevazione_utc":k27.iso(now),"ricerca_setup":{"ciclo":2}}
+        wallet={"posizioni":[],"fonte_quantita":"TEST_FIXTURE_SOLO_SINTETICA"}
+        wallet_sha=desk.fotografia_portafoglio_sha256(wallet)
         dossier={"kraken_istantanea_utc":current["rilevazione_utc"],
-                 "creato_utc":k27.iso(now),"schema":3}
-        state={"ultima_rilevazione.json":old_snapshot,
-               "dossier_multifonte.json":{}}
-        counts={"refresh":0,"deep":0,"export":0}
+                 "creato_utc":k27.iso(now),"schema":3,
+                 "fotografia_portafoglio_sha256":wallet_sha,
+                 "evidenze_economiche":{"stato":"PARZIALE"}}
+        state={"ultima_rilevazione.json":old,"dossier_multifonte.json":{},
+               "portafoglio.json":wallet}
+        count={"refresh":0,"deep":0,"export":0}
         def refresh(*,prepare_dossier=False):
             self.assertFalse(prepare_dossier)
-            counts["refresh"]+=1
+            count["refresh"]+=1
             state["ultima_rilevazione.json"]=current
             return current
-        def deepen(snapshot):
+        def deepen(snapshot, *, wallet_override=None):
             self.assertEqual(snapshot,current)
-            counts["deep"]+=1
+            self.assertEqual(wallet_override,wallet)
+            count["deep"]+=1
             state["dossier_multifonte.json"]=dossier
-            return {"stato":"PRONTO_PER_ESAME_GPT_CON_LIMITI"}
-        def export(*,require_recent=False):
-            self.assertTrue(require_recent)
-            counts["export"]+=1
-            path=Path(self.tmp.name)/"handoff.json"
-            path.write_bytes(b'{}')
-            return path
+            return {"stato":"PARZIALE","stato_fonti_mercato":"PARZIALE",
+                    "idoneita_analisi_patrimoniale":"NON_IDONEA",
+                    "motivi_incompletezza":["MACRO_NON_DISPONIBILE"],
+                    "motivi_patrimoniali":["SALDO_NON_RECENTE"]}
         with mock.patch.object(desk,"load",side_effect=lambda name,default=None:
                                   state.get(name,default)), \
              mock.patch.object(desk,"refresh",side_effect=refresh), \
              mock.patch.object(desk,"prepara_dossier_aggiornamento",
                                side_effect=deepen), \
-             mock.patch.object(exchange,"EXCHANGE_ROOT",Path(self.tmp.name)), \
-             mock.patch.object(exchange,"prepare_export",side_effect=export), \
-             mock.patch.object(exchange.bridge,"strict_json",
-                               return_value={"packet":{},"schema":3}), \
-             mock.patch.object(exchange.bridge,"read_context",
-                               return_value={"mercato":{"stato":"RECENTE"},
-                                             "saldo":{"stato":"RECENTE"}}):
-            for n in range(20):
-                self.db.enqueue_dossier(f"request{n:04}",now)
-            for n in range(20):
-                result=self.db.process_queue(k27.real_dossier_producer,now,limit=1)
-                self.assertEqual(result,[(f"request{n:04}","PRONTO_LOCALE")])
-        self.assertEqual(counts,{"refresh":1,"deep":1,"export":1})
+             mock.patch.object(exchange,"prepare_export",
+                               side_effect=lambda **kw:count.__setitem__(
+                                   "export",count["export"]+1)):
+            for n in range(51):
+                uid=f"request{n:04}"
+                self.assertEqual(self.db.enqueue_dossier(uid,now)["status"],"IN_ATTESA")
+            for n in range(51):
+                self.assertEqual(
+                    self.db.process_queue(k27.real_dossier_producer,now,limit=1),
+                    [(f"request{n:04}","PARZIALE_LOCALE")])
+        self.assertEqual(count,{"refresh":1,"deep":1,"export":0})
         self.assertEqual(self.db.status()["observations"],1)
-        self.assertEqual(self.db.status()["dossiers"]["PRONTO_LOCALE"],20)
+        self.assertEqual(self.db.status()["dossiers"]["PARZIALE_LOCALE"],51)
+        with self.db.connection() as c:
+            self.assertEqual(c.execute(
+                "SELECT COUNT(*) FROM dossier_freezes").fetchone()[0],51)
+            self.assertEqual(c.execute(
+                "SELECT COUNT(DISTINCT source_observation_id) FROM dossier_freezes"
+                ).fetchone()[0],1)
+            self.assertEqual(c.execute(
+                "SELECT COUNT(*) FROM dossier_artifacts").fetchone()[0],1)
+        self.assertIn("MACRO_NON_DISPONIBILE",
+              self.db.dossier_status("request0050")[0]["quality_json"])
         self.assertEqual(self.db.status()["jobs"],[])
 
-    def test_new_request_never_renews_stale_source_by_paper_timestamp(self):
+    def test_source_freeze_survives_restart_and_local_mutation(self):
+        import decision_desk as desk
+        from scripts import kdd27_freeze as freeze
+        now=dt.datetime.now(UTC)
+        uid="frozen_001"
+        source={"rilevazione_utc":k27.iso(now),"market":4}
+        wallet={"posizioni":[]}
+        self.db.enqueue_dossier(uid,now)
+        rec=self.db.record_dossier_snapshot(uid,source,source["rilevazione_utc"])
+        frozen=freeze.freeze(self.db,uid,now=now,source=source,
+                    source_observation_id=rec["observation_id"],wallet=wallet)
+        original=frozen["snapshot_id"]
+        source["market"]=999
+        wallet["posizioni"]=[{"token":"XBT","quantita":"1234"}]
+        self.assertEqual(freeze.get(self.db,uid)["source"]["market"],4)
+        reopened=k27.Store(Path(self.tmp.name))
+        self.assertEqual(freeze.get(reopened,uid)["snapshot_id"],original)
+        newer={"rilevazione_utc":k27.iso(now),"market":999}
+        unchanged=freeze.freeze(reopened,uid,now=now,source=newer,
+                         source_observation_id="invalid",wallet=wallet)
+        self.assertEqual(unchanged["snapshot_id"],original)
+        self.assertEqual(unchanged["wallet"]["posizioni"],[])
+
+    def test_tampering_stored_frozen_observation_fails_closed(self):
+        from scripts import kdd27_freeze as freeze
+        now=dt.datetime.now(UTC)
+        uid="frozen_tamper"
+        source={"rilevazione_utc":k27.iso(now),"market":1}
+        wallet={"posizioni":[]}
+        self.db.enqueue_dossier(uid,now)
+        rec=self.db.record_dossier_snapshot(uid,source,source["rilevazione_utc"])
+        freeze.freeze(self.db,uid,now=now,source=source,
+                     source_observation_id=rec["observation_id"],wallet=wallet)
+        with self.db.connection() as c:
+            c.execute("UPDATE observations SET sha256='0' WHERE observation_id=?",
+                      (rec["observation_id"],))
+        with self.assertRaises(freeze.FrozenMismatch):
+            freeze.get(self.db,uid)
+
+    def test_stale_source_never_relabelled_current_when_upstream_is_offline(self):
         import decision_desk as desk
         from scripts import kdd_drive_exchange as exchange
         now=dt.datetime.now(UTC)
@@ -268,7 +323,7 @@ class DossierProducerTests(unittest.TestCase):
              mock.patch.object(exchange,"prepare_export") as export:
             self.db.enqueue_dossier("stale001",now)
             result=self.db.process_queue(k27.real_dossier_producer,now,limit=1)
-        self.assertEqual(result,[("stale001","ERRORE")])
+        self.assertEqual(result,[("stale001","RINVIATO_RETE")])
         self.assertEqual(self.db.dossier_status("stale001")[0]["error"],"OSError")
         export.assert_not_called()
 
