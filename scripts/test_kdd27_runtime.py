@@ -34,6 +34,26 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.db.run_due(lambda *a: self.fail("worker must not start"), START), [])
         self.assertFalse(any(Path(self.tmp.name).rglob("*.sh")))
 
+    def test_manual_monitor_is_archived_without_shifting_autonomous_deadline(self):
+        period=self.enroll()
+        before=self.db.status()["jobs"][0][2]
+        result=self.db.run_manual_monitor(lambda name,run_id,due:{
+            "payload":{"schema":"kdd27_monitor_observation_v001",
+                       "monitor_run_id":run_id,"snapshot":{"rilevazione_utc":k27.iso(due)},
+                       "dossier_prodotto":False},
+            "observed_at":k27.iso(due),
+            "cursor":{"ciclo":99},
+            "metrics":{"total":{"calls":2,"bytes":120}}},
+            START+dt.timedelta(seconds=60))
+        self.assertEqual(result["status"],"MANUALE")
+        self.assertEqual(self.db.status()["jobs"][0][2],before)
+        self.assertEqual(self.db.status()["observations"],1)
+        self.assertEqual(self.db.latest()["run_id"],result["run_id"])
+        with self.db.connection() as c:
+            self.assertEqual(c.execute("SELECT status FROM runs"
+                         " WHERE run_id=?", (result["run_id"],)).fetchone()[0],
+                             "MANUALE")
+
     def test_30_days_rotation_and_dossier_independence(self):
         period = self.enroll()
         calls = []
