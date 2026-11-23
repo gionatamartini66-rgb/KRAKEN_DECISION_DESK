@@ -42,7 +42,7 @@ PACKET_FILES = (
     'scripts/kdd_bridge_g2.py', 'scripts/kdd_drive_exchange.py', 'scripts/kdd_drive_index.py',
     'scripts/kdd27_runtime.py', 'scripts/kdd27_telemetry.py',
     'scripts/kdd27_families.py', 'scripts/kdd27_freeze.py',
-    'scripts/test_kdd27_runtime.py',
+    'scripts/test_kdd27_runtime.py', 'scripts/test_kdd27_families.py',
     'scripts/test_kdd_drive_exchange.py', 'scripts/test_kdd_bridge_g2.py',
     'scripts/test_kdd_android_transaction_g2.py',
     'scripts/kdd_android_regressions.py',
