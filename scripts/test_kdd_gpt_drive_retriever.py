@@ -256,17 +256,25 @@ class RecoveryG2CTests(unittest.TestCase):
                 self.assertEqual(result["codice"], code)
                 self.assertFalse(drive.downloads)
 
-    def test_race_with_newer_complete_or_incomplete_pair_stops(self):
+    def test_race_with_newer_indexed_pair_stops_but_unindexed_orphan_does_not(self):
         earlier, blobs = publication_files(synth_handoff(when=T-dt.timedelta(minutes=1)), "before")
         for files, code in (
             ([*earlier, *self.files], "INVENTARIO_CAMBIATO_DURANTE_LA_LETTURA"),
-            ([*earlier, self.dossier], "INDICE_CORRENTE_ASSENTE"),
-            ([*earlier, self.manifest], "DOSSIER_INDICIZZATO_NON_ARRIVATO"),
+            ([*earlier, self.dossier], None),  # uncommitted orphan, ignored
+            ([*earlier, self.manifest], "INVENTARIO_CAMBIATO_DURANTE_LA_LETTURA"),
         ):
-            with self.subTest(code=code):
-                result, _ = self.recover(earlier, blobs, alter_second_scan=pages_from(files))
-                self.assertEqual(result["codice"], code)
-                self.validator.validate.assert_not_called()
+            with self.subTest(expected=code):
+                self.validator.reset_mock()
+                result, drive = self.recover(earlier, blobs, alter_second_scan=pages_from(files))
+                if code is None:
+                    self.assertEqual(result["stato"],r.RECOVERED)
+                    self.assertEqual(result["file_id"],"before")
+                    self.assertEqual(drive.downloads,["before-index","before"])
+                    self.validator.validate.assert_called_once()
+                else:
+                    self.assertEqual(result["stato"],r.UNVERIFIABLE)
+                    self.assertEqual(result["codice"],code)
+                    self.validator.validate.assert_not_called()
 
     def test_limits_bound_inventory_and_selected_bytes(self):
         more = [dict(self.dossier, id=f"copy-{i}") for i in range(4)]
