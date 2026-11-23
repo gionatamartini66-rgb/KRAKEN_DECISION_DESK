@@ -303,9 +303,11 @@ class DeskTests(unittest.TestCase):
         from threading import Event
         import time
         started, release = Event(), Event()
-        def fake_refresh():
+        def fake_refresh(*, prepare_dossier=False):
+            self.assertFalse(prepare_dossier)
             started.set()
             release.wait(2.0)
+            return {'rilevazione_utc':serve.desk.NOW().isoformat()}
         try:
             # Il test isola la coda refresh: la pubblicazione del dossier
             # viene provata separatamente, senza dipendere dal filesystem Termux.
@@ -327,7 +329,8 @@ class DeskTests(unittest.TestCase):
 
     def test_error_status_and_retry(self):
         import time
-        def fake_failure():
+        def fake_failure(*, prepare_dossier=False):
+            self.assertFalse(prepare_dossier)
             raise ConnectionError('simulazione offline')
         with unittest.mock.patch.object(serve.desk,'refresh',side_effect=fake_failure):
             self.assertTrue(serve.start_refresh())
@@ -337,7 +340,7 @@ class DeskTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual(serve.job_snapshot()['stato'],'errore')
         # La richiesta successiva può essere avviata dopo un errore.
-        with unittest.mock.patch.object(serve.desk,'refresh',return_value=None), \
+        with unittest.mock.patch.object(serve.desk,'refresh',return_value={'rilevazione_utc':serve.desk.NOW().isoformat()}), \
              unittest.mock.patch('scripts.kdd_drive_exchange.prepare_export',
                                  return_value='kdd_handoff_fixture.json'):
             self.assertTrue(serve.start_refresh())
@@ -347,9 +350,9 @@ class DeskTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual(serve.job_snapshot()['stato'],'riuscito')
 
-    def test_refresh_auto_prepares_handoff_but_does_not_claim_drive_delivery(self):
+    def test_monitor_refresh_does_not_auto_prepare_handoff(self):
         import time
-        with unittest.mock.patch.object(serve.desk, 'refresh', return_value=None), \
+        with unittest.mock.patch.object(serve.desk, 'refresh', return_value={'rilevazione_utc':serve.desk.NOW().isoformat()}) as refresh, \
              unittest.mock.patch('scripts.kdd_drive_exchange.prepare_export',
                                  return_value='kdd_handoff_test.json') as export:
             self.assertTrue(serve.start_refresh())
@@ -359,17 +362,18 @@ class DeskTests(unittest.TestCase):
                 time.sleep(0.01)
             job = serve.job_snapshot()
             self.assertEqual(job['stato'], 'riuscito')
-            self.assertEqual(job['handoff_stato'], 'pronto_per_foldersync')
-            self.assertEqual(job['handoff_file'], 'kdd_handoff_test.json')
-            export.assert_called_once_with(require_recent=True)
-            self.assertIn('ricezione su Drive da verificare',
+            self.assertEqual(job['handoff_stato'], 'non_eseguito')
+            self.assertIsNone(job['handoff_file'])
+            refresh.assert_called_once_with(prepare_dossier=False)
+            export.assert_not_called()
+            self.assertIn('Prepara dossier approfondito su richiesta',
                           serve.with_controls('<h2>1 · Decisioni e posizioni</h2>', 'ok'))
 
-    def test_refresh_export_failure_keeps_success_and_does_not_claim_delivery(self):
+    def test_monitor_not_affected_by_exporter_failure(self):
         import time
-        with unittest.mock.patch.object(serve.desk, 'refresh', return_value=None), \
+        with unittest.mock.patch.object(serve.desk, 'refresh', return_value={'rilevazione_utc':serve.desk.NOW().isoformat()}), \
              unittest.mock.patch('scripts.kdd_drive_exchange.prepare_export',
-                                 side_effect=OSError('cartella non disponibile')):
+                                 side_effect=OSError('cartella non disponibile')) as export:
             self.assertTrue(serve.start_refresh())
             for _ in range(100):
                 if serve.job_snapshot()['stato'] != 'in_corso':
@@ -377,10 +381,9 @@ class DeskTests(unittest.TestCase):
                 time.sleep(0.01)
             job = serve.job_snapshot()
             self.assertEqual(job['stato'], 'riuscito')
-            self.assertEqual(job['handoff_stato'], 'non_preparato')
+            self.assertEqual(job['handoff_stato'], 'non_eseguito')
             self.assertIsNone(job['handoff_file'])
-            self.assertIn('Dossier NON preparato',
-                          serve.with_controls('<h2>1 · Decisioni e posizioni</h2>', 'ok'))
+            export.assert_not_called()
 
     def test_refresh_failed_does_not_auto_export(self):
         import time

@@ -957,7 +957,8 @@ def render(report):
 <h2>3 · Macroeconomia e geopolitica</h2><p>Un contesto non verificato è un'informazione mancante, non equivale a uno scenario neutrale o ribassista.</p>{context}
 <h2>4 · Fonti e limiti</h2><details><summary>Apri titoli di Fed, BCE e Consiglio UE</summary><p>Raccolta automatica di titoli, nessuna interpretazione causale.</p><ul>{feed or '<li>Nessun feed acquisito.</li>'}</ul></details><details><summary>Apri limiti tecnici e avvertenze</summary><ul>{warnings}</ul></details><p class="muted">Strumento sperimentale per supporto alle decisioni. Nessuna previsione o consulenza personalizzata automatica.</p></body></html>'''
 
-def prepara_dossier_aggiornamento(data, *, asset_pairs=None):
+def prepara_dossier_aggiornamento(data, *, asset_pairs=None, wallet_override=None,
+                                  previous_dossier_override=None):
     """Produce un dossier sullo stesso snapshot Kraken. API pubbliche soltanto.
 
     Se una fonte secondaria fallisce non scambia dati vecchi per aggiornati:
@@ -972,6 +973,9 @@ def prepara_dossier_aggiornamento(data, *, asset_pairs=None):
         with dossier_trade.primary_refresh_context():
             dossier=dossier_trade.collect(
                 source=data,
+                **({'portfolio_override': wallet_override} if wallet_override is not None else {}),
+                **({'previous_dossier_override': previous_dossier_override}
+                   if previous_dossier_override is not None else {}),
                 **({'asset_pairs': asset_pairs} if asset_pairs is not None else {}))
         if dossier['kraken_istantanea_utc']!=data['rilevazione_utc']:
             raise ValueError("Dossier riferito ad altro snapshot")
@@ -1183,7 +1187,13 @@ def stato_dossier_per_report(data, portfolio=None):
     return safe
 
 
-def refresh():
+def refresh(*, prepare_dossier=True):
+    """Existing full market producers; optional deep dossier is now explicit.
+
+    prepare_dossier=True preserves legacy library compatibility. The KDD-27
+    monitor and the CLI/dashboard use False; only an explicit dossier request
+    uses prepara_dossier_aggiornamento().
+    """
     # Lettura privata indipendente dalla raccolta pubblica, senza cancellare il saldo vecchio.
     saldo_refresh = aggiorna_saldo_sola_lettura()
     portfolio = load('portafoglio.json', {'posizioni':[]})
@@ -1391,7 +1401,8 @@ def refresh():
     check_out=verifica_piani.safe_check()
     print('Verifica vecchio piano:',check_out.get('stato'),
           '| nessun trade simulato come eseguito')
-    status_dossier=prepara_dossier_aggiornamento(data, asset_pairs=pairs)
+    status_dossier=(prepara_dossier_aggiornamento(data, asset_pairs=pairs)
+                    if prepare_dossier else None)
     # Solo dopo che entrambe le valutazioni GPT sono state congelate:
     # verifica le chiusure future se i relativi orizzonti sono maturi.
     # Al massimo 4 richieste OHLC per refresh, zero prima della scadenza.
@@ -1400,10 +1411,14 @@ def refresh():
     print('Studio delta:',delta_status.get('stato'),
           '| chiusure osservate',delta_status.get('orizzonti_maturi_con_esito',0),
           '| chiamate pubbliche',delta_status.get('chiamate_kraken',0))
-    print('Dossier per GPT:',status_dossier['stato'],
-          '|', len(status_dossier.get('token_analizzati',[])), 'candidati',
-          '| analisi GPT non ricalcolata')
+    if status_dossier is not None:
+        print('Dossier per GPT:',status_dossier['stato'],
+              '|', len(status_dossier.get('token_analizzati',[])), 'candidati',
+              '| analisi GPT non ricalcolata')
+    else:
+        print('KDD-27: raccolta completata senza generare dossier o handoff')
     output(data)
+    return data
 
 def output(data):
     # One actual in-memory wallet for report valuation and dossier provenance.
@@ -1520,7 +1535,7 @@ def main():
     c.add_argument('area',choices=['macroeconomia','geopolitica']); c.add_argument('valutazione'); c.add_argument('fonte'); c.add_argument('--giorni',type=int,default=7)
     args = ap.parse_args()
     try:
-        if args.cmd == 'aggiorna': refresh()
+        if args.cmd == 'aggiorna': refresh(prepare_dossier=False)
         elif args.cmd == 'richiedi-asset': request_public_asset(args)
         elif args.cmd == 'rigenera':
             last = load('ultima_rilevazione.json')

@@ -23,6 +23,14 @@ _PENDING_EXPORT = "in-corso.json"
 _DECISION_LOCK = threading.RLock()  # coordinates threads; flock coordinates processes
 
 
+class ExportGateRejected(bridge.BridgeError):
+    """A verified origin ceased to satisfy the publication gate.
+
+    Distinct from disk failures and collisions: only rejected, verified
+    journals may be retired automatically. Originals remain immutable.
+    """
+
+
 class ExchangeError(bridge.BridgeError):
     domain = "validation"
 
@@ -328,8 +336,12 @@ def _decision_writer():
             yield
 
 
-def _publish_export_file(root, name, raw):
-    """Immutable final name under the cooperative private export lock."""
+def _publish_export_file(root, name, raw, *, before_commit=None):
+    """Immutable final name; optional validation at the actual rename boundary.
+
+    The optional gate is called AFTER fsync of the staged file and IMMEDIATELY
+    before its final rename. Legacy callers keep their original contract.
+    """
     final = root / name
     if bridge._path_present(final):
         fd = os.open(final, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -337,6 +349,8 @@ def _publish_export_file(root, name, raw):
             info = os.fstat(stream.fileno())
             if (stat.S_ISREG(info.st_mode) and info.st_size == len(raw)
                     and stream.read(len(raw) + 1) == raw):
+                if before_commit is not None:
+                    before_commit()
                 return
         raise bridge.BridgeError("Esportazione gia presente ma differente")
     stage = None
@@ -349,6 +363,8 @@ def _publish_export_file(root, name, raw):
             os.fsync(stream.fileno())
         if bridge._path_present(final):
             raise bridge.BridgeError("Collisione prima della pubblicazione")
+        if before_commit is not None:
+            before_commit()
         os.rename(stage, final)
         stage = None
     finally:
@@ -356,7 +372,7 @@ def _publish_export_file(root, name, raw):
             stage.unlink(missing_ok=True)
 
 
-def _export_bundle(bundle):
+def _export_bundle(bundle, *, precommit=None):
     root = EXCHANGE_ROOT
     if root.is_symlink() or not root.is_dir():
         raise bridge.BridgeError("Cartella Kraken condivisa non disponibile")
@@ -364,8 +380,18 @@ def _export_bundle(bundle):
     dossier, name, body = index.publication(bundle, raw)
     stamp, digest = index.INDEX.fullmatch(name).groups()
     index.check_index(body, stamp, digest)
-    _publish_export_file(root, dossier, raw)
-    _publish_export_file(root, name, bridge.canonical(body) + b"\n")
+    index_raw = bridge.canonical(body) + b"\n"
+    def gate():
+        if precommit is not None:
+            precommit(bundle, dossier, raw, name, index_raw)
+    # The dossier is not shared before the first gate. A second gate occurs
+    # exactly at the index rename, which is the publication commit marker.
+    if precommit is None:
+        _publish_export_file(root, dossier, raw)
+        _publish_export_file(root, name, index_raw)
+    else:
+        _publish_export_file(root, dossier, raw, before_commit=gate)
+        _publish_export_file(root, name, index_raw, before_commit=gate)
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         os.fsync(fd)
@@ -398,7 +424,28 @@ def _require_recent_export(bundle):
         raise bridge.BridgeError("Saldo o mercato non recenti: handoff automatico non preparato")
 
 
-def prepare_export(*, require_recent=False):
+def _retire_rejected_export(journal, pending, original):
+    """Crash-idempotent owner-only preservation of a rejected pending journal.
+
+    An orphan public dossier remains immutable; its missing index means it is
+    not a committed publication. The private original and journal are retained.
+    A future legitimate request is free to create a fresh pending journal.
+    """
+    archive = bridge.ensure_dir(journal / "rejected")
+    raw = bridge.read_regular(pending, expected_parent=journal)
+    filename = bridge.digest(original) + ".json"
+    _publish_export_file(archive, filename, raw)
+    bridge._sync_dir(archive)
+    pending.unlink()
+    bridge._sync_dir(journal)
+
+
+def prepare_export(*, require_recent=False, precommit=None):
+    """Publish only after final clocks, IDs and byte integrity are verified.
+
+    precommit is a local KDD-27 validation function. It does not alter the
+    historical KDD-24 schema or execute any remote Drive/FolderSync action.
+    """
     outgoing = bridge.private_directory(bridge.OUTBOX, create=True)
     journal = bridge.ensure_dir(bridge.PRIVATE_ROOT / "drive-export")
     pending = journal / _PENDING_EXPORT
@@ -415,7 +462,23 @@ def prepare_export(*, require_recent=False):
                 outgoing / (digest + ".json"), expected_parent=outgoing))
             if bridge.verify_local_origin(original) != digest:
                 raise bridge.BridgeError("Origine esportazione in corso discordante")
-        else:
+            if require_recent:
+                # RECOVERY-04: the pending A belongs to an earlier request.
+                # Only a VERIFIED, provably expired A may be archived and
+                # skipped in this same call. An ambiguous origin or clock,
+                # corrupt journal or identity mismatch must fail closed.
+                context = bridge.read_context(original)
+                state = (context["mercato"]["stato"], context["saldo"]["stato"])
+                if (all(x in ("RECENTE", "DA_AGGIORNARE") for x in state)
+                        and "DA_AGGIORNARE" in state):
+                    _retire_rejected_export(journal, pending, original)
+                    retry = False
+                elif state != ("RECENTE", "RECENTE"):
+                    raise bridge.BridgeError(
+                        "Journal verificato ma freschezza non accertabile")
+        if not retry:
+            # A stale journal has been safely retired; begin the caller's B
+            # transaction without asking for another manual request.
             original, _ = _prepare_private_origin()
             if require_recent:
                 _require_recent_export(original)
@@ -424,14 +487,74 @@ def prepare_export(*, require_recent=False):
 
         bridge._sync_dir(journal)
         bridge._sync_dir(journal.parent)
-        dossier = _export_bundle(original)
-        pending.unlink()
-        bridge._sync_dir(journal)
-        if retry and require_recent:
-            # Complete the previously authorised pair, but report it as current
-            # for the automatic path only if it still satisfies that path's gate.
-            _require_recent_export(original)
-        return dossier
+
+        def gate(bundle, dossier_name, dossier_raw, index_name, index_raw):
+            try:
+                if require_recent:
+                    _require_recent_export(bundle)
+                # Names, logical digest, byte digest and sizes must be for
+                # the exact bytes about to be exposed, not a prior file.
+                expected_d, expected_i, metadata = index.publication(bundle, dossier_raw)
+                stamp, digest = index.INDEX.fullmatch(index_name).groups()
+                index.check_index(metadata, stamp, digest)
+                if (expected_d != dossier_name or expected_i != index_name
+                        or bridge.canonical(metadata) + b"\n" != index_raw
+                        or metadata["sha256_byte"] != hashlib.sha256(dossier_raw).hexdigest()
+                        or metadata["dimensione_byte"] != len(dossier_raw)):
+                    raise bridge.BridgeError("Identita pubblicazione KDD discordante")
+                if precommit is not None:
+                    precommit(bundle, dossier_name, dossier_raw, index_name, index_raw)
+            except (bridge.BridgeError, ValueError) as exc:
+                raise ExportGateRejected("Handoff scaduto o non verificabile al commit") from exc
+
+        # At most one verified old A can be retired in favour of the
+        # caller's new B. This also covers A expiring BETWEEN the initial
+        # pending-read check and the precommit gate, without any unbounded
+        # retries or resubmission by the author.
+        for attempt in range(2):
+            try:
+                if retry and (require_recent or precommit is not None):
+                    bundle_raw = bridge.canonical(original) + b"\n"
+                    dd, ii, metadata = index.publication(original, bundle_raw)
+                    gate(original, dd, bundle_raw, ii,
+                         bridge.canonical(metadata) + b"\n")
+                dossier = _export_bundle(
+                    original, precommit=gate if (
+                        require_recent or precommit is not None) else None)
+            except ExportGateRejected:
+                if retry and require_recent:
+                    # A callback mismatch alone is never permission to
+                    # discard a still-fresh journal. Only the original bridge
+                    # can establish that this very A is now expired.
+                    context = bridge.read_context(original)
+                    state=(context["mercato"]["stato"],context["saldo"]["stato"])
+                    if (all(x in ("RECENTE","DA_AGGIORNARE") for x in state)
+                            and "DA_AGGIORNARE" in state):
+                        _retire_rejected_export(journal, pending, original)
+                        retry=False
+                        # Proceed with the originally requested B while still
+                        # holding the same process lock; crash before the
+                        # next pending is harmless because A was archived.
+                        original,_=_prepare_private_origin()
+                        if require_recent:
+                            _require_recent_export(original)
+                        raw=bridge.canonical({
+                            "dossier_sha256":bridge.digest(original)})+b"\n"
+                        _publish_export_file(journal,_PENDING_EXPORT,raw)
+                        bridge._sync_dir(journal)
+                        bridge._sync_dir(journal.parent)
+                        continue
+                # A newly-created B rejected at commit is retained privately
+                # and removed from the active journal; a fresh/ambiguous A
+                # remains pending for fail-closed manual investigation.
+                if not retry:
+                    _retire_rejected_export(journal,pending,original)
+                raise
+            pending.unlink()
+            bridge._sync_dir(journal)
+            return dossier
+        raise bridge.BridgeError("RECOVERY04_LIMITE_TENTATIVI_SUPERATO")
+
 
 
 def find_origin(proposal):

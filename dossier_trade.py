@@ -866,7 +866,8 @@ def economic_evidence(source, wallet, four, candidates, now, *,
             "richieste_effettuate": discovery_calls+batch_calls+cg_calls+release_calls,
             "limite": "Risoluzione pubblica incrociata, non prova chain/contract, unlock, acquisti o ordini"}
 
-def collect(source=None, *, asset_pairs=None):
+def collect(source=None, *, asset_pairs=None, portfolio_override=None,
+            previous_dossier_override=None):
     """Prepara il dossier sullo snapshot appena acquisito, senza iniziare un'analisi GPT."""
     now=desk.NOW()
     if source is None:
@@ -969,7 +970,8 @@ def collect(source=None, *, asset_pairs=None):
     derivatives=derivatives_context(now.timestamp())
     # Same D1/D2 validation as dashboard, applied to this actual wallet read.
     # A market snapshot time is not proof of wallet identity or freshness.
-    portafoglio = desk.load('portafoglio.json', {})
+    portafoglio = (portfolio_override if portfolio_override is not None
+                   else desk.load('portafoglio.json', {}))
     qualita = desk.qualita_portafoglio(source, portafoglio)
     saldo = qualita["stato_saldo"]
     fonte = portafoglio.get("fonte_quantita") if isinstance(portafoglio, dict) else None
@@ -980,11 +982,17 @@ def collect(source=None, *, asset_pairs=None):
         except (OSError, RuntimeError, TypeError, ValueError, KeyError):
             asset_pairs = {}
     previous_dossier = {}
-    try:
-        previous_dossier = desk.load("dossier_multifonte.json", {})
-        previous_economic = (previous_dossier or {}).get("evidenze_economiche")
-    except (OSError, ValueError, TypeError, AttributeError):
-        previous_economic = None
+    if previous_dossier_override is not None:
+        if not isinstance(previous_dossier_override, dict):
+            raise ValueError("Dossier historical input must be a private JSON object")
+        previous_dossier = previous_dossier_override
+        previous_economic = previous_dossier.get("evidenze_economiche")
+    else:
+        try:
+            previous_dossier = desk.load("dossier_multifonte.json", {})
+            previous_economic = (previous_dossier or {}).get("evidenze_economiche")
+        except (OSError, ValueError, TypeError, AttributeError):
+            previous_economic = None
     analisi_patrimonio = patrimonio_4tf.collect(
         portafoglio, source, asset_pairs=asset_pairs,
         now=now, old_4h=quattro_ore)
