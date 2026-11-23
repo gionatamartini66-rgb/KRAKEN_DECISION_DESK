@@ -62,7 +62,7 @@ def _dossier_worker():
         store = k27.Store()
         # Release shared filesystem lock after every request: monitoring due
         # between two manual requests can run without shifting its schedule.
-        for _ in range(k27.MAX_QUEUE):
+        while True:  # bounded per request, no arbitrary total request ceiling
             try:
                 processed = store.process_queue(k27.real_dossier_producer, limit=1,
                                                 wait=True)
@@ -800,6 +800,20 @@ def with_controls(page: str, result: str = "") -> str:
         dossier_info = ('Ultimo dossier: ' + html.escape(last_request['status']) +
                         ' (' + html.escape(last_request['request_id'][:12]) + ')' if last_request
                         else 'Nessun dossier esplicito richiesto')
+        if last_request:
+            dossier_info += (' · Pubblicazione: ' +
+                             html.escape(last_request.get('publication_state')
+                                         or 'NON_VERIFICATA'))
+            if last_request.get('quality_json'):
+                import json as _json
+                try:
+                    quality=_json.loads(last_request['quality_json'])
+                    dossier_info += (' · Fonti: ' +
+                        html.escape(quality.get('stato_fonti') or 'NON_VERIFICATE') +
+                        ' · Idoneità: ' +
+                        html.escape(quality.get('idoneita') or 'NON_DETERMINATA'))
+                except (ValueError,TypeError):
+                    dossier_info += ' · Qualità non verificabile'
     except Exception:
         dossier_info = 'Registro richieste dossier temporaneamente non disponibile'
     toolbar = (
@@ -816,6 +830,7 @@ def with_controls(page: str, result: str = "") -> str:
         "<button type='submit'>Prepara dossier approfondito su richiesta</button>"
         "</form><p role='status'>" + dossier_info + "</p>"
         "<p><a href='/dossier/stato'>Stato delle richieste dossier</a></p>"
+        "<p><a href='/monitor/fonti'>Copertura e freschezza delle fonti</a></p>"
         "<p><a style='font-weight:700;color:#8aceff' href='/mercati/spot'>"
         "🌐 Seleziona coppia Kraken Spot · grafici 15m / 1H / 4H / 1D</a></p>"
         "<p><a href='/gpt'>📄 Proposte GPT nel KDD</a></p>"
@@ -1488,6 +1503,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_html(400, "<h1>Coppia Kraken non valida o non online</h1>")
             except (OSError, RuntimeError, KeyError, TypeError, IndexError):
                 self.send_html(503, "<h1>Kraken pubblico non disponibile</h1>")
+            return
+        if url.path == "/monitor/fonti":
+            try:
+                from scripts import kdd27_runtime as k27
+                self.send_body(200, json.dumps(k27.Store().family_coverage(),
+                    ensure_ascii=False), 'application/json; charset=utf-8')
+            except Exception:
+                self.send_body(503,'{"stato":"NON_DISPONIBILE"}',
+                               'application/json; charset=utf-8')
             return
         if url.path == "/dossier/stato":
             try:
