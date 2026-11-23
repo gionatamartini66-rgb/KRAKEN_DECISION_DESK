@@ -215,7 +215,9 @@ def recent_artifact(store, frozen, now, max_age_s):
 
 
 def family_inputs(store, frozen, now):
-    """Data manifest is immutable even if jobs continue collecting new samples."""
+    """Consume immutable IDs with renewed TTL checks, never a freeze-time TTL."""
+    from scripts.kdd27_families import SPECS, stamped
+    consumed=core.instant(now)
     by_family={r["family"]:r for r in frozen["manifest"]["families"]}
     result={}
     with store.connection() as c:
@@ -223,14 +225,31 @@ def family_inputs(store, frozen, now):
             if row["stato"]!="RECENTE" or not row.get("observation_id"):
                 result[family]={"stato":row["stato"],"osservazione":None}
                 continue
-            obs=c.execute("SELECT sha256,payload_z FROM observations"
-                          " WHERE observation_id=?", (row["observation_id"],)).fetchone()
-            if not obs or obs[0]!=row["sha256"]:
+            obs=c.execute("SELECT sha256,payload_z,observed_at,state"
+                          " FROM observations WHERE observation_id=?",
+                          (row["observation_id"],)).fetchone()
+            if (not obs or obs[0]!=row["sha256"]
+                    or obs[2]!=row["osservato_utc"] or obs[3]!="OSSERVATO"):
                 raise FrozenMismatch("FAMILY_SOURCE_MUTATED:"+family)
+            observed=stamped(obs[2])
+            if observed is None:
+                raise FrozenMismatch("FAMILY_SOURCE_TIME_INVALID:"+family)
+            age=(consumed-observed).total_seconds()
+            # The live producer specification may tighten an older manifest.
+            limit=min(SPECS[family]["ttl_s"],row["ttl_s"])
+            if not -120<=age<=limit:
+                result[family]={"stato":("SCADUTO_AL_CONSUMO" if age>limit
+                                        else "TEMPO_FONTE_NON_VALIDO"),
+                                "osservazione":None,
+                                "observation_id":row["observation_id"],
+                                "sha256":row["sha256"],
+                                "eta_s_al_consumo":age,"ttl_s":limit}
+                continue
             result[family]={"stato":"RECENTE",
                             "osservazione":_decode(obs[1],obs[0]),
                             "observation_id":row["observation_id"],
-                            "sha256":row["sha256"]}
+                            "sha256":row["sha256"],
+                            "eta_s_al_consumo":age,"ttl_s":limit}
     return result
 
 
