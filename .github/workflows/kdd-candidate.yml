@@ -32,6 +32,8 @@ jobs:
         run: PYTHONPATH=.:scripts python -B -m unittest -v scripts.test_kdd27_export_commit
       - name: Drive UI handoff through the genuine bridge (no remote API)
         run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_drive_exchange
+      - name: KDD-24 PR79 original GPT Drive retriever full compatibility regression
+        run: PYTHONPATH=.:scripts python -B -m unittest -v scripts.test_kdd_gpt_drive_retriever
       - name: Unchanged R5 invariant tests against Android candidate (mapped, no skips)
         run: PYTHONPATH=.:scripts python -B scripts/kdd_android_regressions.py
       - name: Public Kraken order-book funding scenarios (separate from Termux packaging fixture)
