@@ -200,11 +200,26 @@ def recent_artifact(store, frozen, now, max_age_s):
     """Return immutable output only for EXACT same frozen market and wallet."""
     schema(store)
     with store.connection() as c:
-        row=c.execute("""SELECT dossier_sha256,dossier_z,source_status_json,built_at
-                         FROM dossier_artifacts WHERE source_sha256=?
+        row=c.execute("""SELECT dossier_sha256,dossier_z,source_status_json,built_at,
+                          snapshot_id FROM dossier_artifacts WHERE source_sha256=?
                          AND wallet_sha256=? ORDER BY built_at DESC LIMIT 1""",
                       (frozen["source_sha256"],frozen["wallet_sha256"])).fetchone()
-    if not row:
+        origin=(c.execute("SELECT manifest_sha256,manifest_json FROM dossier_freezes"
+                          " WHERE snapshot_id=?",(row[4],)).fetchone() if row else None)
+    if not row or not origin:
+        return None
+    try:
+        prior=json.loads(origin[1])
+    except (ValueError,TypeError) as exc:
+        raise FrozenMismatch("REUSED_MANIFEST_INVALID") from exc
+    if core.sha(core.encode(prior))!=origin[0]:
+        raise FrozenMismatch("REUSED_MANIFEST_DIGEST_INVALID")
+    # Same market/wallet is insufficient if a source-family observation
+    # rotated between dossier requests: never silently reuse its evidence.
+    def identity(manifest):
+        return {item["family"]:(item["stato"],item.get("observation_id"),
+                               item.get("sha256")) for item in manifest["families"]}
+    if identity(prior)!=identity(frozen["manifest"]):
         return None
     built=dt.datetime.fromisoformat(row[3])
     age=(now-built).total_seconds()
