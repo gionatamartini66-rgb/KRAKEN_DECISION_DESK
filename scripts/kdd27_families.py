@@ -190,6 +190,9 @@ def collect(store, family, now=None, *, overrides=None):
                                          "motivo":type(exc).__name__})
         result={"coppie":observations,"campione_scanner":len(rows),
                 "copertura":len(observations)}
+        if not any(row.get("stato") in ("OSSERVATO","COMPLETO_4H",
+                    "FINESTRA_4H_NON_COPERTA") for row in observations):
+            result["stato"]="NON_DISPONIBILE"
     elif family=="binance_spot":
         import binance_reference
         cat=deps["market_catalog"]
@@ -200,11 +203,17 @@ def collect(store, family, now=None, *, overrides=None):
                                          shortlist=())
         # Provider function has its own bounded 2-call default here (no shortlist).
         count.calls=2 if result.get("status")!="NO_PAIR" else 1
+        if result.get("status")!="OK":
+            result["stato"]="NON_DISPONIBILE"
     elif family=="futures_public":
         import kdd_futures_flow
         result=kdd_futures_flow.collect(now,request=(
             overrides.get("futures_request",desk.request)))
         count.calls=2
+        if not any(isinstance(result.get(key),dict)
+                   and result[key].get("stato")=="OSSERVATO"
+                   for key in ("funding","esecuzioni")):
+            result["stato"]="NON_DISPONIBILE"
     elif family=="fundamentals":
         import dossier_trade
         cat=deps["market_catalog"]
@@ -254,6 +263,9 @@ def collect(store, family, now=None, *, overrides=None):
         result=kdd_network_defi.collect(
             now,owned,candidates,fetch=overrides.get("onchain_fetch"),
             economics=economic,previous=prior)
+        if not any(isinstance(row,dict) and row.get("stato")=="OSSERVATO"
+                   for row in (result.get("fonti") or {}).values()):
+            result["stato"]="NON_DISPONIBILE"
         count.calls=(result.get("asset_reti") or {}).get(
                     "flussi_capitale",{}).get("richieste_effettuate",0)
         # Public native/DeFi queries are not all counted above. Preserve
