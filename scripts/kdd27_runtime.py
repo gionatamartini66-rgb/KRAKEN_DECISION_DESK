@@ -795,6 +795,13 @@ def _real_dossier_producer(store, request_id, now):
     availability=("PRONTO_LOCALE" if can_export and
                   publication=="PRONTO_PER_FOLDERSYNC"
                   else "PARZIALE_LOCALE")
+    # Source quality is evaluated at THIS request's actual consumption
+    # point; a formerly verified producer result cannot extend expired TTLs.
+    valid_at_consumption=(not expired_consumed and not expired_before_publish)
+    idoneita_consumer=(eligible if valid_at_consumption
+                       else "NON_IDONEA_FONTE_SCADUTA")
+    completezza_consumer=(completeness if valid_at_consumption
+                          else "PARZIALE_FONTE_SCADUTA")
     return {"snapshot_sha":snapshot_sha,
             "snapshot_time":frozen["source_observed_at"],
             "snapshot_id":frozen["snapshot_id"],
@@ -805,15 +812,18 @@ def _real_dossier_producer(store, request_id, now):
             "handoff_file":str(local_handoff) if local_handoff else None,
             "publication_state":publication,
             "dossier_status":availability,
-            "quality":{"stato_fonti":completeness,
-                       "idoneita":eligible,
+            "quality":{"stato_fonti":completezza_consumer,
+                       "idoneita":idoneita_consumer,
                        "stato_produttore":state,
                        "lacune":missing,
                        "immagine_congelata_utc":frozen["frozen_at"],
                        "manifest_origin":frozen["manifest_sha256"],
                        "reused_artifact_from":reused_from,
-                       "observations_consumed":quality.get("observations_consumed",used_ids)
-                         if isinstance(quality,dict) else used_ids},
+                       "observations_consumed":used_ids,
+                       "richiesto_utc":iso(requested_at),
+                       "consumato_utc":iso(consumed_at),
+                       "controllato_pubblicazione_utc":iso(publication_checked_at),
+                       "pubblicazione_conclusa_utc":iso(instant())},
             "reused_from":reused_from}
 
 
