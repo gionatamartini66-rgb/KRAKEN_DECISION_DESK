@@ -462,7 +462,23 @@ def prepare_export(*, require_recent=False, precommit=None):
                 outgoing / (digest + ".json"), expected_parent=outgoing))
             if bridge.verify_local_origin(original) != digest:
                 raise bridge.BridgeError("Origine esportazione in corso discordante")
-        else:
+            if require_recent:
+                # RECOVERY-04: the pending A belongs to an earlier request.
+                # Only a VERIFIED, provably expired A may be archived and
+                # skipped in this same call. An ambiguous origin or clock,
+                # corrupt journal or identity mismatch must fail closed.
+                context = bridge.read_context(original)
+                state = (context["mercato"]["stato"], context["saldo"]["stato"])
+                if (all(x in ("RECENTE", "DA_AGGIORNARE") for x in state)
+                        and "DA_AGGIORNARE" in state):
+                    _retire_rejected_export(journal, pending, original)
+                    retry = False
+                elif state != ("RECENTE", "RECENTE"):
+                    raise bridge.BridgeError(
+                        "Journal verificato ma freschezza non accertabile")
+        if not retry:
+            # A stale journal has been safely retired; begin the caller's B
+            # transaction without asking for another manual request.
             original, _ = _prepare_private_origin()
             if require_recent:
                 _require_recent_export(original)
@@ -501,7 +517,17 @@ def prepare_export(*, require_recent=False, precommit=None):
             dossier = _export_bundle(
                 original, precommit=gate if (require_recent or precommit is not None) else None)
         except ExportGateRejected:
-            _retire_rejected_export(journal, pending, original)
+            # A newly created journal may be safely retired; for an existing
+            # fresh journal, a failed KDD-27 identity/TTL callback is NOT
+            # proof of staleness and must not discard the pending recovery.
+            if not retry:
+                _retire_rejected_export(journal, pending, original)
+            elif require_recent:
+                context=bridge.read_context(original)
+                state=(context["mercato"]["stato"],context["saldo"]["stato"])
+                if (all(x in ("RECENTE","DA_AGGIORNARE") for x in state)
+                        and "DA_AGGIORNARE" in state):
+                    _retire_rejected_export(journal, pending, original)
             raise
         pending.unlink()
         bridge._sync_dir(journal)
