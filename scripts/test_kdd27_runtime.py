@@ -387,6 +387,109 @@ class DossierProducerTests(unittest.TestCase):
         export.assert_not_called()
 
 
+
+class TemporalRegressionTests(unittest.TestCase):
+    """RED on PR #80 at 96fab8f: B clocks and frozen TTL at consumption."""
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store=k27.Store(Path(self.tmp.name))
+
+    def _frozen(self,family,when):
+        import sqlite3,zlib
+        from scripts import kdd27_freeze as freeze
+        uid="time_"+family
+        source={"rilevazione_utc":k27.iso(when),"market":1}
+        wallet={"posizioni":[]}
+        self.store.enqueue_dossier(uid,when)
+        payload={"pairs":{"BTC/EUR":{}},"tickers":{}} if family=="market_catalog" else {"v":1}
+        raw=k27.encode(payload)
+        digest=k27.sha(raw)
+        oid=k27.sha(k27.encode([family,k27.iso(when),digest]))
+        with self.store.connection() as c:
+            c.execute("INSERT INTO observations VALUES(?,?,?,?,?,?,?,?,?)",
+                      (oid,"fixture",family,k27.iso(when),k27.iso(when),
+                       digest,sqlite3.Binary(zlib.compress(raw)),len(raw),"OSSERVATO"))
+        src=self.store.record_dossier_snapshot(uid,source,source["rilevazione_utc"])
+        fixed=freeze.freeze(self.store,uid,now=when,source=source,
+                    source_observation_id=src["observation_id"],wallet=wallet)
+        self.assertEqual(next(x for x in fixed["manifest"]["families"]
+                             if x["family"]==family)["stato"],"RECENTE")
+        return fixed
+
+    def test_time01_refresh_10_30_150_seconds_after_request_remains_publishable(self):
+        import decision_desk as desk
+        from scripts import kdd_drive_exchange as exchange
+        for delay in (10,30,150):
+            with self.subTest(seconds=delay),tempfile.TemporaryDirectory() as folder:
+                store=k27.Store(Path(folder))
+                requested=dt.datetime.now(UTC)-dt.timedelta(seconds=delay)
+                acquired=dt.datetime.now(UTC)
+                wallet={"posizioni":[]}
+                snapshot={"rilevazione_utc":k27.iso(acquired),"market":1}
+                dossier={"schema":3,"creato_utc":k27.iso(acquired),
+                    "kraken_istantanea_utc":snapshot["rilevazione_utc"],
+                    "fotografia_portafoglio_sha256":desk.fotografia_portafoglio_sha256(wallet)}
+                files={"portafoglio.json":wallet,
+                       "ultima_rilevazione.json":{"rilevazione_utc":k27.iso(
+                           requested-dt.timedelta(hours=2))},"dossier_multifonte.json":{}}
+                published=[]
+                def refresh(*,prepare_dossier=False):
+                    self.assertFalse(prepare_dossier)
+                    files["ultima_rilevazione.json"]=snapshot
+                    return snapshot
+                def deepen(source,**kwargs):
+                    self.assertEqual(source,snapshot)
+                    files["dossier_multifonte.json"]=dossier
+                    return {"stato":"PRONTO_PER_ESAME_GPT_CON_LIMITI",
+                            "stato_fonti_mercato":"VERIFICATA",
+                            "idoneita_analisi_patrimoniale":"IDONEA"}
+                def exporting(**kwargs):
+                    published.append(True)
+                    return Path(folder)/"test-handoff.json"
+                with mock.patch.object(desk,"load",side_effect=lambda name,default=None:
+                                       files.get(name,default)), \
+                     mock.patch.object(desk,"refresh",side_effect=refresh), \
+                     mock.patch.object(desk,"prepara_dossier_aggiornamento",
+                                       side_effect=deepen), \
+                     mock.patch.object(exchange,"prepare_export",side_effect=exporting):
+                    uid="delay_"+str(delay)
+                    store.enqueue_dossier(uid,requested)
+                    got=store.process_queue(k27.real_dossier_producer,
+                                            now=requested,limit=1)
+                self.assertEqual(got,[(uid,"PRONTO_LOCALE")])
+                self.assertEqual(len(published),1)
+                self.assertEqual(store.dossier_status(uid)[0]["publication_state"],
+                                 "PRONTO_PER_FOLDERSYNC")
+
+    def test_time02_catalog_valid_freeze_expired_consumption_35m(self):
+        from scripts import kdd27_freeze as freeze
+        when=dt.datetime.now(UTC)-dt.timedelta(minutes=35)
+        fixed=self._frozen("market_catalog",when)
+        result=freeze.family_inputs(self.store,fixed,when+dt.timedelta(minutes=35))
+        self.assertEqual(result["market_catalog"]["stato"],"SCADUTO_AL_CONSUMO")
+        self.assertIsNone(result["market_catalog"]["osservazione"])
+        self.assertEqual(freeze.get(self.store,"time_market_catalog")["manifest_sha256"],
+                         fixed["manifest_sha256"])
+
+    def test_time02_book_trades_ttl_299_300_301_seconds(self):
+        from scripts import kdd27_freeze as freeze
+        for family in ("spot_book","spot_trades"):
+            with self.subTest(family=family),tempfile.TemporaryDirectory() as folder:
+                self.store=k27.Store(Path(folder))
+                when=dt.datetime.now(UTC)-dt.timedelta(minutes=6)
+                fixed=self._frozen(family,when)
+                for seconds,expected in ((299,"RECENTE"),(300,"RECENTE"),
+                                         (301,"SCADUTO_AL_CONSUMO")):
+                    result=freeze.family_inputs(self.store,fixed,
+                             when+dt.timedelta(seconds=seconds))[family]
+                    self.assertEqual(result["stato"],expected)
+                    if seconds>300:
+                        self.assertIsNone(result["osservazione"])
+                self.assertEqual(freeze.get(self.store,"time_"+family)["manifest_sha256"],
+                                 fixed["manifest_sha256"])
+
+
 class DossierHTTPTests(unittest.TestCase):
     def test_real_localhost_handler_request_id_idempotence_and_status(self):
         import http.client
