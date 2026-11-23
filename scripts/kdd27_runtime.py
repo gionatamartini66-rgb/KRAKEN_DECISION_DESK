@@ -484,6 +484,10 @@ def _produce_dossier_measured(store, request_id, now, desk, exchange,
         (recent or {}).get('payload',{}).get('snapshot',{}).get('rilevazione_utc')
         == observed and sha(encode((recent or {}).get('payload',{}).get('snapshot',{})))
         == sha(encode(current))) else None
+    if monitor_run is None:
+        dossier_seen = store.latest('DOSSIER_FRESHNESS')
+        if dossier_seen and dossier_seen.get('sha256') == sha(encode(current)):
+            monitor_run = dossier_seen['run_id']
     return {"snapshot_sha": sha(encode(current)), "snapshot_time": observed,
             "dossier_sha": dossier_digest, "handoff_file": str(local_handoff),
             "source_run_id": monitor_run,
