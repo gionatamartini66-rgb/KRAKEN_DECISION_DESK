@@ -28,6 +28,8 @@ jobs:
         run: PYTHONPATH=.:scripts python -B -m unittest -v test_kdd_g2_economic_functional
       - name: Private packet, market age and portfolio 4TF synthetic tests
         run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_wallet_packet_g0 scripts.test_kdd_market_freshness scripts.test_kdd_portfolio_4tf scripts.test_kdd_android_transaction_g2 test_kdd_economics test_kdd_economic_sources test_kdd_futures_flow test_kdd_network_defi
+      - name: KDD-27 export precommit expiry and GPT indexed publication recovery (genuine modules)
+        run: PYTHONPATH=.:scripts python -B -m unittest -v scripts.test_kdd27_export_commit
       - name: Drive UI handoff through the genuine bridge (no remote API)
         run: PYTHONPATH=.:scripts python -B -m unittest -q scripts.test_kdd_drive_exchange
       - name: Unchanged R5 invariant tests against Android candidate (mapped, no skips)
