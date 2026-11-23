@@ -225,6 +225,22 @@ class Store:
                                     "error": type(exc).__name__, "missed": missed})
             return results
 
+    def record_dossier_snapshot(self, request_id, snapshot, observed_at):
+        """Append an independently acquired B snapshot, never alter A calendar."""
+        raw = encode(snapshot)
+        digest = sha(raw)
+        observed = dt.datetime.fromisoformat(observed_at)
+        if observed.tzinfo is None or observed > instant()+dt.timedelta(minutes=2):
+            raise ValueError("Invalid dossier snapshot time")
+        uid = sha(encode([request_id, 'DOSSIER_FRESHNESS', observed_at, digest]))
+        with self.connection() as c:
+            c.execute("BEGIN IMMEDIATE")
+            c.execute("INSERT OR IGNORE INTO observations VALUES(?,?,?,?,?,?,?,?,?)",
+                      (uid, request_id, 'DOSSIER_FRESHNESS', observed_at, iso(),
+                       digest, sqlite3.Binary(zlib.compress(raw)),len(raw),'OSSERVATO'))
+            c.commit()
+        return digest
+
     def latest(self, family=MONITOR_JOB):
         with self.connection() as c:
             row = c.execute("SELECT run_id,observed_at,sha256,payload_z"
@@ -362,8 +378,18 @@ def real_dossier_producer(store, request_id, now):
 
 def _produce_dossier_measured(store, request_id, now, desk, exchange,
                               current, age):
+    recent_monitor = store.latest()
+    recent_snapshot = ((recent_monitor.get('payload') or {}).get('snapshot')
+                       if recent_monitor else None)
+    # The stored source can be used as evidence only when the exact current
+    # working snapshot agrees; otherwise a new real refresh is mandatory.
+    if isinstance(recent_snapshot, dict) and isinstance(current, dict) and (
+        recent_snapshot.get('rilevazione_utc') == current.get('rilevazione_utc')):
+        if sha(encode(recent_snapshot)) != sha(encode(current)):
+            age = float('inf')
     if not (0 <= age <= SNAPSHOT_MAX_AGE_SECONDS):
         current = desk.refresh(prepare_dossier=False)
+        store.record_dossier_snapshot(request_id, current, current['rilevazione_utc'])
     observed = current["rilevazione_utc"]
     # Caches already-built dossier only for the identical Kraken snapshot and
     # within a bounded age. No renewed timestamps are assigned to cached data.
@@ -415,9 +441,13 @@ def _produce_dossier_measured(store, request_id, now, desk, exchange,
     if local_handoff is None:
         local_handoff = exchange.prepare_export(require_recent=True)
     recent = store.latest()
+    monitor_run = (recent or {}).get('run_id') if (
+        (recent or {}).get('payload',{}).get('snapshot',{}).get('rilevazione_utc')
+        == observed and sha(encode((recent or {}).get('payload',{}).get('snapshot',{})))
+        == sha(encode(current))) else None
     return {"snapshot_sha": sha(encode(current)), "snapshot_time": observed,
             "dossier_sha": dossier_digest, "handoff_file": str(local_handoff),
-            "source_run_id": (recent or {}).get("run_id"),
+            "source_run_id": monitor_run,
             "reused_from": prev[0] if prev and reuse else None}
 
 
