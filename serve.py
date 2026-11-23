@@ -36,7 +36,9 @@ def _refresh_worker():
     outcome = "riuscito"
     handoff_stato, handoff_file = "non_eseguito", None
     try:
-        desk.refresh(prepare_dossier=False)
+        from scripts import kdd27_runtime as k27
+        # Explicit manual market refresh is also a durable A observation.
+        k27.Store().run_manual_monitor(k27.real_monitor_worker)
     except Exception as exc:
         outcome = "errore"
         print("Aggiornamento fallito:", type(exc).__name__, str(exc), flush=True)
@@ -62,7 +64,8 @@ def _dossier_worker():
         # between two manual requests can run without shifting its schedule.
         for _ in range(k27.MAX_QUEUE):
             try:
-                processed = store.process_queue(k27.real_dossier_producer, limit=1)
+                processed = store.process_queue(k27.real_dossier_producer, limit=1,
+                                                wait=True)
             except RuntimeError as exc:
                 if str(exc) == 'KDD27_BUSY':
                     break  # another producer will trigger queue resumption
@@ -1637,6 +1640,8 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     with ThreadingHTTPServer((HOST, PORT), Handler) as server:
+        # Pending explicit dossier requests survive an interrupted web process.
+        kick_dossier_queue()
         print(f"Kraken Decision Desk pronto: http://{HOST}:{PORT}/", flush=True)
         print("Termux CTRL+C per fermare il servizio. Nessuna API privata.", flush=True)
         server.serve_forever(poll_interval=0.3)
