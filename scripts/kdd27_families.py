@@ -28,6 +28,18 @@ _FAMILIES = (
  ("macro_context",43200,21600,86400,1,()),
  ("decision_review",21600,10800,86400,8,()),
 )
+# A provider pause blocks only families actually querying that provider.
+# This maps network paths, not a claim of complete provider coverage.
+FAMILY_PROVIDERS = {
+ "wallet_spot":("kraken",), "market_catalog":("kraken",),
+ "scanner":("kraken",), "portfolio_4tf":("kraken",),
+ "spot_book":("kraken",),"spot_trades":("kraken",),
+ "binance_spot":("binance",),"futures_public":("kraken",),
+ "fundamentals":("coingecko","github"),
+ "primary_events":("github",), "network_defi":("defillama",),
+ "macro_context":("coingecko",), "decision_review":("kraken",)
+}
+
 SPECS = OrderedDict((name,dict(
     name=name,intervals={"A":a,"B":b},ttl_s=ttl,
     producer_budget_calls=calls,dependencies=dependencies,
