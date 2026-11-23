@@ -90,6 +90,77 @@ class ExportCommitRaceTests(unittest.TestCase):
             new_prepare.assert_not_called()
         self.assertFalse((self.folder/index_name).exists(),
                          "Retry committed an expired publication before checking age")
+        journal=bridge.PRIVATE_ROOT/"drive-export"
+        self.assertFalse((journal/exchange._PENDING_EXPORT).exists())
+        archived=journal/"rejected"/(bridge.digest(self.bundle)+".json")
+        self.assertTrue(archived.is_file())
+        self.assertEqual(bridge.strict_json(archived.read_bytes()),
+                         {"dossier_sha256":bridge.digest(self.bundle)})
+        self.assertEqual(bridge.verify_local_origin(self.bundle),
+                         bridge.digest(self.bundle))
+        # A rejected journal is retained privately, but no longer blocks the
+        # next authorized transaction. A synthetic test clock returns to T.
+        watch[0]=self.T
+        with mock.patch.object(bridge,"prepare",return_value=self.bundle), \
+             mock.patch.object(bridge,"read_context",side_effect=self._read_at(watch)):
+            self.assertEqual(exchange.prepare_export(require_recent=True),dossier)
+        self.assertTrue((self.folder/index_name).is_file())
+        self.assertEqual(archived.read_bytes(),
+                         bridge.canonical({"dossier_sha256":bridge.digest(self.bundle)})+b"\n")
+
+    def test_original_gpt_recovers_actual_previous_export_with_later_orphan(self):
+        """Real writer emits both files; failed newer writer exposes only dossier."""
+        watch=[self.T]
+        with mock.patch.object(bridge,"prepare",return_value=self.bundle), \
+             mock.patch.object(bridge,"read_context",side_effect=self._read_at(watch)):
+            old_name=exchange.prepare_export(require_recent=True)
+        old_raw=bridge.canonical(self.bundle)+b"\n"
+        old_d,old_idx,_=index.publication(self.bundle,old_raw)
+        self.assertEqual(old_name,old_d)
+        self.assertTrue((self.folder/old_idx).is_file())
+
+        later=self.T+dt.timedelta(seconds=1)
+        newer=bridge.prepare(self.fixture.fixture.root,now=later,_fixture=True)
+        new_raw=bridge.canonical(newer)+b"\n"
+        new_d,new_idx,_=index.publication(newer,new_raw)
+        self.assertNotEqual(new_d,old_d)
+        writer=exchange._publish_export_file
+        watch[0]=later
+        def expire_after_dossier(root,name,raw,**kwargs):
+            outcome=writer(root,name,raw,**kwargs)
+            if name==new_d:
+                watch[0]=self.T+dt.timedelta(seconds=1801)
+            return outcome
+        with mock.patch.object(bridge,"prepare",return_value=newer), \
+             mock.patch.object(bridge,"read_context",side_effect=self._read_at(watch)), \
+             mock.patch.object(exchange,"_publish_export_file",side_effect=expire_after_dossier):
+            with self.assertRaises(exchange.ExportGateRejected):
+                exchange.prepare_export(require_recent=True)
+        self.assertTrue((self.folder/new_d).is_file())
+        self.assertFalse((self.folder/new_idx).exists())
+
+        # Drive-shaped inventory of the EXACT bytes written by real producer.
+        files=[]
+        blobs={}
+        old_index_id=None
+        old_dossier_id=None
+        for i,path in enumerate(sorted(self.folder.glob("kdd_handoff*json"))):
+            raw=path.read_bytes()
+            file_id="actual-"+str(i)
+            files.append(retrieval_fixture.file_metadata(path.name,file_id,raw))
+            blobs[file_id]=raw
+            if path.name==old_idx:
+                old_index_id=file_id
+            if path.name==old_d:
+                old_dossier_id=file_id
+        self.assertIsNotNone(old_index_id)
+        self.assertIsNotNone(old_dossier_id)
+        driver=retrieval_fixture.FakeDrive(retrieval_fixture.pages_from(files),blobs)
+        got=retriever.kdd_get_latest_verified_dossier(
+            driver,retrieval_fixture.FOLDER,now=later)
+        self.assertEqual(got["stato"],retriever.RECOVERED)
+        self.assertEqual(got["file_id"],old_dossier_id)
+        self.assertEqual(driver.downloads,[old_index_id,old_dossier_id])
 
     def test_true_kdd27_freeze_gate_blocks_book_expiry_during_index_commit(self):
         """Actual B -> exchange -> original bridge, family TTL expires AFTER dossier."""
