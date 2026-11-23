@@ -651,6 +651,12 @@ def _real_dossier_producer(store, request_id, now):
     # Consume only immutable, TTL-checked family observations selected when
     # this request was frozen. Later scheduler activity cannot change inputs.
     inputs=frozen_archive.family_inputs(store,frozen,consumed_at)
+    # Freeze-time RECENTE is historical, not a TTL extension. Mark every
+    # formerly fresh family that expired before actual consumption.
+    was_recent={row["family"] for row in frozen["manifest"]["families"]
+                if row["stato"]=="RECENTE"}
+    expired_consumed=sorted(fam for fam in was_recent
+                            if inputs.get(fam,{}).get("stato")!="RECENTE")
     catalog=inputs.get("market_catalog") or {}
     asset_pairs=((catalog.get("osservazione") or {}).get("pairs")
                  if catalog.get("stato")=="RECENTE" else None)
@@ -731,10 +737,27 @@ def _real_dossier_producer(store, request_id, now):
         missing.append("FILE_MERCATO_MUTATO_RISPETTO_ALLA_FOTO_CONGELATA")
     if not dossier_same:
         missing.append("FILE_DOSSIER_MUTATO_RISPETTO_ALLA_FOTO_CONGELATA")
+    for family in expired_consumed:
+        missing.append("FONTE_SCADUTA_AL_CONSUMO:"+family)
+    # A deep dossier may have taken minutes to build: check TTL AGAIN just
+    # before local publication. No family sample is silently substituted.
+    publication_checked_at=instant()
+    publication_age=(publication_checked_at-instant_source).total_seconds()
+    before_publish=frozen_archive.family_inputs(store,frozen,publication_checked_at)
+    expired_before_publish=sorted(fam for fam in was_recent
+                                 if before_publish.get(fam,{}).get("stato")!="RECENTE")
+    for family in expired_before_publish:
+        label="FONTE_SCADUTA_ALLA_PUBBLICAZIONE:"+family
+        if label not in missing:
+            missing.append(label)
+    if not 0<=publication_age<=SNAPSHOT_MAX_AGE_SECONDS:
+        missing.append("FOTOGRAFIA_SCADUTA_ALLA_PUBBLICAZIONE")
     # PARTIAL material is preserved for review but an ineligible or stale
     # packet is NEVER automatically handed to GPT as if fully current.
     can_export=(eligible=="IDONEA" and wallet_same and market_same
-                and dossier_same and 0<=age<=SNAPSHOT_MAX_AGE_SECONDS)
+                and dossier_same and not expired_before_publish
+                and not expired_consumed
+                and 0<=publication_age<=SNAPSHOT_MAX_AGE_SECONDS)
     if can_export:
         try:
             # Existing validated packet and two-file FolderSync preparation.
@@ -744,19 +767,29 @@ def _real_dossier_producer(store, request_id, now):
                         desk.load("portafoglio.json",{}))==wallet_sha and
                     sha(encode(desk.load("ultima_rilevazione.json",{})))==snapshot_sha and
                     sha(encode(desk.load("dossier_multifonte.json",{})))==dossier_digest)
-            if stable:
+            finished_at=instant()
+            end_age=(finished_at-instant_source).total_seconds()
+            end_sources=frozen_archive.family_inputs(store,frozen,finished_at)
+            end_expired=sorted(fam for fam in was_recent
+                               if end_sources.get(fam,{}).get("stato")!="RECENTE")
+            if stable and 0<=end_age<=SNAPSHOT_MAX_AGE_SECONDS and not end_expired:
                 publication="PRONTO_PER_FOLDERSYNC"
             else:
                 local_handoff=None
-                publication="PUBBLICAZIONE_INCERTA_FILE_MUTATO"
-                missing.append("FILE_MUTATO_DURANTE_ESPORTAZIONE")
+                publication="PUBBLICAZIONE_INCERTA_CONSUMO_O_FILE_MUTATO"
+                if not stable:
+                    missing.append("FILE_MUTATO_DURANTE_ESPORTAZIONE")
+                if not 0<=end_age<=SNAPSHOT_MAX_AGE_SECONDS:
+                    missing.append("FOTOGRAFIA_SCADUTA_DURANTE_ESPORTAZIONE")
+                for family in end_expired:
+                    missing.append("FONTE_SCADUTA_DURANTE_ESPORTAZIONE:"+family)
         except Exception as exc:
             local_handoff=None
             publication="NON_PREPARATO_"+type(exc).__name__
             missing.append("HANDOFF_NON_PREPARATO:"+type(exc).__name__)
     else:
         publication="NON_PREPARATO_DATI_NON_IDONEI"
-        if age>SNAPSHOT_MAX_AGE_SECONDS:
+        if publication_age>SNAPSHOT_MAX_AGE_SECONDS:
             missing.append("FOTOGRAFIA_SCADUTA_AL_CONSUMO")
 
     availability=("PRONTO_LOCALE" if can_export and
