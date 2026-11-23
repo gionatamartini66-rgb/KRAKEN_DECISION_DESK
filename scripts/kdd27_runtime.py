@@ -24,8 +24,7 @@ SCHEMA = 1
 # Experimental configurations only; no automatic enrollment or Android job.
 PROFILES = {"A": 7200, "B": 3600}
 MONITOR_JOB = "legacy_public_and_wallet_refresh"
-MAX_QUEUE = 40
-MAX_DEEP_DAY = 20  # Experimental per-UTC-day cap; not a provider rate-limit.
+MAX_BATCH = 40  # Work per invocation, NEVER an admission or daily dossier cap.
 
 
 class BudgetDeferred(RuntimeError):
@@ -103,6 +102,12 @@ class Store:
               CREATE INDEX IF NOT EXISTS dossier_pending
                 ON dossier_requests(status,requested_at);
             """)
+        with self.connection() as c:
+            columns={row[1] for row in c.execute("PRAGMA table_info(dossier_requests)")}
+            for name in ("snapshot_id","manifest_sha","source_observation_id",
+                         "publication_state","quality_json","next_attempt_at"):
+                if name not in columns:
+                    c.execute("ALTER TABLE dossier_requests ADD COLUMN "+name+" TEXT")
         os.chmod(self.path, 0o600)
 
     @contextlib.contextmanager
@@ -328,14 +333,14 @@ class Store:
         observed = dt.datetime.fromisoformat(observed_at)
         if observed.tzinfo is None or observed > instant()+dt.timedelta(minutes=2):
             raise ValueError("Invalid dossier snapshot time")
-        uid = sha(encode([request_id, 'DOSSIER_FRESHNESS', observed_at, digest]))
+        uid = sha(encode(['DOSSIER_FRESHNESS', observed_at, digest]))
         with self.connection() as c:
             c.execute("BEGIN IMMEDIATE")
             c.execute("INSERT OR IGNORE INTO observations VALUES(?,?,?,?,?,?,?,?,?)",
                       (uid, request_id, 'DOSSIER_FRESHNESS', observed_at, iso(),
                        digest, sqlite3.Binary(zlib.compress(raw)),len(raw),'OSSERVATO'))
             c.commit()
-        return digest
+        return {'sha256':digest,'observation_id':uid}
 
     def latest(self, family=MONITOR_JOB):
         with self.connection() as c:
@@ -365,11 +370,6 @@ class Store:
             if row:
                 c.commit()
                 return {"request_id": request_id, "status": row[0], "reused_id": True}
-            count = c.execute("SELECT COUNT(*) FROM dossier_requests WHERE status IN"
-                              " ('IN_ATTESA','IN_CORSO')").fetchone()[0]
-            if count >= MAX_QUEUE:
-                c.rollback()
-                raise ValueError("CODA_COMPLETA")
             c.execute("INSERT INTO dossier_requests(request_id,requested_at,status)"
                       " VALUES(?,?,'IN_ATTESA')", (request_id,timestamp))
             c.commit()
@@ -386,13 +386,19 @@ class Store:
             keys = [item[1] for item in c.execute("PRAGMA table_info(dossier_requests)")]
         return [dict(zip(keys, row)) for row in rows]
 
-    def process_queue(self, producer, now=None, limit=40, *, wait=False):
+    def process_queue(self, producer, now=None, limit=MAX_BATCH, *, wait=False):
         """Serialize dossier runs with monitor runs, without modifying job dates."""
         results = []
         with self.exclusive(nonblocking=not wait):
             with self.connection() as c:
                 c.execute("BEGIN IMMEDIATE")
                 self._recover(c)
+                # Recover provider-delayed requests only when their recorded
+                # retry clock has elapsed, without changing the original id.
+                c.execute("UPDATE dossier_requests SET status='IN_ATTESA'"
+                          " WHERE status IN ('RINVIATO_PROVIDER','RINVIATO_RETE')"
+                          " AND next_attempt_at IS NOT NULL AND next_attempt_at<=?",
+                          (iso(instant(now)),))
                 c.commit()
             for _ in range(limit):
                 with self.connection() as c:
@@ -410,25 +416,40 @@ class Store:
                     produced = producer(self, request_id, instant(now))
                     if not isinstance(produced, dict):
                         raise ValueError("Invalid dossier producer result")
-                    required = ("snapshot_sha","snapshot_time","dossier_sha","handoff_file")
+                    required = ("snapshot_sha","snapshot_time","snapshot_id",
+                                "manifest_sha","dossier_sha","source_observation_id")
                     if any(not produced.get(k) for k in required):
                         raise ValueError("Incomplete dossier provenance")
                     with self.connection() as c:
-                        c.execute("UPDATE dossier_requests SET status='PRONTO_LOCALE',"
-                                  "completed_at=?,snapshot_sha=?,snapshot_time=?,"
-                                  "dossier_sha=?,handoff_file=?,source_run_id=?,"
-                                  "reused_from=?,metrics_json=? WHERE request_id=?",
-                                  (iso(), *(produced[k] for k in required),
-                                   produced.get("source_run_id"),produced.get("reused_from"),
-                                   encode(produced.get("metrics") or {}).decode(),request_id))
-                    results.append((request_id,"PRONTO_LOCALE"))
+                        state=produced.get("dossier_status","PARZIALE_LOCALE")
+                        if state not in ("PRONTO_LOCALE","PARZIALE_LOCALE"):
+                            raise ValueError("Invalid dossier completion state")
+                        c.execute("UPDATE dossier_requests SET status=?,completed_at=?,"
+                                  "snapshot_sha=?,snapshot_time=?,dossier_sha=?,handoff_file=?,"
+                                  "source_run_id=?,reused_from=?,metrics_json=?,snapshot_id=?,"
+                                  "manifest_sha=?,source_observation_id=?,publication_state=?,"
+                                  "quality_json=? WHERE request_id=?",
+                                  (state,iso(),produced["snapshot_sha"],
+                                   produced["snapshot_time"],produced["dossier_sha"],
+                                   produced.get("handoff_file"),produced.get("source_run_id"),
+                                   produced.get("reused_from"),
+                                   encode(produced.get("metrics") or {}).decode(),
+                                   produced["snapshot_id"],produced["manifest_sha"],
+                                   produced["source_observation_id"],
+                                   produced.get("publication_state","NON_PREPARATO"),
+                                   encode(produced.get("quality") or {}).decode(),request_id))
+                    results.append((request_id,state))
                 except Exception as exc:
-                    state = ('RINVIATO_BUDGET' if isinstance(exc, BudgetDeferred)
+                    state = ('RINVIATO_PROVIDER' if isinstance(exc,BudgetDeferred)
+                             else 'RINVIATO_RETE' if isinstance(exc, (OSError,ConnectionError))
                              else 'ERRORE')
+                    due=(instant(now)+dt.timedelta(minutes=5)).iso() if (
+                        state.startswith("RINVIATO_")) else None
                     with self.connection() as c:
                         c.execute("UPDATE dossier_requests SET status=?,"
-                                  "completed_at=?,error=? WHERE request_id=?",
-                                  (state, iso(), type(exc).__name__, request_id))
+                                  "completed_at=?,error=?,next_attempt_at=?"
+                                  " WHERE request_id=?",
+                                  (state,iso(),type(exc).__name__,due,request_id))
                     results.append((request_id,state))
         return results
 
@@ -472,100 +493,177 @@ def real_monitor_worker(name, run_id, due):
 
 
 def real_dossier_producer(store, request_id, now):
-    """On-demand dossier from one coherent legacy snapshot, existing bridge."""
-    import decision_desk as desk
-    from scripts import kdd_drive_exchange as exchange
-    current = desk.load("ultima_rilevazione.json", {})
-    observed = current.get("rilevazione_utc") if isinstance(current,dict) else None
-    try:
-        age = (now - dt.datetime.fromisoformat(observed)).total_seconds()
-    except (TypeError, ValueError, OverflowError):
-        age = float("inf")
+    """Use immutable historical snapshot; never replace it on retry."""
     from scripts.kdd27_telemetry import Telemetry
     with Telemetry() as meter:
-        result = _produce_dossier_measured(store, request_id, now, desk, exchange,
-                                          current, age)
-    result['metrics'] = meter.report()
-    return result
+        outcome=_real_dossier_producer(store,request_id,instant(now))
+    outcome["metrics"]=meter.report()
+    return outcome
 
 
-def _produce_dossier_measured(store, request_id, now, desk, exchange,
-                              current, age):
-    recent_monitor = store.latest()
-    recent_snapshot = ((recent_monitor.get('payload') or {}).get('snapshot')
-                       if recent_monitor else None)
-    # The stored source can be used as evidence only when the exact current
-    # working snapshot agrees; otherwise a new real refresh is mandatory.
-    if isinstance(recent_snapshot, dict) and isinstance(current, dict) and (
-        recent_snapshot.get('rilevazione_utc') == current.get('rilevazione_utc')):
-        if sha(encode(recent_snapshot)) != sha(encode(current)):
-            age = float('inf')
-    if not (0 <= age <= SNAPSHOT_MAX_AGE_SECONDS):
-        current = desk.refresh(prepare_dossier=False)
-        store.record_dossier_snapshot(request_id, current, current['rilevazione_utc'])
-    observed = current["rilevazione_utc"]
-    # Caches already-built dossier only for the identical Kraken snapshot and
-    # within a bounded age. No renewed timestamps are assigned to cached data.
-    old = desk.load("dossier_multifonte.json", {})
-    reuse = (isinstance(old,dict) and old.get("kraken_istantanea_utc")==observed
-             and isinstance(old.get("creato_utc"),str))
-    if reuse:
-        try:
-            elapsed = (now-dt.datetime.fromisoformat(old["creato_utc"])).total_seconds()
-            reuse = 0 <= elapsed <= CACHE_SECONDS
-        except (ValueError, TypeError):
-            reuse = False
-    if not reuse:
-        day = now.date().isoformat()
+def _real_dossier_producer(store, request_id, now):
+    import decision_desk as desk
+    from scripts import kdd_drive_exchange as exchange
+    from scripts import kdd27_freeze as frozen_archive
+
+    frozen=frozen_archive.get(store,request_id)
+    if frozen is None:
+        wallet=desk.load("portafoglio.json",{})
+        wallet_digest=desk.fotografia_portafoglio_sha256(wallet)
+        monitor=store.latest()
+        cached=store.latest("DOSSIER_FRESHNESS")
+        chosen=None
+        if monitor and monitor.get("state")=="OSSERVATO":
+            source=(monitor.get("payload") or {}).get("snapshot")
+            observed=(source or {}).get("rilevazione_utc") if isinstance(source,dict) else None
+            if isinstance(source,dict) and monitor["payload"].get("wallet_sha256")==wallet_digest:
+                try:
+                    age=(now-dt.datetime.fromisoformat(observed)).total_seconds()
+                    if 0<=age<=SNAPSHOT_MAX_AGE_SECONDS:
+                        chosen=source
+                except (ValueError,TypeError,OverflowError):
+                    pass
+        if chosen is None and cached and cached.get("state")=="OSSERVATO":
+            source=cached.get("payload")
+            observed=source.get("rilevazione_utc") if isinstance(source,dict) else None
+            try:
+                age=(now-dt.datetime.fromisoformat(observed)).total_seconds()
+                # Reuse only if its source AND wallet were actually frozen together.
+                with store.connection() as c:
+                    proof=c.execute("SELECT 1 FROM dossier_freezes WHERE"
+                         " source_sha256=? AND wallet_sha256=? LIMIT 1",
+                         (sha(encode(source)),wallet_digest)).fetchone()
+                if 0<=age<=SNAPSHOT_MAX_AGE_SECONDS and proof:
+                    chosen=source
+            except (ValueError,TypeError,OverflowError):
+                pass
+        if chosen is None:
+            chosen=desk.refresh(prepare_dossier=False)
+            # Wallet may have changed during the refresh; save only the
+            # post-refresh exact private image, never silently use an older one.
+            wallet=desk.load("portafoglio.json",{})
+            wallet_digest=desk.fotografia_portafoglio_sha256(wallet)
+        if not isinstance(chosen,dict) or not chosen.get("rilevazione_utc"):
+            raise ValueError("MERCATO_NON_DISPONIBILE")
+        record=store.record_dossier_snapshot(request_id,chosen,chosen["rilevazione_utc"])
+        frozen=frozen_archive.freeze(
+            store,request_id,now=now,source=chosen,
+            source_observation_id=record["observation_id"],wallet=wallet)
+
+    # All subsequent operations consume THIS exact archived market and wallet,
+    # even after the local JSON, roster, scanner or later family samples change.
+    snapshot=frozen["source"]
+    portfolio=frozen["wallet"]
+    snapshot_sha=frozen["source_sha256"]
+    wallet_sha=frozen["wallet_sha256"]
+    instant_source=dt.datetime.fromisoformat(frozen["source_observed_at"])
+    age=(now-instant_source).total_seconds()
+    if not -120<=age<=3600:
+        # Frozen means frozen: a missed retry cannot silently become today's
+        # snapshot. Make the stale request explicit, retain its immutable ID.
+        raise ValueError("FOTOGRAFIA_CONGELATA_SCADUTA")
+
+    cached_artifact=frozen_archive.recent_artifact(store,frozen,now,CACHE_SECONDS)
+    reused_from=None
+    if cached_artifact:
+        dossier=cached_artifact["dossier"]
+        quality=cached_artifact["status"]
         with store.connection() as c:
-            n = c.execute("SELECT COUNT(*) FROM dossier_requests WHERE"
-                          " status='PRONTO_LOCALE' AND reused_from IS NULL AND"
-                          " substr(completed_at,1,10)=?", (day,)).fetchone()[0]
-        if n >= MAX_DEEP_DAY:
-            raise BudgetDeferred('BUDGET_DOSSIER_GIORNALIERO')
-        status = desk.prepara_dossier_aggiornamento(current)
-        if status.get("stato") in ("NON_DISPONIBILE", "PARZIALE"):
-            raise ValueError("DOSSIER_NON_IDONEO")
-        old = desk.load("dossier_multifonte.json", {})
-    dossier_digest = sha(encode(old))
-    with store.connection() as c:
-        prev = c.execute("SELECT request_id,handoff_file FROM dossier_requests WHERE"
-                         " dossier_sha=? AND status='PRONTO_LOCALE'"
-                         " ORDER BY completed_at DESC LIMIT 1",
-                         (dossier_digest,)).fetchone()
-    local_handoff = None
-    if reuse and prev and prev[1]:
-        # Revalidate existing local handoff; a reference to a missing or
-        # corrupted file cannot satisfy a new request, nor renew its clock.
-        path = Path(prev[1])
+            old=c.execute("SELECT request_id FROM dossier_requests WHERE"
+                          " dossier_sha=? AND status IN"
+                          " ('PRONTO_LOCALE','PARZIALE_LOCALE')"
+                          " ORDER BY completed_at DESC LIMIT 1",
+                          (cached_artifact["dossier_sha"],)).fetchone()
+        reused_from=old[0] if old else None
+        dossier_digest=cached_artifact["dossier_sha"]
+    else:
+        quality=desk.prepara_dossier_aggiornamento(snapshot,wallet_override=portfolio)
+        dossier=desk.load("dossier_multifonte.json",{})
+        if not isinstance(dossier,dict) or not dossier.get("kraken_istantanea_utc"):
+            raise ValueError("DOSSIER_NON_PRODOTTO")
+        dossier_digest=frozen_archive.persist_artifact(store,frozen,dossier,quality)
+
+    completeness=(quality.get("stato_fonti_mercato")
+                  if isinstance(quality,dict) else "NON_VERIFICABILE")
+    eligible=(quality.get("idoneita_analisi_patrimoniale")
+              if isinstance(quality,dict) else "NON_IDONEA")
+    state=quality.get("stato") if isinstance(quality,dict) else "NON_DISPONIBILE"
+    if state=="NON_DISPONIBILE":
+        raise ValueError("DOSSIER_NON_DISPONIBILE")
+    if dossier.get("fotografia_portafoglio_sha256")!=wallet_sha:
+        raise ValueError("DOSSIER_DIVERGE_DA_WALLET_CONGELATO")
+    if dossier.get("kraken_istantanea_utc")!=frozen["source_observed_at"]:
+        raise ValueError("DOSSIER_DIVERGE_DA_MERCATO_CONGELATO")
+
+    local_handoff=None
+    publication="NON_PREPARATO"
+    missing=[]
+    if isinstance(quality,dict):
+        missing=list(quality.get("motivi_incompletezza") or [])[:30]
+        missing+=list(quality.get("motivi_patrimoniali") or [])[:30]
+    current_wallet=desk.load("portafoglio.json",{})
+    wallet_same=desk.fotografia_portafoglio_sha256(current_wallet)==wallet_sha
+    current_source=desk.load("ultima_rilevazione.json",{})
+    market_same=(isinstance(current_source,dict)
+                 and sha(encode(current_source))==snapshot_sha)
+    current_dossier=desk.load("dossier_multifonte.json",{})
+    dossier_same=(isinstance(current_dossier,dict)
+                  and sha(encode(current_dossier))==dossier_digest)
+    if not wallet_same:
+        missing.append("FILE_WALLET_MUTATO_RISPETTO_ALLA_FOTO_CONGELATA")
+    if not market_same:
+        missing.append("FILE_MERCATO_MUTATO_RISPETTO_ALLA_FOTO_CONGELATA")
+    if not dossier_same:
+        missing.append("FILE_DOSSIER_MUTATO_RISPETTO_ALLA_FOTO_CONGELATA")
+    # PARTIAL material is preserved for review but an ineligible or stale
+    # packet is NEVER automatically handed to GPT as if fully current.
+    can_export=(eligible=="IDONEA" and wallet_same and market_same
+                and dossier_same and 0<=age<=SNAPSHOT_MAX_AGE_SECONDS)
+    if can_export:
         try:
-            parent = exchange.EXCHANGE_ROOT.resolve(strict=True)
-            if path.is_symlink() or path.resolve().parent != parent:
-                raise ValueError('OUTBOX_NON_ATTENDIBILE')
-            if not 2 <= path.stat().st_size <= exchange.bridge.MAX_BYTES:
-                raise ValueError('DIMENSIONE_HANDOFF')
-            raw = exchange.bridge.strict_json(path.read_bytes())
-            check = exchange.bridge.read_context(raw, now=now)
-            if check['mercato']['stato'] != 'RECENTE' or check['saldo']['stato'] != 'RECENTE':
-                raise ValueError('HANDOFF_SCADUTO')
-            local_handoff = path
-        except (OSError,ValueError,KeyError,AttributeError,TypeError):
-            local_handoff = None
-    if local_handoff is None:
-        local_handoff = exchange.prepare_export(require_recent=True)
-    recent = store.latest()
-    monitor_run = (recent or {}).get('run_id') if (
-        (recent or {}).get('payload',{}).get('snapshot',{}).get('rilevazione_utc')
-        == observed and sha(encode((recent or {}).get('payload',{}).get('snapshot',{})))
-        == sha(encode(current))) else None
-    if monitor_run is None:
-        dossier_seen = store.latest('DOSSIER_FRESHNESS')
-        if dossier_seen and dossier_seen.get('sha256') == sha(encode(current)):
-            monitor_run = dossier_seen['run_id']
-    return {"snapshot_sha": sha(encode(current)), "snapshot_time": observed,
-            "dossier_sha": dossier_digest, "handoff_file": str(local_handoff),
-            "source_run_id": monitor_run,
-            "reused_from": prev[0] if prev and reuse else None}
+            # Existing validated packet and two-file FolderSync preparation.
+            local_handoff=exchange.prepare_export(require_recent=True)
+            # Check no producer replaced its current inputs during export.
+            stable=(desk.fotografia_portafoglio_sha256(
+                        desk.load("portafoglio.json",{}))==wallet_sha and
+                    sha(encode(desk.load("ultima_rilevazione.json",{})))==snapshot_sha and
+                    sha(encode(desk.load("dossier_multifonte.json",{})))==dossier_digest)
+            if stable:
+                publication="PRONTO_PER_FOLDERSYNC"
+            else:
+                local_handoff=None
+                publication="PUBBLICAZIONE_INCERTA_FILE_MUTATO"
+                missing.append("FILE_MUTATO_DURANTE_ESPORTAZIONE")
+        except Exception as exc:
+            local_handoff=None
+            publication="NON_PREPARATO_"+type(exc).__name__
+            missing.append("HANDOFF_NON_PREPARATO:"+type(exc).__name__)
+    else:
+        publication="NON_PREPARATO_DATI_NON_IDONEI"
+        if age>SNAPSHOT_MAX_AGE_SECONDS:
+            missing.append("FOTOGRAFIA_SCADUTA_AL_CONSUMO")
+
+    availability=("PRONTO_LOCALE" if can_export and
+                  publication=="PRONTO_PER_FOLDERSYNC"
+                  else "PARZIALE_LOCALE")
+    return {"snapshot_sha":snapshot_sha,
+            "snapshot_time":frozen["source_observed_at"],
+            "snapshot_id":frozen["snapshot_id"],
+            "manifest_sha":frozen["manifest_sha256"],
+            "source_observation_id":frozen["source_observation_id"],
+            "source_run_id":frozen["source_observation_id"],
+            "dossier_sha":dossier_digest,
+            "handoff_file":str(local_handoff) if local_handoff else None,
+            "publication_state":publication,
+            "dossier_status":availability,
+            "quality":{"stato_fonti":completeness,
+                       "idoneita":eligible,
+                       "stato_produttore":state,
+                       "lacune":missing,
+                       "immagine_congelata_utc":frozen["frozen_at"],
+                       "manifest_origin":frozen["manifest_sha256"],
+                       "reused_artifact_from":reused_from},
+            "reused_from":reused_from}
 
 
 def main(argv=None):
