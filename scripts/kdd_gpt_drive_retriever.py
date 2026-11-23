@@ -129,7 +129,8 @@ def _remaining(deadline: float) -> float:
     return min(remaining, MAX_REQUEST_SECONDS)
 
 
-def _inventory(reader: DriveReader, folder_id: str, deadline: float) -> tuple[list[dict], dict]:
+def _inventory(reader: DriveReader, folder_id: str, deadline: float, *,
+               attest_current: bool = False) -> tuple[list[dict], dict]:
     cursor: str | None = None
     used_tokens: set[str] = set()
     seen_ids: set[str] = set()
@@ -170,12 +171,13 @@ def _inventory(reader: DriveReader, folder_id: str, deadline: float) -> tuple[li
                 index.prepared_from_stamp(match[1])
             except ValueError as exc:
                 raise EvidenceFailure("DATA_PUBBLICAZIONE_KDD_INVALIDA") from exc
-            if file.get("trashed") is True:
-                raise EvidenceFailure("ELEMENTO_CESTINATO_NELLA_RISPOSTA")
-            if file.get("trashed") is not False:
-                raise EvidenceFailure("STATO_CESTINO_DOSSIER_NON_ATTESTATO")
-            if not isinstance(file.get("parents"), list) or file["parents"] != [folder_id]:
-                raise EvidenceFailure("CARTELLA_ORIGINE_NON_ATTESTATA")
+            if not attest_current:
+                if file.get("trashed") is True:
+                    raise EvidenceFailure("ELEMENTO_CESTINATO_NELLA_RISPOSTA")
+                if file.get("trashed") is not False:
+                    raise EvidenceFailure("STATO_CESTINO_DOSSIER_NON_ATTESTATO")
+                if file.get("parents") != [folder_id]:
+                    raise EvidenceFailure("CARTELLA_ORIGINE_NON_ATTESTATA")
             items.append(_file_metadata(file))
             if dossier_match:
                 audit["numero_dossier"] += 1
@@ -215,8 +217,6 @@ def _drive_timestamp(value: object) -> tuple[dt.datetime, bool, str] | None:
 
 
 def _select_candidates(files: list[dict]) -> tuple[str, str, list[dict], list[dict]]:
-    if not files:
-        raise EvidenceFailure("INDICE_CORRENTE_ASSENTE")
     named = {}
     for file in files:
         named.setdefault(file["name"], []).append(file)
@@ -235,8 +235,6 @@ def _select_candidates(files: list[dict]) -> tuple[str, str, list[dict], list[di
     digest = digests.pop()
     dossier_name, index_name = index.names(stamp, digest)
     indices, dossiers = named.get(index_name, []), named.get(dossier_name, [])
-    if not indices:
-        raise EvidenceFailure("INDICE_CORRENTE_ASSENTE")
     if not dossiers:
         raise EvidenceFailure("DOSSIER_INDICIZZATO_NON_ARRIVATO")
     if len(indices) + len(dossiers) > MAX_DOWNLOADS:
@@ -244,13 +242,29 @@ def _select_candidates(files: list[dict]) -> tuple[str, str, list[dict], list[di
     return stamp, digest, sorted(indices, key=lambda f: f["id"]), sorted(dossiers, key=lambda f: f["id"])
 
 
+def _connector_inventory_changed(first: list[dict], second: list[dict]) -> bool:
+    before = {file["id"]: file for file in first}
+    after = {file["id"]: file for file in second}
+    if any(after.get(file_id) != file for file_id, file in before.items()):
+        return True
+
+    # A publisher may expose a new dossier before committing its index.
+    # Keep #79's inventory check for every other change.
+    indexed_names = {file["name"] for file in second if index.INDEX.fullmatch(file["name"])}
+    for file_id in after.keys() - before.keys():
+        dossier = index.DOSSIER.fullmatch(after[file_id]["name"])
+        if dossier is None or index.names(*dossier.groups())[1] in indexed_names:
+            return True
+    return False
+
+
 def _candidate_size(file: dict, limit: int) -> int:
     if file["mimeType"] not in ("application/json", "application/octet-stream", "text/plain"):
         raise EvidenceFailure("TIPO_FILE_NON_BINARY")
-    created = _drive_timestamp(file["createdTime"])
-    modified = _drive_timestamp(file["modifiedTime"])
-    if created is not None and modified is not None and modified < created:
-        raise EvidenceFailure("TEMPI_DRIVE_INCOERENTI")
+    # Drive creation and source modification describe different events.
+    # FolderSync can preserve a modification timestamp older than the upload.
+    _drive_timestamp(file["createdTime"])
+    _drive_timestamp(file["modifiedTime"])
     version, revision = file["version"], file["headRevisionId"]
     if version is not None and (not isinstance(version, str)
                                 or not re.fullmatch(r"[1-9][0-9]{0,18}", version)):
@@ -291,13 +305,17 @@ def _read_identical(reader: DriveReader, candidates: list[dict], sizes: list[int
     return raw, raw_sha
 
 
-def _read_current(reader: DriveReader, stamp: str, digest: str, indices: list[dict],
-                  dossiers: list[dict], deadline: float) -> tuple[Dossier, str]:
+def _current_sizes(indices: list[dict], dossiers: list[dict]) -> tuple[list[int], list[int]]:
     index_sizes = [_candidate_size(file, index.MAX_INDEX_BYTES) for file in indices]
     dossier_sizes = [_candidate_size(file, MAX_BYTES) for file in dossiers]
     if sum(index_sizes) + sum(dossier_sizes) > MAX_TOTAL_BYTES:
         raise EvidenceFailure("LIMITE_BYTE_RECUPERO")
+    return index_sizes, dossier_sizes
 
+
+def _read_current(reader: DriveReader, stamp: str, digest: str, indices: list[dict],
+                  dossiers: list[dict], deadline: float) -> tuple[Dossier, str]:
+    index_sizes, dossier_sizes = _current_sizes(indices, dossiers)
     index_raw, index_sha = _read_identical(reader, indices, index_sizes, deadline)
     try:
         manifest = _canonical_object(index_raw)
@@ -341,14 +359,24 @@ def _check_current_versions(reader: DriveReader, candidates: list[dict], deadlin
     return checked
 
 
+def _attest_current(current, attest, deadline):
+    stamp, digest, indices, dossiers = current
+    rows = [attest(file, timeout=_remaining(deadline)) for file in indices + dossiers]
+    _remaining(deadline)
+    files = [file for file, _ in rows]
+    return (stamp, digest, files[:len(indices)], files[len(indices):]), dict(
+        (file["id"], evidence) for file, evidence in rows)
+
+
 def _final_context(dossier: Dossier, validator: BridgeReader, when: dt.datetime) -> dict:
     # Original KDD bridge is the normative semantic validator. It validates
     # packet digest, wallet identities, prices, timestamps, evidence and freshness.
     try:
         context = validator.validate(dossier.handoff, when, dossier.logical_sha)
+    except ImportError as exc:
+        raise EvidenceFailure("VALIDATORE_KDD_INDISPONIBILE") from exc
     except Exception as exc:
-        # Fail closed even for missing import/bridge dependencies. Do not
-        # expose untrusted payload text or internal exception messages.
+        # Do not expose untrusted payload text or internal exception messages.
         raise EvidenceFailure("VALIDATORE_KDD_NON_SUPERATO") from exc
     if not isinstance(context, dict) or context.get("schema") != "kdd_gpt_read_context_v001":
         raise EvidenceFailure("RISULTATO_VALIDATORE_INVALIDO")
@@ -503,10 +531,10 @@ def kdd_get_latest_verified_dossier(reader: DriveReader, folder_id: str, *,
                                    validator: BridgeReader | None = None,
                                    now: dt.datetime | None = None,
                                    clock: Callable[[], dt.datetime] | None = None) -> dict:
-    """Recover the current visible Drive candidate without historical fallback.
+    """Recover the publication with the newest visible KDD index.
 
-    The newest dated publication must have both a valid index and matching
-    dossier. Drive scans/version checks only detect reported changes.
+    Unindexed dossiers do not commit a publication. The selected index must be
+    valid and match its dossier. Drive scans/version checks detect reported changes.
     A fixed `now` allows deterministic fixture replay; `clock` can advance.
     """
     audit = {}
@@ -517,19 +545,35 @@ def kdd_get_latest_verified_dossier(reader: DriveReader, folder_id: str, *,
         if not isinstance(folder_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{6,128}", folder_id):
             raise EvidenceFailure("CARTELLA_NON_CONFIGURATA")
         validator = validator if validator is not None else OriginalKddBridge()
-        first, audit = _inventory(reader, folder_id, deadline)
+        attest = getattr(reader, "attest_candidate", None)
+        first, audit = _inventory(reader, folder_id, deadline, attest_current=attest is not None)
         audit.update(numero_file_indicizzazione=len(first), massimo_preparato_utc_verificato=False)
-        stamp, digest, indices, dossiers = current = _select_candidates(first)
+        inventoried = current = _select_candidates(first)
+        if attest is not None:
+            current, _ = _attest_current(current, attest, deadline)
+        stamp, digest, indices, dossiers = current
         candidates = indices + dossiers
         audit.update(criterio_selezione="MASSIMO_PREPARATO_UTC_INDICIZZATO",
                      numero_file_correnti=len(candidates), numero_candidati_correnti=len(dossiers),
                      dossier_fuori_selezione_non_validati=audit["numero_dossier"] - len(dossiers))
         selected, index_sha = _read_current(reader, stamp, digest, indices, dossiers, deadline)
-        second, _ = _inventory(reader, folder_id, deadline)
-        if _select_candidates(second) != current:
+        second, _ = _inventory(reader, folder_id, deadline, attest_current=attest is not None)
+        observed = _select_candidates(second)
+        if (observed != inventoried
+                or (attest is not None and _connector_inventory_changed(first, second))):
             raise EvidenceFailure("INVENTARIO_CAMBIATO_DURANTE_LA_LETTURA")
-        checked = _check_current_versions(reader, candidates, deadline)
+        if attest is None:
+            checked = _check_current_versions(reader, candidates, deadline)
+        else:
+            observed, evidence = _attest_current(observed, attest, deadline)
+            if observed != current:
+                raise EvidenceFailure("METADATI_PUNTUALI_CAMBIATI_DURANTE_LA_LETTURA")
+            checked = sum(file["version"] is not None or file["headRevisionId"] is not None
+                          for file in candidates)
+            audit["attestazioni_drive"] = evidence
         audit.update(inventario_stabile_su_due_scansioni=True, numero_controlli_versione=checked,
+                     stabilita_versioni_drive=("ATTESTATA_PER_TUTTI_I_CANDIDATI" if checked == len(candidates)
+                                              else "PARZIALE" if checked else "NON_ATTESTATA"),
                      atomicita_inventario=False)
         return _validated_answer(selected, validator, clock or (lambda: now), deadline,
                                  dict(audit, massimo_preparato_utc_verificato=True,
