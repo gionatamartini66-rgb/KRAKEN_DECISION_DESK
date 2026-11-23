@@ -348,12 +348,14 @@ def real_dossier_producer(store, request_id, now):
         age = float("inf")
     from scripts.kdd27_telemetry import Telemetry
     with Telemetry() as meter:
-        return _produce_dossier_measured(store, request_id, now, desk, exchange,
-                                        current, age, meter)
+        result = _produce_dossier_measured(store, request_id, now, desk, exchange,
+                                          current, age)
+    result['metrics'] = meter.report()
+    return result
 
 
 def _produce_dossier_measured(store, request_id, now, desk, exchange,
-                              current, age, meter):
+                              current, age):
     if not (0 <= age <= SNAPSHOT_MAX_AGE_SECONDS):
         current = desk.refresh(prepare_dossier=False)
     observed = current["rilevazione_utc"]
@@ -383,8 +385,7 @@ def _produce_dossier_measured(store, request_id, now, desk, exchange,
     return {"snapshot_sha": sha(encode(current)), "snapshot_time": observed,
             "dossier_sha": sha(encode(old)), "handoff_file": str(local_handoff),
             "source_run_id": (recent or {}).get("run_id"),
-            "reused_from": prev[0] if prev and reuse else None,
-            "metrics": meter.report()}
+            "reused_from": prev[0] if prev and reuse else None}
 
 
 def main(argv=None):
