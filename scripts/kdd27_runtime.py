@@ -578,6 +578,10 @@ def real_dossier_producer(store, request_id, now):
 
 
 def _real_dossier_producer(store, request_id, now):
+    # now supplied by the queue is the REQUEST instant, not a clock for
+    # samples acquired later. Re-read the physical clock at every gate.
+    requested_at=instant(now)
+    now=instant()
     import decision_desk as desk
     from scripts import kdd_drive_exchange as exchange
     from scripts import kdd27_freeze as frozen_archive
@@ -618,6 +622,7 @@ def _real_dossier_producer(store, request_id, now):
             if pause:
                 raise BudgetDeferred("KRAKEN_HTTP_429",retry_at=pause)
             chosen=desk.refresh(prepare_dossier=False)
+            now=instant()  # collection ended: request_at cannot validate this sample
             # Wallet may have changed during the refresh; save only the
             # post-refresh exact private image, never silently use an older one.
             wallet=desk.load("portafoglio.json",{})
@@ -626,7 +631,7 @@ def _real_dossier_producer(store, request_id, now):
             raise ValueError("MERCATO_NON_DISPONIBILE")
         record=store.record_dossier_snapshot(request_id,chosen,chosen["rilevazione_utc"])
         frozen=frozen_archive.freeze(
-            store,request_id,now=now,source=chosen,
+            store,request_id,now=instant(),source=chosen,
             source_observation_id=record["observation_id"],wallet=wallet)
 
     # All subsequent operations consume THIS exact archived market and wallet,
@@ -636,7 +641,8 @@ def _real_dossier_producer(store, request_id, now):
     snapshot_sha=frozen["source_sha256"]
     wallet_sha=frozen["wallet_sha256"]
     instant_source=dt.datetime.fromisoformat(frozen["source_observed_at"])
-    age=(now-instant_source).total_seconds()
+    consumed_at=instant()
+    age=(consumed_at-instant_source).total_seconds()
     if not -120<=age<=3600:
         # Frozen means frozen: a missed retry cannot silently become today's
         # snapshot. Make the stale request explicit, retain its immutable ID.
@@ -644,7 +650,7 @@ def _real_dossier_producer(store, request_id, now):
 
     # Consume only immutable, TTL-checked family observations selected when
     # this request was frozen. Later scheduler activity cannot change inputs.
-    inputs=frozen_archive.family_inputs(store,frozen,now)
+    inputs=frozen_archive.family_inputs(store,frozen,consumed_at)
     catalog=inputs.get("market_catalog") or {}
     asset_pairs=((catalog.get("osservazione") or {}).get("pairs")
                  if catalog.get("stato")=="RECENTE" else None)
@@ -660,7 +666,7 @@ def _real_dossier_producer(store, request_id, now):
     if network.get("stato")=="RECENTE":
         previous_dossier["evidenze_rete_defi"]=network["osservazione"]
         used_ids.append(network["observation_id"])
-    cached_artifact=frozen_archive.recent_artifact(store,frozen,now,CACHE_SECONDS)
+    cached_artifact=frozen_archive.recent_artifact(store,frozen,instant(),CACHE_SECONDS)
     reused_from=None
     if cached_artifact:
         dossier=cached_artifact["dossier"]
@@ -674,7 +680,7 @@ def _real_dossier_producer(store, request_id, now):
         reused_from=old[0] if old else None
         dossier_digest=cached_artifact["dossier_sha"]
     else:
-        paused=store.active_pauses(now)
+        paused=store.active_pauses(instant())
         affected={p:paused[p] for p in ("kraken","coingecko","github")
                   if p in paused}
         if affected:
