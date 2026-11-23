@@ -203,7 +203,7 @@ def recent_artifact(store, frozen, now, max_age_s):
         return None
     built=dt.datetime.fromisoformat(row[3])
     age=(now-built).total_seconds()
-    if not 0<=age<=max_age_s:
+    if not -120<=age<=max_age_s:
         return None
     return {"dossier_sha":row[0],"dossier":_decode(row[1],row[0]),
             "status":json.loads(row[2]),"built_at":row[3]}
