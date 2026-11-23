@@ -348,6 +348,37 @@ class ExportCommitRaceTests(unittest.TestCase):
         self.assertFalse((self.folder/a_i).exists())
         self.assertEqual(archived.read_bytes(),original_journal)
 
+    def test_recovery04_A_expires_during_retry_and_fresh_B_still_commits(self):
+        """A can cross 1800s BETWEEN initial pending read and commit gate."""
+        a_d,a_i=self._crash_A_after_dossier()
+        later=self.T+dt.timedelta(seconds=1801)
+        B=self._fresh_rebuilt_bundle(later)
+        raw=bridge.canonical(B)+b"\n"
+        b_d,b_i,_=index.publication(B,raw)
+        clock=[self.T+dt.timedelta(seconds=1799)]
+        moved=[False]
+        def advance_after_A_first_check(bundle,**kwargs):
+            value=self.real_read(bundle,now=kwargs.get("now") or clock[0])
+            if bridge.digest(bundle)==bridge.digest(self.bundle) and not moved[0]:
+                self.assertEqual(value["mercato"]["stato"],"RECENTE")
+                moved[0]=True
+                clock[0]=later
+            return value
+        def require_B(bundle,*_):
+            if bridge.digest(bundle)!=bridge.digest(B):
+                raise bridge.BridgeError("RECOVERY04 foreign B identity")
+        with mock.patch.object(bridge,"prepare",return_value=B) as producer, \
+             mock.patch.object(bridge,"read_context",side_effect=advance_after_A_first_check):
+            got=exchange.prepare_export(require_recent=True,precommit=require_B)
+        self.assertTrue(moved[0])
+        producer.assert_called_once()
+        self.assertEqual(got,b_d)
+        self.assertTrue((self.folder/b_i).is_file())
+        self.assertFalse((self.folder/a_i).exists())
+        journal=bridge.PRIVATE_ROOT/"drive-export"
+        self.assertTrue((journal/"rejected"/(bridge.digest(self.bundle)+".json")).is_file())
+        self.assertFalse((journal/exchange._PENDING_EXPORT).exists())
+
     def test_true_kdd27_freeze_gate_blocks_book_expiry_during_index_commit(self):
         """Actual B -> exchange -> original bridge, family TTL expires AFTER dossier."""
         import json
