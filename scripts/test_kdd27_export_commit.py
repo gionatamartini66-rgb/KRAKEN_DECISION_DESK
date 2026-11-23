@@ -163,6 +163,89 @@ class ExportCommitRaceTests(unittest.TestCase):
         self.assertEqual(got["file_id"],old_dossier_id)
         self.assertEqual(driver.downloads,[old_index_id,old_dossier_id])
 
+    def _fresh_rebuilt_bundle(self,when):
+        """Create B from original synthetic KDD producer, not copied handoff."""
+        source=self.fixture.fixture
+        stamp=when.isoformat()
+        source.portfolio["data_ora_saldo_privato_utc"]=stamp
+        source.portfolio["fonte_quantita"]="Kraken BalanceEx API privata SOLA LETTURA, "+stamp
+        source.snapshot["rilevazione_utc"]=stamp
+        source.report["rilevazione_utc"]=stamp
+        source.dossier["kraken_istantanea_utc"]=stamp
+        source.dump()
+        bundle=bridge.prepare(source.root,now=when,_fixture=True)
+        result=self.real_read(bundle,now=when)
+        self.assertEqual(result["mercato"]["stato"],"RECENTE")
+        self.assertEqual(result["saldo"]["stato"],"RECENTE")
+        return bundle
+
+    def _crash_A_after_dossier(self):
+        """Verified immutable A original and visible orphan, missing index."""
+        dossier,index_name=self._names()
+        writer=exchange._publish_export_file
+        def crash(root,name,raw,**kwargs):
+            if name==index_name:
+                raise KeyboardInterrupt("RECOVERY04 synthetic crash after A dossier")
+            return writer(root,name,raw,**kwargs)
+        clock=[self.T]
+        with mock.patch.object(bridge,"prepare",return_value=self.bundle), \
+             mock.patch.object(bridge,"read_context",side_effect=self._read_at(clock)), \
+             mock.patch.object(exchange,"_publish_export_file",side_effect=crash):
+            with self.assertRaises(KeyboardInterrupt):
+                exchange.prepare_export(require_recent=True)
+        self.assertTrue((self.folder/dossier).is_file())
+        self.assertFalse((self.folder/index_name).exists())
+        return dossier,index_name
+
+    def test_recovery04_stale_pending_A_does_not_block_fresh_B_in_same_call(self):
+        """RED: A crash and 31m stale must not turn independent fresh B partial."""
+        a_d,a_i=self._crash_A_after_dossier()
+        a_bytes=(self.folder/a_d).read_bytes()
+        when=self.T+dt.timedelta(seconds=1861)
+        B=self._fresh_rebuilt_bundle(when)
+        b_raw=bridge.canonical(B)+b"\n"
+        b_d,b_i,_=index.publication(B,b_raw)
+        self.assertNotEqual(a_d,b_d)
+        checks=[]
+        def b_frozen_gate(actual,*_):
+            checks.append(bridge.digest(actual))
+            if bridge.digest(actual)!=bridge.digest(B):
+                raise bridge.BridgeError("RECOVERY04 identity drift")
+        clock=[when]
+        with mock.patch.object(bridge,"prepare",return_value=B) as producer, \
+             mock.patch.object(bridge,"read_context",side_effect=self._read_at(clock)):
+            got=exchange.prepare_export(require_recent=True,precommit=b_frozen_gate)
+        self.assertEqual(got,b_d)
+        producer.assert_called_once()
+        self.assertGreaterEqual(len(checks),2)
+        self.assertEqual(set(checks),{bridge.digest(B)})
+        self.assertTrue((self.folder/b_d).is_file())
+        self.assertTrue((self.folder/b_i).is_file())
+        self.assertFalse((self.folder/a_i).exists())
+        self.assertEqual((self.folder/a_d).read_bytes(),a_bytes)
+        journal=bridge.PRIVATE_ROOT/"drive-export"
+        archived=journal/"rejected"/(bridge.digest(self.bundle)+".json")
+        self.assertEqual(archived.read_bytes(),
+                         bridge.canonical({"dossier_sha256":bridge.digest(self.bundle)})+b"\n")
+        self.assertFalse((journal/exchange._PENDING_EXPORT).exists())
+        self.assertEqual(bridge.verify_local_origin(self.bundle),bridge.digest(self.bundle))
+        self.assertEqual(bridge.verify_local_origin(B),bridge.digest(B))
+        # The real Drive consumer reads the exact bytes from the real writer.
+        files=[]
+        blobs={}
+        selected={}
+        for i,path in enumerate(sorted(self.folder.glob("kdd_handoff*json"))):
+            fid="recovery04-"+str(i)
+            files.append(retrieval_fixture.file_metadata(path.name,fid,path.read_bytes()))
+            blobs[fid]=path.read_bytes()
+            selected[path.name]=fid
+        drive=retrieval_fixture.FakeDrive(retrieval_fixture.pages_from(files),blobs)
+        answer=retriever.kdd_get_latest_verified_dossier(
+            drive,retrieval_fixture.FOLDER,now=when)
+        self.assertEqual(answer["stato"],retriever.RECOVERED)
+        self.assertEqual(answer["file_id"],selected[b_d])
+        self.assertEqual(drive.downloads,[selected[b_i],selected[b_d]])
+
     def test_true_kdd27_freeze_gate_blocks_book_expiry_during_index_commit(self):
         """Actual B -> exchange -> original bridge, family TTL expires AFTER dossier."""
         import json
