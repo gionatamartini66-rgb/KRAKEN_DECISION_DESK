@@ -804,6 +804,10 @@ def with_controls(page: str, result: str = "") -> str:
             dossier_info += (' · Pubblicazione: ' +
                              html.escape(last_request.get('publication_state')
                                          or 'NON_VERIFICATA'))
+            if last_request.get("dossier_sha"):
+                dossier_info += (" · <a href='/dossier/archivio?request_id=" +
+                    urllib.parse.quote(last_request["request_id"],safe="") +
+                    "'>Apri dossier storico conservato</a>")
             if last_request.get('quality_json'):
                 import json as _json
                 try:
@@ -1503,6 +1507,26 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_html(400, "<h1>Coppia Kraken non valida o non online</h1>")
             except (OSError, RuntimeError, KeyError, TypeError, IndexError):
                 self.send_html(503, "<h1>Kraken pubblico non disponibile</h1>")
+            return
+        if url.path == "/dossier/archivio":
+            try:
+                from scripts import kdd27_runtime as k27
+                from scripts import kdd27_freeze as frozen
+                requested=urllib.parse.parse_qs(url.query).get("request_id",[])
+                if len(requested)!=1 or not re.fullmatch(
+                    r"[A-Za-z0-9._-]{1,80}",requested[0]):
+                    self.send_error(400,"Identificativo dossier non valido")
+                    return
+                artifact=frozen.artifact_for_request(k27.Store(),requested[0])
+                if artifact is None:
+                    self.send_error(404,"Dossier non disponibile")
+                    return
+                self.send_body(200,json.dumps(artifact,ensure_ascii=False,
+                               allow_nan=False),
+                               "application/json; charset=utf-8")
+            except Exception:
+                self.send_body(503,'{"stato":"ARCHIVIO_NON_VERIFICABILE"}',
+                               "application/json; charset=utf-8")
             return
         if url.path == "/monitor/fonti":
             try:
