@@ -235,7 +235,10 @@ class DossierProducerTests(unittest.TestCase):
             count["refresh"]+=1
             state["ultima_rilevazione.json"]=current
             return current
-        def deepen(snapshot, *, wallet_override=None):
+        def deepen(snapshot, *, wallet_override=None,
+                   previous_dossier_override=None,asset_pairs=None):
+            self.assertEqual(previous_dossier_override,{})
+            self.assertIsNone(asset_pairs)
             self.assertEqual(snapshot,current)
             self.assertEqual(wallet_override,wallet)
             count["deep"]+=1
