@@ -563,6 +563,24 @@ def _real_dossier_producer(store, request_id, now):
         # snapshot. Make the stale request explicit, retain its immutable ID.
         raise ValueError("FOTOGRAFIA_CONGELATA_SCADUTA")
 
+    # Consume only immutable, TTL-checked family observations selected when
+    # this request was frozen. Later scheduler activity cannot change inputs.
+    inputs=frozen_archive.family_inputs(store,frozen,now)
+    catalog=inputs.get("market_catalog") or {}
+    asset_pairs=((catalog.get("osservazione") or {}).get("pairs")
+                 if catalog.get("stato")=="RECENTE" else None)
+    previous_dossier={}
+    economic=inputs.get("fundamentals") or {}
+    network=inputs.get("network_defi") or {}
+    used_ids=[frozen["source_observation_id"]]
+    if catalog.get("stato")=="RECENTE":
+        used_ids.append(catalog["observation_id"])
+    if economic.get("stato")=="RECENTE":
+        previous_dossier["evidenze_economiche"]=economic["osservazione"]
+        used_ids.append(economic["observation_id"])
+    if network.get("stato")=="RECENTE":
+        previous_dossier["evidenze_rete_defi"]=network["osservazione"]
+        used_ids.append(network["observation_id"])
     cached_artifact=frozen_archive.recent_artifact(store,frozen,now,CACHE_SECONDS)
     reused_from=None
     if cached_artifact:
@@ -577,7 +595,14 @@ def _real_dossier_producer(store, request_id, now):
         reused_from=old[0] if old else None
         dossier_digest=cached_artifact["dossier_sha"]
     else:
-        quality=desk.prepara_dossier_aggiornamento(snapshot,wallet_override=portfolio)
+        options={"wallet_override":portfolio,
+                 "previous_dossier_override":previous_dossier}
+        if asset_pairs is not None:
+            options["asset_pairs"]=asset_pairs
+        quality=desk.prepara_dossier_aggiornamento(snapshot,**options)
+        quality=dict(quality or {})
+        quality["observations_consumed"]=used_ids
+        quality["snapshot_id"]=frozen["snapshot_id"]
         dossier=desk.load("dossier_multifonte.json",{})
         if not isinstance(dossier,dict) or not dossier.get("kraken_istantanea_utc"):
             raise ValueError("DOSSIER_NON_PRODOTTO")
@@ -662,7 +687,9 @@ def _real_dossier_producer(store, request_id, now):
                        "lacune":missing,
                        "immagine_congelata_utc":frozen["frozen_at"],
                        "manifest_origin":frozen["manifest_sha256"],
-                       "reused_artifact_from":reused_from},
+                       "reused_artifact_from":reused_from,
+                       "observations_consumed":quality.get("observations_consumed",used_ids)
+                         if isinstance(quality,dict) else used_ids},
             "reused_from":reused_from}
 
 
