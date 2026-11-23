@@ -25,7 +25,11 @@ SCHEMA = 1
 PROFILES = {"A": 7200, "B": 3600}
 MONITOR_JOB = "legacy_public_and_wallet_refresh"
 MAX_QUEUE = 40
-MAX_DEEP_DAY = 20  # Admission ceiling, not a provider rate-limit guarantee.
+MAX_DEEP_DAY = 20  # Experimental per-UTC-day cap; not a provider rate-limit.
+
+
+class BudgetDeferred(RuntimeError):
+    """A source refresh is deferred, never reported as current."""
 CACHE_SECONDS = 300
 SNAPSHOT_MAX_AGE_SECONDS = 600
 
@@ -304,11 +308,13 @@ class Store:
                                    encode(produced.get("metrics") or {}).decode(),request_id))
                     results.append((request_id,"PRONTO_LOCALE"))
                 except Exception as exc:
+                    state = ('RINVIATO_BUDGET' if isinstance(exc, BudgetDeferred)
+                             else 'ERRORE')
                     with self.connection() as c:
-                        c.execute("UPDATE dossier_requests SET status='ERRORE',"
+                        c.execute("UPDATE dossier_requests SET status=?,"
                                   "completed_at=?,error=? WHERE request_id=?",
-                                  (iso(), type(exc).__name__, request_id))
-                    results.append((request_id,"ERRORE"))
+                                  (state, iso(), type(exc).__name__, request_id))
+                    results.append((request_id,state))
         return results
 
 
@@ -371,19 +377,46 @@ def _produce_dossier_measured(store, request_id, now, desk, exchange,
         except (ValueError, TypeError):
             reuse = False
     if not reuse:
+        day = now.date().isoformat()
+        with store.connection() as c:
+            n = c.execute("SELECT COUNT(*) FROM dossier_requests WHERE"
+                          " status='PRONTO_LOCALE' AND reused_from IS NULL AND"
+                          " substr(completed_at,1,10)=?", (day,)).fetchone()[0]
+        if n >= MAX_DEEP_DAY:
+            raise BudgetDeferred('BUDGET_DOSSIER_GIORNALIERO')
         status = desk.prepara_dossier_aggiornamento(current)
         if status.get("stato") in ("NON_DISPONIBILE", "PARZIALE"):
             raise ValueError("DOSSIER_NON_IDONEO")
         old = desk.load("dossier_multifonte.json", {})
-    local_handoff = exchange.prepare_export(require_recent=True)
+    dossier_digest = sha(encode(old))
     with store.connection() as c:
-        prev = c.execute("SELECT request_id FROM dossier_requests WHERE"
+        prev = c.execute("SELECT request_id,handoff_file FROM dossier_requests WHERE"
                          " dossier_sha=? AND status='PRONTO_LOCALE'"
                          " ORDER BY completed_at DESC LIMIT 1",
-                         (sha(encode(old)),)).fetchone()
+                         (dossier_digest,)).fetchone()
+    local_handoff = None
+    if reuse and prev and prev[1]:
+        # Revalidate existing local handoff; a reference to a missing or
+        # corrupted file cannot satisfy a new request, nor renew its clock.
+        path = Path(prev[1])
+        try:
+            parent = exchange.EXCHANGE_ROOT.resolve(strict=True)
+            if path.is_symlink() or path.resolve().parent != parent:
+                raise ValueError('OUTBOX_NON_ATTENDIBILE')
+            if not 2 <= path.stat().st_size <= exchange.bridge.MAX_BYTES:
+                raise ValueError('DIMENSIONE_HANDOFF')
+            raw = exchange.bridge.strict_json(path.read_bytes())
+            check = exchange.bridge.read_context(raw, now=now)
+            if check['mercato']['stato'] != 'RECENTE' or check['saldo']['stato'] != 'RECENTE':
+                raise ValueError('HANDOFF_SCADUTO')
+            local_handoff = path
+        except (OSError,ValueError,KeyError,AttributeError,TypeError):
+            local_handoff = None
+    if local_handoff is None:
+        local_handoff = exchange.prepare_export(require_recent=True)
     recent = store.latest()
     return {"snapshot_sha": sha(encode(current)), "snapshot_time": observed,
-            "dossier_sha": sha(encode(old)), "handoff_file": str(local_handoff),
+            "dossier_sha": dossier_digest, "handoff_file": str(local_handoff),
             "source_run_id": (recent or {}).get("run_id"),
             "reused_from": prev[0] if prev and reuse else None}
 
