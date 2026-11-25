@@ -557,29 +557,41 @@ def prepare_export(*, require_recent=False, precommit=None):
 
 
 
-def find_origin(proposal):
-    """Origin is private KDD evidence, never part of FolderSync transport."""
-    snapshot = proposal.get("snapshot_id") if isinstance(proposal, dict) else None
-    if not isinstance(snapshot, str) or not bridge.HEX.fullmatch(snapshot):
+def _find_origins(snapshots):
+    """One bounded scan for requested snapshots; verify each original exactly once."""
+    if any(not isinstance(s, str) or not bridge.HEX.fullmatch(s) for s in snapshots):
         raise ProposalValidationError("Identita della fotografia non valida")
+    if not snapshots:
+        return {}
     try:
         outgoing = bridge.private_directory(bridge.OUTBOX)
-        matches = []
+        matches = {}
         for path in outgoing.iterdir():
             if path.name.startswith(".kdd-event-") and path.name.endswith(".tmp"):
                 continue
             if not re.fullmatch(r"[0-9a-f]{64}\.json", path.name):
                 continue
             bundle = bridge.strict_json(bridge.read_regular(path, expected_parent=outgoing))
-            if bundle.get("packet_sha256") == snapshot:
+            snapshot = bundle.get("packet_sha256")
+            if isinstance(snapshot, str) and snapshot in snapshots:
                 bridge.verify_local_origin(bundle)
-                matches.append(bundle)
-        if len(matches) != 1:
+                if snapshot in matches:
+                    raise bridge.BridgeError("Fotografia KDD originaria assente o ambigua")
+                matches[snapshot] = bundle
+        if set(matches) != set(snapshots):
             raise bridge.BridgeError("Fotografia KDD originaria assente o ambigua")
-        return matches[0]
+        return matches
     except (bridge.BridgeError, OSError) as exc:
         raise PrivatePersistenceError(
             "STOP PERSISTENZA PRIVATA: origine KDD non verificabile") from exc
+
+
+def find_origin(proposal):
+    """Origin is private KDD evidence, never part of FolderSync transport."""
+    snapshot = proposal.get("snapshot_id") if isinstance(proposal, dict) else None
+    if not isinstance(snapshot, str) or not bridge.HEX.fullmatch(snapshot):
+        raise ProposalValidationError("Identita della fotografia non valida")
+    return _find_origins({snapshot})[snapshot]
 
 
 def validate_raw(raw):
@@ -655,51 +667,260 @@ def _checked_approvals():
 bridge._approval_view_reader = _checked_approvals
 
 
+# Document lifecycle, independent of the decision/event/witness chain.
+# The existing private INCOMING_NAME remains the atomic current reference
+# and retains its original proposal schema. History is committed BEFORE
+# changing it; the current version may therefore also be in history after
+# an interrupted transition, but is never displayed as superseded then.
+_PROPOSAL_ARCHIVE = "proposal_versions"
+_PROPOSAL_INDEX = "proposal_versions.json"
+_PROPOSAL_INDEX_SCHEMA = "kdd_proposal_history_v001"
+
+
+def _successor(new, old):
+    """Strict creation order and non-regressing KDD observation; equal is ambiguous."""
+    return (bridge.instant(new["creato_utc"]) > bridge.instant(old["creato_utc"])
+            and bridge.instant(new["snapshot_utc"]) >= bridge.instant(old["snapshot_utc"]))
+
+
+def _read_proposal_history(folder, current, current_raw=None, current_bundle=None):
+    """Verify immutable versions and the durable ordered index, not human choices.
+
+    The sole permitted unindexed original is the still-current proposal:
+    interruption between preserving it and committing the updated index.
+    The sole permitted indexed current is the last one: interruption before
+    replacing the current reference. Neither is a supersession.
+    """
+    parent_identity = bridge._check_dir(folder)
+    directory = folder / _PROPOSAL_ARCHIVE
+    marker = folder / _PROPOSAL_INDEX
+    current_sha = bridge.digest(current) if current is not None else None
+    try:
+        os.lstat(marker)
+    except FileNotFoundError:
+        indexed = []
+        byte_hashes = {}
+    else:
+        obj = bridge.strict_json(bridge.read_regular(marker, expected_parent=folder))
+        if (not isinstance(obj, dict) or set(obj) != {"schema", "versions", "byte_sha256"}
+                or obj["schema"] != _PROPOSAL_INDEX_SCHEMA
+                or not isinstance(obj["versions"], list)
+                or any(not isinstance(x, str) or not bridge.HEX.fullmatch(x)
+                       for x in obj["versions"])
+                or len(set(obj["versions"])) != len(obj["versions"])
+                or not isinstance(obj["byte_sha256"], dict)
+                or set(obj["byte_sha256"]) != set(obj["versions"])
+                or any(not isinstance(x, str) or not bridge.HEX.fullmatch(x)
+                       for x in obj["byte_sha256"].values())):
+            raise bridge.BridgeError("Indice storico proposte non valido")
+        indexed = obj["versions"]
+        byte_hashes = obj["byte_sha256"]
+
+    records = {}
+    origins = ({current["snapshot_id"]: current_bundle}
+               if current is not None and current_bundle is not None else {})
+    try:
+        os.lstat(directory)
+    except FileNotFoundError:
+        pass
+    else:
+        identity = bridge._check_dir(directory)
+        for path in directory.iterdir():
+            if re.fullmatch(r"\.kdd-proposal-history-[A-Za-z0-9_-]+\.tmp", path.name):
+                _private_file_identity(path)
+                continue
+            if not re.fullmatch(r"[0-9a-f]{64}\.json", path.name):
+                raise bridge.BridgeError("Voce storica inattesa")
+            raw = bridge.read_regular(path, expected_parent=directory)
+            proposal = bridge.strict_json(raw)
+            if (not isinstance(proposal, dict)
+                    or set(proposal) != bridge.PROPOSAL_FIELDS
+                    or proposal["schema"] != bridge.SCHEMA_PROPOSAL
+                    or bridge.digest(proposal) != path.stem):
+                raise bridge.BridgeError("Originale storico non integro")
+            if (path.stem in byte_hashes
+                    and hashlib.sha256(raw).hexdigest() != byte_hashes[path.stem]):
+                raise bridge.BridgeError("Byte originali storici discordanti")
+            if path.stem == current_sha and raw != current_raw:
+                raise bridge.BridgeError("Originale corrente e copia storica discordanti")
+            snapshot = proposal["snapshot_id"]
+            if not isinstance(snapshot, str) or not bridge.HEX.fullmatch(snapshot):
+                raise bridge.BridgeError("Fotografia storica non valida")
+            records[path.stem] = proposal
+        if bridge._check_dir(directory) != identity:
+            raise bridge.BridgeError("Archivio proposte sostituito")
+    # Current validation already verified its origin. Batch only the remaining
+    # distinct snapshots: at most two outbox scans per document-state read,
+    # no persistent cache and no reuse across operations.
+    origins.update(_find_origins({p["snapshot_id"] for p in records.values()} - set(origins)))
+    for proposal in records.values():
+        if (proposal["snapshot_utc"]
+                != origins[proposal["snapshot_id"]]["packet"]["rilevazione_kdd_utc"]
+                or bridge.instant(proposal["creato_utc"])
+                < bridge.instant(proposal["snapshot_utc"])):
+            raise bridge.BridgeError("Fotografia storica incoerente")
+    if bridge._check_dir(folder) != parent_identity:
+        raise bridge.BridgeError("Inbox proposte sostituita")
+    expected = set(indexed)
+    if (not expected.issubset(records)
+            or set(records) - expected - ({current_sha} if current_sha else set())
+            or (current_sha in expected and indexed[-1] != current_sha)
+            or (current is None and (records or indexed))):
+        raise bridge.BridgeError("Indice e originali storici non riconciliati")
+    ordered = [records[sha] for sha in indexed if sha != current_sha]
+    if current is not None:
+        ordered.append(current)
+    if any(not _successor(b, a) for a, b in zip(ordered, ordered[1:])):
+        raise bridge.BridgeError("Successione storica incoerente")
+    return ({sha: records[sha] for sha in indexed if sha != current_sha},
+            (indexed, byte_hashes))
+
+
+def _write_history_file(folder, name, raw, *, immutable=False):
+    """Same-directory durable publication, under the existing decision flock."""
+    if len(raw) > bridge.MAX_BYTES:
+        raise bridge.BridgeError("Documento storico troppo grande: STOP")
+    target = folder / name
+    if immutable and bridge._path_present(target):
+        if bridge.read_regular(target, expected_parent=folder) != raw:
+            raise bridge.BridgeError("Collisione originale storico: STOP")
+        bridge._sync_dir(folder)
+        return
+    stage = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix=".kdd-proposal-history-",
+                                         suffix=".tmp", dir=folder, delete=False) as f:
+            stage = Path(f.name)
+            f.write(raw)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(stage, 0o600)
+        if immutable and bridge._path_present(target):
+            raise bridge.BridgeError("Collisione originale storico: STOP")
+        try:
+            os.replace(stage, target)
+            stage = None
+            bridge._sync_dir(folder)
+        except (OSError, bridge.BridgeError) as exc:
+            raise bridge.PublicationUncertain(
+                "PUBBLICAZIONE_INCERTA: storico proposte da riconciliare") from exc
+    finally:
+        if stage is not None:
+            stage.unlink(missing_ok=True)
+
+
+def _preserve_current(folder, raw, proposal, indexed):
+    sha = bridge.digest(proposal)
+    directory = bridge.ensure_dir(folder / _PROPOSAL_ARCHIVE)
+    _write_history_file(directory, sha + ".json", raw, immutable=True)
+    # A successfully fsynced index also makes creation of its sibling archive
+    # directory durable. A retry may find the predecessor already indexed.
+    versions, hashes = indexed
+    versions = versions if sha in versions else [*versions, sha]
+    hashes = {**hashes, sha: hashlib.sha256(raw).hexdigest()}
+    _write_history_file(folder, _PROPOSAL_INDEX, bridge.canonical({
+        "schema": _PROPOSAL_INDEX_SCHEMA, "versions": versions,
+        "byte_sha256": hashes}) + b"\n")
+
+
+def _check_current_chain(item, approved, events):
+    """A restored old reference is not a newly deliberable current document."""
+    if item is None:
+        return
+    proposal = item[0]
+    sha = bridge.digest(proposal)
+    head = _approved_head(approved)
+    # The approved chain may contain legitimate legacy approvals with equal
+    # proposal timestamps; an already approved head is not a new deliberation.
+    anchors = ([] if sha in approved else
+               [entry["proposta"] for entry in approved.values()])
+    anchors += [e["proposta"] for e in events
+                if "proposta" in e and e["versione_sha256"] != sha]
+    if ((sha in approved and sha != head)
+            or (sha not in approved and proposal["sostituisce_sha256"] != head)
+            or any(not _successor(proposal, p) for p in anchors)):
+        raise PrivatePersistenceError(
+            "STOP PERSISTENZA PRIVATA: corrente incoerente con deliberazioni conservate")
+
+
+def _reconcile_current(folder, item, approved, events):
+    """Under the existing decision flock, verify chain then retry durability.
+
+    The staged bytes were fsynced before rename. Directory syncs must succeed
+    even after restart, without relying on a volatile uncertainty flag.
+    """
+    _check_current_chain(item, approved, events)
+    if item is None:
+        return
+    try:
+        directory = folder / _PROPOSAL_ARCHIVE
+        if bridge._path_present(directory):
+            bridge._sync_dir(directory)
+        bridge._sync_dir(folder)
+    except (OSError, bridge.BridgeError) as exc:
+        raise PrivatePersistenceError(
+            "STOP PERSISTENZA PRIVATA: corrente da riconciliare") from exc
+
+
 def receive(raw):
-    """Validate and import a new version without losing a still-pending choice."""
+    """Validate and import, without interpreting supersession as a decision."""
     with _decision_writer():
         return _receive_locked(raw)
 
 
-def _receive_locked(raw):
-    proposal, _ = validate_raw(raw)
+def _receive_locked(raw, *, synced=False):
+    try:
+        proposal = bridge.strict_json(raw)
+    except bridge.BridgeError as exc:
+        raise ProposalValidationError("STOP VALIDAZIONE: documento non valido") from exc
+    sha = bridge.digest(proposal)
     folder = bridge.private_directory(bridge.INBOX, create=True)
     final = folder / INCOMING_NAME
-    sha = bridge.digest(proposal)
     approved = _checked_approvals()
     events = decision_history()
-    if sha in approved or any(e["versione_sha256"] == sha for e in events):
+    try:
+        before = _private_file_identity(final)
+    except (bridge.BridgeError, OSError) as exc:
+        raise PrivatePersistenceError(_PRIVATE_STOP) from exc
+    item, current_raw, history, indexed = _pending_state(folder)
+    _check_current_chain(item, approved, events)
+    existing = item[0] if item is not None else None
+    old = bridge.digest(existing) if existing is not None else None
+    decided = sha in approved or any(e["versione_sha256"] == sha for e in events)
+    if decided and not synced:
         raise bridge.BridgeError("Versione già deliberata: nessuna riattivazione")
+    if decided or sha == old or sha in history:
+        # Known exact digests are recognized BEFORE validating the old inbound
+        # candidate's freshness. Never reactivate an older proposal.
+        try:
+            bridge._sync_dir(folder)
+        except (OSError, bridge.BridgeError) as exc:
+            raise bridge.PublicationUncertain(
+                "PUBBLICAZIONE_INCERTA: inbox da riconciliare") from exc
+        return sha
 
-    before = _private_file_identity(final)
-    if before is not None:
-        existing = pending()
-        if existing is not None:
-            old = bridge.digest(existing[0])
-        else:
-            # Expired proposals remain identifiable from their private JSON.
-            # Never treat an unreadable existing file as an empty inbox.
-            old = bridge.digest(bridge.strict_json(
-                bridge.read_regular(final, expected_parent=folder)))
-        if old == sha:
-            # An earlier os.replace may have succeeded while directory fsync
-            # failed. Do not claim an idempotent SUCCESS until durability is
-            # rechecked on this attempt.
-            try:
-                bridge._sync_dir(folder)
-            except (OSError, bridge.BridgeError) as exc:
-                raise bridge.PublicationUncertain(
-                    "PUBBLICAZIONE_INCERTA: inbox da riconciliare") from exc
-            return sha
-        if not (old in approved or any(
-                e["versione_sha256"] == old and e["stato"] in ("RIFIUTATA", "RINVIATA")
-                for e in events)):
-            raise bridge.BridgeError("Proposta in attesa diversa: STOP, nessuna sovrascrittura")
-
-    # A rejected/deferred draft is not an APPROVED predecessor. Only the
-    # approved chain can be referenced here, since confirm() uses that bridge.
+    proposal, _ = validate_raw(raw)
+    # Only approvals can be named as an approved predecessor.
     if proposal["sostituisce_sha256"] != _approved_head(approved):
         raise bridge.BridgeError("Revisione non collegata all'ultima versione approvata")
+    # The latest received document, not delivery order or the decision time,
+    # anchors succession. Legacy decisions with full proposals also give
+    # lower bounds when the inbox was legitimately absent.
+    anchors = ([existing] if existing is not None else [])
+    anchors += [entry["proposta"] for entry in approved.values()]
+    anchors += [e["proposta"] for e in events if "proposta" in e]
+    if ((not anchors and events)
+            or any(not _successor(proposal, p) for p in anchors)):
+        raise ProposalValidationError(
+            "STOP VALIDAZIONE: cronologia proposta non successiva o ambigua")
+    if existing is not None:
+        try:
+            _preserve_current(folder, current_raw, existing, indexed)
+        except bridge.PublicationUncertain:
+            raise
+        except (bridge.BridgeError, OSError) as exc:
+            raise PrivatePersistenceError(
+                "STOP PERSISTENZA PRIVATA: storico proposte non conservato") from exc
 
     stage = None
     try:
@@ -715,7 +936,6 @@ def _receive_locked(raw):
         try:
             os.replace(stage, final)
         except OSError as exc:
-            # Replace may have completed before raising: never claim rollback.
             raise bridge.PublicationUncertain(
                 "PUBBLICAZIONE_INCERTA: sostituzione inbox da verificare") from exc
         stage = None
@@ -724,6 +944,11 @@ def _receive_locked(raw):
         except (OSError, bridge.BridgeError) as exc:
             raise bridge.PublicationUncertain(
                 "PUBBLICAZIONE_INCERTA: inbox da riconciliare") from exc
+    except bridge.PublicationUncertain:
+        raise
+    except OSError as exc:
+        raise PrivatePersistenceError(
+            "STOP PERSISTENZA PRIVATA: scrittura proposta non verificabile") from exc
     finally:
         if stage is not None:
             stage.unlink(missing_ok=True)
@@ -768,22 +993,17 @@ def receive_synced():
         raise FolderSyncError("STOP FolderSync: errore filesystem condiviso") from exc
     except bridge.BridgeError as exc:
         raise FolderSyncError("STOP FolderSync: file condiviso non verificabile") from exc
-    # A known, already decided version may be stale when FolderSync copies it
-    # back. Recognize its exact content digest before freshness validation.
+    # Exact known versions are inert, including undecided superseded ones.
+    # Keep private persistence failures distinct from shared transport errors.
     try:
-        proposal = bridge.strict_json(raw)
+        bridge.strict_json(raw)
     except bridge.BridgeError as exc:
         raise ProposalValidationError("STOP VALIDAZIONE: proposta ricevuta malformata") from exc
-    sha = bridge.digest(proposal)
-    with _decision_writer():
-        approved = _checked_approvals()
-        events = decision_history()
-        if sha in approved or any(e["versione_sha256"] == sha for e in events):
-            return sha  # previous A must not replace current B
-        current = pending()
-        if current is not None and bridge.digest(current[0]) == sha:
-            return sha
-        return _receive_locked(raw)
+    try:
+        with _decision_writer():
+            return _receive_locked(raw, synced=True)
+    except bridge.PublicationUncertain as exc:
+        raise PrivatePersistenceError(str(exc)) from exc
 
 _PRIVATE_STOP = "STOP PERSISTENZA PRIVATA: proposta non leggibile o non verificabile"
 
@@ -809,38 +1029,54 @@ def _missing_private_inbox():
     return _missing_private_directory(bridge.INBOX)
 
 
-def pending():
-    """None means VERIFIED ABSENCE, never an unreadable private proposal."""
-    _verify_continuity()
+def _pending_state(folder):
+    """Read the current original and reconcile the document history together."""
+    try:
+        path = folder / INCOMING_NAME
+        verified_folder = bridge._check_dir(folder)
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            if bridge._check_dir(folder) != verified_folder:
+                raise bridge.BridgeError("Inbox privata cambiata durante la lettura")
+            history, indexed = _read_proposal_history(folder, None)
+            return None, None, history, indexed
+        raw = bridge.read_regular(path, expected_parent=folder)
+        item = validate_raw(raw)
+        history, indexed = _read_proposal_history(folder, item[0], raw, item[1])
+        if bridge._check_dir(folder) != verified_folder:
+            raise bridge.BridgeError("Inbox privata cambiata durante la lettura")
+        return item, raw, history, indexed
+    except (bridge.BridgeError, OSError, TypeError, KeyError) as exc:
+        raise PrivatePersistenceError(_PRIVATE_STOP) from exc
+
+
+def _document_state():
+    events, approved = _verify_continuity()
     try:
         try:
             folder = bridge.private_directory(bridge.INBOX)
         except bridge.BridgeError:
             if _missing_private_inbox():
-                return None
+                return None, None, {}, ([], {})
             raise
-
-        path = folder / INCOMING_NAME
-        verified_folder = bridge._check_dir(folder)
-        # lstat confirms absence without following symlinks. A file that
-        # disappears after lstat still produces STOP in read_regular().
-        try:
-            os.lstat(path)
-        except FileNotFoundError:
-            # ENOENT may instead mean the *parent* disappeared or changed.
-            # Only an unchanged verified private directory permits ABSENT.
-            if bridge._check_dir(folder) != verified_folder:
-                raise bridge.BridgeError("Inbox privata cambiata durante la lettura")
-            return None
-        raw = bridge.read_regular(path, expected_parent=folder)
+        state = _pending_state(folder)
+        _check_current_chain(state[0], approved, events)
+        return state
+    except PrivatePersistenceError:
+        raise
     except (bridge.BridgeError, OSError) as exc:
         raise PrivatePersistenceError(_PRIVATE_STOP) from exc
-    try:
-        return validate_raw(raw)
-    except (ProposalValidationError, PrivatePersistenceError) as exc:
-        # This is an *already persisted private* document, not an inbound
-        # candidate. A corrupted/ownerless local draft belongs to private.
-        raise PrivatePersistenceError(_PRIVATE_STOP) from exc
+
+
+def pending():
+    """None means VERIFIED ABSENCE, never an unreadable private proposal."""
+    return _document_state()[0]
+
+
+def proposal_history():
+    """Original documents no longer current; no implied author decision."""
+    return _document_state()[2]
 
 
 def confirm(sha):
@@ -848,13 +1084,14 @@ def confirm(sha):
         item = pending()
         if item is None:
             raise bridge.BridgeError("Nessuna proposta in attesa")
+        events, approved = _verify_continuity()
+        _reconcile_current(bridge.private_directory(bridge.INBOX), item, approved, events)
         proposal, bundle = item
         if not isinstance(sha, str) or bridge.digest(proposal) != sha:
             raise bridge.BridgeError("Versione diversa: rivedere la proposta")
         if any(row["versione_sha256"] == sha and row["stato"] in ("RIFIUTATA", "RINVIATA")
-               for row in decision_history()):
+               for row in events):
             raise bridge.BridgeError("Versione gia rifiutata o rinviata: occorre nuova proposta")
-        approved = _checked_approvals()
         if sha in approved:
             # An idempotent replay must never invent a fresh timestamp.
             return {"stato": "GIA_PRESENTE", "versione_sha256": sha}
@@ -999,10 +1236,10 @@ def record_decision(raw):
             raise bridge.BridgeError("Versione o stato non valido")
         if not isinstance(note, str) or not note.strip() or len(note) > 1500:
             raise bridge.BridgeError("Motivazione o evidenza obbligatoria (massimo 1500 caratteri)")
-        current = pending()
-        approved = _checked_approvals()
-        events = decision_history()
+        events, approved = _verify_continuity()
         if state in ("RIFIUTATA", "RINVIATA"):
+            current = pending()
+            _reconcile_current(bridge.private_directory(bridge.INBOX), current, approved, events)
             if current is None or bridge.digest(current[0]) != sha or sha in approved:
                 raise bridge.BridgeError("Rifiuto/rinvio ammesso solo per proposta in attesa")
             if any(row["versione_sha256"] == sha and row["stato"] in ("RIFIUTATA", "RINVIATA")
@@ -1068,16 +1305,23 @@ def render_page(token):
         validation_error = str(exc)
     except bridge.BridgeError:
         validation_error = "STOP VALIDAZIONE: ricezione KDD non verificabile"
+    document_history = None
+    deliberation_error = None
+    approvals, events = {}, []
     try:
-        item = pending()
-        if item is not None:
-            # A private draft is not displayable as decidable without a
-            # trustworthy account of prior approvals and author decisions.
-            _checked_approvals()
-            decision_history()
+        with _decision_writer():
+            item, _, document_history, _ = _document_state()
+            events, approvals = _verify_continuity()
+            try:
+                _reconcile_current(bridge.private_directory(bridge.INBOX), item, approvals, events)
+            except PrivatePersistenceError as exc:
+                # Verified content remains consultable; new deliberations do not.
+                deliberation_error = str(exc)
         error = None
-    except bridge.BridgeError as exc:
+    except (bridge.BridgeError, OSError) as exc:
         item, error = None, str(exc)
+        if not isinstance(exc, PrivatePersistenceError):
+            error = _PRIVATE_STOP + " | " + error
     if error:
         preview = "<p class='warn'>STOP: " + esc(error) + "</p>"
     elif item is None:
@@ -1093,8 +1337,8 @@ def render_page(token):
         proposal, bundle = item
         state = bridge.read_context(bundle)
         sha = bridge.digest(proposal)
-        already_approved = sha in _checked_approvals()
-        decisions = [x for x in decision_history() if x["versione_sha256"] == sha]
+        already_approved = sha in approvals
+        decisions = [x for x in events if x["versione_sha256"] == sha]
         declined = any(x["stato"] in ("RIFIUTATA", "RINVIATA") for x in decisions)
         rows = "".join(
             "<article><b>" + esc(r["token"]) + " · " + esc(r["azione"]) + "</b><p>" +
@@ -1126,7 +1370,10 @@ def render_page(token):
     if validation_error:
         preview = ("<p class='warn'>STOP VALIDAZIONE: "
                    + esc(validation_error) + "</p>" + preview)
-    if item is not None and not error and (already_approved or declined):
+    if deliberation_error:
+        preview = "<p class='warn'>" + esc(deliberation_error) + "</p>" + preview
+    if item is not None and not error and (already_approved or declined
+                                           or deliberation_error or private_sync_error):
         preview = preview.split("<button onclick=", 1)[0]
     try:
         events = decision_history()
@@ -1146,7 +1393,31 @@ def render_page(token):
                     " · " + esc(x["versione_sha256"][:12]) + attribution +
                     order_note + " · " + esc(x["nota"]) + "</p>")
         history = "".join(event_line(x) for x in events)
-        archive = bridge.approved_html(verified_records=approvals) + "<h3>Decisioni e riesami datati</h3>" + (history or "<p>Nessun evento registrato.</p>")
+        historical_documents = []
+        for version, original in reversed(list((document_history or {}).items())):
+            author_states = []
+            if version in approvals:
+                author_states.append("APPROVATA")
+            author_states.extend(event_label(e["stato"]) for e in events
+                                 if e["versione_sha256"] == version)
+            decision = (" · decisioni esplicite: " + esc(", ".join(author_states))
+                        if author_states else " · nessuna decisione dell'autore")
+            historical_documents.append(
+                "<details><summary>SUPERATA DA UNA PROPOSTA SUCCESSIVA · "
+                + esc(original["proposta_id"]) + decision
+                + "</summary><p>SHA256 " + esc(version)
+                + " · fotografia " + esc(original["snapshot_utc"])
+                + " · creata " + esc(original["creato_utc"])
+                + "</p><pre style='white-space:pre-wrap;overflow-wrap:anywhere'>"
+                + esc(json.dumps(original, ensure_ascii=False, indent=2))
+                + "</pre></details>")
+        archive = ("<h3>Proposte superate · storico documentale</h3>"
+                   + ("<p class=\'warn\'>STOP PERSISTENZA PRIVATA: storico documentale non verificabile.</p>"
+                      if document_history is None else
+                      ("".join(historical_documents) or "<p>Nessuna proposta superata.</p>"))
+                   + bridge.approved_html(verified_records=approvals)
+                   + "<h3>Decisioni e riesami datati</h3>"
+                   + (history or "<p>Nessun evento registrato.</p>"))
     except Exception:
         archive = "<p>Archivio non verificabile: nessuna approvazione attestata.</p>"
     script = """<script>
@@ -1177,10 +1448,11 @@ async function kddFile(){
     if item is not None and not error:
         sha = bridge.digest(item[0])
         states = (("ESECUZIONE_DICHIARATA", "RIESAME", "RISCONTRO_DICHIARATO")
-                  if sha in _checked_approvals() else ("RIFIUTATA", "RINVIATA"))
-        if states and not (sha not in _checked_approvals() and any(
+                  if sha in approvals else
+                  (() if deliberation_error or private_sync_error else ("RIFIUTATA", "RINVIATA")))
+        if states and not (sha not in approvals and any(
                 x["versione_sha256"] == sha and x["stato"] in ("RIFIUTATA", "RINVIATA")
-                for x in decision_history())):
+                for x in events)):
             decision_form = ("<h3>Registra scelta o evento dell'autore</h3>"
                 "<select id='kdd-decision-state'>" +
                 "".join("<option value='" + x + "'>" + esc(event_label(x)) + "</option>" for x in states) +
@@ -1211,7 +1483,7 @@ Prepara fotografia privata di prova</button></details></section>
 <section><h2>2 · Ricezione della proposta da Drive</h2><p>FolderSync
 deposita proposta_portafoglio.json nella cartella KDD_TEST_SAMSUNG;
 il KDD controlla origine, integrità e versione prima di presentarla.
-La ricezione NON approva, NON invia ordini e NON esegue operazioni.</p>
+La ricezione NON approva, NON invia ordini e NON esegue operazioni. Una proposta valida e temporalmente successiva può diventare corrente senza decisione sulla precedente, che resta nello storico.</p>
 <details><summary>Apri la proposta da Drive (legacy)</summary><p>La sincronizzazione
 deve essere configurata e verificata separatamente. Se il file non è leggibile
 il KDD segnala STOP e conserva visibile la proposta privata già valida.</p></details>
@@ -1237,7 +1509,7 @@ def handle(action, raw):
                 "Percorso: " + str(path) + " | origine: " + origin_sha
                 + " | snapshot: " + snapshot_sha)
     if action == "ricevi":
-        return "Proposta valida, NON approvata. Versione: " + receive(raw)
+        return "Ricezione NON approvata; versione ricevuta o già nota: " + receive(raw)
     if action == "decisione":
         return "Evento decisionale conservato: " + record_decision(raw)
     if action == "conferma":

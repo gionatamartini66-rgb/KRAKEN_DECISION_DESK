@@ -277,8 +277,435 @@ class DriveUIHandoffTests(unittest.TestCase):
     def _candidate(self, name, parent=None):
         plan = copy.deepcopy(self.original.plan)
         plan["proposta_id"] = name
+        # Most fixtures represent successive analyses, with distinct creation
+        # timestamps even when they refer to the same KDD observation.
+        self._proposal_sequence = getattr(self, "_proposal_sequence", 0) + 1
+        plan["creato_utc"] = (bridge.instant(plan["creato_utc"])
+                              + dt.timedelta(microseconds=self._proposal_sequence)).isoformat()
         plan["sostituisce_sha256"] = parent
         return plan
+
+    def test_lifecycle_three_undecided_originals_and_only_current_confirmable(self):
+        self.original.persist_origin()
+        a, b, c = [self._candidate(x) for x in ("LIFE-A", "LIFE-B", "LIFE-C")]
+        sha_a, sha_b, sha_c = [bridge.digest(x) for x in (a, b, c)]
+        inbox = bridge.private_directory(bridge.INBOX)
+        current = inbox / exchange.INCOMING_NAME
+        archive = inbox / exchange._PROPOSAL_ARCHIVE
+        source = self.sync / exchange.INCOMING_NAME
+        self.assertEqual(exchange.receive(bridge.canonical(a)), sha_a)
+        raw_a = current.read_bytes()
+        source.write_bytes(bridge.canonical(b))
+        self.assertEqual(exchange.receive_synced(), sha_b)
+        raw_b = current.read_bytes()
+        self.assertEqual(exchange.proposal_history(), {sha_a: a})
+        self.assertEqual(exchange.receive(bridge.canonical(c)), sha_c)
+        self.assertEqual(exchange.proposal_history(), {sha_a: a, sha_b: b})
+        self.assertEqual((archive / (sha_a + ".json")).read_bytes(), raw_a)
+        self.assertEqual((archive / (sha_b + ".json")).read_bytes(), raw_b)
+        self.assertEqual(exchange.decision_history(), [])
+        self.assertEqual(bridge.load_archive(), {})
+        source.write_bytes(raw_a)
+        with mock.patch.object(bridge, "_LOCAL_ORIGINS", set()):
+            self.assertEqual(exchange.receive_synced(), sha_a)
+            self.assertEqual(exchange.pending()[0], c)
+            for endpoint, page in self._rt2_http_gets().items():
+                self.assertIn(sha_c, page)
+                self.assertIn("NON APPROVATA", page)
+                if endpoint == "/gpt":
+                    self.assertIn("SUPERATA DA UNA PROPOSTA SUCCESSIVA", page)
+                    self.assertIn("LIFE-A", page)
+                    self.assertIn("LIFE-B", page)
+                    self.assertIn(sha_a, page)
+        for sha in (sha_a, sha_b):
+            with self.assertRaises(bridge.BridgeError):
+                exchange.confirm(sha)
+            with self.assertRaises(bridge.BridgeError):
+                exchange.record_decision(bridge.canonical({
+                    "sha256": sha, "stato": "RIFIUTATA", "nota": "Versione non corrente"}))
+        self.assertEqual(exchange.confirm(sha_c)["stato"], "INSERITO")
+        self.assertEqual(set(bridge.load_archive()), {sha_c})
+        self.assertEqual(exchange.decision_history(), [])
+        self.assertEqual(exchange.proposal_history(), {sha_a: a, sha_b: b})
+
+    def test_lifecycle_reject_current_only_and_real_fork_late_replay(self):
+        import multiprocessing as mp
+        self.original.persist_origin()
+        a, b = self._candidate("FORK-A"), self._candidate("FORK-B")
+        sha_a = exchange.receive(bridge.canonical(a))
+        sha_b = exchange.receive(bridge.canonical(b))
+        source = self.sync / exchange.INCOMING_NAME
+        source.write_bytes(bridge.canonical(a))
+        ctx = mp.get_context("fork")
+        output = ctx.Queue()
+        def restarted():
+            try:
+                bridge._LOCAL_ORIGINS.clear()
+                output.put((exchange.receive_synced(),
+                            bridge.digest(exchange.pending()[0]),
+                            list(exchange.proposal_history())))
+            except BaseException as exc:
+                output.put(("ERROR", str(exc)))
+        process = ctx.Process(target=restarted)
+        process.start()
+        try:
+            self.assertEqual(output.get(timeout=12), (sha_a, sha_b, [sha_a]))
+        finally:
+            process.join(timeout=12)
+            if process.is_alive():
+                process.terminate()
+                process.join()
+            output.close()
+            output.join_thread()
+        self.assertEqual(process.exitcode, 0)
+        exchange.record_decision(bridge.canonical({
+            "sha256": sha_b, "stato": "RIFIUTATA", "nota": "Scelta esplicita B"}))
+        events = exchange.decision_history()
+        self.assertEqual([(e["versione_sha256"], e["stato"]) for e in events],
+                         [(sha_b, "RIFIUTATA")])
+        self.assertEqual(exchange.proposal_history(), {sha_a: a})
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_lifecycle_unknown_equal_or_older_and_corrupt_history_stop(self):
+        self.original.persist_origin()
+        old = self._candidate("UNKNOWN-OLD")
+        a, b = self._candidate("HISTORY-A"), self._candidate("HISTORY-B")
+        equal = self._candidate("UNKNOWN-EQUAL")
+        equal["creato_utc"] = b["creato_utc"]
+        sha_a = exchange.receive(bridge.canonical(a))
+        sha_b = exchange.receive(bridge.canonical(b))
+        for proposal in (old, equal):
+            with self.assertRaisesRegex(bridge.BridgeError, "cronologia"):
+                exchange.receive(bridge.canonical(proposal))
+        source = self.sync / exchange.INCOMING_NAME
+        source.write_bytes(b'{"incomplete":')
+        with self.assertRaises(exchange.ProposalValidationError):
+            exchange.receive_synced()
+        self.assertEqual(exchange.pending()[0], b)
+        folder = bridge.private_directory(bridge.INBOX)
+        archived = folder / exchange._PROPOSAL_ARCHIVE / (sha_a + ".json")
+        raw = archived.read_bytes()
+        # Equal canonical digest is not enough: original bytes are immutable.
+        archived.write_bytes(raw + b" ")
+        try:
+            self.assertEqual(bridge.digest(bridge.strict_json(archived.read_bytes())), sha_a)
+            with self.assertRaises(exchange.PrivatePersistenceError):
+                exchange.pending()
+            with self.assertRaises(exchange.PrivatePersistenceError):
+                exchange.confirm(sha_b)
+        finally:
+            archived.write_bytes(raw)
+        archived.unlink()
+        try:
+            with self.assertRaises(exchange.PrivatePersistenceError):
+                exchange.pending()
+            with self.assertRaises(exchange.PrivatePersistenceError):
+                exchange.confirm(sha_b)
+            source.write_bytes(bridge.canonical(a))
+            with self.assertRaises(exchange.PrivatePersistenceError):
+                exchange.receive_synced()
+            self.assertIn("STOP PERSISTENZA PRIVATA", exchange.render_page("TOKEN"))
+        finally:
+            archived.write_bytes(raw)
+            archived.chmod(0o600)
+        self.assertEqual(exchange.pending()[0], b)
+        self.assertEqual(exchange.proposal_history(), {sha_a: a})
+        self.assertEqual(exchange.decision_history(), [])
+
+    def test_lifecycle_interrupted_archive_index_and_current_commit(self):
+        import errno
+        import os
+        self.original.persist_origin()
+        a, b = self._candidate("INT-A"), self._candidate("INT-B")
+        sha_a = exchange.receive(bridge.canonical(a))
+        folder = bridge.private_directory(bridge.INBOX)
+        final = folder / exchange.INCOMING_NAME
+        archive = folder / exchange._PROPOSAL_ARCHIVE / (sha_a + ".json")
+        original = final.read_bytes()
+        real_replace = os.replace
+        def fail_index(stage, target):
+            if Path(target).name == exchange._PROPOSAL_INDEX:
+                raise OSError(errno.EIO, "synthetic index error")
+            return real_replace(stage, target)
+        with mock.patch.object(exchange.os, "replace", side_effect=fail_index):
+            with self.assertRaises(bridge.PublicationUncertain):
+                exchange.receive(bridge.canonical(b))
+        self.assertEqual(archive.read_bytes(), original)
+        self.assertEqual(exchange.pending()[0], a)
+        self.assertEqual(exchange.proposal_history(), {})
+        def fail_current(stage, target):
+            if Path(target) == final:
+                raise OSError(errno.EIO, "synthetic current error")
+            return real_replace(stage, target)
+        with mock.patch.object(exchange.os, "replace", side_effect=fail_current):
+            with self.assertRaises(bridge.PublicationUncertain):
+                exchange.receive(bridge.canonical(b))
+        self.assertEqual(final.read_bytes(), original)
+        self.assertEqual(exchange.pending()[0], a)
+        self.assertEqual(exchange.proposal_history(), {})
+        def replace_then_fail(stage, target):
+            result = real_replace(stage, target)
+            if Path(target) == final:
+                raise OSError(errno.EIO, "synthetic post-rename error")
+            return result
+        with mock.patch.object(exchange.os, "replace", side_effect=replace_then_fail):
+            with self.assertRaises(bridge.PublicationUncertain):
+                exchange.receive(bridge.canonical(b))
+        self.assertEqual(exchange.pending()[0], b)
+        self.assertEqual(exchange.receive(bridge.canonical(b)), bridge.digest(b))
+        self.assertEqual(archive.read_bytes(), original)
+        self.assertEqual(exchange.proposal_history(), {sha_a: a})
+        self.assertEqual(exchange.decision_history(), [])
+        self.assertEqual(bridge.load_archive(), {})
+
+    def test_rt81_persist_01_blocks_all_new_decisions_until_reconciled(self):
+        import errno
+        import multiprocessing as mp
+        self.original.persist_origin()
+        a, b = self._candidate("RT81-A"), self._candidate("RT81-B")
+        sha_a = exchange.receive(bridge.canonical(a))
+        sha_b = bridge.digest(b)
+        folder = bridge.private_directory(bridge.INBOX)
+        final = folder / exchange.INCOMING_NAME
+        archived = folder / exchange._PROPOSAL_ARCHIVE / (sha_a + ".json")
+        marker = folder / exchange._PROPOSAL_INDEX
+        raw_a = final.read_bytes()
+        raw_b = bridge.canonical(b) + b"\n"
+        source = self.sync / exchange.INCOMING_NAME
+        source.write_bytes(raw_b)
+        actual_sync = bridge._sync_dir
+        attempts = []
+        def fault(directory):
+            if Path(directory) == folder and final.read_bytes() == raw_b:
+                attempts.append("EIO")
+                raise OSError(errno.EIO, "persistent directory fsync after current rename")
+            return actual_sync(directory)
+        def decision(state):
+            return exchange.record_decision(bridge.canonical({
+                "sha256": sha_b, "stato": state, "nota": "Synthetic explicit decision"}))
+        with mock.patch.object(bridge, "_sync_dir", side_effect=fault):
+            with self.assertRaises(exchange.PrivatePersistenceError):
+                exchange.receive_synced()
+            self.assertEqual(final.read_bytes(), raw_b)
+            self.assertEqual(archived.read_bytes(), raw_a)
+            saved_index = marker.read_bytes()
+            for operation in (lambda: exchange.confirm(sha_b),
+                              lambda: decision("RIFIUTATA"), lambda: decision("RINVIATA")):
+                with self.assertRaisesRegex(exchange.PrivatePersistenceError, "riconciliare"):
+                    operation()
+            self.assertEqual(exchange.decision_history(), [])
+            self.assertEqual(bridge.load_archive(), {})
+            # Remove transport to prove that the UI independently reconciles,
+            # not merely that an inbound error hides the buttons.
+            source.unlink()
+            page = self._rt2_http_gets()["/gpt"]
+            self.assertIn(sha_b, page)
+            self.assertIn("RT81-A", page)
+            self.assertIn("STOP PERSISTENZA PRIVATA", page)
+            self.assertNotIn("Confermo questa versione nel KDD", page)
+            self.assertNotIn("Registra evento datato", page)
+            self.assertNotIn("id='kdd-decision-state'", page)
+            # A separate process, still with the persistent disk failure.
+            ctx = mp.get_context("fork")
+            queue = ctx.Queue()
+            def restart_blocked():
+                bridge._LOCAL_ORIGINS.clear()
+                try:
+                    exchange.confirm(sha_b)
+                except exchange.PrivatePersistenceError:
+                    queue.put("STOP")
+                else:
+                    queue.put("UNSAFE")
+            proc = ctx.Process(target=restart_blocked)
+            proc.start()
+            try:
+                self.assertEqual(queue.get(timeout=15), "STOP")
+            finally:
+                proc.join(timeout=15)
+                if proc.is_alive():
+                    proc.terminate()
+                    proc.join()
+                queue.close()
+                queue.join_thread()
+            self.assertEqual(proc.exitcode, 0)
+        self.assertGreaterEqual(len(attempts), 5)
+        self.assertEqual(marker.read_bytes(), saved_index)
+        self.assertEqual(exchange.decision_history(), [])
+        self.assertIn("Confermo questa versione nel KDD", exchange.render_page("TOKEN"))
+        self.assertEqual(exchange.confirm(sha_b)["stato"], "INSERITO")
+        self.assertEqual(exchange._checked_approvals()[sha_b]["proposta"], b)
+        self.assertEqual(archived.read_bytes(), raw_a)
+        self.assertEqual(final.read_bytes(), raw_b)
+        self.assertEqual(marker.read_bytes(), saved_index)
+        # Normal stale FolderSync replay, then simulated private rollback.
+        source.write_bytes(raw_a)
+        self.assertEqual(exchange.receive_synced(), sha_a)
+        self.assertEqual(bridge.digest(exchange.pending()[0]), sha_b)
+        final.write_bytes(raw_a)
+        with self.assertRaisesRegex(exchange.PrivatePersistenceError, "incoerente"):
+            exchange.pending()
+        with self.assertRaisesRegex(exchange.PrivatePersistenceError, "incoerente"):
+            exchange.confirm(sha_a)
+        for state in ("RIFIUTATA", "RINVIATA"):
+            with self.assertRaisesRegex(exchange.PrivatePersistenceError, "incoerente"):
+                exchange.record_decision(bridge.canonical({
+                    "sha256": sha_a, "stato": state, "nota": "Must not resurrect A"}))
+        with self.assertRaises(exchange.PrivatePersistenceError):
+            exchange.receive_synced()
+        page = exchange.render_page("TOKEN")
+        self.assertIn("STOP PERSISTENZA PRIVATA", page)
+        self.assertNotIn("Confermo questa versione nel KDD", page)
+        self.assertNotIn("Registra evento datato", page)
+        self.assertEqual(exchange.decision_history(), [])
+        # Historical declarations remain legal on the independently verified B.
+        self.assertEqual(exchange.record_decision(bridge.canonical({
+            "sha256": sha_b, "stato": "RIESAME", "nota": "Verified historical B"})), "INSERITO")
+        final.write_bytes(raw_b)
+        self.assertEqual(exchange.receive_synced(), sha_a)
+        def restart_recovered():
+            bridge._LOCAL_ORIGINS.clear()
+            try:
+                queue2.put((bridge.digest(exchange.pending()[0]),
+                            exchange.confirm(sha_b)["stato"],
+                            list(exchange.proposal_history()),
+                            [e["stato"] for e in exchange.decision_history()]))
+            except Exception as exc:
+                queue2.put(("ERROR", str(exc)))
+        queue2 = ctx.Queue()
+        proc = ctx.Process(target=restart_recovered)
+        proc.start()
+        try:
+            self.assertEqual(queue2.get(timeout=15), (sha_b, "GIA_PRESENTE", [sha_a], ["RIESAME"]))
+        finally:
+            proc.join(timeout=15)
+            if proc.is_alive():
+                proc.terminate()
+                proc.join()
+            queue2.close()
+            queue2.join_thread()
+        self.assertEqual(proc.exitcode, 0)
+        self.assertEqual(archived.read_bytes(), raw_a)
+        self.assertEqual(final.read_bytes(), raw_b)
+        self.assertEqual(marker.read_bytes(), saved_index)
+        self.assertEqual(set(exchange._checked_approvals()), {sha_b})
+        self.assertEqual(len(exchange.decision_history()), 1)
+
+    def test_rt81_persist_01_recovery_allows_explicit_rejection_or_deferral(self):
+        import errno
+        self.original.persist_origin()
+        folder = bridge.private_directory(bridge.INBOX)
+        final = folder / exchange.INCOMING_NAME
+        actual_sync = bridge._sync_dir
+        for state in ("RIFIUTATA", "RINVIATA"):
+            a, b = self._candidate("RECOVERY-A-" + state), self._candidate("RECOVERY-B-" + state)
+            exchange.receive(bridge.canonical(a))
+            sha = bridge.digest(b)
+            raw = bridge.canonical(b) + b"\n"
+            def fault(directory):
+                if Path(directory) == folder and final.read_bytes() == raw:
+                    raise OSError(errno.EIO, "persistent current fsync")
+                return actual_sync(directory)
+            payload = bridge.canonical({"sha256": sha, "stato": state, "nota": "Explicit after recovery"})
+            with mock.patch.object(bridge, "_sync_dir", side_effect=fault):
+                with self.assertRaises(bridge.PublicationUncertain):
+                    exchange.receive(raw)
+                before = exchange.decision_history()
+                with self.assertRaises(exchange.PrivatePersistenceError):
+                    exchange.record_decision(payload)
+                self.assertEqual(exchange.decision_history(), before)
+            self.assertEqual(exchange.record_decision(payload), "INSERITO")
+            self.assertEqual(exchange.decision_history()[-1]["versione_sha256"], sha)
+            self.assertEqual(exchange.decision_history()[-1]["stato"], state)
+        self.assertEqual(bridge.load_archive(), {})
+        self.assertEqual(len(exchange.decision_history()), 2)
+
+    def test_rt81_origins_batch_reads_measured_on_twenty_distinct_snapshots(self):
+        # Real producer and private originals. Each preparation time changes
+        # packet identity, while the underlying observed market is the same.
+        plans = []
+        for i in range(20):
+            now = fixtures.T + dt.timedelta(seconds=i)
+            bundle = bridge.prepare(self.original.fixture.root, now=now, _fixture=True)
+            self.original.bundle = bundle
+            self.original.persist_origin()
+            p = self.original.proposal()
+            p["proposta_id"] = "RT81-PERF-%02d" % i
+            p["creato_utc"] = now.isoformat()
+            self.assertEqual(exchange.receive(bridge.canonical(p)), bridge.digest(p))
+            plans.append(p)
+        self.assertEqual(len({p["snapshot_id"] for p in plans}), 20)
+        real_read, real_batch = bridge.read_regular, exchange._find_origins
+        outbox = bridge.private_directory(bridge.OUTBOX)
+        def measure(batch):
+            counts = [0, 0]
+            def metered(path, *args, **kwargs):
+                raw = real_read(path, *args, **kwargs)
+                if Path(path).parent == outbox:
+                    counts[0] += 1
+                    counts[1] += len(raw)
+                return raw
+            with mock.patch.object(bridge, "read_regular", side_effect=metered):
+                with mock.patch.object(exchange, "_find_origins", side_effect=batch):
+                    result = exchange._document_state()
+            return counts, result
+        # The previous algorithm called find_origin separately for every
+        # distinct snapshot (including current). Singleton scans reproduce
+        # that exact scan/read count with the same verification primitives.
+        def previous(snapshots):
+            return {sha: real_batch({sha})[sha] for sha in snapshots}
+        before, old = measure(previous)
+        after, new = measure(real_batch)
+        self.assertEqual(old, new)
+        self.assertEqual(len(new[2]), 19)
+        self.assertEqual(before[0], 420)
+        # validate_proposal may also reread the current origin; count only
+        # assert proportional reduction if that original guard changes.
+        self.assertLess(after[0], before[0] // 3)
+        self.assertLess(after[1], before[1] // 3)
+        print("RT81 ORIGIN READS before=%d/%d bytes after=%d/%d bytes" %
+              (before[0], before[1], after[0], after[1]), flush=True)
+        # No cache can mask missing or ambiguous originals on the next read.
+        last = plans[0]["snapshot_id"]
+        path = next(p for p in outbox.glob("*.json")
+                    if bridge.strict_json(p.read_bytes()).get("packet_sha256") == last)
+        saved = path.read_bytes()
+        path.unlink()
+        try:
+            with self.assertRaises(exchange.PrivatePersistenceError):
+                exchange.pending()
+        finally:
+            path.write_bytes(saved)
+            path.chmod(0o600)
+        self.assertEqual(exchange.pending()[0], plans[-1])
+
+    def test_lifecycle_legacy_rejected_then_pending_and_stale_foldersync(self):
+        self.original.persist_origin()
+        rejected, a, b = [self._candidate(x) for x in
+                          ("LEGACY-REJECTED", "LEGACY-PENDING", "LEGACY-NEW")]
+        rejected_sha = exchange.receive(bridge.canonical(rejected))
+        exchange.record_decision(bridge.canonical({
+            "sha256": rejected_sha, "stato": "RIFIUTATA", "nota": "Rifiuto storico"}))
+        folder = bridge.private_directory(bridge.INBOX)
+        # Reproduce the old installed writer, which left the new pending file
+        # without a document archive; the previous decision remains witnessed.
+        final = folder / exchange.INCOMING_NAME
+        final.write_bytes(bridge.canonical(a) + b"\n")
+        self.assertFalse((folder / exchange._PROPOSAL_INDEX).exists())
+        old_raw = final.read_bytes()
+        self.assertEqual(exchange.pending()[0], a)
+        sha_b = exchange.receive(bridge.canonical(b))
+        sha_a = bridge.digest(a)
+        self.assertEqual(exchange.proposal_history(), {sha_a: a})
+        self.assertEqual((folder / exchange._PROPOSAL_ARCHIVE /
+                          (sha_a + ".json")).read_bytes(), old_raw)
+        source = self.sync / exchange.INCOMING_NAME
+        for old in (rejected, a):
+            source.write_bytes(bridge.canonical(old))
+            self.assertEqual(exchange.receive_synced(), bridge.digest(old))
+            self.assertEqual(bridge.digest(exchange.pending()[0]), sha_b)
+        self.assertEqual(len(exchange.decision_history()), 1)
+        self.assertEqual(exchange.decision_history()[0]["versione_sha256"], rejected_sha)
+        self.assertEqual(bridge.load_archive(), {})
 
     def test_a_deferred_b_imported_stale_a_cannot_overwrite_even_after_restart(self):
         self.original.persist_origin()
@@ -286,8 +713,6 @@ class DriveUIHandoffTests(unittest.TestCase):
         b = self._candidate("B")
         a_sha = exchange.receive(bridge.canonical(a))
         self.assertEqual(exchange.receive(bridge.canonical(a)), a_sha)
-        with self.assertRaisesRegex(bridge.BridgeError, "in attesa"):
-            exchange.receive(bridge.canonical(b))
         self.assertEqual(exchange.record_decision(bridge.canonical(
             {"sha256": a_sha, "stato": "RINVIATA", "nota": "Riesaminare"})), "INSERITO")
         self.assertEqual(exchange.receive(bridge.canonical(b)), bridge.digest(b))
@@ -580,6 +1005,7 @@ class DriveUIHandoffTests(unittest.TestCase):
         self.assertNotIn("ORDINE ESEGUITO", old_integrated)
         newer = copy.deepcopy(self.original.plan)
         newer["proposta_id"] = "VERSIONE-B-POSTFLIGHT"
+        newer["creato_utc"] = (bridge.instant(newer["creato_utc"]) + dt.timedelta(microseconds=1)).isoformat()
         newer["sostituisce_sha256"] = sha_a
         sha_b = exchange.receive(bridge.canonical(newer))
         self.assertNotEqual(sha_a, sha_b)
@@ -850,7 +1276,7 @@ process.stdout.write(JSON.stringify(posted));
             exchange.receive_chat(byte_sha, proposal_sha, consent)
         self.assertIsNone(exchange.pending())
 
-    def test_direct_chat_preserves_pending_version_and_rejected_replay(self):
+    def test_direct_chat_advances_without_decision_and_old_replay_is_inert(self):
         self.original.persist_origin()
         a = self._candidate("CHAT-A")
         b = self._candidate("CHAT-B")
@@ -858,18 +1284,14 @@ process.stdout.write(JSON.stringify(posted));
         _, bytes_b, sha_b = self._chat_stage(b)
         self.assertEqual(exchange.receive_chat(
             bytes_a, sha_a, "PUBBLICA_VERSIONE_" + sha_a), sha_a)
-        with self.assertRaisesRegex(bridge.BridgeError, "attesa"):
-            exchange.receive_chat(bytes_b, sha_b, "PUBBLICA_VERSIONE_" + sha_b)
-        self.assertEqual(bridge.digest(exchange.pending()[0]), sha_a)
-        exchange.record_decision(bridge.canonical({
-            "sha256": sha_a, "stato": "RINVIATA", "nota": "Autore rinvia A"}))
         self.assertEqual(exchange.receive_chat(
             bytes_b, sha_b, "PUBBLICA_VERSIONE_" + sha_b), sha_b)
-        with self.assertRaises(bridge.BridgeError):
-            exchange.receive_chat(bytes_a, sha_a, "PUBBLICA_VERSIONE_" + sha_a)
+        self.assertEqual(exchange.proposal_history(), {sha_a: a})
+        self.assertEqual(exchange.receive_chat(
+            bytes_a, sha_a, "PUBBLICA_VERSIONE_" + sha_a), sha_a)
         self.assertEqual(bridge.digest(exchange.pending()[0]), sha_b)
+        self.assertEqual(exchange.decision_history(), [])
         self.assertEqual(bridge.load_archive(), {})
-
 
     def test_direct_chat_outbound_private_cli_and_legacy_separate(self):
         """One real KDD-origin writer, no FolderSync or patrimonial stdout."""
@@ -964,6 +1386,8 @@ process.stdout.write(JSON.stringify(posted));
 
         self.original.persist_origin()
         a, b = self._candidate("RT33-FORK-A"), self._candidate("RT33-FORK-B")
+        # Independent conflicting proposals have an indistinguishable creation time.
+        b["creato_utc"] = a["creato_utc"]
         sha_a, sha_b = bridge.digest(a), bridge.digest(b)
         self.assertNotEqual(sha_a, sha_b)
         ctx = mp.get_context("fork")
@@ -1016,12 +1440,12 @@ process.stdout.write(JSON.stringify(posted));
         self.assertEqual(len(stopped), 1, outcomes)
         self.assertEqual(successful[0], bridge.digest(exchange.pending()[0]))
         self.assertIn(successful[0], {sha_a, sha_b})
-        self.assertIn("attesa", stopped[0])
+        self.assertIn("cronologia", stopped[0])
         self.assertEqual(bridge.load_archive(), {})
 
         # No hidden overwrite, even a later caller from a separate process.
         rejected = b if successful[0] == sha_a else a
-        with self.assertRaisesRegex(bridge.BridgeError, "attesa"):
+        with self.assertRaisesRegex(bridge.BridgeError, "cronologia"):
             exchange.receive(bridge.canonical(rejected))
         self.assertEqual(bridge.digest(exchange.pending()[0]), successful[0])
 

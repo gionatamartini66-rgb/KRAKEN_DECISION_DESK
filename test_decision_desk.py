@@ -5152,7 +5152,8 @@ class R3RealOriginIntegrationTests(unittest.TestCase):
         self.assertNotIn("ipotesi GPT ALLEGGERIRE", after)
         self.assertIn("KDD (osservazione)", after)
         # A second legitimate version must not inherit A's human event.
-        next_proposal = dict(self.proposal, proposta_id="R3-INTEGRATED-002")
+        next_proposal = dict(self.proposal, proposta_id="R3-INTEGRATED-002",
+                             creato_utc=(self.now + dt.timedelta(microseconds=1)).isoformat())
         next_sha = self.exchange.receive(self.bridge.canonical(next_proposal))
         self.assertNotEqual(self.sha, next_sha)
         next_page = self.html()
@@ -5167,7 +5168,8 @@ class R3RealOriginIntegrationTests(unittest.TestCase):
         self.bridge.read_context(old, now=self.now)
         old_proposal = dict(self.proposal,
                             proposta_id="R3-LEGACY-001",
-                            snapshot_id=old["packet_sha256"])
+                            snapshot_id=old["packet_sha256"],
+                            creato_utc=(self.now + dt.timedelta(microseconds=1)).isoformat())
         self.bridge.validate_proposal(old_proposal, old, now=self.now)
         # The consumer must not derive a full wallet hash from legacy quantities.
         self.assertFalse(serve._decision_proposal_matches(
