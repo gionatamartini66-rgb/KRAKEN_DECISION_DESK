@@ -543,6 +543,8 @@ class DriveUIHandoffTests(unittest.TestCase):
         self.assertEqual(bridge.digest(exchange.pending()[0]), sha_b)
         final.write_bytes(raw_a)
         with self.assertRaisesRegex(exchange.PrivatePersistenceError, "incoerente"):
+            exchange.pending()
+        with self.assertRaisesRegex(exchange.PrivatePersistenceError, "incoerente"):
             exchange.confirm(sha_a)
         for state in ("RIFIUTATA", "RINVIATA"):
             with self.assertRaisesRegex(exchange.PrivatePersistenceError, "incoerente"):

@@ -573,7 +573,7 @@ def _find_origins(snapshots):
                 continue
             bundle = bridge.strict_json(bridge.read_regular(path, expected_parent=outgoing))
             snapshot = bundle.get("packet_sha256")
-            if snapshot in snapshots:
+            if isinstance(snapshot, str) and snapshot in snapshots:
                 bridge.verify_local_origin(bundle)
                 if snapshot in matches:
                     raise bridge.BridgeError("Fotografia KDD originaria assente o ambigua")
@@ -830,7 +830,10 @@ def _check_current_chain(item, approved, events):
     proposal = item[0]
     sha = bridge.digest(proposal)
     head = _approved_head(approved)
-    anchors = [entry["proposta"] for version, entry in approved.items() if version != sha]
+    # The approved chain may contain legitimate legacy approvals with equal
+    # proposal timestamps; an already approved head is not a new deliberation.
+    anchors = ([] if sha in approved else
+               [entry["proposta"] for entry in approved.values()])
     anchors += [e["proposta"] for e in events
                 if "proposta" in e and e["versione_sha256"] != sha]
     if ((sha in approved and sha != head)
@@ -1049,7 +1052,7 @@ def _pending_state(folder):
 
 
 def _document_state():
-    _verify_continuity()
+    events, approved = _verify_continuity()
     try:
         try:
             folder = bridge.private_directory(bridge.INBOX)
@@ -1057,7 +1060,11 @@ def _document_state():
             if _missing_private_inbox():
                 return None, None, {}, ([], {})
             raise
-        return _pending_state(folder)
+        state = _pending_state(folder)
+        _check_current_chain(state[0], approved, events)
+        return state
+    except PrivatePersistenceError:
+        raise
     except (bridge.BridgeError, OSError) as exc:
         raise PrivatePersistenceError(_PRIVATE_STOP) from exc
 
@@ -1313,6 +1320,8 @@ def render_page(token):
         error = None
     except (bridge.BridgeError, OSError) as exc:
         item, error = None, str(exc)
+        if not isinstance(exc, PrivatePersistenceError):
+            error = _PRIVATE_STOP + " | " + error
     if error:
         preview = "<p class='warn'>STOP: " + esc(error) + "</p>"
     elif item is None:
