@@ -436,7 +436,18 @@ class EconomicEvidenceTests(unittest.TestCase):
         ident=self.ident("BTC")
         stats=e.fundamentals(ident,self.market(ident,max_supply=100),T,T)
         self.assertEqual(stats["quota_circolante_su_totale_pct"],50)
-        self.assertEqual(stats["emissione_residua_massima_su_circolante_pct"],900)
+        self.assertEqual(stats["gap_massimo_circolante_pct"],900)
+        self.assertEqual(stats["supply_non_circolante_token"],10)
+        self.assertEqual(stats["gap_massimo_totale_token"],80)
+        self.assertIsNone(stats["emissione_residua_massima_su_circolante_pct"])
+        self.assertIsNone(stats["emissione_futura_quantita_token"])
+        legacy={k:v for k,v in stats.items() if k not in e._SUPPLY_GAP_FIELDS}
+        legacy["emissione_residua_massima_su_circolante_pct"]=900
+        legacy["diluizione"]="RAPPORTO_CALCOLABILE"
+        e.verify_supply_at_read(legacy)
+        self.assertIn("non emissione futura",e.decision_context(ident,legacy,{})["fatto"])
+        with self.assertRaisesRegex(ValueError,"supply inconsistency"):
+            e.verify_supply_at_read(dict(legacy,emissione_residua_massima_su_circolante_pct=80))
         self.assertIsNone(stats["prossimo_unlock_utc"])
         self.assertIsNone(stats["fonte_calendario_unlock"])
         self.assertEqual(stats["vesting"],"NON_VERIFICATO")

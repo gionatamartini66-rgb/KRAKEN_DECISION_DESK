@@ -1133,6 +1133,56 @@ class PrimaryFollowupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             economic.at_read(future,[{"token":"BTC"}],[],T+dt.timedelta(hours=rounds))
 
+    def test_kdd18_documentary_supply_policy_rotation_and_mutations(self):
+        items=self.items(tokens=("BNB",),extra=self.row("XRP"))
+        items["candidati"][0]["coppia_analisi"]="XRP/EUR"
+        bnb=b"<html><p>BNB adopts an Auto-Burn system to reduce its total supply to 100,000,000 BNB.</p></html>"
+        xrp=b"<html><p>At the time of its creation, there were 100 billion XRP.</p><p>In 2017, the company placed <a>55 billion XRP in escrow</a>.</p></html>"
+        calls=[]
+        def fetch(url):
+            calls.append(url)
+            if url==sources.BNB_BURN_DOC: return bnb
+            if url==sources.XRP_ESCROW_DOC: return xrp
+            return self.fetch(url)
+        first=sources.collect(T,items,{},fetch)
+        second=sources.collect(T+dt.timedelta(seconds=5),items,first,fetch)
+        self.assertEqual([x for x in calls if x in sources.SUPPLY_POLICY_DOCUMENTS],
+                         [sources.BNB_BURN_DOC,sources.XRP_ESCROW_DOC])
+        self.assertLessEqual(first["richieste_pubbliche"],8)
+        self.assertLessEqual(second["richieste_pubbliche"],8)
+        checked=sources.at_read(second,items,T+dt.timedelta(seconds=5))
+        policies={x["progetto_id"]:x for x in checked["politiche_emissioni"]}
+        self.assertEqual(policies["binancecoin"]["valori"],{"obiettivo_supply_totale_token":100000000})
+        self.assertEqual(policies["ripple"]["valori"],{"supply_genesi_token":100000000000,
+                         "escrow_storico_token":55000000000,"anno_escrow":2017})
+        self.assertEqual(policies["ripple"]["stato_alla_lettura"],"OSSERVATO")
+        self.assertEqual(policies["binancecoin"]["stato_alla_lettura"],"STORICO_NON_AGGIORNATO")
+        old=sources.at_read(second,items,T+dt.timedelta(days=15))
+        self.assertTrue(all(x["stato_alla_lettura"]=="SCADUTO" for x in old["politiche_emissioni"]))
+        for key,value in (("valori",{"supply_genesi_token":1}),
+                          ("fonte",sources.BNB_BURN_DOC),("vendita","ATTESTATA"),
+                          ("estratto_documento","Escrow corrente 55 miliardi"),
+                          ("escrow_attuale",55000000000)):
+            forged=copy.deepcopy(second)
+            row=next(x for x in forged["politiche_emissioni"] if x["progetto_id"]=="ripple")
+            row[key]=value
+            with self.assertRaises(ValueError):
+                sources.at_read(forged,items,T+dt.timedelta(seconds=5))
+        # Neither an HTML script nor a generic number is a primary document.
+        invalid=sources._policy_document("<script>"+bnb.decode()+"</script>",
+                     sources.BNB_BURN_DOC,T,"0"*64)
+        self.assertIsNone(invalid)
+        # Removal/re-entry and a token outside the curated primary catalog.
+        roster=self.items(tokens=("XRP","BTC"),extra=self.row("BNB"))
+        roster["candidati"][0]["coppia_analisi"]="BNB/EUR"
+        before=len(calls)
+        third=sources.collect(T+dt.timedelta(days=31),roster,second,fetch)
+        self.assertEqual(third["richieste_pubbliche"],len(calls)-before)
+        self.assertIn(third["prossima_emissione"],("binancecoin","ripple"))
+        self.assertEqual(next(x for x in third["politiche_emissioni"]
+                             if x["progetto_id"]=="bitcoin")["stato"],
+                         "SENZA_FONTE_PRIMARIA_ASSOCIATA")
+
     def test_ten_holdings_candidate_primary_review_double_read_and_source_swap(self):
         # Publicly named project identities; invented data, NOT the live wallet.
         tokens=("BNB","FET","JUP","NEAR","RENDER","SOL","SUI","ETH","BTC","XRP")
