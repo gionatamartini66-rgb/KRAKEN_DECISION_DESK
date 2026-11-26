@@ -656,9 +656,13 @@ class OriginalBridgeDifferentialTests(unittest.TestCase):
             clock=lambda: start + dt.timedelta(milliseconds=milliseconds * next(ticks)))
 
     def test_fresh01_original_bridge_advancing_clock_recent_stale_and_rosters(self):
-        for candidates, requested in ((("SOL", "ZZTEST"), True),
-                                      (("ZZTEST", "ETH", "YYTEST"), False),
-                                      ((), True)):
+        original_positions = self.fixture.portfolio["posizioni"]
+        original_report = self.fixture.report["posizioni"]
+        for candidates, requested, order in ((("SOL", "ZZTEST"), True, (0, 1, 2)),
+                                             (("ZZTEST", "ETH", "YYTEST"), False, (2, 0, 1)),
+                                             ((), True, (1, 0))):
+            self.fixture.portfolio["posizioni"] = [original_positions[i] for i in order]
+            self.fixture.report["posizioni"] = [original_report[i] for i in order]
             bundle = self._fresh01_bundle(candidates, requested=requested)
             for delta, outcome in ((dt.timedelta(minutes=5), r.RECOVERED),
                                    (dt.timedelta(hours=4), r.STALE)):
@@ -669,10 +673,12 @@ class OriginalBridgeDifferentialTests(unittest.TestCase):
                     economy = expected["evidenze_economiche_alla_lettura"]
                     self.assertEqual(len(economy["candidati"]), len(candidates))
                     self.assertEqual(len(economy["richiesti"]), int(requested))
-                    self.assertEqual(economy["posizioni"][0]["identita"]["stato"],
-                                     "IDENTITA_VERIFICATA_DA_CATALOGO")
-                    self.assertEqual(economy["posizioni"][2]["identita"]["stato"],
-                                     "NON_VERIFICATO")
+                    self.assertEqual([p["token"] for p in economy["posizioni"]],
+                                     [original_positions[i]["token"] for i in order])
+                    for p in economy["posizioni"]:
+                        self.assertEqual(p["identita"]["stato"],
+                                         "NON_VERIFICATO" if p["token"] == "SXT"
+                                         else "IDENTITA_VERIFICATA_DA_CATALOGO")
                     result = self._fresh01_advancing(bundle, when)
                     self.assertEqual((result["stato"], result["codice"]),
                                      (outcome, "FONTI_BASE_RECENTI" if outcome == r.RECOVERED
@@ -706,6 +712,21 @@ class OriginalBridgeDifferentialTests(unittest.TestCase):
                          (r.STALE, "FONTI_BASE_SCADUTE"))
         self.assertEqual(settled["contesto_kdd"], self.bridge.read_context(
             bundle, now=after, expected_sha256=self.bridge.digest(bundle)))
+
+    def test_fresh01_optional_evidence_expires_inside_the_window(self):
+        bundle = self._fresh01_bundle()
+        first = self.t + dt.timedelta(days=1, milliseconds=-500)
+        before = self.bridge.read_context(bundle, now=first)
+        after = self.bridge.read_context(bundle, now=first+r.VALIDATION_WINDOW)
+        def fundamentals(context):
+            return context["evidenze_economiche_alla_lettura"]["posizioni"][0]["fondamentali"]
+        self.assertEqual(fundamentals(before)["stato"], "VERIFICATO")
+        self.assertEqual(fundamentals(after)["stato"], "SCADUTO")
+        self.assertNotEqual(r._without_read_clock(before), r._without_read_clock(after))
+        result = self._fresh01_advancing(bundle, first)
+        self.assertEqual((result["stato"], result["codice"]),
+                         (r.UNVERIFIABLE, "FRESCHEZZA_FINALE_NON_GARANTITA"))
+        self.assertNotIn("contesto_kdd", result)
 
     def test_fresh01_compare_keeps_real_acquisition_provenance_and_changes(self):
         bundle = self._fresh01_bundle()
