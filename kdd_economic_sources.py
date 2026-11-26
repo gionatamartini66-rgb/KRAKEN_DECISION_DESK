@@ -2649,7 +2649,13 @@ def at_read(raw, items, now):
                 moment=_time(row.get("acquisito_utc"))
                 keys=("initial","taper","terminal","foundation","foundationTerm")
                 values=row.get("valori")
-                if not moment or moment>now+dt.timedelta(minutes=2):
+                # collect() stamps observations and monitor with the same now,
+                # at second precision. A cached observation may precede it,
+                # never follow it. The reading clock is not a new acquisition.
+                if (not moment or moment>now+dt.timedelta(minutes=2)
+                        or moment.replace(microsecond=0)>acquired.replace(microsecond=0)
+                        or (row["stato"]=="OSSERVATO" and version=="v002"
+                            and moment.replace(microsecond=0)!=acquired.replace(microsecond=0))):
                     raise ValueError("Primary inflation clock forged")
                 if expected in SUPPLY_POLICY_DOCUMENTS:
                     if not _policy_document_valid(row,expected,moment):

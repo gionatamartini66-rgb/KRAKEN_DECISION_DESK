@@ -186,7 +186,34 @@ class WalletPacketG0Tests(unittest.TestCase):
         self.assertEqual(coverage["fonti_emissione_attuali"],0)
         self.assertEqual(coverage["documenti_policy_offerta_riacquisiti"],1)
         self.assertIn("ri-vincolo",str(item["giudizio_economico_integrato"]))
-        old=bridge.read_context(bundle,now=T+dt.timedelta(days=15))
+        # TTL04, TTL06, and the independent Supervisione whole-chain mutation.
+        import copy
+        future=T+dt.timedelta(days=15)
+        for parents in ((),("monitor",),("monitor","economy")):
+            forged=copy.deepcopy(bundle)
+            economy=forged["packet"]["evidenze_multifonte"]["economia"]
+            mon=economy["monitor_fonti"]
+            row=next(x for x in mon["politiche_emissioni"] if x["progetto_id"]=="ripple")
+            row["acquisito_utc"]=future.isoformat(timespec="seconds")
+            if "monitor" in parents:
+                mon["acquisito_utc"]=row["acquisito_utc"]
+            if "economy" in parents:
+                economy["acquisito_utc"]=row["acquisito_utc"]
+            forged["packet_sha256"]=bridge.digest(forged["packet"])
+            with self.subTest(parents=parents), self.assertRaisesRegex(
+                    bridge.BridgeError,"Evidenza economica non verificabile"):
+                bridge.read_context(forged,now=future)
+        # Legitimate packet generation after acquisition (subsecond precision)
+        # and successive read: clock is not frozen and TTL remains inclusive.
+        delayed=bridge.prepare(self.root,now=T+dt.timedelta(seconds=7,microseconds=876543),
+                               _fixture=True)
+        valid=bridge.read_context(delayed,now=T+dt.timedelta(seconds=10))
+        self.assertEqual(valid["evidenze_economiche_alla_lettura"]["candidati"][0]
+                         ["quadro_tokenomics"]["politica_offerta"]["stato"],"OSSERVATO")
+        boundary=bridge.read_context(bundle,now=T+dt.timedelta(days=14))
+        self.assertEqual(boundary["evidenze_economiche_alla_lettura"]["candidati"][0]
+                         ["quadro_tokenomics"]["politica_offerta"]["stato"],"OSSERVATO")
+        old=bridge.read_context(bundle,now=future)
         view=old["evidenze_economiche_alla_lettura"]["candidati"][0]["quadro_tokenomics"]
         self.assertEqual(view["politica_offerta"]["stato"],"SCADUTO")
         self.assertIsNone(view["politica_offerta"]["valori_documentati"])

@@ -1745,13 +1745,20 @@ def _historical_provenance_view(current, old_proof, family):
     return None
 
 
-def at_read(source, positions, shortlist, now, *, requested=None):
+def at_read(source, positions, shortlist, now, *, requested=None, packet_generated=None):
     """Validate attribution and recalculate economic age, without source fetches."""
     if not isinstance(source, dict) or source.get("schema") != VERSION:
         raise ValueError("Schema evidenza economica")
     acquired = stamp(source.get("acquisito_utc"))
     if not acquired or acquired > now + dt.timedelta(minutes=2):
         raise ValueError("Tempo evidenza economica")
+    # The immutable packet generation is an upper bound, independent of the
+    # later GPT read clock. Producer timestamps are serialized to seconds.
+    if packet_generated is not None:
+        if (not isinstance(packet_generated,dt.datetime) or packet_generated.utcoffset() is None
+                or acquired.replace(microsecond=0)>
+                   packet_generated.astimezone(UTC).replace(microsecond=0)):
+            raise ValueError("Fotografia economica successiva al packet")
     original_positions = source.get("posizioni")
     original_candidates = source.get("candidati")
     original_requested = source.get("richiesti",[])
@@ -1967,7 +1974,14 @@ def at_read(source, positions, shortlist, now, *, requested=None):
         # Verify all original source attributions, then derive independent
         # decision-review questions for EVERY holding and shortlist entry.
         # Do not carry the old read-time view into the next GPT read.
-        verified = primary.at_read(source["monitor_fonti"], source, now)
+        monitor = source["monitor_fonti"]
+        monitor_clock = stamp(monitor.get("acquisito_utc")) if isinstance(monitor,dict) else None
+        # economic_evidence passes the same now to collect and the dossier.
+        # An earlier monitor remains historical; a later one is impossible.
+        if (not monitor_clock or monitor_clock.replace(microsecond=0)>
+                acquired.replace(microsecond=0)):
+            raise ValueError("Monitor primario successivo alla fotografia economica")
+        verified = primary.at_read(monitor, source, now)
         result["monitor_fonti"] = verified
         previous_read = stamp(source.get("letto_utc"))
         same_read = bool(previous_read and

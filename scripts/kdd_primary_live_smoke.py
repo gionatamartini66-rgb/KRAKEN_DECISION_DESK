@@ -166,3 +166,46 @@ for cycle in range(1,len(primary.MACRO_SERIES)+1):
 
 assert policy_observed=={"binancecoin","ripple"}, "Missing real public KDD18 documents: "+str(policy_observed)
 print("KDD18_PUBLIC_POLICY_BOTH_CONFIRMED", sorted(policy_observed))
+
+# RT83-TTL-01: exercise the actual ordinary producer and its unmodified
+# decision_desk.request urllib transport (not the dedicated fetch above).
+# Synthetic roster and AssetPairs only; all external requests here are public.
+import dossier_trade as producer
+import decision_desk as desk
+ordinary_wallet={"posizioni":[{"token":"BNB"}]}
+ordinary_four={"posizioni":[{"token":"BNB","coppia":"BNB/EUR","pair_key":"BNBEUR"}]}
+ordinary_candidates=[{"token":"XRP","coppia_analisi":"XRP/EUR","kraken_pair_key":"XRPEUR"}]
+ordinary_pairs={token+"EUR":{"wsname":token+"/EUR","status":"online","altname":token+"EUR"}
+                for token in ("BNB","XRP")}
+ordinary_previous=None
+ordinary_observed=set()
+for cycle in range(4):
+    start=dt.datetime.now(dt.timezone.utc)
+    with producer.primary_refresh_context():
+        ordinary_previous=producer.economic_evidence(
+            {"feed":[]},ordinary_wallet,ordinary_four,ordinary_candidates,start,
+            asset_pairs=ordinary_pairs,previous=ordinary_previous)
+    monitor=ordinary_previous["monitor_fonti"]
+    assert monitor["acquisito_utc"]==ordinary_previous["acquisito_utc"]
+    assert monitor["richieste_pubbliche"]<=8
+    read=dt.datetime.now(dt.timezone.utc)
+    result=econ.at_read(ordinary_previous,ordinary_wallet["posizioni"],
+                       ordinary_candidates,read,packet_generated=read)
+    for group in ("posizioni","candidati"):
+        for item in result[group]:
+            policy=item["quadro_tokenomics"].get("politica_offerta",{})
+            if policy.get("stato")=="OSSERVATO":
+                assert policy["acquisito_utc"]==monitor["acquisito_utc"]
+                assert policy["valori_documentati"] is not None
+                ordinary_observed.add(item["token"])
+                print("RT83_ORDINARY_HTTP",item["token"],group,policy["fonte"],
+                      policy["acquisito_utc"],policy["sha256_documento"],
+                      policy["valori_documentati"],"monitor_budget",monitor["richieste_pubbliche"])
+            else:
+                print("RT83_ORDINARY_STATE",item["token"],policy.get("stato"),
+                      policy.get("fonte"))
+    if ordinary_observed=={"BNB","XRP"}:
+        break
+assert ordinary_observed=={"BNB","XRP"}, "Ordinary HTTP policy evidence missing: "+str(ordinary_observed)
+print("RT83_ORDINARY_HTTP_BOTH_CONFIRMED",sorted(ordinary_observed),
+      "dossier_trade.economic_evidence -> primary.collect -> decision_desk.request")
