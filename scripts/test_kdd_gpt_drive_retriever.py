@@ -593,6 +593,183 @@ class OriginalBridgeDifferentialTests(unittest.TestCase):
                     self.assertNotIn("contesto_kdd", result)
 
 
+    def _fresh01_bundle(self, candidates=("SOL", "ZZTEST"), *, requested=True):
+        """Real wallet producer + economic monitor; all inputs invented."""
+        import kdd_economics as econ
+        import kdd_economic_sources as primary
+        iso = self.t.isoformat()
+        def row(i, token, pair, group):
+            key = pair.replace("/", "")
+            base, quote = pair.split("/")
+            ident = econ.identify(token, pair, key, catalog={
+                key: {"pair_key": key, "pair": pair, "base": base, "quote": quote}})
+            payload = release = None
+            if token == "ADA":
+                payload = {"id": ident["coingecko_id"], "symbol": "ada",
+                           "name": ident["progetto"], "market_data": {
+                               "last_updated": iso, "circulating_supply": 100,
+                               "total_supply": 120, "max_supply": 150,
+                               "market_cap": {"usd": 1000},
+                               "fully_diluted_valuation": {"usd": 1500}}}
+                release = {"html_url": "https://github.com/" + ident["repository_primario"]
+                           + "/releases/tag/v-synthetic", "tag_name": "v-synthetic",
+                           "published_at": iso, "name": "Synthetic release",
+                           "draft": False, "prerelease": False}
+            out = {"indice": i, "token": token, "identita": ident,
+                   "fondamentali": econ.fundamentals(ident, payload, self.t, self.t),
+                   "evento": econ.release_event(ident, release, self.t, self.t)}
+            if group != "posizioni":
+                out["coppia_analisi"] = pair
+            if group == "richiesti":
+                out.update(richiesto_utc=iso, origine="CLI_ESPLICITO_LOCALE")
+            return out
+        f = self.fixture
+        f.snapshot["schede_v02"] = [
+            {"token": token, "esito": "RIESAME MIRATO", "categoria": "ripartenza",
+             "coppia_analisi": token + "/USD", "evidenze": ["Synthetic"], "criticita": []}
+            for token in candidates]
+        f.dossier["candidati"] = [{"token": token, "coppia_analisi": token + "/USD"}
+                                for token in candidates]
+        positions = [row(i, x["token"], x["token"] + "/EUR", "posizioni")
+                     for i, x in enumerate(f.portfolio["posizioni"])]
+        shortlist = [row(i, token, token + "/USD", "candidati")
+                     for i, token in enumerate(candidates)]
+        requested_rows = [row(0, "QQTEST", "QQTEST/EUR", "richiesti")] if requested else []
+        roster = {"posizioni": positions, "candidati": shortlist, "richiesti": requested_rows}
+        def no_network(url):
+            raise AssertionError("No external I/O in this fixture: " + url)
+        monitor = primary.collect(self.t, roster, {}, no_network, network_allowed=False)
+        f.dossier["asset_richiesti_espliciti"] = [
+            {k: item[k] for k in ("token", "coppia_analisi", "richiesto_utc", "origine")}
+            for item in requested_rows]
+        f.dossier["evidenze_economiche"] = dict(
+            roster, schema=econ.VERSION, acquisito_utc=iso, monitor_fonti=monitor,
+            macro=econ.macro([], self.t), fonti_economiche=econ.sources_matrix(),
+            regime={"stato": "INDETERMINATO", "qualita": "INSUFFICIENTE"})
+        f.dump()
+        return self.bridge.prepare(f.root, now=self.t, _fixture=True)
+
+    def _fresh01_advancing(self, bundle, start, milliseconds=50):
+        ticks = iter(range(100))
+        return r.kdd_get_latest_verified_dossier(
+            self.drive_for(bundle), FOLDER,
+            clock=lambda: start + dt.timedelta(milliseconds=milliseconds * next(ticks)))
+
+    def test_fresh01_original_bridge_advancing_clock_recent_stale_and_rosters(self):
+        for candidates, requested in ((("SOL", "ZZTEST"), True),
+                                      (("ZZTEST", "ETH", "YYTEST"), False),
+                                      ((), True)):
+            bundle = self._fresh01_bundle(candidates, requested=requested)
+            for delta, outcome in ((dt.timedelta(minutes=5), r.RECOVERED),
+                                   (dt.timedelta(hours=4), r.STALE)):
+                with self.subTest(candidates=candidates, requested=requested, outcome=outcome):
+                    when = self.t + delta
+                    expected = self.bridge.read_context(
+                        bundle, now=when, expected_sha256=self.bridge.digest(bundle))
+                    economy = expected["evidenze_economiche_alla_lettura"]
+                    self.assertEqual(len(economy["candidati"]), len(candidates))
+                    self.assertEqual(len(economy["richiesti"]), int(requested))
+                    self.assertEqual(economy["posizioni"][0]["identita"]["stato"],
+                                     "IDENTITA_VERIFICATA_DA_CATALOGO")
+                    self.assertEqual(economy["posizioni"][2]["identita"]["stato"],
+                                     "NON_VERIFICATO")
+                    result = self._fresh01_advancing(bundle, when)
+                    self.assertEqual((result["stato"], result["codice"]),
+                                     (outcome, "FONTI_BASE_RECENTI" if outcome == r.RECOVERED
+                                      else "FONTI_BASE_SCADUTE"))
+                    self.assertEqual(result["contesto_kdd"], expected)
+                    self.assertGreater(dt.datetime.fromisoformat(result["validita_controllata_utc"]),
+                                       when)
+                    self.assertEqual(result["integrita_documento"], "VERIFICATA")
+                    self.assertEqual(economy["monitor_fonti"]["letto_utc"], expected["letto_utc"])
+
+    def test_fresh01_real_clock_and_true_ttl_boundary(self):
+        bundle = self._fresh01_bundle()
+        # No mocked wall clock: the original bridge and the recuperator read
+        # actual UTC. A dated fixture must remain stale, never appear refreshed.
+        actual = dt.datetime.now(dt.timezone.utc)
+        real = r.kdd_get_latest_verified_dossier(self.drive_for(bundle), FOLDER)
+        self.assertEqual(real["stato"], r.STALE)
+        self.assertGreaterEqual(dt.datetime.fromisoformat(real["validita_controllata_utc"]), actual)
+        self.assertEqual(real["contesto_kdd"]["evidenze_economiche_alla_lettura"]
+                         ["monitor_fonti"]["acquisito_utc"], self.t.isoformat())
+        first = self.t + dt.timedelta(minutes=30, milliseconds=-500)
+        result = self._fresh01_advancing(bundle, first)
+        self.assertEqual((result["stato"], result["codice"]),
+                         (r.UNVERIFIABLE, "FRESCHEZZA_FINALE_NON_GARANTITA"))
+        self.assertNotIn("contesto_kdd", result)
+        after = first + dt.timedelta(seconds=1)
+        clock = iter((first, after, after, after))
+        settled = r.kdd_get_latest_verified_dossier(
+            self.drive_for(bundle), FOLDER, clock=lambda: next(clock))
+        self.assertEqual((settled["stato"], settled["codice"]),
+                         (r.STALE, "FONTI_BASE_SCADUTE"))
+        self.assertEqual(settled["contesto_kdd"], self.bridge.read_context(
+            bundle, now=after, expected_sha256=self.bridge.digest(bundle)))
+
+    def test_fresh01_compare_keeps_real_acquisition_provenance_and_changes(self):
+        bundle = self._fresh01_bundle()
+        when = self.t + dt.timedelta(minutes=5)
+        digest = self.bridge.digest(bundle)
+        left = self.bridge.read_context(bundle, now=when, expected_sha256=digest)
+        right = self.bridge.read_context(bundle, now=when+r.VALIDATION_WINDOW,
+                                         expected_sha256=digest)
+        originals = copy.deepcopy((left, right))
+        self.assertEqual(r._without_read_clock(left), r._without_read_clock(right))
+        self.assertEqual((left, right), originals)
+        econ = left["evidenze_economiche_alla_lettura"]
+        self.assertEqual(econ["posizioni"][0]["fondamentali"]["stato"], "VERIFICATO")
+        self.assertEqual(econ["posizioni"][0]["evento"]["stato"], "VERIFICATO")
+        self.assertEqual(econ["posizioni"][1]["evento"]["stato"], "NON_VERIFICATO")
+        # Isolate single-field variations in authentic generated contexts.
+        # Even a verified identity's unsuccessful acquisition is not a clock.
+        for group, idx, field, key, value in (
+            ("posizioni", 0, "fondamentali", "acquisito_utc",
+             (self.t+dt.timedelta(seconds=1)).isoformat()),
+            ("posizioni", 0, "evento", "acquisito_utc",
+             (self.t+dt.timedelta(seconds=1)).isoformat()),
+            ("posizioni", 1, "evento", "acquisito_utc", right["letto_utc"]),
+            ("posizioni", 0, "fondamentali", "capitalizzazione_usd", 9999),
+            ("candidati", 1, "evento", "sintesi", "Changed"),
+            ("candidati", 1, "identita", "motivo", "Changed"),
+            ("richiesti", 0, "fondamentali", "acquisito_utc", self.t.isoformat()),
+        ):
+            with self.subTest(group=group, field=field, key=key):
+                changed = copy.deepcopy(right)
+                changed["evidenze_economiche_alla_lettura"][group][idx][field][key] = value
+                self.assertNotEqual(r._without_read_clock(left), r._without_read_clock(changed))
+        changed = copy.deepcopy(right)
+        changed["evidenze_economiche_alla_lettura"]["monitor_fonti"]["acquisito_utc"] = right["letto_utc"]
+        self.assertNotEqual(r._without_read_clock(left), r._without_read_clock(changed))
+        # A mismatched read clock is not normalized as if it were generated.
+        changed = copy.deepcopy(right)
+        changed["evidenze_economiche_alla_lettura"]["monitor_fonti"]["letto_utc"] = self.t.isoformat()
+        self.assertNotEqual(r._without_read_clock(left), r._without_read_clock(changed))
+
+    def test_fresh01_original_bridge_preserves_clock_and_document_stops(self):
+        bundle = self._fresh01_bundle()
+        when = self.t + dt.timedelta(minutes=5)
+        for times, expected in (
+            ((when, when-dt.timedelta(seconds=1)), "OROLOGIO_ARRETRATO_DURANTE_VALIDAZIONE"),
+            ((when, when+dt.timedelta(seconds=3), when+dt.timedelta(seconds=6)),
+             "FRESCHEZZA_FINALE_NON_GARANTITA"),
+        ):
+            clock = iter(times)
+            answer = r.kdd_get_latest_verified_dossier(
+                self.drive_for(bundle), FOLDER, clock=lambda: next(clock))
+            self.assertEqual((answer["stato"], answer["codice"]), (r.UNVERIFIABLE, expected))
+            self.assertNotIn("contesto_kdd", answer)
+        # Authentic semantic validation still rejects a rehashed bad identity.
+        tampered = copy.deepcopy(bundle)
+        packet = tampered["packet"]
+        packet["evidenze_multifonte"]["economia"]["posizioni"][0]["identita"]["coingecko_id"] = "bitcoin"
+        tampered["packet_sha256"] = self.bridge.digest(packet)
+        result = r.kdd_get_latest_verified_dossier(self.drive_for(tampered), FOLDER, now=when)
+        self.assertEqual((result["stato"], result["codice"]),
+                         (r.UNVERIFIABLE, "VALIDATORE_KDD_NON_SUPERATO"))
+        self.assertNotIn("contesto_kdd", result)
+
+
 class ConnectorCaptureTests(unittest.TestCase):
     def setUp(self):
         from scripts import kdd_bridge_g2 as bridge
