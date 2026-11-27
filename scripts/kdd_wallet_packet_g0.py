@@ -884,7 +884,8 @@ def analytic_evidence(snapshot, dossier, positions, shortlist, now):
         import kdd_economics
         try:
             economic = kdd_economics.at_read(
-                economic, positions, shortlist, now, requested=requests)
+                economic, positions, shortlist, now, requested=requests,
+                packet_generated=now)
         except (ValueError, TypeError, KeyError, OverflowError) as exc:
             raise PacketError("Evidenza economica non attribuibile") from exc
     import kdd_network_defi

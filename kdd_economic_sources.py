@@ -58,6 +58,9 @@ SUI_CIRCULATION = "https://sui-circulation.suiexplorer.com/api/sui_circulation"
 SUI_SCHEDULE_HOME = "https://www.sui.io/token-schedule"
 SOLANA_RPC = "https://api.mainnet.solana.com"
 SOLANA_GOVERNOR_DOC = "https://solana.com/docs/rpc/http/getinflationgovernor"
+BNB_BURN_DOC = "https://www.bnbchain.org/en/what-is-bnb"
+XRP_ESCROW_DOC = "https://xrpl.org/docs/introduction/what-is-xrp"
+SUPPLY_POLICY_DOCUMENTS = (BNB_BURN_DOC, XRP_ESCROW_DOC)
 MONTHLY_FORMAT = "official-monthly-circulation-v001"
 STRK_UNLOCK_FORMAT = "starknet-primary-unlock-mdx-v001"
 STRK_REPO = "starknet-io/starknet-docs"
@@ -257,7 +260,90 @@ def _solana_governor(payload, now):
 
 def _emission_descriptor(descriptor):
     if not isinstance(descriptor,dict): return None
-    return SOLANA_RPC if descriptor.get("emission_primary")=="SOLANA_RPC_GOVERNOR" else None
+    return {"SOLANA_RPC_GOVERNOR":SOLANA_RPC,
+            "BNB_AUTO_BURN_DOCUMENT":BNB_BURN_DOC,
+            "XRP_ESCROW_HISTORY_DOCUMENT":XRP_ESCROW_DOC}.get(descriptor.get("emission_primary"))
+
+
+class _PolicyText(HTMLParser):
+    """Visible text only; reject script/style as source claims."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts=[]
+        self.hidden=0
+    def handle_starttag(self,tag,attrs):
+        if tag in ("script","style","template","noscript"):
+            self.hidden+=1
+    def handle_endtag(self,tag):
+        if tag in ("script","style","template","noscript") and self.hidden:
+            self.hidden-=1
+    def handle_data(self,data):
+        if not self.hidden:
+            self.parts.append(data)
+
+
+def _policy_document(raw, url, now, digest):
+    """Narrow official-document formats; no invented current on-chain facts.
+
+    A digest identifies the declared HTTP body, not an independently verified
+    signature. Store bounded matched text to rederive quantities at read time.
+    """
+    if not isinstance(raw,str) or len(raw)>1_000_000 or url not in SUPPLY_POLICY_DOCUMENTS:
+        return None
+    if not isinstance(digest,str) or not re.fullmatch(r"[a-f0-9]{64}",digest):
+        return None
+    parser=_PolicyText()
+    try:
+        parser.feed(raw)
+        parser.close()
+    except Exception:
+        return None
+    txt=" ".join(" ".join(parser.parts).split())
+    if url==BNB_BURN_DOC:
+        matches=list(re.finditer(r"BNB adopts an Auto-Burn system to reduce its total supply to ([0-9,]+) BNB\.",txt))
+        if not matches or len({m[1] for m in matches})!=1:
+            return None
+        m=matches[0]
+        if not re.fullmatch(r"[1-9][0-9]{0,2}(?:,[0-9]{3})+",m[1]):
+            return None
+        target=int(m[1].replace(",",""))
+        if not 0<target<=1_000_000_000:
+            return None
+        values={"obiettivo_supply_totale_token":target}
+        fragment=m[0]
+        kind="POLITICA_BURN_BNB"
+        doc_state="OBIETTIVO_DOCUMENTATO_NON_BURN_ESEGUITO"
+        limit="Obiettivo di riduzione della supply totale tramite Auto-Burn, non quantità bruciata, emissione futura o data di esecuzione"
+    else:
+        genesis=list(re.finditer(r"At the time of its creation, there were ([0-9]+) billion XRP\.",txt))
+        locked=list(re.finditer(r"In (20[0-9]{2}), the company placed ([0-9]+) billion XRP in escrow",txt))
+        if (not genesis or not locked or len({m[1] for m in genesis})!=1
+                or len({(m[1],m[2]) for m in locked})!=1):
+            return None
+        g,e=genesis[0],locked[0]
+        initial,escrow,year=int(g[1])*10**9,int(e[2])*10**9,int(e[1])
+        if not 0<escrow<=initial<=10**12 or not 2012<=year<=now.year:
+            return None
+        values={"supply_genesi_token":initial,"escrow_storico_token":escrow,"anno_escrow":year}
+        fragment=g[0]+" "+e[0]
+        kind="ESCROW_STORICO_XRP"
+        doc_state="STORIA_GENESI_E_ESCROW_NON_SALDO_ATTUALE"
+        limit="XRP già creati e vincolati storicamente; nessun saldo escrow attuale, calendario futuro, nuova emissione, circolazione o vendita attestati"
+    return {"stato":"OSSERVATO","tipo":kind,"fonte":url,
+            "acquisito_utc":_iso(now),"pubblicato_utc":None,"unita":"TOKEN",
+            "valori":values,"estratto_documento":fragment,"sha256_documento":digest,
+            "stato_documento":doc_state,"stato_unlock":"NON_ATTESTATO",
+            "vendita":"NON_ATTESTATA","limite":limit}
+
+
+def _policy_document_valid(row, url, moment):
+    # Reparse the exact bounded extract; the HTTP body itself is not retained.
+    fragment=row.get("estratto_documento")
+    if not isinstance(fragment,str) or len(fragment)>500:
+        return False
+    expected=_policy_document(fragment,url,moment,row.get("sha256_documento"))
+    return bool(expected and set(row)<=set(expected)|{"progetto_id","stato_alla_lettura"}
+                and all(row.get(k)==v for k,v in expected.items() if k!="stato"))
 
 
 def _schedule_descriptor(descriptor):
@@ -1556,14 +1642,19 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
         projects.append(entry)
     # KDD-18: one official on-chain inflation governor read per cycle,
     # only for projects explicitly bound to a catalogued primary RPC.
-    emission_eligible=[p for p in roster if _emission_descriptor(roster[p]["source"])]
+    # Same single-call family, including when a public RPC is unavailable.
+    emission_eligible=[p for p in roster if
+                       _emission_descriptor(roster[p]["source"]) in SUPPLY_POLICY_DOCUMENTS
+                       or (_emission_descriptor(roster[p]["source"])==SOLANA_RPC and callable(rpc_fetch))]
     old_emission={x["progetto_id"]:x for x in old.get("politiche_emissioni",[])
                   if isinstance(x,dict) and x.get("progetto_id") in roster}
     emission_cursor=_eligible_cursor(cursors,"prossima_emissione",emission_eligible,successor=True)
+    # Preserve the existing Solana turn on first use; thereafter the cursor
+    # traverses every eligible project, including newly entering candidates.
     emission_start=next((i for i,p in enumerate(emission_eligible)
-                         if isinstance(emission_cursor,str) and p>=emission_cursor),0)
+                         if p==(emission_cursor or "solana")),0)
     emission_selected=(emission_eligible[emission_start:emission_start+MAX_EMISSION_CALLS]
-                       if network_allowed and callable(rpc_fetch) else [])
+                       if network_allowed else [])
     emission_next=(emission_eligible[(emission_start+len(emission_selected))%len(emission_eligible)]
                    if emission_eligible else None)
     emissions=[]
@@ -1577,9 +1668,14 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
         if bound and project in emission_selected:
             used+=1
             try:
-                response=rpc_fetch(SOLANA_RPC,{"jsonrpc":"2.0","id":1,
-                    "method":"getInflationGovernor","params":[{"commitment":"finalized"}]})
-                observed=_solana_governor(response,now)
+                if bound==SOLANA_RPC:
+                    response=rpc_fetch(SOLANA_RPC,{"jsonrpc":"2.0","id":1,
+                        "method":"getInflationGovernor","params":[{"commitment":"finalized"}]})
+                    observed=_solana_governor(response,now)
+                else:
+                    digest={}
+                    document,error=_fetch(fetch,bound,json_data=False,digest_out=digest)
+                    observed=_policy_document(document,bound,now,digest.get("sha256"))
             except Exception:
                 observed=None
             if observed is None:
@@ -1587,7 +1683,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
             else:
                 row.update(observed)
                 former=old_emission.get(project)
-                if (former and former.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO")
+                if (bound==SOLANA_RPC and former and former.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO")
                         and former.get("valori") is not None
                         and former.get("valori")!=observed["valori"]):
                     row["confronto"]={"precedente_utc":former.get("acquisito_utc"),
@@ -2025,6 +2121,7 @@ def collect(now, items, previous, fetch, *, network_allowed=True, asset_pairs=No
             "stati_coppie_kraken":kraken_status,
             "avvisi_repository":advisories,"prossimo_security":_cursor_after_attempt(cursors,"prossimo_security",sec_cursor, bool(chosen_s),security_eligible,project=True),
             "segnalazioni_repo":issues,"prossima_issue":_cursor_after_attempt(cursors,"prossima_issue",next_issue,bool(issue_selected),issue_projects,project=True),
+            "versione_politiche_offerta":"v002",
             "politiche_emissioni":emissions,"prossima_emissione":_cursor_after_attempt(cursors,"prossima_emissione",emission_next,bool(emission_selected),emission_eligible,project=True),
             "indicatori_macro":macro,"calendari":schedules,
             "comunicazioni_kraken":market_notices,
@@ -2244,7 +2341,17 @@ def decision_review(evidence, row, group):
                 else "DOCUMENTO_REPOSITORY",
                 event.get("limite"),{"titolo":event.get("titolo"),"stato":event.get("stato"),"ritirato_utc":event.get("ritirato_utc")})
     emission=by_project("politiche_emissioni")
-    if emission.get("stato_alla_lettura")=="OSSERVATO":
+    if emission.get("stato_alla_lettura") in ("OSSERVATO","STORICO_NON_AGGIORNATO") and emission.get("tipo") in (
+            "POLITICA_BURN_BNB","ESCROW_STORICO_XRP"):
+        add(emission["tipo"],
+            "Documento primario: obiettivo di burn" if emission["tipo"]=="POLITICA_BURN_BNB"
+            else "Documento primario: XRP già creati e escrow storico",
+            emission.get("fonte"),None,emission.get("acquisito_utc"),
+            "DOCUMENTO_POLICY_NON_ESECUZIONE" if emission["stato_alla_lettura"]=="OSSERVATO"
+            else "DOCUMENTO_POLICY_IN_CACHE_NON_ESECUZIONE",emission.get("limite"),
+            {"valori":emission.get("valori"),"sha256_documento":emission.get("sha256_documento"),
+             "stato_documento":emission.get("stato_documento")})
+    elif emission.get("stato_alla_lettura")=="OSSERVATO":
         if isinstance(emission.get("confronto"),dict):
             add("VARIAZIONE_POLICY_EMISSIONE",
                 "I parametri ufficiali di emissione differiscono dall'acquisizione precedente",
@@ -2346,6 +2453,14 @@ def decision_review(evidence, row, group):
                "Una variazione ufficiale dei parametri può modificare l'offerta futura",
                "Non equivale a nuovi token già emessi o venduti",
                "Verificare successiva rilevazione RPC, supply ed esecuzione"),
+              ("POLITICA_BURN_BNB",
+               "L'obiettivo di ridurre l'offerta totale può cambiare la struttura della supply",
+               "Il documento non attesta burn eseguito, provenienza delle monete o pressione sul prezzo",
+               "Confrontare comunicati datati, transazioni burn e circolazione osservata"),
+              ("ESCROW_STORICO_XRP",
+               "Lo svincolo di XRP già creati può cambiare la disponibilità economica",
+               "L'escrow del 2017 non è il saldo odierno e non prova nuova emissione o vendita",
+               "Verificare escrow attuale, svincoli, ri-vincoli e circolazione separatamente"),
               ("PARAMETRI_EMISSIONE",
                "Modifiche alla politica di emissione potrebbero alterare la supply futura",
                "I parametri RPC non misurano i token venduti né dimostrano effetto sul prezzo",
@@ -2518,15 +2633,34 @@ def at_read(raw, items, now):
         for row in source_emissions:
             project=row["progetto_id"]
             expected=_emission_descriptor(roster[project]["source"])
+            version=raw.get("versione_politiche_offerta")
+            if version not in (None,"v002"):
+                raise ValueError("Primary supply policy version")
+            if version is None and expected in SUPPLY_POLICY_DOCUMENTS:
+                expected=None  # Exact legacy roster had no BNB/XRP source.
             if row.get("fonte")!=expected:
                 raise ValueError("Primary inflation source forged")
+            if expected in SUPPLY_POLICY_DOCUMENTS and row.get("stato") not in (
+                    "OSSERVATO","STORICO_NON_AGGIORNATO","RINVIATO_BUDGET",
+                    "FONTE_NON_DISPONIBILE","NON_ACQUISITO_FUORI_REFRESH","RINVIATO_RATE_LIMIT_HTTP_429"):
+                raise ValueError("Primary supply policy state forged")
             copy=dict(row)
             if row.get("stato") in ("OSSERVATO","STORICO_NON_AGGIORNATO"):
                 moment=_time(row.get("acquisito_utc"))
                 keys=("initial","taper","terminal","foundation","foundationTerm")
                 values=row.get("valori")
-                if (expected!=SOLANA_RPC or not moment or moment>now+dt.timedelta(minutes=2)
-                        or not isinstance(values,dict)
+                # collect() stamps observations and monitor with the same now,
+                # at second precision. A cached observation may precede it,
+                # never follow it. The reading clock is not a new acquisition.
+                if (not moment or moment>now+dt.timedelta(minutes=2)
+                        or moment.replace(microsecond=0)>acquired.replace(microsecond=0)
+                        or (row["stato"]=="OSSERVATO" and version=="v002"
+                            and moment.replace(microsecond=0)!=acquired.replace(microsecond=0))):
+                    raise ValueError("Primary inflation clock forged")
+                if expected in SUPPLY_POLICY_DOCUMENTS:
+                    if not _policy_document_valid(row,expected,moment):
+                        raise ValueError("Primary supply policy document or claim forged")
+                elif (expected!=SOLANA_RPC or not isinstance(values,dict)
                         or any(type(values.get(k)) not in (int,float) or not math.isfinite(values[k])
                                or values[k]<0 for k in keys)
                         or any(values[k]>1 for k in keys[:4]) or values["foundationTerm"]>1000
@@ -2535,6 +2669,15 @@ def at_read(raw, items, now):
                     raise ValueError("Primary inflation numeric or claim forged")
                 copy["stato_alla_lettura"]=(
                     "SCADUTO" if now-moment>dt.timedelta(days=14) else row["stato"])
+            elif expected in SUPPLY_POLICY_DOCUMENTS:
+                if (set(row)-{"progetto_id","stato","fonte","valori","acquisito_utc",
+                              "stato_unlock","vendita","limite","stato_alla_lettura"}
+                        or row.get("valori") is not None or row.get("acquisito_utc") is not None
+                        or row.get("stato_unlock")!="NON_ATTESTATO"
+                        or row.get("vendita")!="NON_ATTESTATA"
+                        or row.get("limite")!="Parametri di emissione non attestano unlock o vendita"):
+                    raise ValueError("Primary supply policy unavailable with forged claims")
+                copy.pop("stato_alla_lettura",None)
             verified_emissions.append(copy)
     verified_advisories=[]
     raw_advisories=raw.get("avvisi_repository")
@@ -2721,6 +2864,14 @@ def at_read(raw, items, now):
             "regole_vesting_primarie_attuali":sum(s["stato"]=="DOCUMENTO_PRIMARIO_REGOLA_VESTING" for s in read_schedules),
             "calendari_con_massimi_datati_primari":sum(s["stato"]=="DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI" for s in read_schedules),
                         "security_repository_osservati":sum(a.get("stato_alla_lettura") in ("OSSERVATO","NESSUN_AVVISO_NEL_CAMPIONE") for a in verified_advisories),
-                        "politiche_emissioni_osservate":sum(e.get("stato_alla_lettura")=="OSSERVATO" for e in verified_emissions),
+                        "politiche_emissioni_osservate":sum(
+                            e.get("fonte")==SOLANA_RPC and e.get("stato_alla_lettura")=="OSSERVATO"
+                            for e in verified_emissions),
+                        "documenti_policy_offerta_riacquisiti":sum(
+                            e.get("fonte") in SUPPLY_POLICY_DOCUMENTS and e.get("stato_alla_lettura")=="OSSERVATO"
+                            for e in verified_emissions),
+                        "documenti_policy_offerta_cache_valida":sum(
+                            e.get("fonte") in SUPPLY_POLICY_DOCUMENTS and e.get("stato_alla_lettura")=="STORICO_NON_AGGIORNATO"
+                            for e in verified_emissions),
                         "repository_issue_osservati":sum(e.get("stato_alla_lettura") in ("OSSERVATO","NESSUNA_ISSUE_NEL_CAMPIONE") for e in read_issues)},
             limite=raw.get("limite"))

@@ -4,7 +4,8 @@
   "projects": {
     "BNB": {
       "id": "binancecoin",
-      "name": "BNB"
+      "name": "BNB",
+      "emission_primary": "BNB_AUTO_BURN_DOCUMENT"
     },
     "FET": {
       "id": "fetch-ai",
@@ -91,7 +92,8 @@
     },
     "XRP": {
       "id": "ripple",
-      "name": "XRP"
+      "name": "XRP",
+      "emission_primary": "XRP_ESCROW_HISTORY_DOCUMENT"
     },
     "ONDO": {
       "id": "ondo-finance",

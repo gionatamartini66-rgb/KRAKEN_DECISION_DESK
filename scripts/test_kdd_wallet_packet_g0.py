@@ -139,6 +139,86 @@ class WalletPacketG0Tests(unittest.TestCase):
             "volume_24h_usd":5000, "dominanza_btc_pct":56.7}}
         self.dump()
 
+    def test_kdd18_policy_and_supply_gap_reaches_original_bridge(self):
+        import kdd_economics as econ
+        import kdd_economic_sources as primary
+        import kdd_bridge_g2 as bridge
+        self._analytic_fixture()
+        self.snapshot["schede_v02"]=[{"token":"XRP","coppia_analisi":"XRP/USD",
+                                      "esito":"RIESAME MIRATO","evidenze":[],"criticita":[]}]
+        self.dossier["candidati"]=[{"token":"XRP","coppia_analisi":"XRP/USD"}]
+        def row(i,token,pair):
+            base,quote=pair.split("/")
+            key=base+quote
+            identity=econ.identify(token,pair,key,catalog={
+                key:{"pair_key":key,"pair":pair,"base":base,"quote":quote}})
+            payload={"id":identity.get("coingecko_id"),"symbol":token.lower(),
+                     "name":identity.get("progetto"),"market_data":{"last_updated":T.isoformat(),
+                       "circulating_supply":60,"total_supply":99,"max_supply":100}}
+            return {"indice":i,"token":token,"identita":identity,
+                    "fondamentali":econ.fundamentals(identity,payload,T,T),
+                    "evento":econ.release_event(identity,None,T,T)}
+        rows=[row(i,p["token"],p["token"]+"/EUR") for i,p in enumerate(self.portfolio["posizioni"])]
+        candidate=dict(row(0,"XRP","XRP/USD"),coppia_analisi="XRP/USD")
+        roster={"posizioni":rows,"candidati":[candidate]}
+        def fetch(url):
+            if url==primary.XRP_ESCROW_DOC:
+                return b"<p>At the time of its creation, there were 100 billion XRP.</p><p>In 2017, the company placed 55 billion XRP in escrow.</p>"
+            raise ValueError("other source unavailable in synthetic fixture")
+        monitor=primary.collect(T,roster,{},fetch)
+        self.dossier["evidenze_economiche"]=dict(roster,schema=econ.VERSION,
+            acquisito_utc=T.isoformat(),monitor_fonti=monitor,macro=econ.macro([],T),
+            fonti_economiche=econ.sources_matrix(),
+            regime={"stato":"INDETERMINATO","qualita":"INSUFFICIENTE"})
+        self.dump()
+        bundle=bridge.prepare(self.root,now=T,_fixture=True)
+        current=bridge.read_context(bundle,now=T)
+        item=current["evidenze_economiche_alla_lettura"]["candidati"][0]
+        view=item["quadro_tokenomics"]
+        self.assertEqual(view["supply"]["supply_non_circolante_token"],39)
+        self.assertEqual(view["supply"]["gap_massimo_totale_token"],1)
+        self.assertIsNone(view["supply"]["emissione_futura_quantita_token"])
+        self.assertEqual(view["stato"],"SUPPLY_E_DOCUMENTO_POLICY_OFFERTA")
+        self.assertEqual(view["politica_emissione"]["stato"],"NON_ATTESTATA_DA_QUESTO_DOCUMENTO")
+        self.assertEqual(view["politica_offerta"]["valori_documentati"]["escrow_storico_token"],55000000000)
+        self.assertIsNone(view["politica_offerta"]["saldo_escrow_attuale"])
+        coverage=current["evidenze_economiche_alla_lettura"]["copertura_tokenomics"]["candidati"]
+        self.assertEqual(coverage["fonti_emissione_attuali"],0)
+        self.assertEqual(coverage["documenti_policy_offerta_riacquisiti"],1)
+        self.assertIn("ri-vincolo",str(item["giudizio_economico_integrato"]))
+        # TTL04, TTL06, and the independent Supervisione whole-chain mutation.
+        import copy
+        future=T+dt.timedelta(days=15)
+        for parents in ((),("monitor",),("monitor","economy")):
+            forged=copy.deepcopy(bundle)
+            economy=forged["packet"]["evidenze_multifonte"]["economia"]
+            mon=economy["monitor_fonti"]
+            row=next(x for x in mon["politiche_emissioni"] if x["progetto_id"]=="ripple")
+            row["acquisito_utc"]=future.isoformat(timespec="seconds")
+            if "monitor" in parents:
+                mon["acquisito_utc"]=row["acquisito_utc"]
+            if "economy" in parents:
+                economy["acquisito_utc"]=row["acquisito_utc"]
+            forged["packet_sha256"]=bridge.digest(forged["packet"])
+            with self.subTest(parents=parents), self.assertRaisesRegex(
+                    bridge.BridgeError,"Evidenza economica non verificabile"):
+                bridge.read_context(forged,now=future)
+        # Legitimate packet generation after acquisition (subsecond precision)
+        # and successive read: clock is not frozen and TTL remains inclusive.
+        delayed=bridge.prepare(self.root,now=T+dt.timedelta(seconds=7,microseconds=876543),
+                               _fixture=True)
+        valid=bridge.read_context(delayed,now=T+dt.timedelta(seconds=10))
+        self.assertEqual(valid["evidenze_economiche_alla_lettura"]["candidati"][0]
+                         ["quadro_tokenomics"]["politica_offerta"]["stato"],"OSSERVATO")
+        boundary=bridge.read_context(bundle,now=T+dt.timedelta(days=14))
+        self.assertEqual(boundary["evidenze_economiche_alla_lettura"]["candidati"][0]
+                         ["quadro_tokenomics"]["politica_offerta"]["stato"],"OSSERVATO")
+        old=bridge.read_context(bundle,now=future)
+        view=old["evidenze_economiche_alla_lettura"]["candidati"][0]["quadro_tokenomics"]
+        self.assertEqual(view["politica_offerta"]["stato"],"SCADUTO")
+        self.assertIsNone(view["politica_offerta"]["valori_documentati"])
+        self.assertIsNone(view["supply"]["supply_non_circolante_token"])
+
     def test_issue43_economic_source_packet_bridge_and_aging(self):
         import kdd_economics as econ
         import kdd_bridge_g2 as bridge

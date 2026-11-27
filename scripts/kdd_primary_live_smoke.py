@@ -21,12 +21,14 @@ def fetch(url):
             or url.startswith("https://raw.githubusercontent.com/")
             or url == primary.SUI_CIRCULATION
             or url == primary.CFTC_BTC_TFF_URL
+            or url in primary.SUPPLY_POLICY_DOCUMENTS
             or url in [f[1] for f in primary.KRAKEN_STATUS_FEEDS]
             or url in [f[1] for f in primary.FINANCIAL_FEEDS]):
         raise ValueError("URL outside verified public source allowlist")
     req = urllib.request.Request(url, headers={
         "User-Agent": "KDD-G2-public-source-smoke/1.0",
         "Accept": "application/vnd.github+json" if "api.github.com" in url
+                  else "text/html" if url in primary.SUPPLY_POLICY_DOCUMENTS
                   else "text/csv"})
     with urllib.request.urlopen(req, timeout=15) as res:
         data=res.read(1_000_001)
@@ -58,11 +60,12 @@ def identity(token):
 
 
 roster={"posizioni":[],"candidati":[]}
-for n,token in enumerate(("BTC","ETH","SOL","SUI","ARB","STRK")):
+for n,token in enumerate(("BTC","ETH","SOL","SUI","ARB","STRK","BNB","XRP")):
     ident=identity(token)
     assert ident["stato"]=="IDENTITA_VERIFICATA_DA_CATALOGO"
     roster["posizioni"].append({"indice":n,"token":token,"identita":ident,
-                                "fondamentali":{"stato":"NON_VERIFICATO"}})
+                                "fondamentali":econ.fundamentals(ident,None,NOW,NOW),
+                                "evento":econ.release_event(ident,None,NOW,NOW)})
 
 seen=[]
 def counted(url):
@@ -70,6 +73,7 @@ def counted(url):
     return fetch(url)
 
 raw=None
+policy_observed=set()
 for cycle in range(1,len(primary.MACRO_SERIES)+1):
     moment=dt.datetime.now(dt.timezone.utc)
     before=len(seen)
@@ -77,7 +81,26 @@ for cycle in range(1,len(primary.MACRO_SERIES)+1):
                         collect_project_issues=True,collect_kraken_status=True)
     checked=primary.at_read(raw,roster,moment)
     assert checked["schema"]==primary.SCHEMA
-    assert checked["copertura"]["progetti"]==6
+    assert checked["copertura"]["progetti"]==8
+    # Public facts from real HTTP, with a wholly synthetic identity roster;
+    # pass through the same economic reader used by packet and GPT bridge.
+    economic=econ.at_read(dict(roster,schema=econ.VERSION,
+        acquisito_utc=moment.isoformat(timespec="seconds"),monitor_fonti=raw,
+        macro=econ.macro([],moment),fonti_economiche=econ.sources_matrix(),
+        regime={"stato":"INDETERMINATO","qualita":"INSUFFICIENTE"}),
+        [{"token":row["token"]} for row in roster["posizioni"]],[],moment)
+    policy_views={row["token"]:row["quadro_tokenomics"] for row in economic["posizioni"]
+                  if row["token"] in ("BNB","XRP")}
+    for token,view in policy_views.items():
+        doc=view["politica_offerta"]
+        assert view["politica_emissione"]["stato"]=="NON_ATTESTATA_DA_QUESTO_DOCUMENTO"
+        if doc["stato"] in ("OSSERVATO","STORICO_NON_AGGIORNATO"):
+            assert doc["valori_documentati"] is not None
+            assert doc["burn_eseguito_token"] is None
+            assert doc["saldo_escrow_attuale"] is None
+            assert doc["emissione_futura_token"] is None
+            print("KDD18_PUBLIC_CONSUMER",token,doc["stato"],doc["valori_documentati"],
+                  doc["acquisito_utc"],view["rischio_opportunita_ipotesi"])
     assert raw["richieste_pubbliche"] <= raw["limite_richieste"]
     assert raw["richieste_pubbliche"]==len(seen)-before
     print("PUBLIC_G2_SMOKE_UTC",moment.isoformat(timespec="seconds"),"cycle",cycle)
@@ -103,6 +126,13 @@ for cycle in range(1,len(primary.MACRO_SERIES)+1):
           "next_macro",raw["prossimo_indicatore"])
     print("solana_inflation",[(p["progetto_id"],p["stato"],p.get("valori"))
                               for p in checked.get("politiche_emissioni") or [] if p["progetto_id"]=="solana"])
+    policy_observed.update(p["progetto_id"] for p in checked.get("politiche_emissioni") or []
+                           if p.get("tipo") in ("POLITICA_BURN_BNB","ESCROW_STORICO_XRP")
+                           and p.get("stato_alla_lettura")=="OSSERVATO")
+    print("KDD18_PUBLIC_POLICY",[(p["progetto_id"],p["stato"],p.get("valori"),
+          p.get("sha256_documento"),p.get("acquisito_utc"),p.get("fonte"))
+          for p in checked.get("politiche_emissioni") or []
+          if p["progetto_id"] in ("binancecoin","ripple")])
     print("project_labelled_issues",[(p["progetto_id"],p["stato"],len(p["eventi"]))
                                    for p in checked.get("segnalazioni_repo") or []])
     print("repository_security",[(r["progetto_id"],r["stato"],len(r["avvisi"])) for r in checked.get("avvisi_repository") or []])
@@ -133,3 +163,49 @@ for cycle in range(1,len(primary.MACRO_SERIES)+1):
                   cftc["valore"],cftc["classificazioni"])
     if checked["copertura"]["governance_osservati"]==0 and checked["copertura"]["indicatori_macro_osservati"]==0:
         print("WARNING: NO LIVE PROVIDER EVIDENCE THIS CYCLE",file=sys.stderr)
+
+assert policy_observed=={"binancecoin","ripple"}, "Missing real public KDD18 documents: "+str(policy_observed)
+print("KDD18_PUBLIC_POLICY_BOTH_CONFIRMED", sorted(policy_observed))
+
+# RT83-TTL-01: exercise the actual ordinary producer and its unmodified
+# decision_desk.request urllib transport (not the dedicated fetch above).
+# Synthetic roster and AssetPairs only; all external requests here are public.
+import dossier_trade as producer
+import decision_desk as desk
+ordinary_wallet={"posizioni":[{"token":"BNB"}]}
+ordinary_four={"posizioni":[{"token":"BNB","coppia":"BNB/EUR","pair_key":"BNBEUR"}]}
+ordinary_candidates=[{"token":"XRP","coppia_analisi":"XRP/EUR","kraken_pair_key":"XRPEUR"}]
+ordinary_pairs={token+"EUR":{"wsname":token+"/EUR","status":"online","altname":token+"EUR"}
+                for token in ("BNB","XRP")}
+ordinary_previous=None
+ordinary_observed=set()
+for cycle in range(4):
+    start=dt.datetime.now(dt.timezone.utc)
+    with producer.primary_refresh_context():
+        ordinary_previous=producer.economic_evidence(
+            {"feed":[]},ordinary_wallet,ordinary_four,ordinary_candidates,start,
+            asset_pairs=ordinary_pairs,previous=ordinary_previous)
+    monitor=ordinary_previous["monitor_fonti"]
+    assert monitor["acquisito_utc"]==ordinary_previous["acquisito_utc"]
+    assert monitor["richieste_pubbliche"]<=8
+    read=dt.datetime.now(dt.timezone.utc)
+    result=econ.at_read(ordinary_previous,ordinary_wallet["posizioni"],
+                       ordinary_candidates,read,packet_generated=read)
+    for group in ("posizioni","candidati"):
+        for item in result[group]:
+            policy=item["quadro_tokenomics"].get("politica_offerta",{})
+            if policy.get("stato")=="OSSERVATO":
+                assert policy["acquisito_utc"]==monitor["acquisito_utc"]
+                assert policy["valori_documentati"] is not None
+                ordinary_observed.add(item["token"])
+                print("RT83_ORDINARY_HTTP",item["token"],group,policy["fonte"],
+                      policy["acquisito_utc"],policy["sha256_documento"],
+                      policy["valori_documentati"],"monitor_budget",monitor["richieste_pubbliche"])
+            else:
+                print("RT83_ORDINARY_STATE",item["token"],policy.get("stato"),
+                      policy.get("fonte"))
+    if ordinary_observed=={"BNB","XRP"}:
+        break
+assert ordinary_observed=={"BNB","XRP"}, "Ordinary HTTP policy evidence missing: "+str(ordinary_observed)
+print("RT83_ORDINARY_HTTP_BOTH_CONFIRMED",sorted(ordinary_observed),
+      "dossier_trade.economic_evidence -> primary.collect -> decision_desk.request")

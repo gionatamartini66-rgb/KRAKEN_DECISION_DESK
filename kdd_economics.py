@@ -366,6 +366,11 @@ def _supply_consistency(data):
     diagnostics={"rapporto_fdv_cap":None,
                  "quota_circolante_su_totale_pct":None,
                  "emissione_residua_massima_su_circolante_pct":None,
+                 "gap_massimo_circolante_pct":None,
+                 "gap_massimo_totale_token":None,
+                 "supply_non_circolante_token":None,
+                 "supply_non_circolante_su_circolante_pct":None,
+                 "emissione_futura_quantita_token":None,
                  "diluizione":"NON_CALCOLABILE"}
     cap,fdv=data.get("capitalizzazione_usd"),data.get("fdv_usd")
     if cap and fdv:
@@ -385,16 +390,30 @@ def _supply_consistency(data):
     elif circ is not None and circ>maximum:
         diagnostics["diluizione"]="SUPPLY_MAX_INFERIORE_AL_CIRCOLANTE_ANOMALIA"
     elif circ is not None and circ>0:
-        diagnostics["diluizione"]="RAPPORTO_CALCOLABILE"
+        diagnostics["diluizione"]="GAP_ARITMETICO_CALCOLABILE_NON_DILUIZIONE"
     elif circ==0:
         diagnostics["diluizione"]="CIRCOLANTE_ZERO"
     if not inconsistencies:
         if circ is not None and total is not None and total>0:
             diagnostics["quota_circolante_su_totale_pct"]=round(100*circ/total,4)
         if circ is not None and circ>0 and maximum is not None and maximum>0:
-            diagnostics["emissione_residua_massima_su_circolante_pct"]=round(
+            diagnostics["gap_massimo_circolante_pct"]=round(
                 100*(maximum-circ)/circ,4)
+        if circ is not None and total is not None:
+            diagnostics["supply_non_circolante_token"]=total-circ
+            if circ>0:
+                diagnostics["supply_non_circolante_su_circolante_pct"]=round(
+                    100*(total-circ)/circ,4)
+        if maximum is not None and maximum>0 and total is not None:
+            diagnostics["gap_massimo_totale_token"]=maximum-total
     return diagnostics,sorted(set(inconsistencies))
+
+
+_SUPPLY_GAP_FIELDS=("gap_massimo_circolante_pct","gap_massimo_totale_token",
+                    "supply_non_circolante_token",
+                    "supply_non_circolante_su_circolante_pct",
+                    "emissione_futura_quantita_token")
+
 
 
 def verify_supply_at_read(fundamental):
@@ -435,8 +454,18 @@ def verify_supply_at_read(fundamental):
         return
     expected,anomalies=_supply_consistency(fundamental)
     if fundamental.get("fonte_supply")=="COINGECKO_AGGREGATORE_NON_SCHEDULE_PRIMARIO":
+        # Legacy packets encoded the max/circulating gap under a misleading
+        # key. Verify its exact old arithmetic, never interpret it as minting.
+        new=any(k in fundamental for k in _SUPPLY_GAP_FIELDS)
+        if new and not all(k in fundamental for k in _SUPPLY_GAP_FIELDS):
+            raise ValueError("Fundamentals derived supply inconsistency: partial gap fields")
+        if not new:
+            expected["emissione_residua_massima_su_circolante_pct"]=expected["gap_massimo_circolante_pct"]
+            if expected["diluizione"]=="GAP_ARITMETICO_CALCOLABILE_NON_DILUIZIONE":
+                expected["diluizione"]="RAPPORTO_CALCOLABILE"
         for k in ("rapporto_fdv_cap","quota_circolante_su_totale_pct",
-                  "emissione_residua_massima_su_circolante_pct","diluizione"):
+                  "emissione_residua_massima_su_circolante_pct","diluizione")+(
+                      _SUPPLY_GAP_FIELDS if new else ()):
             if fundamental.get(k)!=expected[k]:
                 raise ValueError("Fundamentals derived supply inconsistency: "+k)
         if sorted(fundamental.get("anomalie_supply") or [])!=anomalies:
@@ -462,6 +491,7 @@ def fundamentals(identity, payload, now, acquired, *, source_url=None, acquisiti
            "offerta_massima": None, "rapporto_fdv_cap": None,
            "quota_circolante_su_totale_pct": None,
            "emissione_residua_massima_su_circolante_pct": None,
+           **{k:None for k in _SUPPLY_GAP_FIELDS},
            "fonte_supply": "COINGECKO_AGGREGATORE_NON_SCHEDULE_PRIMARIO",
            "diluizione": "NON_CALCOLABILE", "anomalie_supply": [],
            "unlock": "NON_VERIFICATO",
@@ -1005,16 +1035,21 @@ def decision_context(identity, fundamental, event):
     if event.get("stato") == "VERIFICATO":
         issue += "; release software ufficiale documentata (" + str(event.get("tag") or "versione") + ")"
         opposite += "; una release non prova adozione della rete o un effetto economico"
-    if fundamental.get("emissione_residua_massima_su_circolante_pct") is not None:
-        issue += "; emissione residua massima teorica pari al " + str(
-            fundamental["emissione_residua_massima_su_circolante_pct"]) + "% del circolante"
+    gap, anomalies = _supply_consistency(fundamental)
+    if not anomalies and gap["gap_massimo_circolante_pct"] is not None:
+        issue += "; differenza aritmetica massimo-circolante pari al " + str(
+            gap["gap_massimo_circolante_pct"]) + "% del circolante, non emissione futura"
+    if not anomalies and gap["supply_non_circolante_token"] is not None:
+        issue += "; totale meno circolante secondo l'aggregatore: " + str(
+            gap["supply_non_circolante_token"]) + " token già emessi non classificati come circolanti"
+    opposite += "; il gap massimo-totale non misura mint futuro: burn, tetti storici e vincoli possono alterarlo"
     return {"fatto": issue, "rischio_opportunita_ipotesi": hypothesis,
             "controipotesi": opposite,
             "condizione_riesame": "Confrontare supply osservata e schedule primaria datata; "
                                  "per release verificare adozione/rete e non solo annuncio"}
 
 
-def tokenomics_view(row, primary):
+def tokenomics_view(row, primary, *, _legacy_supply=False):
     """One per-asset economic view of the already verified source evidence.
 
     No HTTP here, no second producer, no default unlock dates and no claim
@@ -1044,18 +1079,24 @@ def tokenomics_view(row, primary):
                        if acquisition_claim=="RISPOSTA_HTTP_PASSATA_AL_PRODUTTORE"
                        else "ACQUISIZIONE_NON_ATTESTATA")
     anomaly=fund.get("stato")=="ANOMALIA_SUPPLY"
-    remaining=fund.get("emissione_residua_massima_su_circolante_pct") if valid else None
+    gaps = _supply_consistency(fund)[0] if valid else {}
+    remaining = gaps.get("gap_massimo_circolante_pct") if _legacy_supply else None
     schedule_kind=schedule.get("stato","NON_ACQUISITO")
     schedule_source=schedule.get("fonte")
     schedule_current=schedule_kind in (
         "DOCUMENTO_PRIMARIO_CON_SCHEDULE","DOCUMENTO_PRIMARIO_CON_MASSIMI_DATATI",
         "DOCUMENTO_PRIMARIO_REGOLA_VESTING","PROIEZIONE_PRIMARIA_NON_UNLOCK")
-    emission_current=issuance.get("stato_alla_lettura")=="OSSERVATO"
+    from kdd_economic_sources import SUPPLY_POLICY_DOCUMENTS
+    document_bound=issuance.get("fonte") in SUPPLY_POLICY_DOCUMENTS
+    document_policy=issuance.get("tipo") in ("POLITICA_BURN_BNB","ESCROW_STORICO_XRP")
+    document_usable=document_policy and issuance.get("stato_alla_lettura") in (
+        "OSSERVATO","STORICO_NON_AGGIORNATO")
+    emission_current=not document_bound and issuance.get("stato_alla_lettura")=="OSSERVATO"
     if anomaly:
         state="DATI_SUPPLY_CONTRADDITTORI"
         hypothesis="I valori aggregati discordanti non permettono di quantificare la diluizione"
         counter="L'anomalia della fonte non prova una modifica reale dell'offerta"
-    elif not valid and not schedule_current and not emission_current:
+    elif not valid and not schedule_current and not emission_current and not document_usable:
         state="SENZA_PROVE_ECONOMICHE_ATTUALI"
         hypothesis="Non è possibile quantificare l'esposizione alla diluizione con i dati presenti"
         counter="Assenza o scadenza della fonte non dimostra tokenomics favorevole o sfavorevole"
@@ -1063,10 +1104,18 @@ def tokenomics_view(row, primary):
         state="SUPPLY_E_DOCUMENTO_PRIMARIO"
         hypothesis="Una quota non circolante e un piano documentato possono richiedere riesame del rischio di diluizione"
         counter="Programma, circolazione futura e vendita sono osservazioni diverse"
+    elif valid and document_usable:
+        state="SUPPLY_E_DOCUMENTO_POLICY_OFFERTA"
+        hypothesis="Confrontare politica dell'offerta e supply osservata"
+        counter="Un documento di policy non attesta un'operazione eseguita"
     elif valid and emission_current:
         state="SUPPLY_E_POLITICA_EMISSIONE"
         hypothesis="I parametri ufficiali di emissione possono modificare nel tempo la supply osservata"
         counter="Policy di emissione, supply circolante e vendite sono misure distinte"
+    elif document_usable:
+        state="DOCUMENTO_POLICY_OFFERTA_SENZA_SUPPLY_ATTUALE"
+        hypothesis="La policy richiede un confronto con la supply corrente"
+        counter="Senza dati attuali non si quantifica l'effetto sul circolante"
     elif schedule_current or emission_current:
         state="FONTE_PRIMARIA_SENZA_SUPPLY_ATTUALE"
         hypothesis="Politiche o piani primari richiedono confronto con supply osservata"
@@ -1079,6 +1128,16 @@ def tokenomics_view(row, primary):
         state="IDENTITA_NON_VERIFICATA"
         hypothesis="Non attribuire supply o documenti di progetto a un ticker ambiguo"
         counter="L'assenza di identificazione non equivale ad assenza di emissioni"
+    # The source document, rather than the aggregate supply gap, tells us
+    # what the mechanism actually means. A recently retrieved historical
+    # statement is not a recent on-chain transaction.
+    policy_kind=issuance.get("tipo") if document_usable else None
+    if policy_kind=="POLITICA_BURN_BNB":
+        hypothesis="L'Auto-Burn può ridurre l'offerta totale; l'effetto sul circolante dipende dalla provenienza dei token bruciati"
+        counter="L'obiettivo di burn non attesta la quantità bruciata oggi, un acquisto o un rialzo del prezzo"
+    elif policy_kind=="ESCROW_STORICO_XRP":
+        hypothesis="Lo svincolo di XRP già creati può aumentare l'offerta disponibile; distinguere rilascio, ri-vincolo e circolazione"
+        counter="L'escrow del 2017 non misura il saldo escrow attuale, la prossima tranche, nuova emissione o vendita"
     return {
         "token":row.get("token"),"coppia":ident.get("coppia"),
         "progetto_id":project,"stato":state,
@@ -1109,7 +1168,12 @@ def tokenomics_view(row, primary):
             "rapporto_fdv_cap":fund.get("rapporto_fdv_cap") if valid else None,
             "quota_circolante_su_totale_pct":fund.get("quota_circolante_su_totale_pct") if valid else None,
             "emissione_residua_massima_su_circolante_pct":remaining,
-            "diluizione":fund.get("diluizione","NON_CALCOLABILE"),
+            **({} if _legacy_supply else {
+                **{k:gaps.get(k) for k in _SUPPLY_GAP_FIELDS},
+                "interpretazione":"Totale meno circolante: supply non circolante secondo l'aggregatore, non necessariamente vincolata; massimo meno totale e massimo meno circolante sono gap aritmetici, non mint futuro. Vesting è maturazione di diritti, unlock rimozione di vincoli, escrow custodia vincolata, burn distruzione. Diluizione economica dipende da diritti, nuova emissione, circolazione e domanda; quantità futura non inferibile da questi gap."}),
+            "diluizione":("RAPPORTO_CALCOLABILE" if _legacy_supply and
+                          fund.get("diluizione")=="GAP_ARITMETICO_CALCOLABILE_NON_DILUIZIONE"
+                          else fund.get("diluizione","NON_CALCOLABILE")),
             "anomalie":fund.get("anomalie_supply",[]) if anomaly else [],
             "limite":"Dati CoinGecko aggregati, non registro dei token venduti o calendario unlock"},
         "calendario":{
@@ -1145,13 +1209,31 @@ def tokenomics_view(row, primary):
                if isinstance(e,dict)] if schedule_current else [],
             "realizzazione":"NON_ATTESTATA","vendita":"NON_ATTESTATA",
             "limite":schedule.get("limite") or "Nessun calendario primario associato o corrente"},
-        "politica_emissione":{
-            "stato":issuance.get("stato_alla_lettura",
-                                  issuance.get("stato","NON_ACQUISITO")),
-            "fonte":issuance.get("fonte"),
-            "acquisito_utc":issuance.get("acquisito_utc"),
+        "politica_emissione":(
+            {"stato":"NON_ATTESTATA_DA_QUESTO_DOCUMENTO","fonte":None,
+             "acquisito_utc":None,"tipo":None,
+             "limite":"Il documento burn/escrow non attesta parametri di nuova emissione"}
+            if document_bound else {
+                "stato":issuance.get("stato_alla_lettura",
+                                      issuance.get("stato","NON_ACQUISITO")),
+                "fonte":issuance.get("fonte"),
+                "acquisito_utc":issuance.get("acquisito_utc"),
+                "tipo":issuance.get("tipo"),
+                "limite":issuance.get("limite") or "Politica di emissione non acquisita"}),
+        **({"politica_offerta":{
+            "stato":issuance.get("stato_alla_lettura",issuance.get("stato","NON_ACQUISITO")),
+            "fonte":issuance.get("fonte"),"acquisito_utc":issuance.get("acquisito_utc"),
             "tipo":issuance.get("tipo"),
-            "limite":issuance.get("limite") or "Politica di emissione non acquisita"},
+            "valori_documentati":issuance.get("valori") if document_usable else None,
+            "sha256_documento":issuance.get("sha256_documento"),
+            "stato_documento":issuance.get("stato_documento"),
+            "freschezza_documento":"RIACQUISITO" if issuance.get("stato_alla_lettura")=="OSSERVATO"
+                else "CACHE_NON_RICONFERMATA_ENTRO_TTL" if document_usable else "SCADUTO_O_ASSENTE",
+            "provenienza":"HTTP dichiarato dal produttore; corpo originale non disponibile al consumer",
+            "saldo_escrow_attuale":None,"prossimo_unlock_utc":None,
+            "burn_eseguito_token":None,"emissione_futura_token":None,
+            "limite":issuance.get("limite")}}
+           if document_bound else {}),
         "rischio_opportunita_ipotesi":hypothesis,
         "controipotesi":counter,
         "condizione_di_riesame":(
@@ -1663,13 +1745,20 @@ def _historical_provenance_view(current, old_proof, family):
     return None
 
 
-def at_read(source, positions, shortlist, now, *, requested=None):
+def at_read(source, positions, shortlist, now, *, requested=None, packet_generated=None):
     """Validate attribution and recalculate economic age, without source fetches."""
     if not isinstance(source, dict) or source.get("schema") != VERSION:
         raise ValueError("Schema evidenza economica")
     acquired = stamp(source.get("acquisito_utc"))
     if not acquired or acquired > now + dt.timedelta(minutes=2):
         raise ValueError("Tempo evidenza economica")
+    # The immutable packet generation is an upper bound, independent of the
+    # later GPT read clock. Producer timestamps are serialized to seconds.
+    if packet_generated is not None:
+        if (not isinstance(packet_generated,dt.datetime) or packet_generated.utcoffset() is None
+                or acquired.replace(microsecond=0)>
+                   packet_generated.astimezone(UTC).replace(microsecond=0)):
+            raise ValueError("Fotografia economica successiva al packet")
     original_positions = source.get("posizioni")
     original_candidates = source.get("candidati")
     original_requested = source.get("richiesti",[])
@@ -1798,6 +1887,12 @@ def at_read(source, positions, shortlist, now, *, requested=None):
             # fundamentals object through row_copy = dict(row). Never mutate
             # the hashed packet while deriving a GPT read-time qualification.
             row_copy["fondamentali"]=dict(row_copy["fondamentali"])
+            fund_copy=row_copy["fondamentali"]
+            if fund_copy.get("stato") in ("VERIFICATO","SCADUTO","ANOMALIA_SUPPLY"):
+                derived,_=_supply_consistency(fund_copy)
+                fund_copy.update({k:derived[k] for k in _SUPPLY_GAP_FIELDS},
+                                 emissione_residua_massima_su_circolante_pct=None,
+                                 diluizione=derived["diluizione"])
             proof=row_copy["fondamentali"].get("prova_acquisizione")
             if isinstance(proof,dict):
                 original=proof.get("stato")
@@ -1879,7 +1974,14 @@ def at_read(source, positions, shortlist, now, *, requested=None):
         # Verify all original source attributions, then derive independent
         # decision-review questions for EVERY holding and shortlist entry.
         # Do not carry the old read-time view into the next GPT read.
-        verified = primary.at_read(source["monitor_fonti"], source, now)
+        monitor = source["monitor_fonti"]
+        monitor_clock = stamp(monitor.get("acquisito_utc")) if isinstance(monitor,dict) else None
+        # economic_evidence passes the same now to collect and the dossier.
+        # An earlier monitor remains historical; a later one is impossible.
+        if (not monitor_clock or monitor_clock.replace(microsecond=0)>
+                acquired.replace(microsecond=0)):
+            raise ValueError("Monitor primario successivo alla fotografia economica")
+        verified = primary.at_read(monitor, source, now)
         result["monitor_fonti"] = verified
         previous_read = stamp(source.get("letto_utc"))
         same_read = bool(previous_read and
@@ -1920,11 +2022,13 @@ def at_read(source, positions, shortlist, now, *, requested=None):
         for original,item in zip(source.get(group,[]),result[group]):
             tokenomics=tokenomics_view(item,primary_read)
             prior_tokenomics=original.get("quadro_tokenomics")
-            if (same_read and prior_tokenomics is not None
-                    and prior_tokenomics!=tokenomics
-                    and prior_tokenomics!=_historical_provenance_view(
-                        tokenomics,original.get("fondamentali",{}).get("prova_acquisizione") or {},
-                        "tokenomics")):
+            proof=original.get("fondamentali",{}).get("prova_acquisizione") or {}
+            admissible=[tokenomics,_historical_provenance_view(tokenomics,proof,"tokenomics")]
+            if not any(k in original.get("fondamentali",{}) for k in _SUPPLY_GAP_FIELDS):
+                # Exact prior display only, regenerated from verified inputs.
+                legacy=tokenomics_view(item,primary_read,_legacy_supply=True)
+                admissible.extend([legacy,_historical_provenance_view(legacy,proof,"tokenomics")])
+            if same_read and prior_tokenomics is not None and prior_tokenomics not in admissible:
                 raise ValueError("Tokenomics at read distorted")
             item["quadro_tokenomics"]=tokenomics
     for group in ("posizioni","candidati","richiesti"):
@@ -1972,6 +2076,12 @@ def at_read(source, positions, shortlist, now, *, requested=None):
                 for r in rows),
             "fonti_emissione_attuali":sum(
                 r["quadro_tokenomics"]["politica_emissione"]["stato"]=="OSSERVATO"
+                for r in rows),
+            "documenti_policy_offerta_riacquisiti":sum(
+                r["quadro_tokenomics"].get("politica_offerta",{}).get("stato")=="OSSERVATO"
+                for r in rows),
+            "documenti_policy_offerta_cache_valida":sum(
+                r["quadro_tokenomics"].get("politica_offerta",{}).get("stato")=="STORICO_NON_AGGIORNATO"
                 for r in rows),
             "fonte_supply":"CoinGecko pubblica per asset, non calendario primario",
             "limite":"Copertura del roster del packet, non prova del wallet o dell'esecuzione degli unlock"}
