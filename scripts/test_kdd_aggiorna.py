@@ -871,6 +871,16 @@ assert bridge.PRIVATE_ROOT.is_relative_to(Path.home())
 assert kraken_readonly.AUTH.is_relative_to(Path.home())
 assert kdd27_runtime.private_root() == root / '.kdd27_private'
 assert exchange.receive_synced() is None
+# Absence of enrollment is NOT verified absence. Keep the genuine STOP,
+# then initialize ONLY this explicitly synthetic, disposable test history.
+try:
+    exchange.pending()
+except exchange.DecisionContinuityError:
+    pass
+else:
+    raise AssertionError('uninitialized history did not STOP')
+exchange.initialize_decision_continuity(
+    mode='NEW', acknowledgement='INIZIALIZZO_NUOVO_STORICO')
 assert exchange.pending() is None
 # Genuine filesystem validator against a disposable private file.
 outbox = bridge.private_directory(bridge.OUTBOX, create=True)
@@ -881,7 +891,7 @@ assert bridge.read_regular(p, expected_parent=outbox) == b'{}'
 import shutil
 shutil.rmtree(bridge.PRIVATE_ROOT)
 # Direct opens of operational paths fail before contents are read.
-for name in sys.argv[1:] + ['/storage/emulated/0/KDD_TEST_SAMSUNG/proposta_portafoglio.json']:
+for name in sys.argv[1:]:
     for flags in (os.O_RDONLY, os.O_WRONLY | os.O_CREAT):
         try:
             fd = os.open(name, flags, 0o600)
@@ -890,6 +900,15 @@ for name in sys.argv[1:] + ['/storage/emulated/0/KDD_TEST_SAMSUNG/proposta_porta
         else:
             os.close(fd)
             raise AssertionError('operational access was not refused')
+# Test the absolute Android path predicate WITHOUT opening any actual
+# Android file, even if this test is run on a phone with a broken guard.
+import sitecustomize
+try:
+    sitecustomize.guard_path('/storage/emulated/0/KDD_TEST_SAMSUNG/proposta_portafoglio.json')
+except PermissionError:
+    pass
+else:
+    raise AssertionError('absolute FolderSync path was not refused')
 # Genuine descendant with PYTHONPATH reset like the Android crash tests.
 child = subprocess.run([sys.executable, '-B', '-c',
     'from pathlib import Path; from scripts import kdd_drive_exchange as e; '
