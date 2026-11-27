@@ -909,6 +909,103 @@ except PermissionError:
     pass
 else:
     raise AssertionError('absolute FolderSync path was not refused')
+# Compare the original guard with the actual candidate, including lexical
+# boundary cases, bytes, relative names, missing leaves, symlink chains,
+# loops and a previously allowed path whose ancestor is replaced.
+def prior_guard(value):
+    if not isinstance(value, (str, bytes, os.PathLike)):
+        return
+    p = Path(os.fsdecode(value)).resolve()
+    if p == sitecustomize.ROOT or p.is_relative_to(sitecustomize.ROOT):
+        return
+    if any(p == base or p.is_relative_to(base) for base in sitecustomize.FORBIDDEN):
+        raise PermissionError('STOP operational path in updater test')
+
+def outcome(guard, value):
+    try:
+        guard(value)
+    except (PermissionError, RuntimeError, OSError) as exc:
+        return type(exc).__name__
+    return 'ALLOWED'
+
+probes = root / '.guard-probes'
+mutable = probes / 'current/item'
+blocked = probes / 'blocked-file'
+cases = [
+    (root, 'ALLOWED'), (root / 'missing', 'ALLOWED'),
+    (str(root) + '-sibling/file', None),
+    (os.fsencode(root / 'missing'), 'ALLOWED'),
+    ('.guard-probes/current/item', 'ALLOWED'),
+    (mutable, 'ALLOWED'), (blocked, 'PermissionError'),
+    (probes / 'blocked-dir/missing', 'PermissionError'),
+    (probes / 'blocked-dir/../ultimo_report.json', 'PermissionError'),
+    (probes / 'chain', 'PermissionError'),
+    (probes / 'dangling', 'PermissionError'),
+    (probes / 'allowed-link', 'ALLOWED'),
+    (probes / 'loop', None),
+    (sys.argv[1], 'PermissionError'),
+    (os.path.relpath(sys.argv[1], root), 'PermissionError'),
+    (sys.argv[1] + '-sibling', 'PermissionError'),
+    (str(Path(sys.argv[1]).parent) + '-sibling/file', 'ALLOWED'),
+    ('/storage/emulated/0/KDD_TEST_SAMSUNG-sibling/file', None),
+    ('/storage/emulated/0/KDD_TEST_SAMSUNG/proposta_portafoglio.json', 'PermissionError'),
+    (None, 'ALLOWED'), (0, 'ALLOWED'),
+]
+for value, expected in cases:
+    old = outcome(prior_guard, value)
+    new = outcome(sitecustomize.guard_path, value)
+    assert old == new, (value, old, new)
+    if expected is not None:
+        assert new == expected, (value, new, expected)
+# Actual intercepted read/write opens and rename/unlink must refuse an
+# existing synthetic symlink, before opening the operational sentinel.
+for value in (blocked, probes / 'chain'):
+    for flags in (os.O_RDONLY, os.O_WRONLY):
+        try:
+            fd = os.open(value, flags)
+        except PermissionError:
+            pass
+        else:
+            os.close(fd)
+            raise AssertionError('symlink operational open accepted')
+    for operation in (lambda: os.unlink(value),
+                      lambda: os.rename(value, probes / 'renamed')):
+        try:
+            operation()
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError('symlink operational mutation accepted')
+# Both directory renames are genuinely inside the disposable workspace.
+# The path string is unchanged, but the replacement child points outside.
+os.rename(probes / 'current', probes / 'previous')
+os.rename(probes / 'replacement', probes / 'current')
+assert outcome(prior_guard, mutable) == outcome(sitecustomize.guard_path, mutable) == 'PermissionError'
+try:
+    fd = os.open(mutable, os.O_RDONLY)
+except PermissionError:
+    pass
+else:
+    os.close(fd)
+    raise AssertionError('previously allowed path accepted after symlink replacement')
+
+# Same-process A/B timing of the authentic old predicate versus the new
+# one; no timing-based bypass or flaky speed assertion. Each run resolves
+# actual filesystem paths, including forbidden and symlink cases.
+import time
+sample = [value for value, _ in cases if isinstance(value, (str, bytes, os.PathLike))]
+count = 6200
+times = []
+for guard in (prior_guard, sitecustomize.guard_path, sitecustomize.guard_path, prior_guard):
+    start = time.perf_counter()
+    for i in range(count):
+        outcome(guard, sample[i % len(sample)])
+    times.append(time.perf_counter() - start)
+print('KDD_GUARD_EQUIVALENCE_PASS', len(cases), 'mutable-symlink and real opens/mutations')
+print('KDD_GUARD_AB', sys.version.split()[0], count,
+      'old_seconds', round((times[0]+times[3])/2, 4),
+      'new_seconds', round((times[1]+times[2])/2, 4))
+
 # Genuine descendant with PYTHONPATH reset like the Android crash tests.
 child = subprocess.run([sys.executable, '-B', '-c',
     'from pathlib import Path; from scripts import kdd_drive_exchange as e; '
@@ -928,10 +1025,29 @@ print('ISOLATION_SENTINELS_AND_DESCENDANT_OK')
                     self.assertEqual((cwd / name).read_bytes(), (source / name).read_bytes())
                 for path in sentinels[:3]:
                     self.assertFalse((cwd / path.relative_to(source)).exists())
+                # Prepare synthetic symlinks in the disposable workspace
+                # from the parent, outside the child's audit hook. No
+                # operational files are opened by setup.
+                probes = cwd / '.guard-probes'
+                (probes / 'current').mkdir(parents=True)
+                (probes / 'replacement').mkdir()
+                (probes / 'current/item').write_text('safe synthetic fixture')
+                (probes / 'replacement/item').symlink_to(sentinels[0])
+                (probes / 'blocked-file').symlink_to(sentinels[0])
+                (probes / 'blocked-dir').symlink_to(source / 'storico_portafoglio')
+                (probes / 'chain').symlink_to('blocked-file')
+                (probes / 'dangling').symlink_to(source / 'missing')
+                (probes / 'allowed-link').symlink_to('current/item')
+                (probes / 'loop').symlink_to('loop')
                 checked = original([sys.executable, '-B', '-c', probe,
                                     *map(str, sentinels)], cwd=cwd, timeout=30)
                 self.assertEqual(checked.returncode, 0, checked.stderr)
                 self.assertIn('ISOLATION_SENTINELS_AND_DESCENDANT_OK', checked.stdout)
+                self.assertIn('KDD_GUARD_EQUIVALENCE_PASS', checked.stdout)
+                self.assertIn('KDD_GUARD_AB', checked.stdout)
+                for line in checked.stdout.splitlines():
+                    if line.startswith(('KDD_GUARD_EQUIVALENCE_PASS', 'KDD_GUARD_AB')):
+                        print(line)
                 seen[cwd] = []
             result = original(args, cwd=cwd, timeout=timeout)
             # No new skips, and the genuine local checkpoint + T0 gates run.

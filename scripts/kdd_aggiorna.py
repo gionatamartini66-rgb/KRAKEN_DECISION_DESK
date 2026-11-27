@@ -402,13 +402,29 @@ sys.meta_path.insert(0, ExchangeFinder())
 # aliases. This is a test I/O guard, not an OS sandbox against malicious code.
 # Resolve symlinks before checking; never read a sentinel to decide if allowed.
 FORBIDDEN = tuple(Path(p).resolve() for p in FORBIDDEN_PATHS)
+# Compare canonical strings at component boundaries. Path.resolve on Python
+# 3.13+ delegates to os.path.realpath; avoid repeated Path construction and
+# is_relative_to for every audited syscall. Older Python retains its original
+# resolve behavior (including the historical symlink-loop exception).
+_ROOT_TEXT = os.fspath(ROOT)
+_ROOT_PREFIX = _ROOT_TEXT.rstrip(os.sep) + os.sep
+_FORBIDDEN_TEXT = tuple(os.fspath(p) for p in FORBIDDEN)
+_FORBIDDEN_PREFIXES = tuple(p.rstrip(os.sep) + os.sep for p in _FORBIDDEN_TEXT)
+if sys.version_info >= (3, 13):
+    _resolve_guard_path = os.path.realpath
+else:
+    def _resolve_guard_path(value):
+        return os.fspath(Path(value).resolve())
+
 def guard_path(value):
     if not isinstance(value, (str, bytes, os.PathLike)):
         return
-    p = Path(os.fsdecode(value)).resolve()
-    if p == ROOT or p.is_relative_to(ROOT):
+    # Never cache resolved paths or skip resolution inside the workspace:
+    # a symlink or an ancestor may have changed since the previous syscall.
+    p = _resolve_guard_path(os.fsdecode(value))
+    if p == _ROOT_TEXT or p.startswith(_ROOT_PREFIX):
         return
-    if any(p == base or p.is_relative_to(base) for base in FORBIDDEN):
+    if p in _FORBIDDEN_TEXT or p.startswith(_FORBIDDEN_PREFIXES):
         raise PermissionError('STOP operational path in updater test')
 
 def audit(event, args):
