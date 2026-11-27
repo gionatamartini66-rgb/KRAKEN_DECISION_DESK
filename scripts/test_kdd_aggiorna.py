@@ -345,10 +345,11 @@ class UpdateTests(unittest.TestCase):
         def subprocess_with_clean_r5_environment(args, *, cwd, timeout=120):
             if any('kdd_android_regressions' in str(arg) for arg in args):
                 r5_seen.append(tuple(args))
-                env = os.environ.copy()
-                env.pop('PYTHONPATH', None)
-                return subprocess.run(args, cwd=cwd, text=True,
-                                      capture_output=True, timeout=timeout, env=env)
+                # Remove the ambient path, not the updater's verified
+                # workspace launcher/environment. Run the genuine command.
+                with patch.dict(os.environ):
+                    os.environ.pop('PYTHONPATH', None)
+                    return real_command(args, cwd=cwd, timeout=timeout)
             return real_command(args, cwd=cwd, timeout=timeout)
         with patch.object(kdd, 'capability_preflight'), \
              patch.object(kdd, 'command', side_effect=subprocess_with_clean_r5_environment), \
@@ -599,7 +600,9 @@ class UpdateTests(unittest.TestCase):
         observed = []
         def synthetic_command(args, *, cwd, timeout=120):
             module = next((m for m in modules if m in args), None)
-            phase = 'preflight' if cwd == self.root else 'postflight'
+            self.assertNotIn(cwd, (self.root, self.live))
+            self.assertTrue((cwd / 'sitecustomize/__init__.py').is_file())
+            phase = 'preflight' if cwd.name.startswith('.kdd-test-preflight-') else 'postflight'
             elapsed = (138 if phase == 'preflight' else 180) if module == 'test_decision_desk' else 1
             observed.append((phase, tuple(args), timeout, elapsed))
             clock['seconds'] += elapsed
@@ -797,6 +800,291 @@ class UpdateTests(unittest.TestCase):
                     kdd.isolated_test(self.root, phase='preflight')
             self.assertEqual(seen, [210])
             self.assertNotIn('PRIVATE_KDD_', output.getvalue())
+
+    def test_isolation_real_suites_and_operational_sentinels_both_flights(self):
+        """Actual KDD sources, actual updater runner, synthetic private data only."""
+        import hashlib
+        import json
+        import os
+        import sys
+
+        repo = Path(__file__).resolve().parents[1]
+        source = Path(self.tmp.name) / 'authentic-synthetic-live'
+        source.mkdir()
+        for name in kdd.FILES:
+            kdd._copy_test_input(repo, source, name)
+        # Local checkpoint and T0 gates must EXECUTE, not skip because CI
+        # lacks a private configuration. This T0 is wholly invented.
+        (source / 'config.json').write_text('{}\n')
+        t0 = source / 'storico_portafoglio/T0_2026-10-19_2301_KRAKEN_PRO.json'
+        t0.parent.mkdir()
+        t0.write_text(json.dumps({
+            'quantita_e_valori_schermata': [{'valore_eur_visualizzato': '12.40'}],
+            'valore_totale_fotografia_eur': '12.40'}))
+        digest = hashlib.sha256(t0.read_bytes()).hexdigest()
+        (source / 'portafoglio.json').write_text(json.dumps({
+            't0_id': t0.stem, 't0_sha256': digest,
+            'fonte_quantita': 'Kraken BalanceEx - SYNTHETIC ONLY',
+            'posizioni': [{'token': 'TEST', 'costo_medio_eur': None}],
+            'liquidita_spot_api': {}}))
+        (source / 'README.md').write_text(
+            'SYNTHETIC CHECKPOINT\n<!-- CHECKPOINT_SORGENTI_SHA256: '
+            + kdd.fingerprint(source) + ' -->\n')
+
+        home = Path(self.tmp.name) / 'operational-sentinel-home'
+        home.mkdir(mode=0o700)
+        sentinels = [
+            source / 'ultimo_report.json',
+            source / '.kdd27_private/monitor.sqlite3',
+            source / 'storico_portafoglio/not-an-authorized-fixture.json',
+            home / '.local/state/kraken-decision-desk/bridge/outgoing/sentinel.json',
+            home / '.local/state/kraken-decision-desk/bridge/incoming/proposta_portafoglio.json',
+            home / '.config/kraken-decision-desk/readonly.json',
+            home / 'storage/shared/KDD_TEST_SAMSUNG/proposta_portafoglio.json',
+        ]
+        payload = b'SYNTHETIC OPERATIONAL SENTINEL - DO NOT READ OR WRITE'
+        for path in sentinels:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+        (home / '.local/state/kraken-decision-desk').chmod(0o700)
+
+        def inventory():
+            return {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
+                    for base in (source, home) for p in base.rglob('*') if p.is_file()}
+        # Capability preflight intentionally creates its disposable directory
+        # in real updater state; it must not touch any sentinel contents.
+        before = inventory()
+        original = kdd.command
+        seen = {}
+        probe = r"""
+import os, subprocess, sys
+from pathlib import Path
+from scripts import kdd_drive_exchange as exchange, kdd_bridge_g2 as bridge
+import kdd_drive_exchange as alternate
+import decision_desk, kraken_readonly
+from scripts import kdd27_runtime
+root = Path.cwd()
+assert Path.home() == root / '.test-home'
+assert decision_desk.DIR == root
+assert exchange.EXCHANGE_ROOT == alternate.EXCHANGE_ROOT == root / '.test-foldersync'
+assert bridge.PRIVATE_ROOT.is_relative_to(Path.home())
+assert kraken_readonly.AUTH.is_relative_to(Path.home())
+assert kdd27_runtime.private_root() == root / '.kdd27_private'
+assert exchange.receive_synced() is None
+# Absence of enrollment is NOT verified absence. Keep the genuine STOP,
+# then initialize ONLY this explicitly synthetic, disposable test history.
+try:
+    exchange.pending()
+except exchange.DecisionContinuityError:
+    pass
+else:
+    raise AssertionError('uninitialized history did not STOP')
+exchange.initialize_decision_continuity(
+    mode='NEW', acknowledgement='INIZIALIZZO_NUOVO_STORICO')
+assert exchange.pending() is None
+# Genuine filesystem validator against a disposable private file.
+outbox = bridge.private_directory(bridge.OUTBOX, create=True)
+p = outbox / 'isolation-probe.json'
+p.write_bytes(b'{}')
+p.chmod(0o600)
+assert bridge.read_regular(p, expected_parent=outbox) == b'{}'
+import shutil
+shutil.rmtree(bridge.PRIVATE_ROOT)
+# Direct opens of operational paths fail before contents are read.
+for name in sys.argv[1:]:
+    for flags in (os.O_RDONLY, os.O_WRONLY | os.O_CREAT):
+        try:
+            fd = os.open(name, flags, 0o600)
+        except PermissionError:
+            continue
+        else:
+            os.close(fd)
+            raise AssertionError('operational access was not refused')
+# Test the absolute Android path predicate WITHOUT opening any actual
+# Android file, even if this test is run on a phone with a broken guard.
+import sitecustomize
+try:
+    sitecustomize.guard_path('/storage/emulated/0/KDD_TEST_SAMSUNG/proposta_portafoglio.json')
+except PermissionError:
+    pass
+else:
+    raise AssertionError('absolute FolderSync path was not refused')
+# Compare the original guard with the actual candidate, including lexical
+# boundary cases, bytes, relative names, missing leaves, symlink chains,
+# loops and a previously allowed path whose ancestor is replaced.
+def prior_guard(value):
+    if not isinstance(value, (str, bytes, os.PathLike)):
+        return
+    p = Path(os.fsdecode(value)).resolve()
+    if p == sitecustomize.ROOT or p.is_relative_to(sitecustomize.ROOT):
+        return
+    if any(p == base or p.is_relative_to(base) for base in sitecustomize.FORBIDDEN):
+        raise PermissionError('STOP operational path in updater test')
+
+def outcome(guard, value):
+    try:
+        guard(value)
+    except (PermissionError, RuntimeError, OSError) as exc:
+        return type(exc).__name__
+    return 'ALLOWED'
+
+probes = root / '.guard-probes'
+mutable = probes / 'current/item'
+blocked = probes / 'blocked-file'
+cases = [
+    (root, 'ALLOWED'), (root / 'missing', 'ALLOWED'),
+    (str(root) + '-sibling/file', None),
+    (os.fsencode(root / 'missing'), 'ALLOWED'),
+    ('.guard-probes/current/item', 'ALLOWED'),
+    (mutable, 'ALLOWED'), (blocked, 'PermissionError'),
+    (probes / 'blocked-dir/missing', 'PermissionError'),
+    (probes / 'blocked-dir/../ultimo_report.json', 'PermissionError'),
+    (probes / 'chain', 'PermissionError'),
+    (probes / 'dangling', 'PermissionError'),
+    (probes / 'allowed-link', 'ALLOWED'),
+    (probes / 'loop', None),
+    (sys.argv[1], 'PermissionError'),
+    (os.path.relpath(sys.argv[1], root), 'PermissionError'),
+    (sys.argv[1] + '-sibling', 'PermissionError'),
+    (str(Path(sys.argv[1]).parent) + '-sibling/file', 'ALLOWED'),
+    ('/storage/emulated/0/KDD_TEST_SAMSUNG-sibling/file', None),
+    ('/storage/emulated/0/KDD_TEST_SAMSUNG/proposta_portafoglio.json', 'PermissionError'),
+    (None, 'ALLOWED'), (0, 'ALLOWED'),
+]
+for value, expected in cases:
+    old = outcome(prior_guard, value)
+    new = outcome(sitecustomize.guard_path, value)
+    assert old == new, (value, old, new)
+    if expected is not None:
+        assert new == expected, (value, new, expected)
+# Actual intercepted read/write opens and rename/unlink must refuse an
+# existing synthetic symlink, before opening the operational sentinel.
+for value in (blocked, probes / 'chain'):
+    for flags in (os.O_RDONLY, os.O_WRONLY):
+        try:
+            fd = os.open(value, flags)
+        except PermissionError:
+            pass
+        else:
+            os.close(fd)
+            raise AssertionError('symlink operational open accepted')
+    for operation in (lambda: os.unlink(value),
+                      lambda: os.rename(value, probes / 'renamed')):
+        try:
+            operation()
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError('symlink operational mutation accepted')
+# Both directory renames are genuinely inside the disposable workspace.
+# The path string is unchanged, but the replacement child points outside.
+os.rename(probes / 'current', probes / 'previous')
+os.rename(probes / 'replacement', probes / 'current')
+assert outcome(prior_guard, mutable) == outcome(sitecustomize.guard_path, mutable) == 'PermissionError'
+try:
+    fd = os.open(mutable, os.O_RDONLY)
+except PermissionError:
+    pass
+else:
+    os.close(fd)
+    raise AssertionError('previously allowed path accepted after symlink replacement')
+
+# Same-process A/B timing of the authentic old predicate versus the new
+# one; no timing-based bypass or flaky speed assertion. Each run resolves
+# actual filesystem paths, including forbidden and symlink cases.
+import time
+sample = [value for value, _ in cases if isinstance(value, (str, bytes, os.PathLike))]
+count = 6200
+times = []
+for guard in (prior_guard, sitecustomize.guard_path, sitecustomize.guard_path, prior_guard):
+    start = time.perf_counter()
+    for i in range(count):
+        outcome(guard, sample[i % len(sample)])
+    times.append(time.perf_counter() - start)
+print('KDD_GUARD_EQUIVALENCE_PASS', len(cases), 'mutable-symlink and real opens/mutations')
+print('KDD_GUARD_AB', sys.version.split()[0], count,
+      'old_seconds', round((times[0]+times[3])/2, 4),
+      'new_seconds', round((times[1]+times[2])/2, 4))
+
+# Genuine descendant with PYTHONPATH reset like the Android crash tests.
+child = subprocess.run([sys.executable, '-B', '-c',
+    'from pathlib import Path; from scripts import kdd_drive_exchange as e; '
+    'assert e.EXCHANGE_ROOT == Path.cwd()/".test-foldersync"; '
+    'assert Path.home() == Path.cwd()/".test-home"'],
+    env={**os.environ, 'PYTHONPATH': str(root)}, cwd=root,
+    capture_output=True, text=True, timeout=15)
+assert child.returncode == 0, child.stderr
+print('ISOLATION_SENTINELS_AND_DESCENDANT_OK')
+"""
+        def observe(args, *, cwd, timeout=120):
+            if cwd not in seen:
+                self.assertNotEqual(cwd, source)
+                self.assertTrue(cwd.name.startswith('.kdd-test-'))
+                self.assertEqual(kdd.fingerprint(cwd), kdd.fingerprint(source))
+                for name in ('config.json', 'portafoglio.json', str(t0.relative_to(source))):
+                    self.assertEqual((cwd / name).read_bytes(), (source / name).read_bytes())
+                for path in sentinels[:3]:
+                    self.assertFalse((cwd / path.relative_to(source)).exists())
+                # Prepare synthetic symlinks in the disposable workspace
+                # from the parent, outside the child's audit hook. No
+                # operational files are opened by setup.
+                probes = cwd / '.guard-probes'
+                (probes / 'current').mkdir(parents=True)
+                (probes / 'replacement').mkdir()
+                (probes / 'current/item').write_text('safe synthetic fixture')
+                (probes / 'replacement/item').symlink_to(sentinels[0])
+                (probes / 'blocked-file').symlink_to(sentinels[0])
+                (probes / 'blocked-dir').symlink_to(source / 'storico_portafoglio')
+                (probes / 'chain').symlink_to('blocked-file')
+                (probes / 'dangling').symlink_to(source / 'missing')
+                (probes / 'allowed-link').symlink_to('current/item')
+                (probes / 'loop').symlink_to('loop')
+                checked = original([sys.executable, '-B', '-c', probe,
+                                    *map(str, sentinels)], cwd=cwd, timeout=30)
+                self.assertEqual(checked.returncode, 0, checked.stderr)
+                self.assertIn('ISOLATION_SENTINELS_AND_DESCENDANT_OK', checked.stdout)
+                self.assertIn('KDD_GUARD_EQUIVALENCE_PASS', checked.stdout)
+                self.assertIn('KDD_GUARD_AB', checked.stdout)
+                for line in checked.stdout.splitlines():
+                    if line.startswith(('KDD_GUARD_EQUIVALENCE_PASS', 'KDD_GUARD_AB')):
+                        print(line)
+                seen[cwd] = []
+            result = original(args, cwd=cwd, timeout=timeout)
+            # No new skips, and the genuine local checkpoint + T0 gates run.
+            if 'test_decision_desk' in args:
+                self.assertNotIn('skipped=', result.stderr, result.stderr)
+            seen[cwd].append((tuple(args), timeout))
+            return result
+
+        with patch.object(kdd.Path, 'home', return_value=home), \
+             patch.dict(os.environ, {'KDD_T0_TRUSTED_SHA256': digest,
+                                     'KDD_T0_TRUSTED_PROOF': ''}), \
+             patch.object(kdd, 'command', side_effect=observe):
+            measured = kdd.isolated_test(source)
+            kdd.isolated_test(source, phase='postflight', reference_times=measured)
+        self.assertEqual(len(seen), 2)
+        pre, post = list(seen.values())
+        self.assertEqual([a for a, _ in pre], [a for a, _ in post])
+        self.assertEqual(len(pre), 12)
+        self.assertEqual(pre[0][1], 210)
+        self.assertTrue(all(t == 120 for _, t in pre[6:] + post[6:]))
+        self.assertTrue(all(not p.exists() for p in seen))
+        self.assertEqual(inventory(), before)
+        print('ISOLATION_AUTHENTIC_BOTH_FLIGHTS_PASS: 12+12 suites, sentinels unchanged')
+
+    def test_isolation_workspace_removed_on_timeout(self):
+        import subprocess
+        workspaces = []
+        def timeout(args, *, cwd, timeout=120):
+            workspaces.append(cwd)
+            self.assertNotEqual(cwd, self.root)
+            raise subprocess.TimeoutExpired(args, timeout)
+        with patch.object(kdd, 'capability_preflight'), \
+             patch.object(kdd, 'command', side_effect=timeout):
+            with self.assertRaisesRegex(kdd.SafetyError, 'timeout dopo 210'):
+                kdd.isolated_test(self.root)
+        self.assertEqual(len(workspaces), 1)
+        self.assertFalse(workspaces[0].exists())
 
 
 if __name__ == '__main__':

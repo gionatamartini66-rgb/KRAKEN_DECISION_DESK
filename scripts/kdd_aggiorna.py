@@ -74,6 +74,27 @@ def command(args: list[str], *, cwd: Path, timeout: int = 120) -> subprocess.Com
         env = os.environ.copy()
         env['PYTHONPATH'] = os.pathsep.join((str(cwd.resolve()),
                                           str((cwd / 'scripts').resolve())))
+        # Only test workspaces have the bootstrap package. The parent updater
+        # keeps its real HOME for lock, capability checks, backup and rollback.
+        if (cwd / 'sitecustomize' / '__init__.py').is_file():
+            private = cwd / '.test-home'
+            temp = cwd / '.test-tmp'
+            env.update(HOME=str(private), TMPDIR=str(temp), TMP=str(temp),
+                       TEMP=str(temp), XDG_CONFIG_HOME=str(private / '.config'),
+                       XDG_DATA_HOME=str(private / '.local/share'),
+                       XDG_STATE_HOME=str(private / '.local/state'),
+                       XDG_CACHE_HOME=str(private / '.cache'),
+                       PYTHONNOUSERSITE='1', PYTHONDONTWRITEBYTECODE='1')
+            env.pop('PYTHONHOME', None)
+            env.pop('PYTHONSTARTUP', None)
+            # Do not silently continue if Python's automatic site import was
+            # suppressed or failed. Retain the exact unittest arguments.
+            tail = args[1:]
+            if tail[:1] == ['-B']:
+                tail = tail[1:]
+            if len(tail) < 2 or tail[0] not in ('-m', '-c'):
+                raise SafetyError('comando Python test non riconosciuto')
+            args = [sys.executable, '-B', '-c', _TEST_ENTRY, *tail]
     return subprocess.run(args, cwd=cwd, text=True, capture_output=True,
                           timeout=timeout, check=False, env=env)
 
@@ -329,6 +350,173 @@ def capability_preflight() -> None:
         raise SafetyError('preflight filesystem Android/Termux FALLITO') from exc
 
 
+# This package is created ONLY in disposable workspaces, not installed as
+# application code. Keeping it in a package (not a top-level .py file) leaves
+# the authentic checkpoint fingerprint unchanged. Python children that reset
+# PYTHONPATH to the workspace still load it before application imports.
+_TEST_BOOTSTRAP = r"""
+import importlib.abc
+import importlib.machinery
+import os
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+HOME = ROOT / '.test-home'
+TEMP = ROOT / '.test-tmp'
+SYNC = ROOT / '.test-foldersync'
+if Path.home() != HOME or not all(p.is_dir() and not p.is_symlink()
+                                  for p in (HOME, TEMP, SYNC)):
+    raise SystemExit('STOP test workspace environment')
+
+# Route BOTH supported import spellings, before any test can call the real
+# exchange. Do not replace a validator, receiver, lock, or persistence method.
+class ExchangeLoader:
+    def __init__(self, loader):
+        self.loader = loader
+
+    def create_module(self, spec):
+        return self.loader.create_module(spec)
+
+    def __getattr__(self, name):
+        return getattr(self.loader, name)
+
+    def exec_module(self, module):
+        self.loader.exec_module(module)
+        module.EXCHANGE_ROOT = SYNC
+
+class ExchangeFinder(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname not in ('scripts.kdd_drive_exchange', 'kdd_drive_exchange'):
+            return None
+        spec = importlib.machinery.PathFinder.find_spec(fullname, path, target)
+        if (spec is None or spec.loader is None or
+                Path(spec.origin).resolve() != ROOT / 'scripts/kdd_drive_exchange.py'):
+            raise ImportError('STOP exchange outside test workspace')
+        spec.loader = ExchangeLoader(spec.loader)
+        return spec
+
+sys.meta_path.insert(0, ExchangeFinder())
+
+# Defense in depth for known operational locations and Android storage
+# aliases. This is a test I/O guard, not an OS sandbox against malicious code.
+# Resolve symlinks before checking; never read a sentinel to decide if allowed.
+FORBIDDEN = tuple(Path(p).resolve() for p in FORBIDDEN_PATHS)
+# Compare canonical strings at component boundaries. Path.resolve on Python
+# 3.13+ delegates to os.path.realpath; avoid repeated Path construction and
+# is_relative_to for every audited syscall. Older Python retains its original
+# resolve behavior (including the historical symlink-loop exception).
+_ROOT_TEXT = os.fspath(ROOT)
+_ROOT_PREFIX = _ROOT_TEXT.rstrip(os.sep) + os.sep
+_FORBIDDEN_TEXT = tuple(os.fspath(p) for p in FORBIDDEN)
+_FORBIDDEN_PREFIXES = tuple(p.rstrip(os.sep) + os.sep for p in _FORBIDDEN_TEXT)
+if sys.version_info >= (3, 13):
+    _resolve_guard_path = os.path.realpath
+else:
+    def _resolve_guard_path(value):
+        return os.fspath(Path(value).resolve())
+
+def guard_path(value):
+    if not isinstance(value, (str, bytes, os.PathLike)):
+        return
+    # Never cache resolved paths or skip resolution inside the workspace:
+    # a symlink or an ancestor may have changed since the previous syscall.
+    p = _resolve_guard_path(os.fsdecode(value))
+    if p == _ROOT_TEXT or p.startswith(_ROOT_PREFIX):
+        return
+    if p in _FORBIDDEN_TEXT or p.startswith(_FORBIDDEN_PREFIXES):
+        raise PermissionError('STOP operational path in updater test')
+
+def audit(event, args):
+    if event in ('open', 'os.listdir', 'os.scandir', 'os.chdir', 'os.mkdir',
+                 'os.remove', 'os.rmdir', 'os.chmod', 'os.chown', 'os.utime',
+                 'os.truncate'):
+        guard_path(args[0])
+    elif event in ('os.rename', 'os.link', 'os.symlink'):
+        guard_path(args[0])
+        guard_path(args[1])
+
+sys.addaudithook(audit)
+ACTIVE = True
+"""
+
+_TEST_ENTRY = """
+import runpy
+import sys
+from pathlib import Path
+import sitecustomize as isolation
+if (getattr(isolation, 'ACTIVE', False) is not True
+        or Path(isolation.__file__).resolve().parent.parent != Path.cwd().resolve()):
+    raise SystemExit('STOP test bootstrap not active')
+mode, target, *arguments = sys.argv[1:]
+sys.argv = [target if mode == '-m' else '-c', *arguments]
+if mode == '-m':
+    runpy.run_module(target, run_name='__main__', alter_sys=True)
+else:
+    exec(compile(target, '<kdd-test>', 'exec'), {'__name__': '__main__', '__package__': None})
+"""
+
+_LOCAL_TEST_FIXTURES = ('config.json', 'migrazione_attesa.json',
+                        'portafoglio.json', 'piano_gpt.json',
+                        'storico_portafoglio/T0_2026-10-19_2301_KRAKEN_PRO.json')
+
+
+def _copy_test_input(source: Path, target: Path, name: str) -> None:
+    original = source / name
+    for p in (original, *original.parents):
+        if p == source:
+            break
+        if p.is_symlink():
+            raise SafetyError('fixture o sorgente test symlink: ' + name)
+    if not original.exists():
+        return
+    if not original.is_file():
+        raise SafetyError('fixture o sorgente test non regolare: ' + name)
+    dest = target / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(original, dest)
+
+
+@contextmanager
+def test_workspace(source: Path, phase: str):
+    """Private byte-copy of allowed inputs, never the operational archive."""
+    if source.is_symlink() or not source.is_dir():
+        raise SafetyError('directory sorgente test non regolare')
+    source = source.resolve()
+    with tempfile.TemporaryDirectory(prefix='.kdd-test-' + phase + '-',
+                                     dir=source.parent) as name:
+        root = Path(name).resolve()
+        root.chmod(0o700)
+        # Keep all resident Python files for the original checkpoint check.
+        # Everything else is a closed allowlist; no bridge, reports, SQLite,
+        # outgoing/incoming documents, readonly keys, or operational history.
+        files = set(FILES) | {p.name for p in source.glob('*.py')}
+        files.update(_LOCAL_TEST_FIXTURES)
+        files.add(README)
+        for item in sorted(files):
+            _copy_test_input(source, root, item)
+        if fingerprint(root) != fingerprint(source):
+            raise SafetyError('impronta della copia test discordante')
+        for item in ('.test-home', '.test-tmp', '.test-foldersync', 'sitecustomize'):
+            (root / item).mkdir(mode=0o700)
+        home = Path.home().resolve()
+        forbidden = [str(source), str(home),
+                     '/storage/emulated/0/KDD_TEST_SAMSUNG',
+                     '/storage/self/primary/KDD_TEST_SAMSUNG',
+                     '/sdcard/KDD_TEST_SAMSUNG',
+                     '/mnt/sdcard/KDD_TEST_SAMSUNG',
+                     str(home / 'storage/shared/KDD_TEST_SAMSUNG')]
+        # site.py normally ignores startup exceptions. Stop instead; this
+        # also covers subprocesses in the genuine crash/recovery suites.
+        body = 'FORBIDDEN_PATHS = ' + repr(forbidden) + '\n' + _TEST_BOOTSTRAP
+        bootstrap = ('try:\n' + '\n'.join('    ' + line for line in body.splitlines())
+                     + '\nexcept BaseException:\n'
+                       "    raise SystemExit('STOP test bootstrap initialization')\n")
+        compile(bootstrap, '<kdd-test-bootstrap>', 'exec')
+        (root / 'sitecustomize/__init__.py').write_text(bootstrap, encoding='utf-8')
+        yield root
+
+
 def isolated_test(staging: Path, *, phase: str = 'preflight',
                   reference_times: dict[str, float] | None = None) -> dict[str, float]:
     """Run every mandatory suite, record timings, and keep postflight bounded.
@@ -346,6 +534,15 @@ def isolated_test(staging: Path, *, phase: str = 'preflight',
     except SafetyError as exc:
         raise SafetyError('capability_preflight: ' + str(exc)) from None
 
+    # Both phases now execute against a disposable copy. For postflight this
+    # copy is made from the ACTUALLY installed bytes, not the candidate clone.
+    # Capability checks above still run on the real Termux filesystem.
+    with test_workspace(staging, phase) as workspace:
+        return _run_test_suites(workspace, phase=phase, reference_times=reference_times)
+
+
+def _run_test_suites(staging: Path, *, phase: str,
+                     reference_times: dict[str, float] | None) -> dict[str, float]:
     def checked(args: list[str], *, label: str, timeout: int = 120) -> float:
         started = monotonic()
         try:
@@ -460,7 +657,7 @@ def apply(root: Path, live: Path, *, commit_sha: str, dry_run: bool) -> None:
             shutil.copy2(src, staging / src.name)
         # The curated project catalog is executable input to kdd_economics;
         # staging must contain the same version that will be installed.
-        for name in PY_FILES + PACKET_FILES + DATA_FILES:
+        for name in PY_FILES + PACKET_FILES + DATA_FILES + VENDOR_FILES:
             dest = staging / name
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(root / name, dest)
@@ -479,9 +676,7 @@ def apply(root: Path, live: Path, *, commit_sha: str, dry_run: bool) -> None:
             if original.is_file():
                 shutil.copy2(original, staging / name)
         t0_path = 'storico_portafoglio/T0_2026-10-19_2301_KRAKEN_PRO.json'
-        if (live / t0_path).exists():
-            (staging / 'storico_portafoglio').mkdir()
-            shutil.copy2(live / t0_path, staging / t0_path)
+        _copy_test_input(live, staging, t0_path)
         source_readme = rewrite_readme(original_readme, fingerprint(staging),
                                        commit_sha, changed)
         (staging / README).write_text(source_readme, encoding='utf-8')
