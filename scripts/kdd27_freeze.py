@@ -153,6 +153,18 @@ def freeze(store, request_id, *, now, source, source_observation_id, wallet):
             c.rollback()
             raise FrozenMismatch("SORGENTE_SQLITE_NON_VERIFICATA")
         manifest=_manifest(c,now)
+        # History is bound once, just like the market and family observations.
+        # A different wallet is deliberately allowed: producers re-identify
+        # the current roster and revalidate source-specific ages.
+        prior=c.execute("""SELECT r.request_id,r.dossier_sha
+                            FROM dossier_requests r
+                            JOIN dossier_artifacts a ON a.dossier_sha256=r.dossier_sha
+                            WHERE r.request_id<>? AND r.status IN
+                              ('PRONTO_LOCALE','PARZIALE_LOCALE')
+                            ORDER BY a.built_at DESC,r.completed_at DESC,r.request_id DESC
+                            LIMIT 1""",(request_id,)).fetchone()
+        if prior:
+            manifest["previous_dossier"]={"request_id":prior[0],"dossier_sha256":prior[1]}
         man_sha=core.sha(core.encode(manifest))
         snapshot_id=core.sha(core.encode({
             "request_id":request_id,"source_id":source_observation_id,
@@ -304,3 +316,22 @@ def artifact_for_request(store, request_id):
             "manifest":frozen["manifest"],
             "dossier":dossier,
             "nota":"Storico, non prova di attualita; consumer GPT rivalida fonti e tempi."}
+
+
+def previous_dossier(store, frozen):
+    """Return only historical inputs of the archived predecessor pinned at freeze.
+
+    Existing manifests without a predecessor remain valid; never substitute
+    the mutable compatibility JSON or a later request during a retry.
+    The source producers, not this archive, decide what is still usable.
+    """
+    ref=frozen["manifest"].get("previous_dossier")
+    if ref is None:
+        return {}
+    saved=artifact_for_request(store,ref["request_id"])
+    if saved is None or saved["dossier_sha256"]!=ref["dossier_sha256"]:
+        raise FrozenMismatch("DOSSIER_PRECEDENTE_DISCORDANTE")
+    dossier=saved["dossier"]
+    return {key:dossier[key] for key in
+            ("evidenze_economiche","evidenze_rete_defi")
+            if isinstance(dossier.get(key),dict)}

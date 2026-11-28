@@ -669,16 +669,19 @@ def _real_dossier_producer(store, request_id, now):
     catalog=inputs.get("market_catalog") or {}
     asset_pairs=((catalog.get("osservazione") or {}).get("pairs")
                  if catalog.get("stato")=="RECENTE" else None)
-    previous_dossier={}
+    previous_dossier=frozen_archive.previous_dossier(store,frozen)
     economic=inputs.get("fundamentals") or {}
     network=inputs.get("network_defi") or {}
     used_ids=[frozen["source_observation_id"]]
     if catalog.get("stato")=="RECENTE":
         used_ids.append(catalog["observation_id"])
-    if economic.get("stato")=="RECENTE":
+    # Keep the archived dossier's acquisition sequence authoritative when
+    # available. Periodic samples remain a fallback for missing families;
+    # they are not allowed to rewind an already advanced dossier cursor.
+    if economic.get("stato")=="RECENTE" and "evidenze_economiche" not in previous_dossier:
         previous_dossier["evidenze_economiche"]=economic["osservazione"]
         used_ids.append(economic["observation_id"])
-    if network.get("stato")=="RECENTE":
+    if network.get("stato")=="RECENTE" and "evidenze_rete_defi" not in previous_dossier:
         previous_dossier["evidenze_rete_defi"]=network["osservazione"]
         used_ids.append(network["observation_id"])
     cached_artifact=frozen_archive.recent_artifact(store,frozen,instant(),CACHE_SECONDS)
