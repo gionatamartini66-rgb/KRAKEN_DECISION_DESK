@@ -277,6 +277,200 @@ class DossierProducerTests(unittest.TestCase):
               self.db.dossier_status("request0050")[0]["quality_json"])
         self.assertEqual(self.db.status()["jobs"],[])
 
+    def test_on_demand_history_rotation_ttl_retry_and_changed_wallet(self):
+        """Real queue, SQLite archive, economic producer and primary parser.
+        Only external IO and unrelated dossier assembly are synthetic.
+        """
+        import decision_desk as desk
+        import dossier_trade as producer
+        import kdd_economic_sources as primary
+        import kdd_network_defi as network
+        from scripts import kdd27_freeze as archive
+        from scripts import kdd_drive_exchange as exchange
+        from test_kdd_economic_sources import PrimaryFollowupTests
+
+        clock=[dt.datetime(2026,11,15,10,tzinfo=UTC)]
+        state={"portafoglio.json":{"posizioni":[{"token":t,"quantita":"1"}
+                for t in ("SOL","BNB","XRP")]}}
+        policies=[]
+        produced=[]
+        calls=[]
+        fixture=PrimaryFollowupTests()
+        def fetch(url,timeout=12):
+            if url==primary.BNB_BURN_DOC:
+                policies.append("BNB")
+                return b"<html><p>BNB adopts an Auto-Burn system to reduce its total supply to 100,000,000 BNB.</p></html>"
+            if url==primary.XRP_ESCROW_DOC:
+                policies.append("XRP")
+                return b"<html><p>At the time of its creation, there were 100 billion XRP.</p><p>In 2017, the company placed <a>55 billion XRP in escrow</a>.</p></html>"
+            try:
+                return fixture.fetch(url)
+            except AssertionError:
+                raise OSError("Unmodelled public endpoint")
+        def rpc(url,query):
+            self.assertEqual(url,primary.SOLANA_RPC)
+            policies.append("SOL")
+            return {"jsonrpc":"2.0","id":1,"result":{"initial":.08,
+                    "taper":.15,"terminal":.015,"foundation":.05,"foundationTerm":7}}
+        def refresh(*,prepare_dossier=False):
+            self.assertFalse(prepare_dossier)
+            source={"rilevazione_utc":k27.iso(),"feed":[]}
+            state["ultima_rilevazione.json"]=source
+            return source
+        def deepen(snapshot, *, wallet_override,previous_dossier_override,asset_pairs=None):
+            tokens=[r["token"] for r in wallet_override["posizioni"]]
+            pairs={t+"EUR":{"wsname":t+"/EUR","altname":t+"EUR","status":"online"}
+                   for t in tokens}
+            four={"posizioni":[{"token":t,"coppia":t+"/EUR","pair_key":t+"EUR"}
+                               for t in tokens]}
+            before=previous_dossier_override.get("evidenze_economiche")
+            calls.append(before)
+            with producer.primary_refresh_context():
+                result=producer.economic_evidence(snapshot,wallet_override,four,[],clock[0],
+                        asset_pairs=pairs,previous=before)
+            m=result["monitor_fonti"]
+            self.assertLessEqual(m["richieste_pubbliche"],8)
+            checked=primary.at_read(m,result,clock[0])
+            produced.append((result,checked))
+            state["dossier_multifonte.json"]={
+                "schema":3,"creato_utc":k27.iso(),
+                "kraken_istantanea_utc":snapshot["rilevazione_utc"],
+                "fotografia_portafoglio_sha256":desk.fotografia_portafoglio_sha256(wallet_override),
+                "evidenze_economiche":result}
+            return {"stato":"PARZIALE","stato_fonti_mercato":"PARZIALE",
+                    "idoneita_analisi_patrimoniale":"NON_IDONEA"}
+        def run(uid):
+            self.db.enqueue_dossier(uid,clock[0])
+            self.assertEqual(self.db.process_queue(k27.real_dossier_producer,clock[0],limit=1),
+                             [(uid,"PARZIALE_LOCALE")])
+            return archive.artifact_for_request(self.db,uid)
+        def tick(value=None):
+            return clock[0] if value is None else value.astimezone(UTC)
+
+        with mock.patch.object(k27,"instant",side_effect=tick), \
+             mock.patch.object(desk,"load",side_effect=lambda name,default=None:state.get(name,default)), \
+             mock.patch.object(desk,"refresh",side_effect=refresh), \
+             mock.patch.object(desk,"prepara_dossier_aggiornamento",side_effect=deepen), \
+             mock.patch.object(desk,"request",side_effect=fetch), \
+             mock.patch.object(producer.time,"sleep"), \
+             mock.patch.object(network,"_http",side_effect=rpc), \
+             mock.patch.object(exchange,"prepare_export") as export:
+            first=run("hist-first")
+            self.assertEqual(policies,["SOL"])
+            self.assertIsNone(calls[0])
+            # Repeated request within the cache window must not consume a turn.
+            repeated=run("hist-repeat")
+            self.assertEqual(first["dossier_sha256"],repeated["dossier_sha256"])
+            self.assertEqual(len(produced),1)
+            self.assertEqual(self.db.enqueue_dossier("hist-first",clock[0])["status"],
+                             "PRONTO_LOCALE" if first["stato_disponibilita"]=="PRONTO_LOCALE"
+                             else "PARZIALE_LOCALE")
+            # New snapshots, no scheduler. The mutable file is not history.
+            clock[0]+=dt.timedelta(minutes=11)
+            state["dossier_multifonte.json"]={}
+            second=run("hist-second")
+            clock[0]+=dt.timedelta(minutes=11)
+            state["dossier_multifonte.json"]={}
+            third=run("hist-third")
+            self.assertEqual(policies,["SOL","BNB","XRP"])
+            self.assertEqual(calls[1],first["dossier"]["evidenze_economiche"])
+            self.assertEqual(calls[2],second["dossier"]["evidenze_economiche"])
+            rows={r["progetto_id"]:r for r in produced[2][1]["politiche_emissioni"]}
+            self.assertEqual(rows["solana"]["stato_alla_lettura"],"STORICO_NON_AGGIORNATO")
+            self.assertEqual(rows["binancecoin"]["stato_alla_lettura"],"STORICO_NON_AGGIORNATO")
+            self.assertEqual(rows["ripple"]["stato_alla_lettura"],"OSSERVATO")
+            self.assertEqual(rows["solana"]["acquisito_utc"],
+                next(r["acquisito_utc"] for r in produced[0][1]["politiche_emissioni"]
+                     if r["progetto_id"]=="solana"))
+            # Historical binding of a completed request remains exact after later acquisitions.
+            self.assertEqual(archive.previous_dossier(self.db,archive.get(self.db,"hist-second"))
+                             ["evidenze_economiche"],first["dossier"]["evidenze_economiche"])
+            # Change wallet within market cache: forces a new freeze and roster.
+            clock[0]+=dt.timedelta(days=15)
+            state["portafoglio.json"]={"posizioni":[{"token":t,"quantita":"2"}
+                                                    for t in ("BNB","XRP")]}
+            fourth=run("hist-changed")
+            self.assertNotEqual(third["wallet_sha256"],fourth["wallet_sha256"])
+            self.assertEqual(calls[3],third["dossier"]["evidenze_economiche"])
+            self.assertEqual(policies,["SOL","BNB","XRP","BNB"])
+            rows={r["progetto_id"]:r for r in produced[3][1]["politiche_emissioni"]}
+            self.assertNotIn("solana",rows)
+            self.assertEqual(rows["binancecoin"]["stato_alla_lettura"],"OSSERVATO")
+            self.assertIsNone(rows["ripple"]["valori"])
+            export.assert_not_called()
+        self.assertEqual(self.db.status()["jobs"],[])
+
+    def test_deferred_retry_retains_predecessor_without_rewinding_newer_history(self):
+        import decision_desk as desk
+        from scripts import kdd27_freeze as archive
+        from scripts import kdd_drive_exchange as exchange
+
+        clock=[dt.datetime(2026,11,15,10,tzinfo=UTC)]
+        state={"portafoglio.json":{"posizioni":[{"token":"SOL","quantita":"1"}]}}
+        deferred=[False]
+        received=[]
+        def tick(value=None):
+            return clock[0] if value is None else value.astimezone(UTC)
+        def refresh(*,prepare_dossier=False):
+            self.assertFalse(prepare_dossier)
+            source={"rilevazione_utc":k27.iso()}
+            state["ultima_rilevazione.json"]=source
+            return source
+        def deepen(snapshot, *, wallet_override, previous_dossier_override, **kwargs):
+            received.append((snapshot["rilevazione_utc"],previous_dossier_override))
+            if deferred[0]:
+                deferred[0]=False
+                raise OSError("SYNTHETIC_TEMPORARY_NETWORK_FAILURE")
+            state["dossier_multifonte.json"]={
+                "schema":3,"kraken_istantanea_utc":snapshot["rilevazione_utc"],
+                "creato_utc":k27.iso(),
+                "fotografia_portafoglio_sha256":desk.fotografia_portafoglio_sha256(wallet_override),
+                "evidenze_economiche":{"stamp":snapshot["rilevazione_utc"]},
+                "evidenze_rete_defi":{"stamp":snapshot["rilevazione_utc"]}}
+            return {"stato":"PARZIALE","stato_fonti_mercato":"PARZIALE",
+                    "idoneita_analisi_patrimoniale":"NON_IDONEA"}
+        def run(uid,status="PARZIALE_LOCALE"):
+            self.db.enqueue_dossier(uid,clock[0])
+            self.assertEqual(self.db.process_queue(k27.real_dossier_producer,clock[0],limit=1),
+                             [(uid,status)])
+            return archive.artifact_for_request(self.db,uid)
+        with mock.patch.object(k27,"instant",side_effect=tick), \
+             mock.patch.object(desk,"load",side_effect=lambda name,default=None:state.get(name,default)), \
+             mock.patch.object(desk,"refresh",side_effect=refresh), \
+             mock.patch.object(desk,"prepara_dossier_aggiornamento",side_effect=deepen), \
+             mock.patch.object(exchange,"prepare_export") as export:
+            first=run("retry-first")
+            clock[0]+=dt.timedelta(minutes=11)
+            deferred[0]=True
+            self.assertIsNone(run("retry-delayed","RINVIATO_RETE"))
+            pinned=archive.get(self.db,"retry-delayed")
+            self.assertEqual(pinned["manifest"]["previous_dossier"]["dossier_sha256"],
+                             first["dossier_sha256"])
+            clock[0]+=dt.timedelta(minutes=1)
+            state["portafoglio.json"]={"posizioni":[{"token":"XRP","quantita":"1"}]}
+            newer=run("retry-newer")
+            self.assertNotEqual(first["wallet_sha256"],newer["wallet_sha256"])
+            clock[0]+=dt.timedelta(minutes=4)
+            # Reopen the existing archive as after process restart.
+            self.db=k27.Store(Path(self.tmp.name))
+            self.assertEqual(self.db.process_queue(k27.real_dossier_producer,clock[0],limit=1),
+                             [("retry-delayed","PARZIALE_LOCALE")])
+            after=archive.get(self.db,"retry-delayed")
+            self.assertEqual(pinned["snapshot_id"],after["snapshot_id"])
+            self.assertEqual(received[1],received[3])
+            self.assertEqual(received[3][1]["evidenze_economiche"],
+                             first["dossier"]["evidenze_economiche"])
+            self.assertEqual(received[3][1]["evidenze_rete_defi"],
+                             first["dossier"]["evidenze_rete_defi"])
+            clock[0]+=dt.timedelta(minutes=11)
+            last=run("retry-next")
+            self.assertEqual(last["manifest"]["previous_dossier"]["dossier_sha256"],
+                             newer["dossier_sha256"])
+            self.assertEqual(received[-1][1]["evidenze_economiche"],
+                             newer["dossier"]["evidenze_economiche"])
+            export.assert_not_called()
+        self.assertEqual(self.db.status()["jobs"],[])
+
     def test_source_freeze_survives_restart_and_local_mutation(self):
         import decision_desk as desk
         from scripts import kdd27_freeze as freeze
