@@ -156,12 +156,16 @@ def freeze(store, request_id, *, now, source, source_observation_id, wallet):
         # History is bound once, just like the market and family observations.
         # A different wallet is deliberately allowed: producers re-identify
         # the current roster and revalidate source-specific ages.
+        # Order by the original freeze (not the time a retry or reuse
+        # completed), so a delayed old request cannot rewind the sequence.
         prior=c.execute("""SELECT r.request_id,r.dossier_sha
                             FROM dossier_requests r
                             JOIN dossier_artifacts a ON a.dossier_sha256=r.dossier_sha
+                            JOIN dossier_freezes origin ON origin.snapshot_id=a.snapshot_id
                             WHERE r.request_id<>? AND r.status IN
                               ('PRONTO_LOCALE','PARZIALE_LOCALE')
-                            ORDER BY a.built_at DESC,r.completed_at DESC,r.request_id DESC
+                            ORDER BY origin.frozen_at DESC,a.built_at DESC,
+                                     r.completed_at DESC,r.request_id DESC
                             LIMIT 1""",(request_id,)).fetchone()
         if prior:
             manifest["previous_dossier"]={"request_id":prior[0],"dossier_sha256":prior[1]}

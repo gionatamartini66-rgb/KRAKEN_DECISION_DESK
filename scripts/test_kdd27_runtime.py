@@ -400,6 +400,77 @@ class DossierProducerTests(unittest.TestCase):
             export.assert_not_called()
         self.assertEqual(self.db.status()["jobs"],[])
 
+    def test_deferred_retry_retains_predecessor_without_rewinding_newer_history(self):
+        import decision_desk as desk
+        from scripts import kdd27_freeze as archive
+        from scripts import kdd_drive_exchange as exchange
+
+        clock=[dt.datetime(2026,11,15,10,tzinfo=UTC)]
+        state={"portafoglio.json":{"posizioni":[{"token":"SOL","quantita":"1"}]}}
+        deferred=[False]
+        received=[]
+        def tick(value=None):
+            return clock[0] if value is None else value.astimezone(UTC)
+        def refresh(*,prepare_dossier=False):
+            self.assertFalse(prepare_dossier)
+            source={"rilevazione_utc":k27.iso()}
+            state["ultima_rilevazione.json"]=source
+            return source
+        def deepen(snapshot, *, wallet_override, previous_dossier_override, **kwargs):
+            received.append((snapshot["rilevazione_utc"],previous_dossier_override))
+            if deferred[0]:
+                deferred[0]=False
+                raise OSError("SYNTHETIC_TEMPORARY_NETWORK_FAILURE")
+            state["dossier_multifonte.json"]={
+                "schema":3,"kraken_istantanea_utc":snapshot["rilevazione_utc"],
+                "creato_utc":k27.iso(),
+                "fotografia_portafoglio_sha256":desk.fotografia_portafoglio_sha256(wallet_override),
+                "evidenze_economiche":{"stamp":snapshot["rilevazione_utc"]},
+                "evidenze_rete_defi":{"stamp":snapshot["rilevazione_utc"]}}
+            return {"stato":"PARZIALE","stato_fonti_mercato":"PARZIALE",
+                    "idoneita_analisi_patrimoniale":"NON_IDONEA"}
+        def run(uid,status="PARZIALE_LOCALE"):
+            self.db.enqueue_dossier(uid,clock[0])
+            self.assertEqual(self.db.process_queue(k27.real_dossier_producer,clock[0],limit=1),
+                             [(uid,status)])
+            return archive.artifact_for_request(self.db,uid)
+        with mock.patch.object(k27,"instant",side_effect=tick), \
+             mock.patch.object(desk,"load",side_effect=lambda name,default=None:state.get(name,default)), \
+             mock.patch.object(desk,"refresh",side_effect=refresh), \
+             mock.patch.object(desk,"prepara_dossier_aggiornamento",side_effect=deepen), \
+             mock.patch.object(exchange,"prepare_export") as export:
+            first=run("retry-first")
+            clock[0]+=dt.timedelta(minutes=11)
+            deferred[0]=True
+            self.assertIsNone(run("retry-delayed","RINVIATO_RETE"))
+            pinned=archive.get(self.db,"retry-delayed")
+            self.assertEqual(pinned["manifest"]["previous_dossier"]["dossier_sha256"],
+                             first["dossier_sha256"])
+            clock[0]+=dt.timedelta(minutes=1)
+            state["portafoglio.json"]={"posizioni":[{"token":"XRP","quantita":"1"}]}
+            newer=run("retry-newer")
+            self.assertNotEqual(first["wallet_sha256"],newer["wallet_sha256"])
+            clock[0]+=dt.timedelta(minutes=4)
+            # Reopen the existing archive as after process restart.
+            self.db=k27.Store(Path(self.tmp.name))
+            self.assertEqual(self.db.process_queue(k27.real_dossier_producer,clock[0],limit=1),
+                             [("retry-delayed","PARZIALE_LOCALE")])
+            after=archive.get(self.db,"retry-delayed")
+            self.assertEqual(pinned["snapshot_id"],after["snapshot_id"])
+            self.assertEqual(received[1],received[3])
+            self.assertEqual(received[3][1]["evidenze_economiche"],
+                             first["dossier"]["evidenze_economiche"])
+            self.assertEqual(received[3][1]["evidenze_rete_defi"],
+                             first["dossier"]["evidenze_rete_defi"])
+            clock[0]+=dt.timedelta(minutes=11)
+            last=run("retry-next")
+            self.assertEqual(last["manifest"]["previous_dossier"]["dossier_sha256"],
+                             newer["dossier_sha256"])
+            self.assertEqual(received[-1][1]["evidenze_economiche"],
+                             newer["dossier"]["evidenze_economiche"])
+            export.assert_not_called()
+        self.assertEqual(self.db.status()["jobs"],[])
+
     def test_source_freeze_survives_restart_and_local_mutation(self):
         import decision_desk as desk
         from scripts import kdd27_freeze as freeze
